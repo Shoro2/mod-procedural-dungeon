@@ -1,0 +1,160 @@
+[worldserver]
+
+########################################
+# mod-procedural-dungeon configuration
+########################################
+#
+#    ProceduralDungeon.Enable
+#        Description: Enable the procedural dungeon module.
+#        Default:     0 - Disabled
+#                     1 - Enabled
+#        Requires the module SQL to be applied and CheckGameObjectLoS = 1
+#        (default) so walls block creature line of sight.
+
+ProceduralDungeon.Enable = 0
+
+#
+#    ProceduralDungeon.BaseMapId
+#        Description: Client-known map the dungeon is assembled on. The map
+#                     must have an instance_template row and be a dungeon
+#                     server-side (see mod_pdungeon_base.sql; default setup
+#                     covers map 37 'Azshara Crater').
+#        Default:     37
+
+ProceduralDungeon.BaseMapId = 37
+
+#
+#    ProceduralDungeon.Center.X / .Y / .Z / .O
+#        Description: World coordinates of the grid center on the base map.
+#                     Scout a large, flat, open area with a GM character
+#                     (.gps) and put the coordinates here. Z is used as the
+#                     fallback ground height where terrain sampling fails.
+#        Default:     0 / 0 / 0 / 0
+
+ProceduralDungeon.Center.X = 0
+ProceduralDungeon.Center.Y = 0
+ProceduralDungeon.Center.Z = 0
+ProceduralDungeon.Center.O = 0
+
+#
+#    ProceduralDungeon.TileSize
+#        Description: Edge length of one layout tile in yards. Corridors are
+#                     2 tiles wide. The default matches the Wintergrasp wall
+#                     palette (28.5yd piece on a 3-tile slot).
+#        Default:     10
+
+ProceduralDungeon.TileSize = 10
+
+#
+#    ProceduralDungeon.Grid.Width / .Height
+#        Description: Layout grid size in tiles. 64x64 tiles at TileSize 10
+#                     covers 640x640 yards on the base map.
+#        Default:     64 / 64
+
+ProceduralDungeon.Grid.Width = 64
+ProceduralDungeon.Grid.Height = 64
+
+#
+#    ProceduralDungeon.Rooms.Min / .Max
+#        Description: Rooms per run (before semantics: entrance, combat,
+#                     elite, treasure, shrine, boss).
+#        Default:     10 / 16
+
+ProceduralDungeon.Rooms.Min = 10
+ProceduralDungeon.Rooms.Max = 16
+
+#
+#    ProceduralDungeon.Rooms.SizeMin / .SizeMax
+#        Description: Room edge lengths in tiles (forced odd).
+#        Default:     5 / 11
+
+ProceduralDungeon.Rooms.SizeMin = 5
+ProceduralDungeon.Rooms.SizeMax = 11
+
+#
+#    ProceduralDungeon.LoopChance
+#        Description: Percent chance to keep a non-MST connection as an
+#                     extra loop corridor (shortcuts, alternate routes).
+#        Default:     15
+
+ProceduralDungeon.LoopChance = 15
+
+#
+#    ProceduralDungeon.TorchEvery
+#        Description: Place a torch on every Nth eligible wall tile.
+#        Default:     4
+
+ProceduralDungeon.TorchEvery = 4
+
+#
+#    ProceduralDungeon.Theme
+#        Description: Palette theme (pdungeon_palette.theme) used for pieces.
+#        Default:     "wg"
+
+ProceduralDungeon.Theme = "wg"
+
+#
+#    ProceduralDungeon.Spawn.BatchSize
+#        Description: Objects spawned per map update tick while the dungeon
+#                     materializes (higher = faster build-out, bigger hitch).
+#        Default:     50
+
+ProceduralDungeon.Spawn.BatchSize = 50
+
+#
+#    ProceduralDungeon.Spawn.MaxGameObjects
+#        Description: Hard cap on planned spawns per run (safety valve).
+#        Default:     1500
+
+ProceduralDungeon.Spawn.MaxGameObjects = 1500
+
+#
+#    ProceduralDungeon.Mob.PackSize.Min / .Max
+#        Description: Trash mobs per combat room.
+#        Default:     3 / 5
+
+ProceduralDungeon.Mob.PackSize.Min = 3
+ProceduralDungeon.Mob.PackSize.Max = 5
+
+#
+#    ProceduralDungeon.Mob.CasterChance
+#        Description: Percent chance that a trash mob is a caster.
+#        Default:     30
+
+ProceduralDungeon.Mob.CasterChance = 30
+
+#
+#    ProceduralDungeon.Mob.Level
+#        Description: Override level applied to spawned mobs (0 = use the
+#                     creature_template levels).
+#        Default:     0
+
+ProceduralDungeon.Mob.Level = 0
+
+#
+#    ProceduralDungeon.Mob.LeashTiles
+#        Description: Leash radius around a mob's spawn point, in tiles.
+#        Default:     18
+
+ProceduralDungeon.Mob.LeashTiles = 18
+
+#
+#    ProceduralDungeon.ShrineSpellId
+#        Description: Spell the shrine casts on its user (one-shot per run).
+#        Default:     48161 (Power Word: Fortitude)
+
+ProceduralDungeon.ShrineSpellId = 48161
+
+#
+#    ProceduralDungeon.Announce
+#        Description: Announce the module to players on login.
+#        Default:     1
+
+ProceduralDungeon.Announce = 1
+
+#
+#    ProceduralDungeon.Debug
+#        Description: Log the generated ASCII layout and timings.
+#        Default:     0
+
+ProceduralDungeon.Debug = 0

@@ -1,0 +1,37 @@
+-- ----------------------------------------------------------------------------
+-- mod-procedural-dungeon: tile palette (world database)
+-- Maps generator roles onto GameObject entries. Swap pieces or add themes
+-- without rebuilding the server. All display ids below were verified against
+-- the 3.3.5a client GameObjectDisplayInfo.dbc; walls and gates use WMO models
+-- so they block creature line of sight (M2 is fine for decoration).
+-- Roles: WALL, GATE, TORCH, BRAZIER, CHEST, SHRINE, EXIT, ENTRANCE
+-- rot_offset: yaw added to the computed piece orientation (radians).
+-- z_offset:   height added on top of the sampled ground height.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS `pdungeon_palette` (
+  `id` INT UNSIGNED NOT NULL,
+  `theme` VARCHAR(16) NOT NULL DEFAULT 'wg',
+  `role` VARCHAR(16) NOT NULL,
+  `go_entry` INT UNSIGNED NOT NULL,
+  `len_tiles` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `rot_offset` FLOAT NOT NULL DEFAULT 0,
+  `z_offset` FLOAT NOT NULL DEFAULT 0,
+  `weight` INT UNSIGNED NOT NULL DEFAULT 1,
+  `comment` VARCHAR(64) DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+DELETE FROM `pdungeon_palette` WHERE `theme` = 'wg';
+INSERT INTO `pdungeon_palette` (`id`, `theme`, `role`, `go_entry`, `len_tiles`, `rot_offset`, `z_offset`, `weight`, `comment`) VALUES
+(1, 'wg', 'WALL', 910000, 3, 0, 0, 1, 'WG_Wall01.wmo 28.5yd'),
+(2, 'wg', 'WALL', 910001, 3, 0, 0, 1, 'WG_Wall02.wmo variant'),
+(3, 'wg', 'WALL', 910002, 2, 0, 0, 1, 'nd_human_wall_small02.wmo 17.7yd'),
+(4, 'wg', 'WALL', 910003, 1, 0, 0, 1, 'nd_human_wall_end_small02.wmo 10.4yd'),
+(5, 'wg', 'GATE', 910010, 1, 0, 0, 1, 'WG_Gate01.wmo'),
+(6, 'wg', 'TORCH', 910020, 1, 0, 0, 1, 'ScarletO_Brazier_Lit'),
+(7, 'wg', 'BRAZIER', 910021, 1, 0, 0, 1, 'Zuldrak brazier'),
+(8, 'wg', 'CHEST', 910030, 1, 0, 0, 1, 'TreasureChest01'),
+(9, 'wg', 'SHRINE', 910031, 1, 0, 0, 1, 'Nox portal yellow'),
+(10, 'wg', 'EXIT', 910032, 1, 0, 0, 1, 'InstancePortal red'),
+(11, 'wg', 'ENTRANCE', 910033, 1, 0, 0, 1, 'InstancePortal');
