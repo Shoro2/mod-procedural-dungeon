@@ -132,7 +132,17 @@ namespace PDungeon
         _entrancePosition = TileToWorldPosition(entrance->CenterX() + 0.5f, entrance->CenterY() + 0.5f);
         _entrancePosition.m_positionZ += 0.5f;
 
-        // A doorway is a boss door when any of its tiles touches boss room floor.
+        // Every doorway is a closed blocking gate that opens on adjacent-room
+        // clear. Record each group's tiles (for the fallback mob A* blocker) and
+        // which rooms open it (its corridor-blob incident rooms).
+        for (size_t group = 0; group < _layout.doorways.size(); ++group)
+        {
+            uint32 const groupId = static_cast<uint32>(group) + 1;
+            _groupTiles[groupId] = _layout.doorways[group].tiles;
+        }
+
+        // A doorway is a boss door when any of its tiles touches boss room floor;
+        // boss gates ignore the adjacency rule and open only via OpenBossDoors.
         int const offsetsX[4] = { -1, 1, 0, 0 };
         int const offsetsY[4] = { 0, 0, -1, 1 };
         for (size_t group = 0; group < _layout.doorways.size(); ++group)
@@ -157,32 +167,57 @@ namespace PDungeon
             if (isBossDoor)
             {
                 _bossDoorGroups.insert(static_cast<uint32>(group) + 1);
-                for (TilePos const& tile : _layout.doorways[group].tiles)
-                {
-                    _closedDoorTiles.push_back(tile);
-                }
             }
         }
 
+        // Planned mob counts from the post-truncation plan: a room clears when
+        // its last actually-spawned mob dies, so count what will really spawn.
+        for (PlannedSpawn const& plan : _initialSpawns)
+        {
+            if (plan.isCreature && plan.roomId >= 0)
+            {
+                ++_roomMobsPlanned[plan.roomId];
+            }
+        }
+
+        // Doorway <-> rooms adjacency: clearing a room opens every gate whose
+        // corridor blob touches that room (both the gate leaving it and the gate
+        // letting the player into the neighbor).
+        std::vector<std::vector<int>> const incidentRooms = _layout.DoorwayIncidentRooms();
+        for (size_t i = 0; i < incidentRooms.size(); ++i)
+        {
+            uint32 const groupId = static_cast<uint32>(i) + 1;
+            for (int roomId : incidentRooms[i])
+            {
+                _roomDoorGroups[roomId].push_back(groupId);
+            }
+        }
+
+        // Boss gate is additionally gated on clearing every elite room.
         for (Room const& room : _layout.rooms)
         {
-            if (room.kind != RoomKind::Elite)
+            if (room.kind == RoomKind::Elite && _roomMobsPlanned[room.id] > 0)
             {
-                continue;
-            }
-            for (SpawnPoint const& point : _layout.spawnPoints)
-            {
-                if (point.roomId == room.id)
-                {
-                    ++_eliteRoomsRemaining;
-                    break;
-                }
+                ++_eliteRoomsRemaining;
             }
         }
         if (!_eliteRoomsRemaining)
         {
             _bossDoorsOpen = true;
-            _closedDoorTiles.clear();
+        }
+
+        // Seed the fallback mob-path blocker from every currently-closed door.
+        RebuildClosedDoorTiles();
+
+        // Auto-clear rooms the player can never be trapped behind: the entrance
+        // and any room with no mobs to fight (shrine / empty / truncated).
+        OnRoomCleared(_layout.entranceRoomId);
+        for (Room const& room : _layout.rooms)
+        {
+            if (_roomMobsPlanned[room.id] == 0)
+            {
+                OnRoomCleared(room.id);
+            }
         }
 
         _generated = true;
@@ -309,6 +344,14 @@ namespace PDungeon
             if (!summon)
             {
                 LOG_ERROR(PD_LOG, "instance {}: failed to summon creature {} (missing creature_template?)", instance->GetInstanceId(), plan.entry);
+                // The plan counted this mob; a failed summon means it will never spawn
+                // or die. Drop it from the room's plan and re-check the room so a summon
+                // failure can never leave the room's gates permanently shut (softlock).
+                if (plan.roomId >= 0 && _roomMobsPlanned[plan.roomId] > 0)
+                {
+                    --_roomMobsPlanned[plan.roomId];
+                }
+                CheckRoomCleared(plan.roomId);
                 return;
             }
             int const level = sPDMgr->GetConfig().mobLevel;
@@ -343,8 +386,13 @@ namespace PDungeon
         if (plan.doorGroupId)
         {
             _gateGuids[plan.doorGroupId].push_back(go->GetGUID());
+            // Spawn every gate closed (GO_STATE_READY) unless its group is
+            // already scheduled open - gates spawn in later Update batches, so a
+            // door auto-opened at setup must still open when its piece appears.
             bool const bossGate = _bossDoorGroups.find(plan.doorGroupId) != _bossDoorGroups.end();
-            if (!bossGate || _bossDoorsOpen)
+            bool const open = bossGate ? _bossDoorsOpen
+                                       : _openDoorGroups.find(plan.doorGroupId) != _openDoorGroups.end();
+            if (open)
             {
                 go->SetGoState(GO_STATE_ACTIVE);
             }
@@ -355,6 +403,68 @@ namespace PDungeon
     {
         _mobRooms[creature->GetGUID()] = roomId;
         ++_roomMobsAlive[roomId];
+        ++_roomMobsSpawned[roomId];
+    }
+
+    void PDInstanceScript::OnRoomCleared(int roomId)
+    {
+        if (roomId < 0 || !_clearedRooms.insert(roomId).second)
+        {
+            return;
+        }
+        auto const itr = _roomDoorGroups.find(roomId);
+        if (itr != _roomDoorGroups.end())
+        {
+            for (uint32 group : itr->second)
+            {
+                OpenDoorGroup(group);
+            }
+        }
+    }
+
+    void PDInstanceScript::OpenDoorGroup(uint32 group)
+    {
+        if (_bossDoorGroups.find(group) != _bossDoorGroups.end())
+        {
+            return; // boss gates are opened only by OpenBossDoors
+        }
+        if (!_openDoorGroups.insert(group).second)
+        {
+            return; // idempotent
+        }
+        auto const itr = _gateGuids.find(group);
+        if (itr != _gateGuids.end())
+        {
+            for (ObjectGuid guid : itr->second)
+            {
+                if (GameObject* gate = instance->GetGameObject(guid))
+                {
+                    gate->SetGoState(GO_STATE_ACTIVE);
+                }
+            }
+        }
+        RebuildClosedDoorTiles();
+    }
+
+    void PDInstanceScript::RebuildClosedDoorTiles()
+    {
+        auto isOpen = [&](uint32 group)
+        {
+            if (_bossDoorGroups.find(group) != _bossDoorGroups.end())
+            {
+                return _bossDoorsOpen;
+            }
+            return _openDoorGroups.find(group) != _openDoorGroups.end();
+        };
+
+        _closedDoorTiles.clear();
+        for (auto const& pair : _groupTiles)
+        {
+            if (!isOpen(pair.first))
+            {
+                _closedDoorTiles.insert(_closedDoorTiles.end(), pair.second.begin(), pair.second.end());
+            }
+        }
     }
 
     void PDInstanceScript::OnMobDied(Creature* creature)
@@ -376,6 +486,26 @@ namespace PDungeon
         {
             return;
         }
+        CheckRoomCleared(roomId);
+    }
+
+    // A room is cleared once all its planned mobs have spawned and died - or failed
+    // to summon (SpawnOne drops the failed mob from the plan and re-checks here).
+    // Fires exactly once per room: opens the room's adjacency gates and, for an elite
+    // room, ticks the boss-gate counter. The summon-failure path routing through here
+    // is what keeps a failed spawn from permanently sealing a room's gates (softlock).
+    void PDInstanceScript::CheckRoomCleared(int roomId)
+    {
+        if (roomId < 0 || _clearedRooms.find(roomId) != _clearedRooms.end())
+        {
+            return;
+        }
+        if (_roomMobsAlive[roomId] != 0 || _roomMobsSpawned[roomId] < _roomMobsPlanned[roomId])
+        {
+            return;
+        }
+
+        OnRoomCleared(roomId); // opens this room's adjacency gates (marks _clearedRooms)
 
         Room const* room = _layout.GetRoom(roomId);
         if (room && room->kind == RoomKind::Elite && _eliteRoomsRemaining)
@@ -399,10 +529,10 @@ namespace PDungeon
             return;
         }
         _bossDoorsOpen = true;
-        _closedDoorTiles.clear();
 
         for (uint32 group : _bossDoorGroups)
         {
+            _openDoorGroups.insert(group);
             auto const itr = _gateGuids.find(group);
             if (itr == _gateGuids.end())
             {
@@ -416,6 +546,7 @@ namespace PDungeon
                 }
             }
         }
+        RebuildClosedDoorTiles();
         DoSendNotifyToInstance("The boss gate grinds open!");
     }
 
@@ -435,6 +566,7 @@ namespace PDungeon
         OpenBossDoors();
         for (auto const& pair : _gateGuids)
         {
+            _openDoorGroups.insert(pair.first);
             for (ObjectGuid guid : pair.second)
             {
                 if (GameObject* gate = instance->GetGameObject(guid))
@@ -443,6 +575,8 @@ namespace PDungeon
                 }
             }
         }
+        // Everything is open now; stop blocking late-pathing mobs.
+        _closedDoorTiles.clear();
 
         for (PlannedSpawn const& plan : _completionSpawns)
         {

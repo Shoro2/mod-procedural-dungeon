@@ -67,6 +67,20 @@ namespace PDungeon
         // Room whose rectangle contains (x, y), or -1.
         int RoomIdAt(int x, int y) const;
 
+        // For each doorway (by index), the set of rooms that share its corridor
+        // "blob" - a 4-connected component of Corridor+Doorway tiles. A simple
+        // corridor blob is incident to exactly two rooms (near + far); junctions
+        // and loops yield more. The returned lists are sorted/deduplicated and a
+        // doorway's own roomId is always included.
+        //
+        // This is the doorway<->rooms adjacency the room-clear gating relies on:
+        // clearing a room opens every gate whose blob touches that room, so both
+        // the gate leaving the cleared room and the gate letting the player enter
+        // the neighbor open together. Engine-free and deterministic (fixed
+        // y-then-x scan, fixed neighbor order), so both the instance script and
+        // the ASCII harness derive identical adjacency.
+        std::vector<std::vector<int>> DoorwayIncidentRooms() const;
+
         Room const* GetRoom(int roomId) const
         {
             return roomId >= 0 && roomId < static_cast<int>(rooms.size()) ? &rooms[roomId] : nullptr;

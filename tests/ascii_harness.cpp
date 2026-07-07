@@ -92,6 +92,159 @@ namespace
         }
     }
 
+    // Verifies the one-gate-per-doorway contract and the room-clear gating: that
+    // starting from the (auto-cleared) entrance, clearing reachable rooms in some
+    // order opens a path to every room including the boss - i.e. the gating can
+    // never softlock. Mirrors PDInstanceScript's adjacency + boss-gate rules on
+    // the engine-free layout, so this is the same logic the live run uses.
+    bool CheckGating(PDLayout const& layout, std::string& error)
+    {
+        size_t const doorCount = layout.doorways.size();
+        std::vector<std::vector<int>> const incident = layout.DoorwayIncidentRooms();
+        if (incident.size() != doorCount)
+        {
+            error = "doorway incidence size mismatch";
+            return false;
+        }
+
+        // One gate per doorway: exactly one representative center per doorway,
+        // in-bounds, and the doorway's own room is incident to its corridor blob.
+        for (size_t i = 0; i < doorCount; ++i)
+        {
+            Doorway const& doorway = layout.doorways[i];
+            if (doorway.tiles.empty())
+            {
+                error = "doorway without tiles";
+                return false;
+            }
+            float cx = 0.0f;
+            float cy = 0.0f;
+            doorway.Center(cx, cy);
+            if (!layout.InBounds(static_cast<int>(cx), static_cast<int>(cy)))
+            {
+                error = "gate center out of bounds";
+                return false;
+            }
+            bool ownRoomIncident = false;
+            for (int roomId : incident[i])
+            {
+                if (roomId == doorway.roomId)
+                {
+                    ownRoomIncident = true;
+                }
+            }
+            if (!ownRoomIncident)
+            {
+                error = "doorway room not incident to its own corridor blob";
+                return false;
+            }
+        }
+
+        int const roomCount = static_cast<int>(layout.rooms.size());
+        if (layout.entranceRoomId < 0 || layout.entranceRoomId >= roomCount ||
+            layout.bossRoomId < 0 || layout.bossRoomId >= roomCount)
+        {
+            error = "invalid entrance/boss room id for gating";
+            return false;
+        }
+
+        // Mob-less rooms are auto-cleared at setup (entrance + no-spawn rooms).
+        std::vector<bool> hasMobs(roomCount, false);
+        for (SpawnPoint const& spawn : layout.spawnPoints)
+        {
+            if (spawn.roomId >= 0 && spawn.roomId < roomCount)
+            {
+                hasMobs[spawn.roomId] = true;
+            }
+        }
+
+        // A doorway is a boss door if any tile touches boss room floor.
+        int const offsetsX[4] = { -1, 1, 0, 0 };
+        int const offsetsY[4] = { 0, 0, -1, 1 };
+        std::vector<bool> isBossDoor(doorCount, false);
+        for (size_t i = 0; i < doorCount; ++i)
+        {
+            for (TilePos const& tile : layout.doorways[i].tiles)
+            {
+                for (int n = 0; n < 4; ++n)
+                {
+                    int const nx = tile.x + offsetsX[n];
+                    int const ny = tile.y + offsetsY[n];
+                    if (layout.At(nx, ny) == TileType::RoomFloor && layout.RoomIdAt(nx, ny) == layout.bossRoomId)
+                    {
+                        isBossDoor[i] = true;
+                    }
+                }
+            }
+        }
+
+        // Fixpoint: a reachable room is immediately clearable; clearing a room
+        // opens every gate whose blob touches it, letting the far room be reached.
+        // The boss door additionally needs every mob-bearing elite room cleared.
+        std::vector<bool> cleared(roomCount, false);
+        cleared[layout.entranceRoomId] = true;
+        for (int r = 0; r < roomCount; ++r)
+        {
+            if (!hasMobs[r])
+            {
+                cleared[r] = true;
+            }
+        }
+
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            bool allElitesCleared = true;
+            for (Room const& room : layout.rooms)
+            {
+                if (room.kind == RoomKind::Elite && hasMobs[room.id] && !cleared[room.id])
+                {
+                    allElitesCleared = false;
+                }
+            }
+            for (size_t i = 0; i < doorCount; ++i)
+            {
+                bool gateOpen = false;
+                for (int roomId : incident[i])
+                {
+                    if (cleared[roomId])
+                    {
+                        gateOpen = true;
+                        break;
+                    }
+                }
+                if (!gateOpen)
+                {
+                    continue;
+                }
+                if (isBossDoor[i] && !allElitesCleared)
+                {
+                    continue; // boss gate still shut
+                }
+                for (int roomId : incident[i])
+                {
+                    if (!cleared[roomId])
+                    {
+                        cleared[roomId] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        for (int r = 0; r < roomCount; ++r)
+        {
+            if (!cleared[r])
+            {
+                error = (r == layout.bossRoomId) ? "boss room unreachable under gating"
+                                                 : "room unreachable under gating";
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool CheckLayout(PDLayout const& layout, std::string& error)
     {
         if (static_cast<int>(layout.rooms.size()) < layout.config.roomsMin ||
@@ -164,6 +317,11 @@ namespace
         if (path.size() < 2)
         {
             error = "simplified path degenerated";
+            return false;
+        }
+
+        if (!CheckGating(layout, error))
+        {
             return false;
         }
         return true;

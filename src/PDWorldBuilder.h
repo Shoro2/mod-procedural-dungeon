@@ -40,9 +40,10 @@ namespace PDungeon
     };
 
     // Translates a generated layout into world-space spawn plans: greedy wall
-    // tiling from the palette, one gate piece per doorway tile, decorations
-    // and mob packs. Spawns that appear only on completion (boss chest, exit
-    // portal) go to a separate list.
+    // tiling from the palette (pieces overlapped for collision-continuity), one
+    // gate per doorway centered on the span, decorations and mob packs. Spawns
+    // that appear only on completion (boss chest, exit portal) go to a separate
+    // list.
     class PDWorldBuilder
     {
     public:

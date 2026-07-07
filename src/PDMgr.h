@@ -37,6 +37,7 @@ namespace PDungeon
         float centerZ = 0.0f;
         float orientation = 0.0f;
         float tileSize = 10.0f;
+        float wallOverlap = 1.75f;     // yards each straight wall piece is pulled into its neighbour
         GenConfig gen;                 // seed field is per-run
         uint32_t spawnBatchSize = 50;
         uint32_t maxGameObjects = 1500;

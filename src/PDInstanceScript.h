@@ -70,6 +70,10 @@ namespace PDungeon
         void SpawnBatch(uint32 budget);
         void SpawnOne(PlannedSpawn const& plan);
         void RegisterMob(Creature* creature, int roomId);
+        void OnRoomCleared(int roomId);
+        void CheckRoomCleared(int roomId);
+        void OpenDoorGroup(uint32 group);
+        void RebuildClosedDoorTiles();
         void OpenBossDoors();
         void HandleCompletion(bool silent);
         void ProcessPendingIntroTeleports();
@@ -87,12 +91,18 @@ namespace PDungeon
         Position _entrancePosition;
 
         std::unordered_map<uint32, std::vector<ObjectGuid>> _gateGuids; // doorGroupId -> gate pieces
+        std::unordered_map<uint32, std::vector<TilePos>> _groupTiles;   // doorGroupId -> its doorway tiles
+        std::unordered_map<int, std::vector<uint32>> _roomDoorGroups;   // roomId -> groups opened when it clears
         std::set<uint32> _bossDoorGroups;
+        std::set<uint32> _openDoorGroups;    // groups currently open (or scheduled to open)
         std::set<uint32> _collisionWarnings; // entries already reported without model
         std::vector<TilePos> _closedDoorTiles;
 
         std::unordered_map<ObjectGuid, int> _mobRooms;
         std::unordered_map<int, uint32> _roomMobsAlive;
+        std::unordered_map<int, uint32> _roomMobsPlanned; // mobs that will actually spawn (post-truncation)
+        std::unordered_map<int, uint32> _roomMobsSpawned; // mobs spawned so far
+        std::set<int> _clearedRooms;                      // idempotency for OnRoomCleared
         uint32 _eliteRoomsRemaining = 0;
 
         std::vector<ObjectGuid> _pendingIntroTeleports;

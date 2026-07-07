@@ -46,7 +46,15 @@ namespace PDungeon
 
         void AddWallPiece(PDLayout const& layout, PDConfig const& config, std::vector<PlannedSpawn>& out, int startX, int startY, int length, bool horizontal)
         {
+            // WMO wall models taper (wider at the base than at player height) and
+            // are ~1.5yd shorter than their tile slot, so pieces placed edge-to-
+            // edge leave a gap at collision height that a player fits through.
+            // Pull every piece after the first back toward the run origin by
+            // config.wallOverlap yards per joint, so consecutive pieces overlap
+            // by a fixed, tunable margin and the collision stays continuous.
+            // Deterministic: depends only on the run and the config constant.
             int position = 0;
+            int jointIndex = 0;
             while (position < length)
             {
                 int const remaining = length - position;
@@ -64,6 +72,20 @@ namespace PDungeon
                 PlannedSpawn spawn;
                 spawn.entry = piece->goEntry;
                 PDWorldBuilder::TileToWorld(config, layout, centerTileX, centerTileY, spawn.x, spawn.y);
+
+                // Overlap adjacent pieces along the run axis, always toward the
+                // run origin (into the wall run, away from any room interior).
+                // TileToWorld is monotonic, so subtracting pulls the center back.
+                float const shift = config.wallOverlap * static_cast<float>(jointIndex);
+                if (horizontal)
+                {
+                    spawn.x -= shift;
+                }
+                else
+                {
+                    spawn.y -= shift;
+                }
+
                 spawn.o = (horizontal ? 0.0f : HALF_PI) + piece->rotOffset;
                 spawn.zOffset = piece->zOffset;
                 spawn.requiresCollision = true;
@@ -71,6 +93,7 @@ namespace PDungeon
                 out.push_back(spawn);
 
                 position += piece->lenTiles;
+                ++jointIndex;
             }
         }
 
@@ -142,27 +165,41 @@ namespace PDungeon
 
         void BuildGates(PDLayout const& layout, PDConfig const& config, std::vector<PlannedSpawn>& out)
         {
+            // One gate per doorway (not one per tile): a single closed blocking
+            // gate centered on the span that opens on adjacent-room clear. The
+            // shared doorGroupId lets every gate open/close atomically; the
+            // per-tile mob blocking is handled separately via _closedDoorTiles.
             for (size_t group = 0; group < layout.doorways.size(); ++group)
             {
                 Doorway const& doorway = layout.doorways[group];
-                for (TilePos const& tile : doorway.tiles)
+                if (doorway.tiles.empty())
                 {
-                    PalettePiece const* piece = sPDPaletteMgr->GetPiece(PaletteRole::Gate, TileSalt(tile.x, tile.y));
-                    if (!piece)
-                    {
-                        continue;
-                    }
-                    PlannedSpawn spawn;
-                    spawn.entry = piece->goEntry;
-                    PDWorldBuilder::TileToWorld(config, layout, tile.x + 0.5f, tile.y + 0.5f, spawn.x, spawn.y);
-                    spawn.o = (doorway.spanAlongX ? 0.0f : HALF_PI) + piece->rotOffset;
-                    spawn.zOffset = piece->zOffset;
-                    spawn.requiresCollision = true;
-                    spawn.doorGroupId = static_cast<uint32>(group) + 1;
-                    spawn.roomId = doorway.roomId;
-                    spawn.sortKey = DistSqToEntrance(layout, static_cast<float>(tile.x), static_cast<float>(tile.y));
-                    out.push_back(spawn);
+                    continue;
                 }
+                PalettePiece const* piece = sPDPaletteMgr->GetPiece(PaletteRole::Gate, TileSalt(doorway.AnchorX(), doorway.AnchorY()));
+                if (!piece)
+                {
+                    continue;
+                }
+
+                float centerTileX = 0.0f;
+                float centerTileY = 0.0f;
+                doorway.Center(centerTileX, centerTileY);
+
+                PlannedSpawn spawn;
+                spawn.entry = piece->goEntry;
+                PDWorldBuilder::TileToWorld(config, layout, centerTileX, centerTileY, spawn.x, spawn.y);
+                // rot_offset normalizes the model so o=0 runs along +X; the
+                // spanAlongX branch orients the barrier across the opening.
+                // rot_offset is operator-calibrated (see pdungeon_palette /
+                // .pdungeon validate); never hard-guess it here.
+                spawn.o = (doorway.spanAlongX ? 0.0f : HALF_PI) + piece->rotOffset;
+                spawn.zOffset = piece->zOffset;
+                spawn.requiresCollision = true;
+                spawn.doorGroupId = static_cast<uint32>(group) + 1;
+                spawn.roomId = doorway.roomId;
+                spawn.sortKey = DistSqToEntrance(layout, centerTileX, centerTileY);
+                out.push_back(spawn);
             }
         }
 

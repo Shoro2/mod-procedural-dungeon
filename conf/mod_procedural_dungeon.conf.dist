@@ -46,6 +46,20 @@ ProceduralDungeon.Center.O = 0
 ProceduralDungeon.TileSize = 10
 
 #
+#    ProceduralDungeon.WallOverlap
+#        Description: Yards each straight wall piece is pulled into its
+#                     neighbour along the run axis so tapered WMO bases stay
+#                     collision-continuous at player height. WMO wall models
+#                     are wider at the base than mid-height and ~1.5yd shorter
+#                     than their tile slot, so edge-to-edge pieces leave a gap
+#                     a player can slip through; this closes it. Increase (try
+#                     2.0, then 2.5) if players still walk through straight
+#                     runs; decrease if pieces visibly telescope.
+#        Default:     1.75
+
+ProceduralDungeon.WallOverlap = 1.75
+
+#
 #    ProceduralDungeon.Grid.Width / .Height
 #        Description: Layout grid size in tiles. 64x64 tiles at TileSize 10
 #                     covers 640x640 yards on the base map.

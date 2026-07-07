@@ -119,6 +119,24 @@ namespace PDungeon
 
         int AnchorX() const { return tiles.empty() ? 0 : tiles[0].x; }
         int AnchorY() const { return tiles.empty() ? 0 : tiles[0].y; }
+
+        // Representative center of the whole span in fractional tile
+        // coordinates (tile centers sit at tx + 0.5 / ty + 0.5). A single
+        // gate is spawned here so one door covers the opening. Deterministic:
+        // depends only on the (fixed-order) tile list.
+        void Center(float& tileX, float& tileY) const
+        {
+            float sumX = 0.0f;
+            float sumY = 0.0f;
+            for (TilePos const& tile : tiles)
+            {
+                sumX += static_cast<float>(tile.x);
+                sumY += static_cast<float>(tile.y);
+            }
+            float const count = tiles.empty() ? 1.0f : static_cast<float>(tiles.size());
+            tileX = sumX / count + 0.5f;
+            tileY = sumY / count + 0.5f;
+        }
     };
 
     struct Decoration
