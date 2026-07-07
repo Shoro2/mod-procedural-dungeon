@@ -5,12 +5,18 @@
 -- (registered in share-public docs/06-custom-ids.md)
 -- ----------------------------------------------------------------------------
 
+-- Walls 910000-910003 are GAMEOBJECT_TYPE_DESTRUCTIBLE_BUILDING (type 33): their WMO
+-- displays (7877/7909/8251/8250) are destructible-building models that the 3.3.5a client
+-- renders via the type-33 path, NOT as plain type-0 doors (a type-0 door with these
+-- displays spawns collidable-but-invisible). Data0 = intactNumHits set high so the intact
+-- model shows and the walls are effectively indestructible.
+-- Gate 910010 stays type 0 for now (its open/close uses SetGoState; convert separately).
 DELETE FROM `gameobject_template` WHERE `entry` BETWEEN 910000 AND 910099;
 INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`, `Data0`, `Data1`, `ScriptName`) VALUES
-(910000, 0, 7877, 'PD Wall Long', 1, 0, 0, ''),
-(910001, 0, 7909, 'PD Wall Long Alt', 1, 0, 0, ''),
-(910002, 0, 8251, 'PD Wall Short', 1, 0, 0, ''),
-(910003, 0, 8250, 'PD Wall End', 1, 0, 0, ''),
+(910000, 33, 7877, 'PD Wall Long', 1, 9000000, 0, ''),
+(910001, 33, 7909, 'PD Wall Long Alt', 1, 9000000, 0, ''),
+(910002, 33, 8251, 'PD Wall Short', 1, 9000000, 0, ''),
+(910003, 33, 8250, 'PD Wall End', 1, 9000000, 0, ''),
 (910010, 0, 7906, 'PD Gate', 1, 0, 0, ''),
 (910020, 5, 7858, 'PD Torch', 1, 0, 0, ''),
 (910021, 5, 8191, 'PD Brazier', 1, 0, 0, ''),
