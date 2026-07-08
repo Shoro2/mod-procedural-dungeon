@@ -381,7 +381,9 @@ namespace PDungeon
         if (plan.scale > 0.0f)
         {
             go->SetObjectScale(plan.scale);
-            go->UpdateModel();
+            // UpdateModel() is protected; SetDisplayId (public) re-runs it, rebuilding
+            // m_model at the new scale so server collision matches the scaled width.
+            go->SetDisplayId(go->GetDisplayId());
         }
 
         if (plan.requiresCollision)
