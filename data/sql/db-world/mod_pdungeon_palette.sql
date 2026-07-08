@@ -41,9 +41,9 @@ CREATE TABLE IF NOT EXISTS `pdungeon_palette` (
 DELETE FROM `pdungeon_palette` WHERE `theme` = 'wg';
 INSERT INTO `pdungeon_palette` (`id`, `theme`, `role`, `go_entry`, `len_tiles`, `rot_offset`, `z_offset`, `weight`, `comment`) VALUES
 (1, 'wg', 'WALL', 910000, 3, 0, 0, 1, 'WG_Wall01.wmo 28.5yd - calibrate rot_offset'),
-(3, 'wg', 'WALL', 910002, 2, 0, 0, 1, 'nd_human_wall_small02.wmo 17.7yd - calibrate rot_offset'),
+(3, 'wg', 'WALL', 910002, 2, 1.5708, 0, 1, 'nd_human_wall_small02.wmo 17.7yd rot90 (perp to Wall Long)'),
 (4, 'wg', 'WALL', 910003, 1, 0, -1.84, 1, 'nd_human_wall_end_small02.wmo 10.4yd zoff-1.84'),
-(5, 'wg', 'GATE', 910010, 1, 0, 0, 1, 'WG_Gate01.wmo - calibrate rot_offset'),
+(5, 'wg', 'GATE', 910010, 1, 0, 0, 1, 'BlackRockIronDoor M2 - calibrate rot_offset'),
 (6, 'wg', 'TORCH', 910020, 1, 0, 0, 1, 'ScarletO_Brazier_Lit'),
 (7, 'wg', 'BRAZIER', 910021, 1, 0, 0, 1, 'Zuldrak brazier'),
 (8, 'wg', 'CHEST', 910030, 1, 0, 0, 1, 'TreasureChest01'),
