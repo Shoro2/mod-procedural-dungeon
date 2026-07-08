@@ -39,11 +39,14 @@ ProceduralDungeon.Center.O = 0
 #
 #    ProceduralDungeon.TileSize
 #        Description: Edge length of one layout tile in yards. Corridors are
-#                     2 tiles wide. The default matches the Wintergrasp wall
-#                     palette (28.5yd piece on a 3-tile slot).
-#        Default:     10
+#                     2 tiles wide. 9.5 makes the 28.5yd Wintergrasp wall fill
+#                     its 3-tile slot EXACTLY (3 * 9.5 = 28.5). WMO GameObjects
+#                     ignore the `size` scale field, so tile size is the only
+#                     lever that makes walls tile gap-free. (10 = 30yd slot left
+#                     a 1.5yd gap per joint.)
+#        Default:     9.5
 
-ProceduralDungeon.TileSize = 10
+ProceduralDungeon.TileSize = 9.5
 
 #
 #    ProceduralDungeon.WallOverlap
