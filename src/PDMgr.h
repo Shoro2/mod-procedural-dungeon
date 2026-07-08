@@ -38,6 +38,9 @@ namespace PDungeon
         float orientation = 0.0f;
         float tileSize = 10.0f;
         float wallOverlap = 1.75f;     // yards each straight wall piece is pulled into its neighbour
+        float wallJunctionExtend = 0.0f; // extra yards a wall run's END piece buries into a
+                                         // perpendicular wall/corner, on top of the built-in
+                                         // one-tile tile-share; terminal pieces only, never cumulative
         GenConfig gen;                 // seed field is per-run
         uint32_t spawnBatchSize = 50;
         uint32_t maxGameObjects = 1500;

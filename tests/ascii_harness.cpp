@@ -24,6 +24,7 @@
 
 #include "generator/PDDungeonGenerator.h"
 #include "generator/PDGridPath.h"
+#include "generator/PDWallPlan.h"
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -245,6 +246,189 @@ namespace
         return true;
     }
 
+    // Verifies the wall/gate geometry plan (PDWallPlan) that the world-builder
+    // feeds to the palette. This is the engine-free half of the placement
+    // rework, so the harness exercises the exact deterministic logic the live
+    // run uses. Four properties:
+    //   (a) no wall piece is oriented perpendicular to its own wall line;
+    //   (b) every wall run end that abuts a perpendicular wall buries into a
+    //       real wall tile (junctions/corners are covered, no taper gap);
+    //   (c) gates are emitted only at genuine wall-capped passages;
+    //   (d) the whole plan is deterministic (recomputed identical).
+    bool CheckWallGatePlan(PDLayout const& layout, std::string& error)
+    {
+        int const W = layout.width;
+        int const H = layout.height;
+        auto isWall = [&](int x, int y) { return layout.At(x, y) == TileType::Wall; };
+
+        std::vector<WallRun> const runs = BuildWallRuns(layout);
+
+        // (d) determinism: an identical recompute must yield an identical plan.
+        std::vector<WallRun> const again = BuildWallRuns(layout);
+        if (again.size() != runs.size())
+        {
+            error = "wall run plan not deterministic (count)";
+            return false;
+        }
+        for (size_t i = 0; i < runs.size(); ++i)
+        {
+            if (again[i].startX != runs[i].startX || again[i].startY != runs[i].startY ||
+                again[i].length != runs[i].length || again[i].horizontal != runs[i].horizontal ||
+                again[i].abutLow != runs[i].abutLow || again[i].abutHigh != runs[i].abutHigh)
+            {
+                error = "wall run plan not deterministic (run)";
+                return false;
+            }
+        }
+
+        // Body coverage: every Wall tile is the body tile of exactly one run.
+        std::vector<int> bodyRun(static_cast<size_t>(W) * H, -1);
+        std::vector<bool> bodyHoriz(static_cast<size_t>(W) * H, false);
+        for (size_t r = 0; r < runs.size(); ++r)
+        {
+            WallRun const& run = runs[r];
+            for (int i = 0; i < run.length; ++i)
+            {
+                int const x = run.horizontal ? run.startX + i : run.startX;
+                int const y = run.horizontal ? run.startY : run.startY + i;
+                if (!layout.InBounds(x, y) || !isWall(x, y))
+                {
+                    error = "wall run body tile is not a Wall tile";
+                    return false;
+                }
+                size_t const idx = static_cast<size_t>(y) * W + x;
+                if (bodyRun[idx] != -1)
+                {
+                    error = "wall tile covered by two run bodies";
+                    return false;
+                }
+                bodyRun[idx] = static_cast<int>(r);
+                bodyHoriz[idx] = run.horizontal;
+            }
+        }
+
+        // (a) every Wall tile is covered, and by a run along its OWN wall line:
+        // a straight-through vertical tile is never placed by a horizontal run
+        // (and vice versa). This is the anti-"verdrehte Waende" invariant.
+        for (int y = 0; y < H; ++y)
+        {
+            for (int x = 0; x < W; ++x)
+            {
+                if (!isWall(x, y))
+                {
+                    continue;
+                }
+                size_t const idx = static_cast<size_t>(y) * W + x;
+                if (bodyRun[idx] == -1)
+                {
+                    error = "wall tile not covered by any run";
+                    return false;
+                }
+                WallAxis const a = WallAxisOf(layout, x, y);
+                bool const expectHoriz = (a == WallAxis::Horizontal || a == WallAxis::Isolated);
+                if (bodyHoriz[idx] != expectHoriz)
+                {
+                    error = "wall piece perpendicular to its own wall line";
+                    return false;
+                }
+            }
+        }
+
+        // (b) junction coverage: abut flags are exactly "wall beyond the end",
+        // and every applied extension buries into a REAL wall tile that some run
+        // owns (so the tapered bases actually meet - no walk-through gap).
+        for (WallRun const& run : runs)
+        {
+            int const bLoX = run.horizontal ? run.startX - 1 : run.startX;
+            int const bLoY = run.horizontal ? run.startY : run.startY - 1;
+            int const bHiX = run.horizontal ? run.startX + run.length : run.startX;
+            int const bHiY = run.horizontal ? run.startY : run.startY + run.length;
+            if (run.abutLow != isWall(bLoX, bLoY) || run.abutHigh != isWall(bHiX, bHiY))
+            {
+                error = "wall run abut flag disagrees with the grid";
+                return false;
+            }
+            if (run.abutLow && bodyRun[static_cast<size_t>(bLoY) * W + bLoX] == -1)
+            {
+                error = "junction extension does not bury into a covered wall tile";
+                return false;
+            }
+            if (run.abutHigh && bodyRun[static_cast<size_t>(bHiY) * W + bHiX] == -1)
+            {
+                error = "junction extension does not bury into a covered wall tile";
+                return false;
+            }
+        }
+
+        // (c) gates only at genuine passages. Re-derive the predicate the finder
+        // must satisfy for every opening it accepts, and verify determinism.
+        auto isRoom = [&](int x, int y) { return layout.At(x, y) == TileType::RoomFloor; };
+        auto isPath = [&](int x, int y) { TileType t = layout.At(x, y); return t == TileType::Corridor || t == TileType::Doorway; };
+        auto isBlocked = [&](int x, int y) { TileType t = layout.At(x, y); return t == TileType::Wall || t == TileType::Void; };
+        auto isDoor = [&](int x, int y) { return layout.At(x, y) == TileType::Doorway; };
+        for (Doorway const& doorway : layout.doorways)
+        {
+            GateOpening const op = FindGateOpening(layout, doorway);
+            GateOpening const op2 = FindGateOpening(layout, doorway);
+            if (op.valid != op2.valid || op.spanAlongX != op2.spanAlongX || op.spanTiles != op2.spanTiles ||
+                op.anchorX != op2.anchorX || op.anchorY != op2.anchorY)
+            {
+                error = "gate opening not deterministic";
+                return false;
+            }
+            if (!op.valid)
+            {
+                continue; // stray/edge-hugging doorway correctly suppressed
+            }
+
+            int const cx = static_cast<int>(op.centerTileX);
+            int const cy = static_cast<int>(op.centerTileY);
+            if (!layout.InBounds(cx, cy) || op.spanTiles < 1)
+            {
+                error = "gate opening out of bounds / empty span";
+                return false;
+            }
+
+            int const spanDX = op.spanAlongX ? 1 : 0;
+            int const spanDY = op.spanAlongX ? 0 : 1;
+            int const loX = op.anchorX;
+            int const loY = op.anchorY;
+            int const hiX = loX + (op.spanTiles - 1) * spanDX;
+            int const hiY = loY + (op.spanTiles - 1) * spanDY;
+
+            // Wall-capped at both span ends (rejects a corridor hugging an edge).
+            if (!isBlocked(loX - spanDX, loY - spanDY) || !isBlocked(hiX + spanDX, hiY + spanDY))
+            {
+                error = "gate opening not capped by wall at both ends";
+                return false;
+            }
+            // Every opening tile is a Doorway that pierces the room wall ring:
+            // RoomFloor on one through-side, a corridor on the exact opposite.
+            int const thruDX = op.spanAlongX ? 0 : 1;
+            int const thruDY = op.spanAlongX ? 1 : 0;
+            for (int i = 0; i < op.spanTiles; ++i)
+            {
+                int const tx = loX + i * spanDX;
+                int const ty = loY + i * spanDY;
+                if (!isDoor(tx, ty))
+                {
+                    error = "gate opening tile is not a Doorway";
+                    return false;
+                }
+                bool const through =
+                    (isRoom(tx + thruDX, ty + thruDY) && isPath(tx - thruDX, ty - thruDY)) ||
+                    (isRoom(tx - thruDX, ty - thruDY) && isPath(tx + thruDX, ty + thruDY));
+                if (!through)
+                {
+                    error = "gate opening tile does not connect a corridor to a room";
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
     bool CheckLayout(PDLayout const& layout, std::string& error)
     {
         if (static_cast<int>(layout.rooms.size()) < layout.config.roomsMin ||
@@ -321,6 +505,10 @@ namespace
         }
 
         if (!CheckGating(layout, error))
+        {
+            return false;
+        }
+        if (!CheckWallGatePlan(layout, error))
         {
             return false;
         }

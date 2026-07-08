@@ -373,6 +373,17 @@ namespace PDungeon
         }
         ++_spawnedCount;
 
+        // Gates span their opening via M2 scale (walls can't scale - WMO ignores
+        // it). Rebuild the collision model so the door blocks at the new width;
+        // the model is (re)created for the current GO_STATE_READY (closed) here,
+        // before the doorGroupId open-state block, so an auto-opened group still
+        // opens correctly.
+        if (plan.scale > 0.0f)
+        {
+            go->SetObjectScale(plan.scale);
+            go->UpdateModel();
+        }
+
         if (plan.requiresCollision)
         {
             go->SetGameObjectFlag(GameObjectFlags(GO_FLAG_NOT_SELECTABLE | GO_FLAG_LOCKED));

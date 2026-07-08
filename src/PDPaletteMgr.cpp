@@ -82,7 +82,7 @@ namespace PDungeon
         }
         _loaded = false;
 
-        QueryResult result = WorldDatabase.Query("SELECT role, go_entry, len_tiles, rot_offset, z_offset FROM pdungeon_palette WHERE theme = '{}' ORDER BY id", theme);
+        QueryResult result = WorldDatabase.Query("SELECT role, go_entry, len_tiles, length_yd, rot_offset, z_offset FROM pdungeon_palette WHERE theme = '{}' ORDER BY id", theme);
         if (!result)
         {
             LOG_ERROR(PD_LOG, "pdungeon_palette has no rows for theme '{}' - dungeons cannot be built", theme);
@@ -103,8 +103,15 @@ namespace PDungeon
             PalettePiece piece;
             piece.goEntry = fields[1].Get<uint32>();
             piece.lenTiles = fields[2].Get<uint8>();
-            piece.rotOffset = fields[3].Get<float>();
-            piece.zOffset = fields[4].Get<float>();
+            piece.lengthYd = fields[3].Get<float>();
+            piece.rotOffset = fields[4].Get<float>();
+            piece.zOffset = fields[5].Get<float>();
+            // Flush wall anchoring needs the physical length; fall back to an
+            // exact tile fill (matches the pre-length_yd behaviour) when unset.
+            if (piece.lengthYd <= 0.0f)
+            {
+                piece.lengthYd = static_cast<float>(piece.lenTiles) * 9.5f;
+            }
             _pieces[static_cast<size_t>(role)].push_back(piece);
         } while (result->NextRow());
 

@@ -42,6 +42,7 @@ namespace PDungeon
     {
         uint32 goEntry = 0;
         uint8 lenTiles = 1;
+        float lengthYd = 0.0f;      // physical model length in yards along its run axis
         float rotOffset = 0.0f;
         float zOffset = 0.0f;
     };

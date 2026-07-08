@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS `pdungeon_palette` (
   `role` VARCHAR(16) NOT NULL,
   `go_entry` INT UNSIGNED NOT NULL,
   `len_tiles` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `length_yd` FLOAT NOT NULL DEFAULT 0,
   `rot_offset` FLOAT NOT NULL DEFAULT 0,
   `z_offset` FLOAT NOT NULL DEFAULT 0,
   `weight` INT UNSIGNED NOT NULL DEFAULT 1,
@@ -38,15 +39,31 @@ CREATE TABLE IF NOT EXISTS `pdungeon_palette` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+-- length_yd migration for installs created before the column existed (the
+-- CREATE TABLE IF NOT EXISTS above only adds it on a fresh table). MySQL 8 has
+-- no ADD COLUMN IF NOT EXISTS, so guard on information_schema.
+SET @col_exists := (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pdungeon_palette' AND COLUMN_NAME = 'length_yd');
+SET @ddl := IF(@col_exists = 0,
+  'ALTER TABLE `pdungeon_palette` ADD COLUMN `length_yd` FLOAT NOT NULL DEFAULT 0 AFTER `len_tiles`',
+  'SELECT 1');
+PREPARE stmt FROM @ddl;
+EXECUTE stmt;
+DEALLOCATE PREPARE stmt;
+
+-- length_yd is the piece's PHYSICAL model length along its run axis, used for
+-- flush wall anchoring (glue each piece's inner face to the previous piece's
+-- outer face instead of centering it in a tile slot; closes Long->Short seams).
+-- Long 28.5 = 3 * TileSize(9.5) reproduces the pixel-perfect tiling exactly.
 DELETE FROM `pdungeon_palette` WHERE `theme` = 'wg';
-INSERT INTO `pdungeon_palette` (`id`, `theme`, `role`, `go_entry`, `len_tiles`, `rot_offset`, `z_offset`, `weight`, `comment`) VALUES
-(1, 'wg', 'WALL', 910000, 3, 0, 0, 1, 'WG_Wall01.wmo 28.5yd - calibrate rot_offset'),
-(3, 'wg', 'WALL', 910002, 2, 1.5708, 0, 1, 'nd_human_wall_small02.wmo 17.7yd rot90 (perp to Wall Long)'),
-(4, 'wg', 'WALL', 910003, 1, 0, -1.84, 1, 'nd_human_wall_end_small02.wmo 10.4yd zoff-1.84'),
-(5, 'wg', 'GATE', 910010, 1, 1.5708, 0, 1, 'BlackRockIronDoor M2 - leaf along model-Y, rot90 to span opening'),
-(6, 'wg', 'TORCH', 910020, 1, 0, 0, 1, 'ScarletO_Brazier_Lit'),
-(7, 'wg', 'BRAZIER', 910021, 1, 0, 0, 1, 'Zuldrak brazier'),
-(8, 'wg', 'CHEST', 910030, 1, 0, 0, 1, 'TreasureChest01'),
-(9, 'wg', 'SHRINE', 910031, 1, 0, 0, 1, 'Nox portal yellow'),
-(10, 'wg', 'EXIT', 910032, 1, 0, 0, 1, 'InstancePortal red'),
-(11, 'wg', 'ENTRANCE', 910033, 1, 0, 0, 1, 'InstancePortal');
+INSERT INTO `pdungeon_palette` (`id`, `theme`, `role`, `go_entry`, `len_tiles`, `length_yd`, `rot_offset`, `z_offset`, `weight`, `comment`) VALUES
+(1, 'wg', 'WALL', 910000, 3, 28.5, 0, 0, 1, 'WG_Wall01.wmo 28.5yd - calibrate rot_offset'),
+(3, 'wg', 'WALL', 910002, 2, 17.7, 1.5708, 0, 1, 'nd_human_wall_small02.wmo 17.7yd rot90 (perp to Wall Long)'),
+(4, 'wg', 'WALL', 910003, 1, 10.4, 0, -1.84, 1, 'nd_human_wall_end_small02.wmo 10.4yd zoff-1.84'),
+(5, 'wg', 'GATE', 910010, 1, 0, 1.5708, 0, 1, 'BlackRockIronDoor M2 - leaf along model-Y, rot90 to span opening'),
+(6, 'wg', 'TORCH', 910020, 1, 0, 0, 0, 1, 'ScarletO_Brazier_Lit'),
+(7, 'wg', 'BRAZIER', 910021, 1, 0, 0, 0, 1, 'Zuldrak brazier'),
+(8, 'wg', 'CHEST', 910030, 1, 0, 0, 0, 1, 'TreasureChest01'),
+(9, 'wg', 'SHRINE', 910031, 1, 0, 0, 0, 1, 'Nox portal yellow'),
+(10, 'wg', 'EXIT', 910032, 1, 0, 0, 0, 1, 'InstancePortal red'),
+(11, 'wg', 'ENTRANCE', 910033, 1, 0, 0, 0, 1, 'InstancePortal');

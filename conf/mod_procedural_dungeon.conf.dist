@@ -63,6 +63,22 @@ ProceduralDungeon.TileSize = 9.5
 ProceduralDungeon.WallOverlap = 0
 
 #
+#    ProceduralDungeon.WallJunctionExtend
+#        Description: Extra yards a wall run's END piece is pushed further INTO
+#                     the perpendicular wall it abuts, ON TOP of the built-in
+#                     one-tile share (which already buries the terminal piece a
+#                     full tile ~9.5yd into the junction - well past the 2-3yd
+#                     taper gap). DEFAULT 0: WMO pieces are rigid, so this push
+#                     is a translation that ALSO retreats the piece's inner face
+#                     by the same amount, opening a mid-wall gap at the interior
+#                     joint of a multi-piece run. Leave at 0 (the one-tile share
+#                     is geometrically clean); only raise if a junction still
+#                     gaps, then re-check long walls for new mid-run gaps.
+#        Default:     0
+
+ProceduralDungeon.WallJunctionExtend = 0
+
+#
 #    ProceduralDungeon.Grid.Width / .Height
 #        Description: Layout grid size in tiles. 64x64 tiles at TileSize 10
 #                     covers 640x640 yards on the base map.

@@ -18,6 +18,7 @@
 #include "PDWorldBuilder.h"
 #include "PDDefines.h"
 #include "PDPaletteMgr.h"
+#include "generator/PDWallPlan.h"
 #include <algorithm>
 #include <cmath>
 
@@ -44,131 +45,126 @@ namespace PDungeon
             return static_cast<int>(dx * dx + dy * dy);
         }
 
-        void AddWallPiece(PDLayout const& layout, PDConfig const& config, std::vector<PlannedSpawn>& out, int startX, int startY, int length, bool horizontal)
+        // Emit the palette pieces for one straight wall run, laid FLUSH by
+        // physical model length (not tiled), and burying each end that abuts a
+        // perpendicular wall one tile INTO it (tile-sharing) plus an optional
+        // config micro-push. Flush anchoring closes Long->Short seams and, for
+        // all-Long runs at TileSize 9.5 (28.5 = 3*9.5), reproduces the old
+        // pixel-perfect tiling exactly. Deterministic: integer tile inputs, the
+        // fixed TileSalt, and config constants only. NOT cumulative (the old
+        // drift-prone per-joint pull is gone); the extension touches terminal
+        // pieces only, so interior Long|Long joints stay untouched.
+        void AddWallRun(PDLayout const& layout, PDConfig const& config, std::vector<PlannedSpawn>& out, WallRun const& run)
         {
-            // WMO wall models taper (wider at the base than at player height) and
-            // are ~1.5yd shorter than their tile slot, so pieces placed edge-to-
-            // edge leave a gap at collision height that a player fits through.
-            // Pull every piece after the first back toward the run origin by
-            // config.wallOverlap yards per joint, so consecutive pieces overlap
-            // by a fixed, tunable margin and the collision stays continuous.
-            // Deterministic: depends only on the run and the config constant.
-            int position = 0;
-            int jointIndex = 0;
-            while (position < length)
+            bool const horizontal = run.horizontal;
+            int const axisStart = horizontal ? run.startX : run.startY;
+            int const perpTile = horizontal ? run.startY : run.startX;
+
+            // Fold the shared junction tile(s) into the coverage: the
+            // perpendicular through-run already owns that tile; we deliberately
+            // overlap it so the two tapered bases meet at player height.
+            int const lowTile = axisStart - (run.abutLow ? 1 : 0);
+            int const covered = run.length + (run.abutLow ? 1 : 0) + (run.abutHigh ? 1 : 0);
+
+            // World coord of the OUTER (low) edge of lowTile plus the fixed
+            // perpendicular tile-center coordinate.
+            float edgeX = 0.0f;
+            float edgeY = 0.0f;
+            PDWorldBuilder::TileToWorld(config, layout,
+                horizontal ? static_cast<float>(lowTile) : perpTile + 0.5f,
+                horizontal ? perpTile + 0.5f : static_cast<float>(lowTile),
+                edgeX, edgeY);
+            float const perpWorld = horizontal ? edgeY : edgeX;
+            float cursor = horizontal ? edgeX : edgeY;   // advances along the axis
+
+            std::vector<size_t> emitted;
+            int remaining = covered;
+            while (remaining > 0)
             {
-                int const remaining = length - position;
-                PalettePiece const* piece = sPDPaletteMgr->GetWallPiece(static_cast<uint8>(std::min(remaining, 255)), TileSalt(startX + position, startY + position));
+                int const placedFromLow = covered - remaining;
+                PalettePiece const* piece = sPDPaletteMgr->GetWallPiece(
+                    static_cast<uint8>(std::min(remaining, 255)), TileSalt(lowTile + placedFromLow, perpTile));
                 if (!piece)
                 {
                     return;
                 }
 
-                int const tileX = horizontal ? startX + position : startX;
-                int const tileY = horizontal ? startY : startY + position;
-                float const centerTileX = horizontal ? tileX + piece->lenTiles * 0.5f : tileX + 0.5f;
-                float const centerTileY = horizontal ? tileY + 0.5f : tileY + piece->lenTiles * 0.5f;
+                float const len = piece->lengthYd;         // physical length
+                float const centerAxis = cursor + len * 0.5f;  // FLUSH: inner face glued to previous
+                float const centerTileX = horizontal
+                    ? (centerAxis - config.centerX) / config.tileSize + layout.width * 0.5f
+                    : perpTile + 0.5f;
+                float const centerTileY = horizontal
+                    ? perpTile + 0.5f
+                    : (centerAxis - config.centerY) / config.tileSize + layout.height * 0.5f;
 
                 PlannedSpawn spawn;
                 spawn.entry = piece->goEntry;
-                PDWorldBuilder::TileToWorld(config, layout, centerTileX, centerTileY, spawn.x, spawn.y);
-
-                // Overlap adjacent pieces along the run axis, always toward the
-                // run origin (into the wall run, away from any room interior).
-                // TileToWorld is monotonic, so subtracting pulls the center back.
-                float const shift = config.wallOverlap * static_cast<float>(jointIndex);
                 if (horizontal)
                 {
-                    spawn.x -= shift;
+                    spawn.x = centerAxis;
+                    spawn.y = perpWorld;
                 }
                 else
                 {
-                    spawn.y -= shift;
+                    spawn.x = perpWorld;
+                    spawn.y = centerAxis;
                 }
-
                 spawn.o = (horizontal ? 0.0f : HALF_PI) + piece->rotOffset;
                 spawn.zOffset = piece->zOffset;
                 spawn.requiresCollision = true;
                 spawn.sortKey = DistSqToEntrance(layout, centerTileX, centerTileY);
+
+                emitted.push_back(out.size());
                 out.push_back(spawn);
 
-                position += piece->lenTiles;
-                ++jointIndex;
+                cursor += len;                    // flush: next piece starts here
+                remaining -= piece->lenTiles;     // slot accounting stays on tiles
+            }
+
+            // Optional micro-push past flush, terminal pieces only, outward along
+            // the axis (into the perpendicular wall). Interior joints untouched.
+            float const extend = config.wallJunctionExtend;
+            if (extend > 0.0f && !emitted.empty())
+            {
+                if (run.abutLow)
+                {
+                    PlannedSpawn& lo = out[emitted.front()];
+                    (horizontal ? lo.x : lo.y) -= extend;
+                }
+                if (run.abutHigh)
+                {
+                    PlannedSpawn& hi = out[emitted.back()];
+                    (horizontal ? hi.x : hi.y) += extend;
+                }
             }
         }
 
         void BuildWalls(PDLayout const& layout, PDConfig const& config, std::vector<PlannedSpawn>& out)
         {
-            std::vector<bool> consumed(static_cast<size_t>(layout.width) * layout.height, false);
-            auto isFreeWall = [&](int x, int y)
+            // Axis-partitioned run detection (engine-free, deterministic): every
+            // Wall tile is placed with a piece along its OWN wall line, so the
+            // horizontal-first greedy can no longer drop a piece rotated 90 deg
+            // at a junction (the "verdrehte kleine Waende" bug).
+            std::vector<WallRun> const runs = BuildWallRuns(layout);
+            for (WallRun const& run : runs)
             {
-                return layout.At(x, y) == TileType::Wall && !consumed[static_cast<size_t>(y) * layout.width + x];
-            };
-            auto consume = [&](int x, int y)
-            {
-                consumed[static_cast<size_t>(y) * layout.width + x] = true;
-            };
-
-            // Horizontal runs of at least 2 tiles.
-            for (int y = 0; y < layout.height; ++y)
-            {
-                for (int x = 0; x < layout.width; ++x)
-                {
-                    if (!isFreeWall(x, y) || !isFreeWall(x + 1, y))
-                    {
-                        continue;
-                    }
-                    int length = 0;
-                    while (isFreeWall(x + length, y))
-                    {
-                        consume(x + length, y);
-                        ++length;
-                    }
-                    AddWallPiece(layout, config, out, x, y, length, true);
-                    x += length;
-                }
-            }
-
-            // Vertical runs of at least 2 tiles among the leftovers.
-            for (int x = 0; x < layout.width; ++x)
-            {
-                for (int y = 0; y < layout.height; ++y)
-                {
-                    if (!isFreeWall(x, y) || !isFreeWall(x, y + 1))
-                    {
-                        continue;
-                    }
-                    int length = 0;
-                    while (isFreeWall(x, y + length))
-                    {
-                        consume(x, y + length);
-                        ++length;
-                    }
-                    AddWallPiece(layout, config, out, x, y, length, false);
-                    y += length;
-                }
-            }
-
-            // Isolated single tiles.
-            for (int y = 0; y < layout.height; ++y)
-            {
-                for (int x = 0; x < layout.width; ++x)
-                {
-                    if (isFreeWall(x, y))
-                    {
-                        consume(x, y);
-                        AddWallPiece(layout, config, out, x, y, 1, true);
-                    }
-                }
+                AddWallRun(layout, config, out, run);
             }
         }
 
         void BuildGates(PDLayout const& layout, PDConfig const& config, std::vector<PlannedSpawn>& out)
         {
-            // One gate per doorway (not one per tile): a single closed blocking
-            // gate centered on the span that opens on adjacent-room clear. The
-            // shared doorGroupId lets every gate open/close atomically; the
-            // per-tile mob blocking is handled separately via _closedDoorTiles.
+            // One gate per doorway group, but ONLY where the doorway is a genuine
+            // opening: a Doorway tile with RoomFloor on one side and a corridor
+            // on the exact opposite side, whose run is capped by wall at both
+            // span ends. Blobs that merely hug a room edge or turn a corner yield
+            // no such run and get no gate (fixes stray gates). The gate axis and
+            // width come from that local opening, not the blob centroid/bbox, so
+            // a junction gate is neither mis-placed nor rotated 90 deg wrong.
+            // doorGroupId/roomId are preserved so the room-clear gating is
+            // untouched: a doorway that now gets no gate simply has no GUID under
+            // its group, and opening a gate-less group is a harmless no-op.
             for (size_t group = 0; group < layout.doorways.size(); ++group)
             {
                 Doorway const& doorway = layout.doorways[group];
@@ -176,29 +172,36 @@ namespace PDungeon
                 {
                     continue;
                 }
-                PalettePiece const* piece = sPDPaletteMgr->GetPiece(PaletteRole::Gate, TileSalt(doorway.AnchorX(), doorway.AnchorY()));
+
+                GateOpening const opening = FindGateOpening(layout, doorway);
+                if (!opening.valid)
+                {
+                    continue;
+                }
+
+                PalettePiece const* piece = sPDPaletteMgr->GetPiece(PaletteRole::Gate, TileSalt(opening.anchorX, opening.anchorY));
                 if (!piece)
                 {
                     continue;
                 }
 
-                float centerTileX = 0.0f;
-                float centerTileY = 0.0f;
-                doorway.Center(centerTileX, centerTileY);
-
                 PlannedSpawn spawn;
                 spawn.entry = piece->goEntry;
-                PDWorldBuilder::TileToWorld(config, layout, centerTileX, centerTileY, spawn.x, spawn.y);
-                // rot_offset normalizes the model so o=0 runs along +X; the
-                // spanAlongX branch orients the barrier across the opening.
-                // rot_offset is operator-calibrated (see pdungeon_palette /
-                // .pdungeon validate); never hard-guess it here.
-                spawn.o = (doorway.spanAlongX ? 0.0f : HALF_PI) + piece->rotOffset;
+                PDWorldBuilder::TileToWorld(config, layout, opening.centerTileX, opening.centerTileY, spawn.x, spawn.y);
+                // Orient across the REAL opening: spanAlongX is the local through-
+                // axis (perpendicular to the corridor direction). rot_offset
+                // (operator-calibrated, gate = 1.5708) composes on top.
+                spawn.o = (opening.spanAlongX ? 0.0f : HALF_PI) + piece->rotOffset;
                 spawn.zOffset = piece->zOffset;
+                // Gate is an M2 -> its size scales (walls, being WMO, cannot).
+                // Cover the full opening: operator calibration is template size=2
+                // spanning a 2-tile doorway at TileSize, i.e. 1 tile of span per
+                // scale unit => scale == span tiles.
+                spawn.scale = static_cast<float>(opening.spanTiles);
                 spawn.requiresCollision = true;
                 spawn.doorGroupId = static_cast<uint32>(group) + 1;
                 spawn.roomId = doorway.roomId;
-                spawn.sortKey = DistSqToEntrance(layout, centerTileX, centerTileY);
+                spawn.sortKey = DistSqToEntrance(layout, opening.centerTileX, opening.centerTileY);
                 out.push_back(spawn);
             }
         }

@@ -32,6 +32,7 @@ namespace PDungeon
         float y = 0.0f;
         float o = 0.0f;
         float zOffset = 0.0f;       // applied on top of the sampled ground height
+        float scale = 0.0f;         // >0: SetObjectScale on the GO (gates span their opening); 0 = keep template size
         uint32 doorGroupId = 0;     // 1-based doorway group; 0 = not a gate
         bool requiresCollision = false; // walls/gates: warn if the model is missing
         int roomId = -1;
@@ -39,11 +40,12 @@ namespace PDungeon
         int sortKey = 0;
     };
 
-    // Translates a generated layout into world-space spawn plans: greedy wall
-    // tiling from the palette (pieces overlapped for collision-continuity), one
-    // gate per doorway centered on the span, decorations and mob packs. Spawns
-    // that appear only on completion (boss chest, exit portal) go to a separate
-    // list.
+    // Translates a generated layout into world-space spawn plans: axis-aware
+    // wall runs from the palette (laid flush by model length, terminal pieces
+    // buried into perpendicular walls at junctions), one gate per genuine
+    // doorway opening (scaled to span its width), decorations and mob packs.
+    // Spawns that appear only on completion (boss chest, exit portal) go to a
+    // separate list.
     class PDWorldBuilder
     {
     public:
