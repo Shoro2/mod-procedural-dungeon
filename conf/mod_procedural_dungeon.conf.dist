@@ -79,6 +79,17 @@ ProceduralDungeon.WallOverlap = 0
 ProceduralDungeon.WallJunctionExtend = 0
 
 #
+#    ProceduralDungeon.GateWidthExtra
+#        Description: Extra scale added to a gate on top of its opening span, so
+#                     the (M2, scalable) gate overlaps the flanking tapered walls
+#                     and a player can't slip past its edge to skip the gate.
+#                     Units are scale (1 = one tile ~9.5yd); 0.2 buries ~1yd into
+#                     each flank. Raise slightly if a gate is still skippable.
+#        Default:     0.2
+
+ProceduralDungeon.GateWidthExtra = 0.2
+
+#
 #    ProceduralDungeon.Grid.Width / .Height
 #        Description: Layout grid size in tiles. 64x64 tiles at TileSize 10
 #                     covers 640x640 yards on the base map.

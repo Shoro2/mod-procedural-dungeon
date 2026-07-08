@@ -197,7 +197,7 @@ namespace PDungeon
                 // Cover the full opening: operator calibration is template size=2
                 // spanning a 2-tile doorway at TileSize, i.e. 1 tile of span per
                 // scale unit => scale == span tiles.
-                spawn.scale = static_cast<float>(opening.spanTiles);
+                spawn.scale = static_cast<float>(opening.spanTiles) + config.gateWidthExtra;
                 spawn.requiresCollision = true;
                 spawn.doorGroupId = static_cast<uint32>(group) + 1;
                 spawn.roomId = doorway.roomId;
