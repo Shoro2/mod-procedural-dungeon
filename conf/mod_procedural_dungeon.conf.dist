@@ -90,6 +90,18 @@ ProceduralDungeon.WallJunctionExtend = 0
 ProceduralDungeon.GateWidthExtra = 0.2
 
 #
+#    ProceduralDungeon.JunctionTowers
+#        Description: Drop a tower piece on every wall corner/junction/step (a
+#                     Wall tile with both a horizontal and a vertical wall
+#                     neighbour). Its chunky footprint covers the seam that
+#                     straight wall runs leave at these spots (tapered bases +
+#                     offset "steps"), reading as a fortress corner tower.
+#        Default:     1 - Enabled
+#                     0 - Disabled (accept the residual junction seams)
+
+ProceduralDungeon.JunctionTowers = 1
+
+#
 #    ProceduralDungeon.Grid.Width / .Height
 #        Description: Layout grid size in tiles. 64x64 tiles at TileSize 10
 #                     covers 640x640 yards on the base map.

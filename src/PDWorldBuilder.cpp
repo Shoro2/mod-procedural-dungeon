@@ -151,6 +151,31 @@ namespace PDungeon
             {
                 AddWallRun(layout, config, out, run);
             }
+
+            // Drop a tower on every wall corner/junction/step (a Wall tile with
+            // both a horizontal and a vertical wall neighbour). Its chunky 1-tile
+            // footprint covers the seam the straight runs leave at these spots
+            // (tapered bases + offset "steps") and reads as a fortress corner
+            // tower. Additive - the run layout above is untouched.
+            if (config.junctionTowers)
+            {
+                for (TilePos const& j : WallJunctions(layout))
+                {
+                    PalettePiece const* piece = sPDPaletteMgr->GetWallPiece(static_cast<uint8>(1), TileSalt(j.x, j.y));
+                    if (!piece)
+                    {
+                        continue;
+                    }
+                    PlannedSpawn spawn;
+                    spawn.entry = piece->goEntry;
+                    PDWorldBuilder::TileToWorld(config, layout, j.x + 0.5f, j.y + 0.5f, spawn.x, spawn.y);
+                    spawn.o = piece->rotOffset;
+                    spawn.zOffset = piece->zOffset;
+                    spawn.requiresCollision = true;
+                    spawn.sortKey = DistSqToEntrance(layout, j.x + 0.5f, j.y + 0.5f);
+                    out.push_back(spawn);
+                }
+            }
         }
 
         void BuildGates(PDLayout const& layout, PDConfig const& config, std::vector<PlannedSpawn>& out)

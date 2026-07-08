@@ -180,6 +180,35 @@ namespace PDungeon
         return runs;
     }
 
+    std::vector<TilePos> WallJunctions(PDLayout const& layout)
+    {
+        std::vector<TilePos> out;
+        for (int y = 0; y < layout.height; ++y)        // fixed y-then-x scan
+        {
+            for (int x = 0; x < layout.width; ++x)
+            {
+                if (layout.At(x, y) != TileType::Wall)
+                {
+                    continue;
+                }
+                bool const l = layout.At(x - 1, y) == TileType::Wall;
+                bool const r = layout.At(x + 1, y) == TileType::Wall;
+                bool const u = layout.At(x, y - 1) == TileType::Wall;
+                bool const d = layout.At(x, y + 1) == TileType::Wall;
+                // A true corner/step: EXACTLY one horizontal side and exactly one
+                // vertical side (an actual turn). Excludes straight walls, straight-
+                // through T/+ junctions, AND the interior of 2-tile-thick wall bands
+                // (all of which have l==r or u==d) - so a thick band is not lined
+                // with a row of towers, only its real end corners are.
+                if ((l != r) && (u != d))
+                {
+                    out.push_back(TilePos{ x, y });
+                }
+            }
+        }
+        return out;
+    }
+
     GateOpening FindGateOpening(PDLayout const& layout, Doorway const& doorway)
     {
         auto isRoom = [&](int x, int y)

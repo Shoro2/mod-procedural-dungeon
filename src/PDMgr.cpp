@@ -43,6 +43,7 @@ namespace PDungeon
         _config.wallOverlap = sConfigMgr->GetOption<float>("ProceduralDungeon.WallOverlap", 1.75f);
         _config.wallJunctionExtend = sConfigMgr->GetOption<float>("ProceduralDungeon.WallJunctionExtend", 0.0f);
         _config.gateWidthExtra = sConfigMgr->GetOption<float>("ProceduralDungeon.GateWidthExtra", 0.2f);
+        _config.junctionTowers = sConfigMgr->GetOption<bool>("ProceduralDungeon.JunctionTowers", true);
         _config.gen.gridWidth = sConfigMgr->GetOption<int>("ProceduralDungeon.Grid.Width", 64);
         _config.gen.gridHeight = sConfigMgr->GetOption<int>("ProceduralDungeon.Grid.Height", 64);
         _config.gen.roomsMin = sConfigMgr->GetOption<int>("ProceduralDungeon.Rooms.Min", 10);

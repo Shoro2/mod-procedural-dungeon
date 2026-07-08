@@ -79,6 +79,14 @@ namespace PDungeon
     // pillars. Every Wall tile is the body tile of exactly one run.
     std::vector<WallRun> BuildWallRuns(PDLayout const& layout);
 
+    // Tiles where the wall line makes a TURN - a Wall tile with EXACTLY one
+    // horizontal and exactly one vertical wall neighbour: L-corners and offset
+    // "steps" (NOT straight walls, straight-through T/+ junctions, or the interior
+    // of 2-tile-thick wall bands). A chunky tower dropped on each covers the seam
+    // the straight runs leave there (tapered bases + offset runs). Deterministic
+    // y-then-x scan.
+    std::vector<TilePos> WallJunctions(PDLayout const& layout);
+
     // The genuine gate opening for one doorway, or {valid=false} when the doorway
     // blob merely hugs a room edge / turns a corner without a real wall-capped
     // choke (so no stray gate is spawned there).

@@ -43,6 +43,7 @@ namespace PDungeon
                                          // one-tile tile-share; terminal pieces only, never cumulative
         float gateWidthExtra = 0.2f;     // extra scale added to a gate's opening-span width so it
                                          // overlaps the flanking (tapered) walls and can't be skipped
+        bool junctionTowers = true;      // drop a tower on each wall corner/junction/step to cover the seam
         GenConfig gen;                 // seed field is per-run
         uint32_t spawnBatchSize = 50;
         uint32_t maxGameObjects = 1500;
