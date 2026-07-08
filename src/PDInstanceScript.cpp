@@ -29,6 +29,7 @@
 #include "Random.h"
 #include "TemporarySummon.h"
 #include "generator/PDDungeonGenerator.h"
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <sstream>
@@ -123,9 +124,32 @@ namespace PDungeon
         PDWorldBuilder::Build(_layout, config, _initialSpawns, _completionSpawns);
         if (_initialSpawns.size() > config.maxGameObjects)
         {
-            LOG_WARN(PD_LOG, "instance {}: spawn plan ({}) exceeds ProceduralDungeon.Spawn.MaxGameObjects ({}), truncating",
-                     instance->GetInstanceId(), _initialSpawns.size(), config.maxGameObjects);
+            // Truncate cosmetic decor FIRST so collision-critical pieces (walls,
+            // gates, towers) and creatures (boss + required mobs) always survive
+            // the cap - otherwise the highest-sortKey entries (creatures, incl. the
+            // boss) would be dropped first and the run become unwinnable. Partition
+            // keeps critical ahead of decor (build-out order preserved within each
+            // group); resize then drops from the decor tail; then restore sortKey
+            // build-out order.
+            auto const isCritical = [](PlannedSpawn const& s)
+            {
+                return s.isCreature || s.requiresCollision;
+            };
+            auto const firstDecor = std::stable_partition(_initialSpawns.begin(), _initialSpawns.end(), isCritical);
+            size_t const criticalCount = static_cast<size_t>(firstDecor - _initialSpawns.begin());
+            if (criticalCount > config.maxGameObjects)
+            {
+                LOG_ERROR(PD_LOG, "instance {}: {} collision-critical/creature spawns exceed ProceduralDungeon.Spawn.MaxGameObjects ({}); {} critical dropped - raise the cap",
+                          instance->GetInstanceId(), criticalCount, config.maxGameObjects, criticalCount - config.maxGameObjects);
+            }
+            else
+            {
+                LOG_WARN(PD_LOG, "instance {}: spawn plan ({}) exceeds ProceduralDungeon.Spawn.MaxGameObjects ({}); dropped {} cosmetic decor (walls/gates/boss/mobs kept)",
+                         instance->GetInstanceId(), _initialSpawns.size(), config.maxGameObjects, _initialSpawns.size() - config.maxGameObjects);
+            }
             _initialSpawns.resize(config.maxGameObjects);
+            std::stable_sort(_initialSpawns.begin(), _initialSpawns.end(),
+                             [](PlannedSpawn const& a, PlannedSpawn const& b) { return a.sortKey < b.sortKey; });
         }
 
         Room const* entrance = _layout.GetRoom(_layout.entranceRoomId);
