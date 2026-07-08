@@ -16,9 +16,9 @@
 -- 30yd wide - far too big for a ~10yd doorway.)
 DELETE FROM `gameobject_template` WHERE `entry` BETWEEN 910000 AND 910099;
 INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`, `Data0`, `Data1`, `ScriptName`) VALUES
-(910000, 33, 7877, 'PD Wall Long', 1.053, 9000000, 0, ''),
+(910000, 33, 7877, 'PD Wall Long', 1.15, 9000000, 0, ''),
 (910001, 33, 7909, 'PD Wall Long Alt', 1, 9000000, 0, ''),
-(910002, 33, 8251, 'PD Wall Short', 1.13, 9000000, 0, ''),
+(910002, 33, 8251, 'PD Wall Short', 1.2, 9000000, 0, ''),
 (910003, 33, 8250, 'PD Wall End', 1, 9000000, 0, ''),
 (910010, 0, 2752, 'PD Gate', 1.05, 0, 0, ''),
 (910020, 5, 7858, 'PD Torch', 1, 0, 0, ''),

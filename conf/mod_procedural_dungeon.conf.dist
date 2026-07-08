@@ -47,17 +47,17 @@ ProceduralDungeon.TileSize = 10
 
 #
 #    ProceduralDungeon.WallOverlap
-#        Description: Yards each straight wall piece is pulled into its
-#                     neighbour along the run axis so tapered WMO bases stay
-#                     collision-continuous at player height. WMO wall models
-#                     are wider at the base than mid-height and ~1.5yd shorter
-#                     than their tile slot, so edge-to-edge pieces leave a gap
-#                     a player can slip through; this closes it. Increase (try
-#                     2.0, then 2.5) if players still walk through straight
-#                     runs; decrease if pieces visibly telescope.
-#        Default:     1.75
+#        Description: Yards each straight wall piece is pulled back along the run
+#                     axis. DEFAULT 0 (off): the pull is cumulative, so on long
+#                     runs it dragged the far end inward and OPENED gaps at
+#                     corners. Wall overlap is now handled by per-piece model
+#                     scale (gameobject_template.size), which extends pieces
+#                     symmetrically into both neighbours AND corners without
+#                     drift. Leave at 0 unless you know you want the old
+#                     run-axis pull.
+#        Default:     0
 
-ProceduralDungeon.WallOverlap = 1.75
+ProceduralDungeon.WallOverlap = 0
 
 #
 #    ProceduralDungeon.Grid.Width / .Height
