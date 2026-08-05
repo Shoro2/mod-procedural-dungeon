@@ -12,7 +12,9 @@ doc.
 |------|----------|
 | `src/generator/` | **Engine-free** deterministic generator (types, RNG, pipeline, grid A*). Compiles standalone — keep it free of any engine include. |
 | `src/` | Engine glue: `PDMgr` (config/pending seeds), `PDPaletteMgr` (SQL tile set), `PDWorldBuilder` (layout → spawn plans), `PDInstanceScript` (run lifecycle), `PDCreatureAI` (leash/A*-waypoints/LoS-gated casters), entrance NPC, exit/shrine GOs, `.pdungeon` commands |
-| `tests/ascii_harness.cpp` | Standalone verification: `g++ -std=c++17 -Wall -Wextra -Werror -O2 -Isrc tests/ascii_harness.cpp src/generator/*.cpp -o pdgen`; `pdgen <seed>` / `pdgen --batch 500` |
+| `tests/ascii_harness.cpp` | Standalone verification of the **v1 tile** generator: `g++ -std=c++17 -Wall -Wextra -Werror -O2 -Isrc tests/ascii_harness.cpp src/generator/*.cpp -o pdgen`; `pdgen <seed>` / `pdgen --batch 500` |
+| `src/generator/PDBlockPlan.*` | **PDv2 block planner**: decides which kit block sits at which block coordinate and emits the `FLPD2` manifest the client composes from. Engine-free like the rest of `src/generator/`. Rooms are single blocks (66.67 yd), so the graph work is simpler than v1's rectangle packing |
+| `tests/blockplan_harness.cpp` | Standalone verification of the block planner: `g++ -std=c++17 -Wall -Wextra -Werror -O2 -Isrc tests/blockplan_harness.cpp src/generator/PDBlockPlan.cpp -o pdblock`; `pdblock <seed> [rooms]` / `pdblock --batch 500 [rooms]` / `pdblock --manifest <seed> <file> [rooms]` |
 | `data/sql/db-world/` | `instance_template` + `map_dbc` override (base map), GO/creature templates (910000+/910500+), `pdungeon_palette` |
 | `data/sql/db-characters/` | `pdungeon_runs` history |
 
@@ -30,6 +32,13 @@ doc.
 - Determinism: never use std `<random>` distributions in `src/generator/`
   (implementation-defined) — only `PDRandom` helpers; keep iteration orders
   fixed. Same seed must yield the same dungeon on gcc/clang/MSVC.
-- The ASCII harness must stay green: `pdgen --batch 500` = 0 failures.
+- Both harnesses must stay green: `pdgen --batch 500` and `pdblock --batch 500`
+  = 0 failures.
+- The block planner's manifest is a **contract with two other implementations**:
+  `scripts/49_pd_compose_blocks.py` in the ForgottenLand2.0 workspace (the
+  byte-exact oracle for the client composer) and the `FLPD2` parser in
+  `fl-stream-client`. After changing `EmitManifest`, feed a real manifest
+  through the oracle — `pdblock --manifest <seed> <file>` then
+  `python 49_pd_compose_blocks.py --manifest <file>` — or the three will drift.
 - AC code style, `-Werror`-clean; run `apps/codestyle/codestyle-cpp.py` from
   the module root before committing.
