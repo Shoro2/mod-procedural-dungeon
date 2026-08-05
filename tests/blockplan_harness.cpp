@@ -62,7 +62,8 @@ namespace
         }
     }
 
-    BlockCfg MakeCfg(uint32_t seed, int rooms)
+    BlockCfg MakeCfg(uint32_t seed, int rooms, int originBX = 32 * 8,
+                     int originBY = 32 * 8)
     {
         BlockCfg cfg;
         cfg.seed = seed;
@@ -71,8 +72,11 @@ namespace
         // 8 blocks square is exactly one ADT tile, which is the case that
         // matters: a dungeon of this size composes into a single tile.
         cfg.fieldBlocks = 8;
-        cfg.originBX = 32 * 8;
-        cfg.originBY = 32 * 8;
+        // The origin decides which tile the layout lands on: tx = bx / 8. It is
+        // settable so a layout can be aimed at a tile a real map already has,
+        // which is what makes it viewable before map 760 exists.
+        cfg.originBX = originBX;
+        cfg.originBY = originBY;
         return cfg;
     }
 
@@ -145,10 +149,10 @@ namespace
     // the parsers on both sides reject CR, but stdout on Windows is a text
     // stream that rewrites every \n into \r\n -- so piping this through a shell
     // would corrupt it in a way that only shows up as a parse error much later.
-    void WriteManifest(uint32_t seed, int rooms, char const* path)
+    void WriteManifest(uint32_t seed, int rooms, char const* path, int obx, int oby)
     {
         BlockPlan plan;
-        if (!GenerateBlockPlan(MakeCfg(seed, rooms), &plan))
+        if (!GenerateBlockPlan(MakeCfg(seed, rooms, obx, oby), &plan))
         {
             std::fprintf(stderr, "generation failed\n");
             std::exit(2);
@@ -258,7 +262,10 @@ int main(int argc, char** argv)
     if (argc >= 4 && std::strcmp(argv[1], "--manifest") == 0)
     {
         int const rooms = (argc >= 5) ? std::atoi(argv[4]) : 5;
-        WriteManifest(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)), rooms, argv[3]);
+        int const obx = (argc >= 7) ? std::atoi(argv[5]) : 32 * 8;
+        int const oby = (argc >= 7) ? std::atoi(argv[6]) : 32 * 8;
+        WriteManifest(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)),
+                      rooms, argv[3], obx, oby);
         return 0;
     }
 
