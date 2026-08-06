@@ -102,16 +102,22 @@ namespace PDungeon
             }
             LOG_DEBUG(PD_LOG, "PDv2 link: account {} reports DLL version {}", accountId, version);
 
-            // First contact of a (re)initialized, capable client: push the
-            // stored dungeon right away. This is what makes a layout survive
-            // relogs, client restarts and server restarts without a command.
-            if (version > 0 && sPDv2Mgr->GetPlan(accountId))
+            // First contact of a (re)initialized client: push the stored
+            // dungeon right away - DELIBERATELY even on VER 0. The DLL only
+            // sets its Lua globals when it speaks, and after injection
+            // nothing makes it speak until something is fed to it; the push
+            // IS that kick. A capable client answers the feed (silently),
+            // which sets FLPD_DLL_VERSION + FLPD_ACK, the addon relays both,
+            // and the arriving VER triggers one more push that settles READY.
+            // Without the DLL the feed is an inert Lua comment, no ACK ever
+            // arrives, and the gate keeps refusing - exactly right.
+            if (sPDv2Mgr->GetPlan(accountId))
             {
                 std::string error;
                 if (PushManifest(player, error))
                 {
-                    LOG_DEBUG(PD_LOG, "PDv2 link: auto-pushed the stored layout to account {}",
-                              accountId);
+                    LOG_DEBUG(PD_LOG, "PDv2 link: auto-pushed the stored layout to account {} "
+                                      "(reported version {})", accountId, version);
                 }
             }
             return;
