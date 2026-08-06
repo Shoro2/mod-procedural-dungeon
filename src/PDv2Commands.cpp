@@ -17,6 +17,7 @@
 
 #include "Chat.h"
 #include "ChatCommand.h"
+#include "PDClientLink.h"
 #include "PDDefines.h"
 #include "PDv2Mgr.h"
 #include "Player.h"
@@ -119,22 +120,31 @@ private:
                                  plan.effectiveSeed, uint32(plan.blocks.size()), rooms,
                                  uint32(plan.blocks.size()) - rooms);
 
+        // The real transport: push over the addon channel and wait for READY.
+        std::string pushError;
+        if (sPDClientLink->PushManifest(handler->GetPlayer(), pushError))
+        {
+            handler->SendSysMessage("pdungeon v2: layout pushed to your client - "
+                                    "`.pdungeon v2 info` shows when it is READY.");
+        }
+        else
+        {
+            handler->PSendSysMessage("pdungeon v2: push failed ({}).", pushError);
+        }
+
+        // Dev fallback while the addon path earns its T2: the file the DLL's
+        // LOAD verb can read by hand.
         std::string path;
         std::string error;
         if (sPDv2Mgr->WriteManifest(plan, 1, path, error))
         {
-            handler->PSendSysMessage("pdungeon v2: manifest written to {}", path);
-            handler->PSendSysMessage("pdungeon v2: in the client, run:  /run --FLPD:LOAD {}",
-                                     path);
-        }
-        else
-        {
-            handler->PSendSysMessage("pdungeon v2: manifest NOT written ({}).", error);
+            handler->PSendSysMessage("pdungeon v2: (dev fallback) manifest also written "
+                                     "to {} for `/run --FLPD:LOAD`", path);
         }
         return true;
     }
 
-    static bool HandleV2EnterCommand(ChatHandler* handler)
+    static bool HandleV2EnterCommand(ChatHandler* handler, Optional<std::string> forceArg)
     {
         if (!RequireEnabled(handler))
         {
@@ -152,6 +162,28 @@ private:
         {
             handler->SendSysMessage("pdungeon v2: no plan for this account yet - run `.pdungeon v2 gen` first.");
             return true;
+        }
+
+        // GMs bypass OnPlayerCanEnterMap in the core (MapMgr.cpp:158-159), so
+        // this command runs the same gate itself - otherwise the GM the tests
+        // are run on would never exercise it, and entering unready CRASHES the
+        // client. `enter force` keeps the old DLL-LOAD dev loop usable.
+        if (!forceArg || *forceArg != "force")
+        {
+            std::string whyNot;
+            if (!sPDClientLink->MayEnter(player, whyNot))
+            {
+                handler->PSendSysMessage("pdungeon v2: NOT entering - {}", whyNot);
+                handler->SendSysMessage("pdungeon v2: `.pdungeon v2 enter force` skips "
+                                        "this check (dev only - an unready client "
+                                        "CRASHES on this map).");
+                return true;
+            }
+        }
+        else
+        {
+            handler->SendSysMessage("pdungeon v2: gate SKIPPED by force - your client "
+                                    "better be serving this layout.");
         }
 
         float x = 0.0f, y = 0.0f, z = 0.0f;
@@ -191,6 +223,8 @@ private:
         // - the one failure that makes every mob stand still.
         handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded",
                                  uint32(sPDv2Mgr->WalkMaskCount()));
+        handler->PSendSysMessage("pdungeon v2: {}",
+                                 sPDClientLink->DebugLine(AccountOf(handler)));
 
         BlockPlan const* plan = sPDv2Mgr->GetPlan(AccountOf(handler));
         if (!plan)

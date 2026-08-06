@@ -309,6 +309,27 @@ ProceduralDungeon.V2.LoopChance = 15
 ProceduralDungeon.V2.Theme = 1
 
 #
+#    ProceduralDungeon.V2.RequiredDllVersion
+#        Description: Minimum FLStream.dll bridge version the entry gate
+#                     accepts. A client below it (or with no DLL at all) is
+#                     denied politely instead of entering a map whose terrain
+#                     its client cannot compose - which CRASHES that client.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.RequiredDllVersion = 1
+
+#
+#    ProceduralDungeon.V2.AckTimeoutMs
+#        Description: How long a pushed manifest may go unanswered before the
+#                     gate re-pushes it (once per push) on the next entry
+#                     attempt.
+#        Default:     5000
+#
+
+ProceduralDungeon.V2.AckTimeoutMs = 5000
+
+#
 #    ProceduralDungeon.V2.ManifestPath
 #        Description: Where `.pdungeon v2 gen` writes the manifest. This is a
 #                     TEMPORARY transport: until PDClientLink pushes manifests

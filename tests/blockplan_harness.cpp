@@ -38,6 +38,7 @@
 #endif
 
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2LinkState.h"
 #include "generator/PDv2WalkGrid.h"
 
 #include <cmath>
@@ -564,9 +565,69 @@ namespace
         std::printf("\n  '.' walkable   '*' the path the creatures would take\n");
     }
 
+    // The client-link handshake gate. Entering without a composed layout
+    // crashes the client, so the verdict matrix below is safety logic and
+    // every row of it is pinned here.
+    void RunLinkStateChecks()
+    {
+        LinkState link;
+        uint32_t const acc = 1;
+        uint32_t const other = 2;
+        auto Is = [&](LinkVerdict want, char const* what) {
+            Check(link.Verdict(acc, 1) == want, what, 0);
+        };
+
+        Is(LinkVerdict::NoAddon, "fresh account should be NoAddon");
+        link.ReportVersion(acc, 0);
+        Is(LinkVerdict::NoDll, "version 0 should be NoDll");
+        link.ReportVersion(acc, 1);
+        Check(link.Verdict(acc, 2) == LinkVerdict::DllTooOld,
+              "version below requirement should be DllTooOld", 0);
+        Is(LinkVerdict::NothingPushed, "no push yet should be NothingPushed");
+
+        uint32_t const seqA = link.BeginPush(acc, 1000);
+        Check(seqA != 0, "seq 0 must never be issued", 0);
+        Is(LinkVerdict::AwaitingAck, "freshly pushed should be AwaitingAck");
+        link.ReportAck(acc, "RECV:" + std::to_string(seqA));
+        Is(LinkVerdict::AwaitingAck, "RECV is receipt, not readiness");
+        link.ReportAck(acc, "READY:garbage");
+        Is(LinkVerdict::AwaitingAck, "malformed READY must not satisfy the gate");
+        link.ReportAck(acc, "READY:" + std::to_string(seqA));
+        Is(LinkVerdict::Ready, "READY for the pending seq should be Ready");
+
+        uint32_t const seqB = link.BeginPush(acc, 2000);
+        Check(seqB != seqA, "seqs must be unique", 0);
+        Is(LinkVerdict::AwaitingAck, "a stale READY must not satisfy a new push");
+        Check(!link.ShouldRepush(acc, 2000 + 4999, 5000),
+              "no repush before the timeout", 0);
+        Check(link.ShouldRepush(acc, 2000 + 5000, 5000),
+              "timeout should grant exactly one repush", 0);
+        Check(!link.ShouldRepush(acc, 2000 + 60000, 5000),
+              "the one repush must not repeat", 0);
+        link.ReportAck(acc, "READY:" + std::to_string(seqB));
+        Is(LinkVerdict::Ready, "READY for the new seq should recover to Ready");
+
+        uint32_t const seqC = link.BeginPush(acc, 9000);
+        link.ReportAck(acc, "NAK:crc mismatch");
+        Is(LinkVerdict::Nak, "a NAK should be reported as Nak");
+        Check(link.ShouldRepush(acc, 9001, 5000),
+              "a NAK should grant the repush immediately", 0);
+        Check(!link.ShouldRepush(acc, 9002, 5000),
+              "the NAK repush must not repeat either", 0);
+        link.ReportAck(acc, "READY:" + std::to_string(seqC));
+        Is(LinkVerdict::Ready, "READY after a NAK should still recover");
+
+        Check(link.Verdict(other, 1) == LinkVerdict::NoAddon,
+              "accounts must not share state", 0);
+        Check(!link.ShouldRepush(other, 99999, 1),
+              "no repush for an account that was never pushed", 0);
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
+
+        RunLinkStateChecks();
 
         size_t maxManifest = 0;
         int longestPath = 0;

@@ -16,6 +16,7 @@
  */
 
 #include "Chat.h"
+#include "PDClientLink.h"
 #include "PDDefines.h"
 #include "PDMgr.h"
 #include "PDPaletteMgr.h"
@@ -32,6 +33,7 @@ public:
     {
         sPDMgr->LoadConfig();
         sPDv2Mgr->LoadConfig();
+        sPDClientLink->LoadConfig();
         if (reload && sPDMgr->IsEnabled())
         {
             sPDPaletteMgr->Load(sPDMgr->GetConfig().theme);
