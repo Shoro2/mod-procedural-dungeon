@@ -22,6 +22,7 @@ void AddPDEntranceNPCScripts();
 void AddPDExitObjectScripts();
 void AddPDCommandScripts();
 void AddPDv2CommandScripts();
+void AddPDv2MapScripts();
 
 // Name contract with the CMake module loader: mod-procedural-dungeon ->
 // Addmod_procedural_dungeonScripts().
@@ -34,4 +35,5 @@ void Addmod_procedural_dungeonScripts()
     AddPDExitObjectScripts();
     AddPDCommandScripts();
     AddPDv2CommandScripts();
+    AddPDv2MapScripts();
 }
