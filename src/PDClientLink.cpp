@@ -284,12 +284,29 @@ public:
 
     bool OnPlayerCanEnterMap(Player* player, MapEntry const* entry,
                              InstanceTemplate const* /*instance*/,
-                             MapDifficulty const* /*mapDiff*/, bool /*loginCheck*/) override
+                             MapDifficulty const* /*mapDiff*/, bool loginCheck) override
     {
         if (!sPDv2Mgr->IsEnabled() || !entry ||
             entry->MapID != sPDv2Mgr->GetConfig().mapId)
         {
             return true;
+        }
+
+        // A character logging in INSIDE the map is the one case the handshake
+        // cannot vouch for: a READY earned by the PREVIOUS client session may
+        // outlive a client restart that emptied the DLL's composed slots, and
+        // the login map load happens before any addon or DLL can speak.
+        // Entering blind CRASHES that client (measured 2026-08-06, third
+        // shape of the same boundary). Deny every login-time check - the core
+        // relocates the character to its homebind, and the normal flow
+        // (auto-push, READY, enter) brings them back in.
+        if (loginCheck)
+        {
+            LOG_INFO(PDungeon::PD_LOG,
+                     "PDv2 link: relocating {} out of map {} at login - a fresh "
+                     "client cannot prove readiness this early",
+                     player->GetName(), entry->MapID);
+            return false;
         }
 
         std::string whyNot;
