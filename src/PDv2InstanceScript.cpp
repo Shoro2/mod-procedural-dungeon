@@ -172,12 +172,16 @@ namespace PDungeon
                 float x = 0.0f, y = 0.0f, z = 0.0f;
                 sPDv2Mgr->BlockToWorld(b.bx, b.by, mid + du, mid + dv, x, y, z);
 
-                // +0.5 so a creature is not spawned inside the floor plane. The
-                // map cannot be asked for a height here - it has none.
+                // Exactly ON the floor plane. This used to add 0.5 yd "so a
+                // creature is not spawned inside the floor" - harmless while
+                // gravity would have settled them, but with gravity disabled
+                // that offset is a permanent hover (operator report
+                // 2026-08-06: mobs stood slightly in the air until a pull and
+                // evade walked them onto their home position).
                 if (Creature* c = instance->SummonCreature(PLACEHOLDER_CREATURE,
-                                                           Position(x, y, z + 0.5f, 0.0f)))
+                                                           Position(x, y, z, 0.0f)))
                 {
-                    c->SetHomePosition(x, y, z + 0.5f, 0.0f);
+                    c->SetHomePosition(x, y, z, 0.0f);
 
                     // Gravity OFF, and this is not cosmetic: the server has no
                     // terrain here, so Map::GetHeight answers INVALID_HEIGHT
