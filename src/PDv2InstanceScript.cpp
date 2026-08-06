@@ -27,6 +27,7 @@
 #include "Player.h"
 #include "Position.h"
 #include "TemporarySummon.h"
+#include "WorldSession.h"
 
 #include <cmath>
 
@@ -192,12 +193,49 @@ namespace PDungeon
         }
     }
 
+    void PDv2InstanceScript::EvictDisconnected()
+    {
+        // A client that crashes or is killed leaves its player standing here,
+        // alive in memory, for the session's grace period - and a reconnect
+        // during that window attaches to THAT player, so the server sends the
+        // returning client straight back to map 760 while its fresh DLL has
+        // composed nothing yet. The client dies on CMap::LoadWdt, relogs into
+        // the same trap, and the DB says nothing about any of it because the
+        // live player was never saved (measured 2026-08-06: crash 6 s after
+        // injection, no intercept in the DLL log, characters.map already 0).
+        //
+        // So the eviction has to happen on the LIVE player, and this is the
+        // only place that sees it: send anyone whose socket is gone home at
+        // once, before a reconnect can find them in here.
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+        {
+            Player* player = it->GetSource();
+            if (!player || !player->IsInWorld() || !player->GetSession())
+            {
+                continue;
+            }
+            if (!player->GetSession()->IsSocketClosed() && !player->GetSession()->IsKicked())
+            {
+                continue;
+            }
+
+            player->TeleportTo(player->m_homebindMapId, player->m_homebindX,
+                               player->m_homebindY, player->m_homebindZ,
+                               player->GetOrientation());
+            LOG_INFO(PD_LOG, "PDv2: evicted {} from the dungeon - the client is gone "
+                             "and a reconnect must not land back on this map",
+                     player->GetName());
+        }
+    }
+
     void PDv2InstanceScript::Update(uint32 diff)
     {
         if (_fallCheckTimer <= diff)
         {
             _fallCheckTimer = FALL_CHECK_INTERVAL_MS;
             CatchFallers();
+            EvictDisconnected();
         }
         else
         {

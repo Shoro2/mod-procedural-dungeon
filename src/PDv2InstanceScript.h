@@ -64,6 +64,7 @@ namespace PDungeon
         void SpawnFromPlan(BlockPlan const& plan);
         void EnsureWalkGrid(BlockPlan const& plan);
         void CatchFallers();
+        void EvictDisconnected();
 
         uint32_t _accountId = 0;
         bool     _spawned = false;
