@@ -25,6 +25,7 @@ local lastSentVersion = nil   -- last VER value relayed upstream
 local lastSeenAck = nil       -- last FLPD_ACK value relayed upstream
 local pollUntil = 0           -- FLPD_ACK is watched while GetTime() < pollUntil
 local reReportAt = 0          -- one-shot VER re-report after the loading screen
+local probeAt = 0             -- next DLL wake probe while no version is known
 local throttle = 0
 
 local function SendUp(text)
@@ -51,9 +52,20 @@ frame:SetScript("OnUpdate", function(self, elapsed)
     throttle = 0
 
     -- The DLL is injected AFTER login, so its version global appears late;
-    -- watching for the change is what makes the report reach the server
-    -- without the DLL having to announce itself.
+    -- watching for the change is what makes the report reach the server.
     SendVersionIfChanged()
+
+    -- The DLL announces its version on the first EXECUTED BUFFER after
+    -- injection - but the client runs no buffer by itself in idle play
+    -- (measured 2026-08-06: injected, armed, silent). So while no version is
+    -- known, run one comment-only buffer per second: a no-op for the game,
+    -- the wake-up call for a freshly injected DLL. Stops by itself the
+    -- moment a version appears.
+    local ver = _G.FLPD_DLL_VERSION
+    if (not ver or ver == 0) and GetTime() >= probeAt then
+        probeAt = GetTime() + 1
+        RunScript("-- flpd wake")
+    end
 
     -- The VER sent at PLAYER_ENTERING_WORLD reaches the server, but the
     -- server's answering manifest push can die on the login boundary - the
