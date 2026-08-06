@@ -19,8 +19,10 @@
 
 #include "Config.h"
 #include "DatabaseEnv.h"
+#include "Field.h"
 #include "Log.h"
 #include "PDDefines.h"
+#include "QueryResult.h"
 #include "generator/PDv2WalkGrid.h"
 
 #include <algorithm>
