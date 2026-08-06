@@ -270,7 +270,36 @@ class PDClientLinkPlayerScript : public PlayerScript
 public:
     PDClientLinkPlayerScript() : PlayerScript("PDClientLinkPlayerScript",
         { PLAYERHOOK_ON_BEFORE_SEND_CHAT_MESSAGE, PLAYERHOOK_CAN_ENTER_MAP,
-          PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT }) { }
+          PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_BEFORE_LOGOUT }) { }
+
+    // Sends the player home BEFORE the logout save, which is the only way to
+    // keep the dungeon position out of the DB row. Two earlier attempts
+    // failed and both are worth remembering: a teleport in OnPlayerLogout is
+    // too late (LogoutPlayer saves at WorldSession.cpp:735 and calls that
+    // hook at :760), and a DirectExecute UPDATE from there RACED - it bypasses
+    // the async queue the save is sitting in, lands first, and the save then
+    // writes map 760 straight back over it (measured 2026-08-06).
+    //
+    // Here the core does the work itself: this hook runs at :626, and the
+    // far-teleport it triggers is completed at :720 by the loop whose own
+    // comment says it exists to "teleport player immediately for correct
+    // player save". So the save at :735 already writes the homebind row.
+    void OnPlayerBeforeLogout(Player* player) override
+    {
+        if (!sPDv2Mgr->IsEnabled() || !player ||
+            player->GetMapId() != sPDv2Mgr->GetConfig().mapId)
+        {
+            return;
+        }
+        player->TeleportTo(player->m_homebindMapId, player->m_homebindX,
+                           player->m_homebindY, player->m_homebindZ,
+                           player->GetOrientation());
+        LOG_INFO(PDungeon::PD_LOG,
+                 "PDv2 link: sending {} home before the logout save - a "
+                 "character saved inside map {} would crash its own client at "
+                 "the character screen", player->GetName(),
+                 sPDv2Mgr->GetConfig().mapId);
+    }
 
     // A character must never be SAVED inside map 760: the client reads the
     // position from the DB at the character screen and starts loading that
@@ -279,33 +308,6 @@ public:
     // (measured 2026-08-06, the login-boundary's final shape). Send them
     // home before the logout save; the startup sweep in PDWorldScript covers
     // characters stranded by a crash.
-    void OnPlayerLogout(Player* player) override
-    {
-        if (!sPDv2Mgr->IsEnabled() || !player ||
-            player->GetMapId() != sPDv2Mgr->GetConfig().mapId)
-        {
-            return;
-        }
-
-        // Written straight to the DB, NOT teleported: this hook fires AFTER
-        // WorldSession::LogoutPlayer has already saved the character
-        // (WorldSession.cpp:735 saves, :760 calls us), so a teleport here
-        // would never reach the row. The account-login rescue would catch it
-        // anyway, but leaving a character parked on the map between the two
-        // is exactly the state that traps a player if anything else goes
-        // wrong first.
-        CharacterDatabase.DirectExecute(
-            Acore::StringFormat(
-                "UPDATE characters c JOIN character_homebind h ON c.guid = h.guid "
-                "SET c.map = h.mapId, c.zone = h.zoneId, c.position_x = h.posX, "
-                "c.position_y = h.posY, c.position_z = h.posZ, c.instance_id = 0 "
-                "WHERE c.guid = {}", player->GetGUID().GetCounter()).c_str());
-        LOG_INFO(PDungeon::PD_LOG,
-                 "PDv2 link: sent {} home in the DB at logout - characters must "
-                 "not be saved inside map {}", player->GetName(),
-                 sPDv2Mgr->GetConfig().mapId);
-    }
-
     // Login restores the account's persisted layout (regenerated from its
     // stored seed); the addon's VER report that follows moments later then
     // auto-pushes it. Together those are what "your dungeon survives a
