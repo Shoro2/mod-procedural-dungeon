@@ -68,6 +68,12 @@ namespace PDungeon
     class LinkState
     {
     public:
+        // A version report also INVALIDATES any earlier readiness: the addon
+        // re-reports after every loading screen and every injection, so a VER
+        // means "the client (re)initialized" - and a client restart empties
+        // the DLL's composed slots while the old READY would still satisfy
+        // the gate. Stale readiness here is the crash the gate exists to
+        // prevent, so it is dropped on every report and the caller re-pushes.
         void ReportVersion(uint32_t accountId, int version);
 
         // Allocates the next manifest seq for a push and arms the timeout /

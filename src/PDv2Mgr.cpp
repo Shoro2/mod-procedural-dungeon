@@ -80,9 +80,91 @@ namespace PDungeon
             return false;
         }
 
-        std::lock_guard<std::mutex> guard(_lock);
-        _plans[accountId] = out;
+        StorePlan(accountId, out);
+        SavePlanToDB(accountId, out);
         return true;
+    }
+
+    void PDv2Mgr::StorePlan(uint32_t accountId, BlockPlan const& plan)
+    {
+        std::lock_guard<std::mutex> guard(_lock);
+        _plans[accountId] = plan;
+    }
+
+    void PDv2Mgr::SavePlanToDB(uint32_t accountId, BlockPlan const& plan)
+    {
+        BlockCfg const& cfg = plan.config;
+        // Layout columns only - dlvl/dxp and the cfg_* gameplay knobs belong
+        // to the gameplay slice, and a reroll must never clobber them.
+        CharacterDatabase.Execute(
+            "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
+            "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
+            "gen_loop_pct) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}) "
+            "ON DUPLICATE KEY UPDATE theme = VALUES(theme), "
+            "layout_seed = VALUES(layout_seed), layout_version = VALUES(layout_version), "
+            "gen_rooms = VALUES(gen_rooms), gen_boss_rooms = VALUES(gen_boss_rooms), "
+            "gen_field_blocks = VALUES(gen_field_blocks), gen_origin_bx = VALUES(gen_origin_bx), "
+            "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct)",
+            accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
+            cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.loopChancePct);
+    }
+
+    void PDv2Mgr::LoadPlanFromDB(uint32_t accountId)
+    {
+        if (GetPlan(accountId))
+        {
+            return;
+        }
+
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT layout_seed, layout_version, theme, gen_rooms, gen_boss_rooms, "
+            "gen_field_blocks, gen_origin_bx, gen_origin_by, gen_loop_pct "
+            "FROM pdungeon_account WHERE accountId = {}", accountId);
+        if (!result)
+        {
+            return;
+        }
+
+        Field* fields = result->Fetch();
+        uint32_t const seed = fields[0].Get<uint32>();
+        uint32_t const version = fields[1].Get<uint32>();
+        if (!seed)
+        {
+            return;
+        }
+        if (version != PD_LAYOUT_VERSION)
+        {
+            LOG_INFO(PD_LOG, "PDv2: account {} has a layout stamped v{} (current v{}) - "
+                             "kept in the DB, but a reroll is needed",
+                     accountId, version, PD_LAYOUT_VERSION);
+            return;
+        }
+
+        BlockCfg cfg;
+        cfg.seed = seed;
+        cfg.theme = fields[2].Get<uint8>();
+        cfg.rooms = fields[3].Get<uint8>();
+        cfg.bossRooms = fields[4].Get<uint8>();
+        cfg.fieldBlocks = fields[5].Get<uint8>();
+        cfg.originBX = fields[6].Get<uint16>();
+        cfg.originBY = fields[7].Get<uint16>();
+        cfg.loopChancePct = fields[8].Get<uint8>();
+
+        BlockPlan plan;
+        if (!GenerateBlockPlan(cfg, &plan))
+        {
+            // Determinism makes this near-impossible for a layout that once
+            // generated; if it happens the generator changed without a
+            // PD_LAYOUT_VERSION bump, and that is worth shouting about.
+            LOG_ERROR(PD_LOG, "PDv2: account {}'s stored layout (seed {}) no longer "
+                              "regenerates - PD_LAYOUT_VERSION should have been bumped",
+                      accountId, seed);
+            return;
+        }
+
+        StorePlan(accountId, plan);
+        LOG_INFO(PD_LOG, "PDv2: restored account {}'s dungeon from seed {} ({} blocks)",
+                 accountId, seed, uint32(plan.blocks.size()));
     }
 
     BlockPlan const* PDv2Mgr::GetPlan(uint32_t accountId) const

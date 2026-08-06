@@ -621,6 +621,15 @@ namespace
               "accounts must not share state", 0);
         Check(!link.ShouldRepush(other, 99999, 1),
               "no repush for an account that was never pushed", 0);
+
+        // A fresh version report must drop earlier readiness: after a client
+        // restart the DLL's composed slots are gone, and a READY that
+        // survived the report would wave a crash straight through the gate.
+        Is(LinkVerdict::Ready, "precondition: still Ready before the re-report");
+        link.ReportVersion(acc, 1);
+        Is(LinkVerdict::NothingPushed, "a VER report must invalidate readiness");
+        Check(!link.ShouldRepush(acc, 999999, 1),
+              "no repush credit left over after invalidation", 0);
     }
 
     int RunBatch(int count, int rooms)

@@ -44,7 +44,13 @@ namespace PDungeon
 
     void LinkState::ReportVersion(uint32_t accountId, int version)
     {
-        _clients[accountId].dllVersion = version;
+        LinkClient& client = _clients[accountId];
+        client.dllVersion = version;
+        client.pendingSeq = 0;
+        client.pushMs = 0;
+        client.repushSpent = false;
+        client.readySeq = 0;
+        client.lastNak.clear();
     }
 
     uint32_t LinkState::BeginPush(uint32_t accountId, uint64_t nowMs)

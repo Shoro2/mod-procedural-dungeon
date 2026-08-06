@@ -66,6 +66,12 @@ namespace PDungeon
     // generator/PDv2WorldMath.h so the world math that uses them is
     // harness-checkable; the include above keeps them visible here.
 
+    // Stored with every persisted layout; bump on any change that would make
+    // an old seed regenerate a DIFFERENT dungeon (generator logic, kit block
+    // ids, field semantics). A mismatch at load means "reroll needed", never
+    // "regenerate wrong".
+    constexpr uint32_t PD_LAYOUT_VERSION = 1;
+
     class PDv2Mgr
     {
     public:
@@ -75,12 +81,20 @@ namespace PDungeon
         PDv2Config const& GetConfig() const { return _config; }
         bool IsEnabled() const { return _config.enabled; }
 
-        // Builds a plan for `accountId` and replaces any previous one. Returns
-        // false when the generator could not produce a valid layout.
+        // Builds a plan for `accountId`, replaces any previous one and saves
+        // its generation inputs to the characters DB. Returns false when the
+        // generator could not produce a valid layout.
         bool GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out);
 
         // The stored plan, or nullptr when the account has none.
         BlockPlan const* GetPlan(uint32_t accountId) const;
+
+        // Restores the account's persisted layout by REGENERATING it from the
+        // stored seed + generation inputs (a plan is deterministic, so no
+        // layout blob exists to load). Called at login; a missing row, seed 0
+        // or a foreign layout_version simply means "no dungeon yet". No-op
+        // when a plan is already cached for this account.
+        void LoadPlanFromDB(uint32_t accountId);
 
         // Writes the manifest for `plan` to the configured path. Until
         // PDClientLink exists this file IS the transport: the operator feeds it
@@ -112,6 +126,9 @@ namespace PDungeon
         size_t WalkMaskCount() const { return _walkMasks.size(); }
 
     private:
+        void StorePlan(uint32_t accountId, BlockPlan const& plan);
+        void SavePlanToDB(uint32_t accountId, BlockPlan const& plan);
+
         PDv2Config _config;
         mutable std::mutex _lock;
         std::unordered_map<uint32_t, BlockPlan> _plans;

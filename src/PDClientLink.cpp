@@ -95,9 +95,25 @@ namespace PDungeon
         if (body.compare(0, 4, "VER ") == 0)
         {
             int const version = static_cast<int>(std::strtol(body.c_str() + 4, nullptr, 10));
-            std::lock_guard<std::mutex> guard(_lock);
-            _state.ReportVersion(accountId, version);
+            {
+                std::lock_guard<std::mutex> guard(_lock);
+                // Also invalidates earlier readiness - see PDv2LinkState.h.
+                _state.ReportVersion(accountId, version);
+            }
             LOG_DEBUG(PD_LOG, "PDv2 link: account {} reports DLL version {}", accountId, version);
+
+            // First contact of a (re)initialized, capable client: push the
+            // stored dungeon right away. This is what makes a layout survive
+            // relogs, client restarts and server restarts without a command.
+            if (version > 0 && sPDv2Mgr->GetPlan(accountId))
+            {
+                std::string error;
+                if (PushManifest(player, error))
+                {
+                    LOG_DEBUG(PD_LOG, "PDv2 link: auto-pushed the stored layout to account {}",
+                              accountId);
+                }
+            }
             return;
         }
 
@@ -230,7 +246,21 @@ class PDClientLinkPlayerScript : public PlayerScript
 {
 public:
     PDClientLinkPlayerScript() : PlayerScript("PDClientLinkPlayerScript",
-        { PLAYERHOOK_ON_BEFORE_SEND_CHAT_MESSAGE, PLAYERHOOK_CAN_ENTER_MAP }) { }
+        { PLAYERHOOK_ON_BEFORE_SEND_CHAT_MESSAGE, PLAYERHOOK_CAN_ENTER_MAP,
+          PLAYERHOOK_ON_LOGIN }) { }
+
+    // Login restores the account's persisted layout (regenerated from its
+    // stored seed); the addon's VER report that follows moments later then
+    // auto-pushes it. Together those are what "your dungeon survives a
+    // restart" means.
+    void OnPlayerLogin(Player* player) override
+    {
+        if (!sPDv2Mgr->IsEnabled() || !player || !player->GetSession())
+        {
+            return;
+        }
+        sPDv2Mgr->LoadPlanFromDB(player->GetSession()->GetAccountId());
+    }
 
     void OnPlayerBeforeSendChatMessage(Player* player, uint32& type, uint32& lang,
                                        std::string& msg) override
