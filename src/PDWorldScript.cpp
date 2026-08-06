@@ -16,6 +16,7 @@
  */
 
 #include "Chat.h"
+#include "DatabaseEnv.h"
 #include "PDClientLink.h"
 #include "PDDefines.h"
 #include "PDMgr.h"
@@ -53,6 +54,17 @@ public:
             // that is a restart. Keeping the table immutable after startup is
             // what lets map threads read it without a lock.
             sPDv2Mgr->LoadChunkMeta();
+
+            // Rescue sweep: a character SAVED inside the composed-only map
+            // crashes its client at the character screen (the client loads
+            // the map from the DB position before the server can intervene).
+            // The logout hook prevents new cases; this catches characters
+            // stranded by a crash or kill while the server was down.
+            CharacterDatabase.Execute(
+                "UPDATE characters c JOIN character_homebind h ON c.guid = h.guid "
+                "SET c.map = h.mapId, c.zone = h.zoneId, c.position_x = h.posX, "
+                "c.position_y = h.posY, c.position_z = h.posZ WHERE c.map = {}",
+                sPDv2Mgr->GetConfig().mapId);
         }
     }
 };

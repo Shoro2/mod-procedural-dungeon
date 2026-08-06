@@ -253,7 +253,30 @@ class PDClientLinkPlayerScript : public PlayerScript
 public:
     PDClientLinkPlayerScript() : PlayerScript("PDClientLinkPlayerScript",
         { PLAYERHOOK_ON_BEFORE_SEND_CHAT_MESSAGE, PLAYERHOOK_CAN_ENTER_MAP,
-          PLAYERHOOK_ON_LOGIN }) { }
+          PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT }) { }
+
+    // A character must never be SAVED inside map 760: the client reads the
+    // position from the DB at the character screen and starts loading that
+    // map before the server can say anything - and without an injected DLL,
+    // CMap::LoadWdt() on the composed-only map is a hard client crash
+    // (measured 2026-08-06, the login-boundary's final shape). Send them
+    // home before the logout save; the startup sweep in PDWorldScript covers
+    // characters stranded by a crash.
+    void OnPlayerLogout(Player* player) override
+    {
+        if (!sPDv2Mgr->IsEnabled() || !player ||
+            player->GetMapId() != sPDv2Mgr->GetConfig().mapId)
+        {
+            return;
+        }
+        player->TeleportTo(player->m_homebindMapId, player->m_homebindX,
+                           player->m_homebindY, player->m_homebindZ,
+                           player->GetOrientation());
+        LOG_INFO(PDungeon::PD_LOG,
+                 "PDv2 link: sent {} home at logout - characters must not be "
+                 "saved inside map {}", player->GetName(),
+                 sPDv2Mgr->GetConfig().mapId);
+    }
 
     // Login restores the account's persisted layout (regenerated from its
     // stored seed); the addon's VER report that follows moments later then
