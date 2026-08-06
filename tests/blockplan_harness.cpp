@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify
@@ -37,6 +37,7 @@
 #endif
 
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2WalkGrid.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -117,6 +118,88 @@ namespace
         return true;
     }
 
+    // --- walk masks, read from the kit's own metadata -----------------------
+    //
+    // The masks come from the kit rather than being recomputed here on purpose:
+    // the kit generator is the authority on what its blocks look like, and a
+    // second implementation of that geometry would drift from it silently.
+    // On the server the same data arrives from `pdungeon_chunk_meta`; here it is
+    // parsed out of the SQL the kit generator emits alongside the ADTs.
+    std::map<int, std::vector<uint8_t>> g_masks;
+
+    bool RleDecode(std::string const& text, std::vector<uint8_t>& out)
+    {
+        out.clear();
+        if (text.compare(0, 5, "RLE1:") != 0)
+        {
+            return false;
+        }
+        size_t at = 5;
+        while (at < text.size())
+        {
+            size_t const star = text.find('*', at);
+            if (star == std::string::npos) return false;
+            size_t comma = text.find(',', star);
+            if (comma == std::string::npos) comma = text.size();
+            int const value = std::atoi(text.substr(at, star - at).c_str());
+            int const count = std::atoi(text.substr(star + 1, comma - star - 1).c_str());
+            if (count <= 0) return false;
+            out.insert(out.end(), static_cast<size_t>(count), static_cast<uint8_t>(value));
+            at = comma + 1;
+        }
+        return true;
+    }
+
+    bool LoadMasks(char const* sqlPath)
+    {
+        FILE* fh = std::fopen(sqlPath, "rb");
+        if (!fh)
+        {
+            std::printf("  cannot open %s\n", sqlPath);
+            return false;
+        }
+        std::string blob;
+        char buf[8192];
+        size_t got;
+        while ((got = std::fread(buf, 1, sizeof(buf), fh)) > 0)
+        {
+            blob.append(buf, got);
+        }
+        std::fclose(fh);
+
+        // Rows look like:  (2005, @KIT, 1, 'room', 5, 'RLE1:â€¦', '{â€¦}')
+        size_t at = 0;
+        while (true)
+        {
+            size_t const open = blob.find("\n    (", at);
+            if (open == std::string::npos) break;
+            size_t const idStart = open + 6;
+            int const chunkId = std::atoi(blob.substr(idStart, 12).c_str());
+
+            size_t const rle = blob.find("'RLE1:", idStart);
+            if (rle == std::string::npos) break;
+            size_t const rleEnd = blob.find('\'', rle + 1);
+            if (rleEnd == std::string::npos) break;
+
+            std::vector<uint8_t> mask;
+            if (RleDecode(blob.substr(rle + 1, rleEnd - rle - 1), mask) &&
+                mask.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK)
+            {
+                g_masks[chunkId] = mask;
+            }
+            at = rleEnd;
+        }
+        std::printf("  %u walk mask(s) from %s\n",
+                    static_cast<unsigned>(g_masks.size()), sqlPath);
+        return !g_masks.empty();
+    }
+
+    uint8_t const* MaskFor(int chunkId)
+    {
+        auto it = g_masks.find(chunkId);
+        return it == g_masks.end() ? nullptr : it->second.data();
+    }
+
     void PrintOne(uint32_t seed, int rooms)
     {
         BlockCfg const cfg = MakeCfg(seed, rooms);
@@ -170,11 +253,133 @@ namespace
         std::printf("wrote %s, %d bytes\n", path, static_cast<int>(m.size()));
     }
 
+    // Cell coordinates of a block's centre within the grid.
+    GridPoint BlockCentreCell(WalkGrid const& grid, PlacedBlock const& b)
+    {
+        return { (b.bx - grid.originBX) * PD_CELLS_PER_BLOCK + PD_CELLS_PER_BLOCK / 2,
+                 (b.by - grid.originBY) * PD_CELLS_PER_BLOCK + PD_CELLS_PER_BLOCK / 2 };
+    }
+
+    // Can a creature standing in any room reach any other? That is the property
+    // the dungeon actually needs; a grid that merely exists proves nothing.
+    bool CheckAllRoomsConnected(BlockPlan const& plan, WalkGrid const& grid,
+                                std::string& why, int& longest)
+    {
+        std::vector<PlacedBlock const*> rooms;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.roomId >= 0)
+            {
+                rooms.push_back(&b);
+            }
+        }
+        longest = 0;
+        for (size_t i = 0; i < rooms.size(); ++i)
+        {
+            for (size_t j = i + 1; j < rooms.size(); ++j)
+            {
+                GridPoint a = BlockCentreCell(grid, *rooms[i]);
+                GridPoint b = BlockCentreCell(grid, *rooms[j]);
+                GridPoint sa, sb;
+                if (!NearestWalkable(grid, a.x, a.y, 4, sa) ||
+                    !NearestWalkable(grid, b.x, b.y, 4, sb))
+                {
+                    why = "a room centre has no walkable cell near it";
+                    return false;
+                }
+                std::vector<GridPoint> path;
+                if (!FindGridPath(grid, sa, sb, path))
+                {
+                    why = "no path between two rooms";
+                    return false;
+                }
+                longest = (static_cast<int>(path.size()) > longest)
+                              ? static_cast<int>(path.size()) : longest;
+
+                std::vector<GridPoint> simple = path;
+                SimplifyGridPath(grid, simple);
+                if (simple.size() > path.size())
+                {
+                    why = "simplification made the path longer";
+                    return false;
+                }
+                for (GridPoint const& p : simple)
+                {
+                    if (!grid.At(p.x, p.y))
+                    {
+                        why = "a simplified waypoint is not walkable";
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    void PrintPath(uint32_t seed, int rooms)
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(MakeCfg(seed, rooms), &plan))
+        {
+            std::printf("generation FAILED\n");
+            return;
+        }
+
+        WalkGrid grid;
+        std::string err;
+        if (!BuildWalkGrid(plan, MaskFor, &grid, &err))
+        {
+            std::printf("walk grid FAILED: %s\n", err.c_str());
+            return;
+        }
+        std::printf("grid %dx%d cells, %u walkable (%.1f%%)\n", grid.width, grid.height,
+                    static_cast<unsigned>(grid.WalkableCount()),
+                    100.0 * grid.WalkableCount() / (grid.width * grid.height));
+
+        PlacedBlock const& entrance = plan.blocks[static_cast<size_t>(plan.entranceIndex)];
+        PlacedBlock const& boss = plan.blocks[static_cast<size_t>(plan.bossIndex)];
+        GridPoint a, b;
+        NearestWalkable(grid, BlockCentreCell(grid, entrance).x,
+                        BlockCentreCell(grid, entrance).y, 4, a);
+        NearestWalkable(grid, BlockCentreCell(grid, boss).x,
+                        BlockCentreCell(grid, boss).y, 4, b);
+
+        std::vector<GridPoint> path;
+        if (!FindGridPath(grid, a, b, path))
+        {
+            std::printf("no path from the entrance to the boss\n");
+            return;
+        }
+        std::vector<GridPoint> simple = path;
+        SimplifyGridPath(grid, simple);
+        std::printf("entrance -> boss: %u cells, %u waypoints after simplification\n\n",
+                    static_cast<unsigned>(path.size()), static_cast<unsigned>(simple.size()));
+
+        std::vector<bool> onPath(grid.cells.size(), false);
+        for (GridPoint const& p : path)
+        {
+            onPath[static_cast<size_t>(p.y) * grid.width + p.x] = true;
+        }
+        for (int y = 0; y < grid.height; ++y)
+        {
+            std::string row;
+            for (int x = 0; x < grid.width; ++x)
+            {
+                bool const walk = grid.At(x, y);
+                bool const on = onPath[static_cast<size_t>(y) * grid.width + x];
+                row += on ? '*' : (walk ? '.' : ' ');
+            }
+            std::printf("  %s\n", row.c_str());
+        }
+        std::printf("\n  '.' walkable   '*' the path the creatures would take\n");
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
 
         size_t maxManifest = 0;
+        int longestPath = 0;
         int minBlocks = 1 << 30;
         int maxBlocks = 0;
 
@@ -238,11 +443,33 @@ namespace
                       "manifest CRC does not match its body", seed);
             }
 
+            // The walk grid, if the kit metadata was found. A layout whose rooms
+            // cannot reach each other is worse than one that fails to generate:
+            // it looks fine and strands the player.
+            if (!g_masks.empty())
+            {
+                WalkGrid grid;
+                std::string gridErr;
+                if (!BuildWalkGrid(plan, MaskFor, &grid, &gridErr))
+                {
+                    Check(false, gridErr.c_str(), seed);
+                }
+                else
+                {
+                    std::string gridWhy;
+                    int longest = 0;
+                    Check(CheckAllRoomsConnected(plan, grid, gridWhy, longest),
+                          gridWhy.empty() ? "rooms not all connected" : gridWhy.c_str(), seed);
+                    longestPath = (longest > longestPath) ? longest : longestPath;
+                }
+            }
+
             int const blocks = static_cast<int>(plan.blocks.size());
             minBlocks = (blocks < minBlocks) ? blocks : minBlocks;
             maxBlocks = (blocks > maxBlocks) ? blocks : maxBlocks;
         }
 
+        if (longestPath) std::printf("longest room-to-room path: %d cells\\n", longestPath);
         std::printf("blocks per layout: %d..%d\n", minBlocks, maxBlocks);
         std::printf("largest manifest  : %d bytes (budget 2048)\n", static_cast<int>(maxManifest));
         std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
@@ -253,6 +480,10 @@ namespace
 
 int main(int argc, char** argv)
 {
+    // Optional: without the kit metadata the planner checks still run, the
+    // walk-grid ones are simply skipped rather than faked.
+    LoadMasks("C:\\\\wowstuff\\\\ForgottenLand2.0\\\\output\\\\pd_block_kit\\\\FLStream\\\\chunks\\\\t1b\\\\pdungeon_chunk_meta.sql");
+
     if (argc >= 2 && std::strcmp(argv[1], "--batch") == 0)
     {
         int const n = (argc >= 3) ? std::atoi(argv[2]) : 100;
@@ -266,6 +497,13 @@ int main(int argc, char** argv)
         int const oby = (argc >= 7) ? std::atoi(argv[6]) : 32 * 8;
         WriteManifest(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)),
                       rooms, argv[3], obx, oby);
+        return 0;
+    }
+
+    if (argc >= 3 && std::strcmp(argv[1], "--path") == 0)
+    {
+        int const r = (argc >= 4) ? std::atoi(argv[3]) : 5;
+        PrintPath(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)), r);
         return 0;
     }
 
