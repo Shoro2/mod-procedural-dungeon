@@ -20,6 +20,7 @@
 #include "Chat.h"
 #include "Config.h"
 #include "DBCStructure.h"
+#include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Log.h"
 #include "Opcodes.h"
@@ -353,7 +354,38 @@ public:
     }
 };
 
+// The last line of defence against the login crash-loop. Whatever path left a
+// character SAVED on the composed-only map - a periodic save before a client
+// crash, a logout teleport that never got to run because the server died too -
+// this heals the DB at ACCOUNT login. The hook fires at auth
+// (WorldSocket.cpp:703), before the character enum, and the update runs
+// synchronously, so the client can never even SEE a character standing on map
+// 760 - and a player can therefore never be trapped in a crash-on-login loop,
+// no matter how their character got there.
+class PDClientLinkAccountScript : public AccountScript
+{
+public:
+    PDClientLinkAccountScript() : AccountScript("PDClientLinkAccountScript",
+        { ACCOUNTHOOK_ON_ACCOUNT_LOGIN }) { }
+
+    void OnAccountLogin(uint32 accountId) override
+    {
+        if (!sPDv2Mgr->IsEnabled())
+        {
+            return;
+        }
+        CharacterDatabase.DirectExecute(
+            Acore::StringFormat(
+                "UPDATE characters c JOIN character_homebind h ON c.guid = h.guid "
+                "SET c.map = h.mapId, c.zone = h.zoneId, c.position_x = h.posX, "
+                "c.position_y = h.posY, c.position_z = h.posZ "
+                "WHERE c.account = {} AND c.map = {}",
+                accountId, sPDv2Mgr->GetConfig().mapId).c_str());
+    }
+};
+
 void AddPDClientLinkScripts()
 {
     new PDClientLinkPlayerScript();
+    new PDClientLinkAccountScript();
 }
