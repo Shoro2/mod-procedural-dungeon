@@ -24,6 +24,7 @@ local PREFIX_UP = "FLPD"      -- client -> server
 local lastSentVersion = nil   -- last VER value relayed upstream
 local lastSeenAck = nil       -- last FLPD_ACK value relayed upstream
 local pollUntil = 0           -- FLPD_ACK is watched while GetTime() < pollUntil
+local reReportAt = 0          -- one-shot VER re-report after the loading screen
 local throttle = 0
 
 local function SendUp(text)
@@ -54,6 +55,18 @@ frame:SetScript("OnUpdate", function(self, elapsed)
     -- without the DLL having to announce itself.
     SendVersionIfChanged()
 
+    -- The VER sent at PLAYER_ENTERING_WORLD reaches the server, but the
+    -- server's answering manifest push can die on the login boundary - the
+    -- client cannot receive addon chat that early (measured 2026-08-06: seq 1
+    -- lost at login, an identical push fine in steady state). One re-report a
+    -- few seconds later makes the server invalidate and push again; if the
+    -- first push DID land, the repeat converges back to READY harmlessly.
+    if reReportAt > 0 and GetTime() >= reReportAt then
+        reReportAt = 0
+        lastSentVersion = nil
+        SendVersionIfChanged()
+    end
+
     if GetTime() < pollUntil then
         local ack = _G.FLPD_ACK
         if ack and ack ~= lastSeenAck then
@@ -70,6 +83,7 @@ frame:SetScript("OnEvent", function(self, event, arg1, arg2)
     if event == "PLAYER_ENTERING_WORLD" then
         lastSentVersion = nil          -- re-report after every loading screen
         SendVersionIfChanged()
+        reReportAt = GetTime() + 5
     elseif event == "CHAT_MSG_ADDON" then
         if arg1 ~= PREFIX_DOWN then
             return                     -- also skips the echo of our own FLPD whispers
