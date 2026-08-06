@@ -48,7 +48,6 @@ namespace PDungeon
     {
         explicit PDv2MobAI(Creature* creature);
 
-        void InitializeAI() override;
         void JustEngagedWith(Unit* who) override;
         void UpdateAI(uint32 diff) override;
         void MovementInform(uint32 type, uint32 id) override;
@@ -58,11 +57,8 @@ namespace PDungeon
         void StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid);
         void MoveToWaypoint(size_t index, WalkGrid const& grid);
         void StopWaypointRun(bool resumeChase);
-        bool IsLeashed() const;
 
         PDv2InstanceScript* _instance = nullptr;
-        float _homeX = 0.0f;
-        float _homeY = 0.0f;
         uint32 _repathTimer = 0;
         std::vector<GridPoint> _waypoints;
         size_t _waypointIndex = 0;

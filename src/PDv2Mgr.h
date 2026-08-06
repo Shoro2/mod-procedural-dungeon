@@ -59,7 +59,6 @@ namespace PDungeon
         int         originBY = 256;
         int         loopChancePct = 15;
         int         theme = 1;
-        float       leashYd = 150.0f;    // 2D pull distance before a mob evades
         std::string manifestPath;        // where `v2 gen` writes the manifest
     };
 

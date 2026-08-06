@@ -309,18 +309,6 @@ ProceduralDungeon.V2.LoopChance = 15
 ProceduralDungeon.V2.Theme = 1
 
 #
-#    ProceduralDungeon.V2.LeashYd
-#        Description: How far (yards, 2D) a creature may be pulled from its
-#                     spawn point before it gives up and evades home. Rooms sit
-#                     66.67 yd apart, so 150 allows a chase across about two
-#                     rooms. The evade walk home is core movement and may cut
-#                     visually across the void - a known v1-class artifact.
-#        Default:     150
-#
-
-ProceduralDungeon.V2.LeashYd = 150
-
-#
 #    ProceduralDungeon.V2.ManifestPath
 #        Description: Where `.pdungeon v2 gen` writes the manifest. This is a
 #                     TEMPORARY transport: until PDClientLink pushes manifests

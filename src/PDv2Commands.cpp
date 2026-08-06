@@ -189,8 +189,8 @@ private:
                                  cfg.originBX, cfg.originBY);
         // 0 here means mod_pdungeon_chunk_meta.sql never reached the world DB
         // - the one failure that makes every mob stand still.
-        handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded | leash {:.0f} yd",
-                                 uint32(sPDv2Mgr->WalkMaskCount()), cfg.leashYd);
+        handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded",
+                                 uint32(sPDv2Mgr->WalkMaskCount()));
 
         BlockPlan const* plan = sPDv2Mgr->GetPlan(AccountOf(handler));
         if (!plan)

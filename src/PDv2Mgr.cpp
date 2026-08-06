@@ -48,7 +48,6 @@ namespace PDungeon
         _config.originBY = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBY", 256);
         _config.loopChancePct = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.LoopChance", 15);
         _config.theme = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.Theme", 1);
-        _config.leashYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.LeashYd", 150.0f);
         _config.manifestPath = sConfigMgr->GetOption<std::string>(
             "ProceduralDungeon.V2.ManifestPath", "");
 

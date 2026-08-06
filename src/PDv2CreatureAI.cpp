@@ -57,13 +57,6 @@ namespace PDungeon
         _instance = GetV2Instance(creature);
     }
 
-    void PDv2MobAI::InitializeAI()
-    {
-        ScriptedAI::InitializeAI();
-        _homeX = me->GetPositionX();
-        _homeY = me->GetPositionY();
-    }
-
     void PDv2MobAI::JustEngagedWith(Unit* /*who*/)
     {
         // A previous fight may have left a stale run behind (evade clears the
@@ -72,14 +65,6 @@ namespace PDungeon
         // floor. Decide on the very next UpdateAI tick.
         StopWaypointRun(false);
         _repathTimer = 0;
-    }
-
-    bool PDv2MobAI::IsLeashed() const
-    {
-        float const leash = sPDv2Mgr->GetConfig().leashYd;
-        float const dx = me->GetPositionX() - _homeX;
-        float const dy = me->GetPositionY() - _homeY;
-        return dx * dx + dy * dy > leash * leash;
     }
 
     void PDv2MobAI::MoveToWaypoint(size_t index, WalkGrid const& grid)
@@ -225,14 +210,14 @@ namespace PDungeon
 
     void PDv2MobAI::UpdateAI(uint32 diff)
     {
+        // Deliberately no distance leash: dungeon mobs chase for as long as
+        // the target exists on the map, like any stock instance (operator
+        // decision 2026-08-06, replacing a working 150 yd leash). Reset still
+        // happens the normal way - UpdateVictim() fails when the target dies
+        // or leaves the map - and a target the grid cannot reach is held at
+        // bay by UpdateGridChase's Unreachable case, not by walking after it.
         if (!UpdateVictim())
         {
-            return;
-        }
-
-        if (IsLeashed())
-        {
-            EnterEvadeMode(EVADE_REASON_BOUNDARY);
             return;
         }
 
