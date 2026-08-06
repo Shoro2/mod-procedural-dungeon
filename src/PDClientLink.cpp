@@ -96,6 +96,22 @@ namespace PDungeon
         if (body.compare(0, 4, "VER ") == 0)
         {
             int const version = static_cast<int>(std::strtol(body.c_str() + 4, nullptr, 10));
+
+            // NEVER touch the link while the player is standing in the
+            // dungeon. A push makes the DLL compose a fresh layout and switch
+            // the slot the running client is being served from - measured
+            // 2026-08-06: two pushes triggered by the dungeon's own loading
+            // screen recycled the live slot and the next terrain read failed
+            // (ERROR #134 CMap::LoadWdt). The client in there already has
+            // exactly this layout; there is nothing to gain and a crash to
+            // lose.
+            if (player->GetMapId() == sPDv2Mgr->GetConfig().mapId)
+            {
+                LOG_DEBUG(PD_LOG, "PDv2 link: ignoring a version report from account {} "
+                                  "while inside the dungeon", accountId);
+                return;
+            }
+
             {
                 std::lock_guard<std::mutex> guard(_lock);
                 // Also invalidates earlier readiness - see PDv2LinkState.h.
@@ -270,12 +286,23 @@ public:
         {
             return;
         }
-        player->TeleportTo(player->m_homebindMapId, player->m_homebindX,
-                           player->m_homebindY, player->m_homebindZ,
-                           player->GetOrientation());
+
+        // Written straight to the DB, NOT teleported: this hook fires AFTER
+        // WorldSession::LogoutPlayer has already saved the character
+        // (WorldSession.cpp:735 saves, :760 calls us), so a teleport here
+        // would never reach the row. The account-login rescue would catch it
+        // anyway, but leaving a character parked on the map between the two
+        // is exactly the state that traps a player if anything else goes
+        // wrong first.
+        CharacterDatabase.DirectExecute(
+            Acore::StringFormat(
+                "UPDATE characters c JOIN character_homebind h ON c.guid = h.guid "
+                "SET c.map = h.mapId, c.zone = h.zoneId, c.position_x = h.posX, "
+                "c.position_y = h.posY, c.position_z = h.posZ, c.instance_id = 0 "
+                "WHERE c.guid = {}", player->GetGUID().GetCounter()).c_str());
         LOG_INFO(PDungeon::PD_LOG,
-                 "PDv2 link: sent {} home at logout - characters must not be "
-                 "saved inside map {}", player->GetName(),
+                 "PDv2 link: sent {} home in the DB at logout - characters must "
+                 "not be saved inside map {}", player->GetName(),
                  sPDv2Mgr->GetConfig().mapId);
     }
 
@@ -378,7 +405,7 @@ public:
             Acore::StringFormat(
                 "UPDATE characters c JOIN character_homebind h ON c.guid = h.guid "
                 "SET c.map = h.mapId, c.zone = h.zoneId, c.position_x = h.posX, "
-                "c.position_y = h.posY, c.position_z = h.posZ "
+                "c.position_y = h.posY, c.position_z = h.posZ, c.instance_id = 0 "
                 "WHERE c.account = {} AND c.map = {}",
                 accountId, sPDv2Mgr->GetConfig().mapId).c_str());
     }

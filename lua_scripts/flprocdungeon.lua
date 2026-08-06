@@ -67,16 +67,17 @@ frame:SetScript("OnUpdate", function(self, elapsed)
         RunScript("-- flpd wake")
     end
 
-    -- The VER sent at PLAYER_ENTERING_WORLD reaches the server, but the
-    -- server's answering manifest push can die on the login boundary - the
-    -- client cannot receive addon chat that early (measured 2026-08-06: seq 1
-    -- lost at login, an identical push fine in steady state). One re-report a
-    -- few seconds later makes the server invalidate and push again; if the
-    -- first push DID land, the repeat converges back to READY harmlessly.
+    -- One retry, and only while the DLL has never answered: the server's
+    -- push can die on the login boundary (client-to-server addon chat
+    -- survives the loading screen, the reverse does not - measured
+    -- 2026-08-06). Once an ACK exists the link is up and re-reporting would
+    -- only make the server recompose, which is exactly what must not happen.
     if reReportAt > 0 and GetTime() >= reReportAt then
         reReportAt = 0
-        lastSentVersion = nil
-        SendVersionIfChanged()
+        if not _G.FLPD_ACK then
+            lastSentVersion = nil
+            SendVersionIfChanged()
+        end
     end
 
     if GetTime() < pollUntil then
@@ -93,7 +94,12 @@ end)
 
 frame:SetScript("OnEvent", function(self, event, arg1, arg2)
     if event == "PLAYER_ENTERING_WORLD" then
-        lastSentVersion = nil          -- re-report after every loading screen
+        -- Deliberately NOT re-reporting here. This event also fires for the
+        -- dungeon's own loading screen, and a version report makes the server
+        -- invalidate and push - which makes the DLL recompose and switch the
+        -- slot the client is being served from, killing it mid-map
+        -- (measured 2026-08-06). The report below happens once per Lua state,
+        -- which is exactly the lifetime that can lose the DLL's globals.
         SendVersionIfChanged()
         reReportAt = GetTime() + 5
     elseif event == "CHAT_MSG_ADDON" then

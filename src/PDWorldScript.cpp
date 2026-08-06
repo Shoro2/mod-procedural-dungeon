@@ -63,7 +63,8 @@ public:
             CharacterDatabase.Execute(
                 "UPDATE characters c JOIN character_homebind h ON c.guid = h.guid "
                 "SET c.map = h.mapId, c.zone = h.zoneId, c.position_x = h.posX, "
-                "c.position_y = h.posY, c.position_z = h.posZ WHERE c.map = {}",
+                "c.position_y = h.posY, c.position_z = h.posZ, c.instance_id = 0 "
+                "WHERE c.map = {}",
                 sPDv2Mgr->GetConfig().mapId);
         }
     }
