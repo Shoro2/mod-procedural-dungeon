@@ -27,7 +27,8 @@
 //
 // Build:
 //   cl /std:c++17 /EHsc /W4 /O2 /I src tests\blockplan_harness.cpp
-//      src\generator\PDBlockPlan.cpp /Fe:pdblock.exe
+//      src\generator\PDBlockPlan.cpp src\generator\PDv2WalkGrid.cpp
+//      /Fe:pdblock.exe
 
 // MSVC deprecates std::fopen in favour of fopen_s, which is a Microsoft
 // extension. This harness is also expected to build with g++ (see CLAUDE.md),
@@ -39,6 +40,7 @@
 #include "generator/PDBlockPlan.h"
 #include "generator/PDv2WalkGrid.h"
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -127,29 +129,6 @@ namespace
     // parsed out of the SQL the kit generator emits alongside the ADTs.
     std::map<int, std::vector<uint8_t>> g_masks;
 
-    bool RleDecode(std::string const& text, std::vector<uint8_t>& out)
-    {
-        out.clear();
-        if (text.compare(0, 5, "RLE1:") != 0)
-        {
-            return false;
-        }
-        size_t at = 5;
-        while (at < text.size())
-        {
-            size_t const star = text.find('*', at);
-            if (star == std::string::npos) return false;
-            size_t comma = text.find(',', star);
-            if (comma == std::string::npos) comma = text.size();
-            int const value = std::atoi(text.substr(at, star - at).c_str());
-            int const count = std::atoi(text.substr(star + 1, comma - star - 1).c_str());
-            if (count <= 0) return false;
-            out.insert(out.end(), static_cast<size_t>(count), static_cast<uint8_t>(value));
-            at = comma + 1;
-        }
-        return true;
-    }
-
     bool LoadMasks(char const* sqlPath)
     {
         FILE* fh = std::fopen(sqlPath, "rb");
@@ -182,7 +161,7 @@ namespace
             if (rleEnd == std::string::npos) break;
 
             std::vector<uint8_t> mask;
-            if (RleDecode(blob.substr(rle + 1, rleEnd - rle - 1), mask) &&
+            if (DecodeWalkMaskRle(blob.substr(rle + 1, rleEnd - rle - 1), mask) &&
                 mask.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK)
             {
                 g_masks[chunkId] = mask;
@@ -310,6 +289,217 @@ namespace
                         why = "a simplified waypoint is not walkable";
                         return false;
                     }
+                }
+            }
+        }
+        return true;
+    }
+
+    // The room-connectivity check above walks room centres. This one is
+    // stronger: EVERY walkable cell must be one component, because a creature
+    // can stand anywhere walkable and PlanApproach promises it a route.
+    bool CheckGridOneComponent(WalkGrid const& grid, std::string& why)
+    {
+        size_t const total = grid.WalkableCount();
+        if (total == 0)
+        {
+            why = "grid has no walkable cells";
+            return false;
+        }
+
+        GridPoint start{ -1, -1 };
+        for (int y = 0; start.x < 0 && y < grid.height; ++y)
+        {
+            for (int x = 0; x < grid.width; ++x)
+            {
+                if (grid.At(x, y))
+                {
+                    start = { x, y };
+                    break;
+                }
+            }
+        }
+
+        std::vector<uint8_t> seen(grid.cells.size(), 0);
+        std::vector<GridPoint> frontier{ start };
+        seen[static_cast<size_t>(start.y) * grid.width + start.x] = 1;
+        size_t reached = 1;
+        int const dx[4] = { 0, 1, 0, -1 };
+        int const dy[4] = { -1, 0, 1, 0 };
+        while (!frontier.empty())
+        {
+            GridPoint const cur = frontier.back();
+            frontier.pop_back();
+            for (int d = 0; d < 4; ++d)
+            {
+                int const nx = cur.x + dx[d];
+                int const ny = cur.y + dy[d];
+                if (!grid.At(nx, ny))
+                {
+                    continue;
+                }
+                size_t const idx = static_cast<size_t>(ny) * grid.width + nx;
+                if (seen[idx])
+                {
+                    continue;
+                }
+                seen[idx] = 1;
+                ++reached;
+                frontier.push_back({ nx, ny });
+            }
+        }
+
+        if (reached != total)
+        {
+            why = "walkable surface is not one component";
+            return false;
+        }
+        return true;
+    }
+
+    // Deterministic LCG so sampled cell pairs are identical on every compiler;
+    // <random> distributions are not, and the batch must reproduce.
+    struct Lcg
+    {
+        uint32_t s;
+        uint32_t Next() { s = s * 1664525u + 1013904223u; return s; }
+    };
+
+    // The contract the creature AI stands on: on a connected grid nothing
+    // walkable is unreachable, Direct really is a walkable straight line, and
+    // every Path segment can be walked with MovePoint(generatePath = false).
+    bool CheckApproachPolicy(WalkGrid const& grid, uint32_t seed, std::string& why)
+    {
+        std::vector<GridPoint> walkable;
+        for (int y = 0; y < grid.height; ++y)
+        {
+            for (int x = 0; x < grid.width; ++x)
+            {
+                if (grid.At(x, y))
+                {
+                    walkable.push_back({ x, y });
+                }
+            }
+        }
+        if (walkable.empty())
+        {
+            why = "no walkable cells to sample";
+            return false;
+        }
+
+        Lcg rng{ seed ^ 0x9E3779B9u };
+        std::vector<GridPoint> wp;
+        for (int k = 0; k < 8; ++k)
+        {
+            GridPoint const a = walkable[rng.Next() % walkable.size()];
+            GridPoint const b = walkable[rng.Next() % walkable.size()];
+            switch (PlanApproach(grid, a, b, 2, wp))
+            {
+                case ApproachKind::Unreachable:
+                    why = "unreachable between two walkable cells of a connected grid";
+                    return false;
+                case ApproachKind::Direct:
+                    if (!GridLineWalkable(grid, a, b))
+                    {
+                        why = "Direct but the straight line is not walkable";
+                        return false;
+                    }
+                    break;
+                case ApproachKind::Path:
+                    if (GridLineWalkable(grid, a, b))
+                    {
+                        why = "Path where Direct was possible";
+                        return false;
+                    }
+                    if (wp.size() < 2 || !(wp.front() == a) || !(wp.back() == b))
+                    {
+                        why = "path endpoints do not match the (walkable) query";
+                        return false;
+                    }
+                    for (size_t i = 0; i + 1 < wp.size(); ++i)
+                    {
+                        if (!GridLineWalkable(grid, wp[i], wp[i + 1]))
+                        {
+                            why = "a path segment cuts across unwalkable cells";
+                            return false;
+                        }
+                    }
+                    break;
+            }
+        }
+
+        // Snapping: querying from an unwalkable cell right next to the surface
+        // must still resolve - that is a creature standing a hair off-centre.
+        for (GridPoint const& cell : walkable)
+        {
+            GridPoint const off{ cell.x + 1, cell.y };
+            if (grid.At(off.x, off.y))
+            {
+                continue;
+            }
+            if (PlanApproach(grid, off, walkable.front(), 2, wp) == ApproachKind::Unreachable)
+            {
+                why = "snap failed one cell off the walkable surface";
+                return false;
+            }
+            break;
+        }
+
+        // And a position nowhere near the layout must refuse instead of
+        // inventing a route.
+        if (PlanApproach(grid, { -10, -10 }, walkable.front(), 2, wp) != ApproachKind::Unreachable)
+        {
+            why = "a far off-grid start did not come back Unreachable";
+            return false;
+        }
+        return true;
+    }
+
+    // Forward (block-local, the spawn path) and inverse (world -> cell, the AI
+    // path) must agree, or creatures would chase mirrored positions. The u/v
+    // to row/col pairing below IS the axis mapping - if someone swaps it, this
+    // is the check that goes red, because no seam or render test ever would.
+    bool CheckWorldMathRoundTrip(BlockPlan const& plan, WalkGrid const& grid,
+                                 std::string& why)
+    {
+        struct Probe { int col; int row; };
+        Probe const probes[3] = { { 0, 0 }, { 7, 7 }, { 3, 4 } };
+
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            for (Probe const& p : probes)
+            {
+                int const gcx = b.bx * PD_CELLS_PER_BLOCK + p.col;
+                int const gcy = b.by * PD_CELLS_PER_BLOCK + p.row;
+
+                double wx = 0.0, wy = 0.0;
+                CellCentreToWorld(gcx, gcy, wx, wy);
+
+                int rx = 0, ry = 0;
+                WorldToCell(wx, wy, rx, ry);
+                if (rx != gcx || ry != gcy)
+                {
+                    why = "cell -> world -> cell did not round-trip";
+                    return false;
+                }
+
+                double bx2 = 0.0, by2 = 0.0;
+                BlockLocalToWorld(b.bx, b.by,
+                                  (p.row + 0.5) * PD_CELL_SIZE_YD,
+                                  (p.col + 0.5) * PD_CELL_SIZE_YD, bx2, by2);
+                if (std::abs(bx2 - wx) > 1e-6 || std::abs(by2 - wy) > 1e-6)
+                {
+                    why = "block-local and cell-centre forms disagree (axis swap?)";
+                    return false;
+                }
+
+                GridPoint const local = grid.LocalFromGlobalCell(gcx, gcy);
+                int ggx = 0, ggy = 0;
+                grid.GlobalFromLocalCell(local, ggx, ggy);
+                if (ggx != gcx || ggy != gcy)
+                {
+                    why = "grid local<->global cell mapping did not round-trip";
+                    return false;
                 }
             }
         }
@@ -461,6 +651,18 @@ namespace
                     Check(CheckAllRoomsConnected(plan, grid, gridWhy, longest),
                           gridWhy.empty() ? "rooms not all connected" : gridWhy.c_str(), seed);
                     longestPath = (longest > longestPath) ? longest : longestPath;
+
+                    std::string compWhy;
+                    Check(CheckGridOneComponent(grid, compWhy),
+                          compWhy.empty() ? "grid not one component" : compWhy.c_str(), seed);
+
+                    std::string approachWhy;
+                    Check(CheckApproachPolicy(grid, seed, approachWhy),
+                          approachWhy.empty() ? "approach policy broken" : approachWhy.c_str(), seed);
+
+                    std::string mathWhy;
+                    Check(CheckWorldMathRoundTrip(plan, grid, mathWhy),
+                          mathWhy.empty() ? "world math broken" : mathWhy.c_str(), seed);
                 }
             }
 
@@ -469,7 +671,7 @@ namespace
             maxBlocks = (blocks > maxBlocks) ? blocks : maxBlocks;
         }
 
-        if (longestPath) std::printf("longest room-to-room path: %d cells\\n", longestPath);
+        if (longestPath) std::printf("longest room-to-room path: %d cells\n", longestPath);
         std::printf("blocks per layout: %d..%d\n", minBlocks, maxBlocks);
         std::printf("largest manifest  : %d bytes (budget 2048)\n", static_cast<int>(maxManifest));
         std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);

@@ -1,0 +1,73 @@
+/*
+ * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+ * more details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef MOD_PDUNGEON_V2_CREATURE_AI_H
+#define MOD_PDUNGEON_V2_CREATURE_AI_H
+
+#include "ScriptedCreature.h"
+#include "generator/PDv2WalkGrid.h"
+
+namespace PDungeon
+{
+    class PDv2InstanceScript;
+
+    // Mob AI for the file-less v2 map.
+    //
+    // Map 760 has no mmaps and never will, so core pathfinding degenerates to
+    // straight lines - and a straight line between two platforms crosses the
+    // void. Engine line-of-sight cannot gate the chase either: with no VMAP
+    // and no server terrain, everything on the map "sees" everything else.
+    // The walk grid is the only thing on the server that knows where floor
+    // is, so every movement decision here goes through it:
+    //
+    //   * straight line walkable  -> core chase (its straight line IS safe)
+    //   * otherwise               -> module A* waypoints, executed with
+    //                                MovePoint(generatePath = false)
+    //   * target not on the grid  -> hold; the fall catcher will deal with a
+    //                                player who is over the void
+    //
+    // v1's PDMobAI (PDCreatureAI.h) is the model; the differences are the
+    // grid (8.3 yd cells instead of v1's room tiles) and the gate (grid line
+    // walkability instead of engine LoS, which v1 could use because its walls
+    // were dynamic-tree GameObjects).
+    struct PDv2MobAI : public ScriptedAI
+    {
+        explicit PDv2MobAI(Creature* creature);
+
+        void InitializeAI() override;
+        void JustEngagedWith(Unit* who) override;
+        void UpdateAI(uint32 diff) override;
+        void MovementInform(uint32 type, uint32 id) override;
+
+    protected:
+        bool UpdateGridChase(uint32 diff);
+        void StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid);
+        void MoveToWaypoint(size_t index, WalkGrid const& grid);
+        void StopWaypointRun(bool resumeChase);
+        bool IsLeashed() const;
+
+        PDv2InstanceScript* _instance = nullptr;
+        float _homeX = 0.0f;
+        float _homeY = 0.0f;
+        uint32 _repathTimer = 0;
+        std::vector<GridPoint> _waypoints;
+        size_t _waypointIndex = 0;
+        bool _followingPath = false;
+    };
+}
+
+#endif

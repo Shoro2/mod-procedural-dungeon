@@ -44,6 +44,14 @@ public:
         {
             sPDPaletteMgr->Load(sPDMgr->GetConfig().theme);
         }
+        if (sPDv2Mgr->IsEnabled())
+        {
+            // Startup only, never on `.reload config`: the masks describe the
+            // shipped kit, and a kit change means a new client patch anyway -
+            // that is a restart. Keeping the table immutable after startup is
+            // what lets map threads read it without a lock.
+            sPDv2Mgr->LoadChunkMeta();
+        }
     }
 };
 

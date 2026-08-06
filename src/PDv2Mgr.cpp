@@ -18,9 +18,12 @@
 #include "PDv2Mgr.h"
 
 #include "Config.h"
+#include "DatabaseEnv.h"
 #include "Log.h"
 #include "PDDefines.h"
+#include "generator/PDv2WalkGrid.h"
 
+#include <algorithm>
 #include <cstdio>
 
 namespace PDungeon
@@ -43,6 +46,7 @@ namespace PDungeon
         _config.originBY = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBY", 256);
         _config.loopChancePct = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.LoopChance", 15);
         _config.theme = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.Theme", 1);
+        _config.leashYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.LeashYd", 150.0f);
         _config.manifestPath = sConfigMgr->GetOption<std::string>(
             "ProceduralDungeon.V2.ManifestPath", "");
 
@@ -121,20 +125,64 @@ namespace PDungeon
     void PDv2Mgr::BlockToWorld(int bx, int by, double u, double v,
                                float& x, float& y, float& z) const
     {
-        // Mirrors pd_adt_lib: tile (tx, ty) has its world corner at
-        // ((32 - ty) * TILE, (32 - tx) * TILE); u runs south (-X) and v east (-Y)
-        // from that corner, block by block.
-        int const tx = bx / PD_BLOCKS_PER_TILE;
-        int const ty = by / PD_BLOCKS_PER_TILE;
-        int const blockCol = bx % PD_BLOCKS_PER_TILE;
-        int const blockRow = by % PD_BLOCKS_PER_TILE;
-
-        double const xmax = (32.0 - static_cast<double>(ty)) * PD_TILE_SIZE_YD;
-        double const ymax = (32.0 - static_cast<double>(tx)) * PD_TILE_SIZE_YD;
-
-        x = static_cast<float>(xmax - (static_cast<double>(blockRow) * PD_BLOCK_SIZE_YD + u));
-        y = static_cast<float>(ymax - (static_cast<double>(blockCol) * PD_BLOCK_SIZE_YD + v));
+        // The math lives in generator/PDv2WorldMath.h beside its inverse, so
+        // the harness can prove the two agree - see the header's rationale.
+        double wx = 0.0, wy = 0.0;
+        BlockLocalToWorld(bx, by, u, v, wx, wy);
+        x = static_cast<float>(wx);
+        y = static_cast<float>(wy);
         z = _config.floorZ;
+    }
+
+    void PDv2Mgr::LoadChunkMeta()
+    {
+        _walkMasks.clear();
+
+        // Highest kit version wins per chunk id: rows are read in ascending
+        // kitVersion order and later ones overwrite. Today there is exactly
+        // one kit, so this is bookkeeping for the day there are two.
+        QueryResult result = WorldDatabase.Query(
+            "SELECT chunkId, kitVersion, walkMask FROM pdungeon_chunk_meta "
+            "WHERE theme = '{}' ORDER BY kitVersion", _config.theme);
+        if (!result)
+        {
+            LOG_ERROR(PD_LOG, "PDv2: pdungeon_chunk_meta has no rows for theme {} - "
+                              "mod_pdungeon_chunk_meta.sql was not applied, and no "
+                              "walk grid can be built (creatures will not chase)",
+                      _config.theme);
+            return;
+        }
+
+        uint32 bad = 0;
+        do
+        {
+            Field* fields = result->Fetch();
+            int const chunkId = static_cast<int>(fields[0].Get<uint32>());
+            std::string const rle = fields[2].Get<std::string>();
+
+            std::vector<uint8_t> mask;
+            if (!DecodeWalkMaskRle(rle, mask) ||
+                mask.size() != PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: chunk {} has a malformed walkMask ('{}')",
+                          chunkId, rle);
+                ++bad;
+                continue;
+            }
+
+            auto& slot = _walkMasks[chunkId];
+            std::copy(mask.begin(), mask.end(), slot.begin());
+        } while (result->NextRow());
+
+        LOG_INFO(PD_LOG, "PDv2: loaded {} walk mask(s) from pdungeon_chunk_meta "
+                         "(theme {}, {} malformed)",
+                 uint32(_walkMasks.size()), _config.theme, bad);
+    }
+
+    uint8_t const* PDv2Mgr::WalkMaskFor(int chunkId) const
+    {
+        auto it = _walkMasks.find(chunkId);
+        return it == _walkMasks.end() ? nullptr : it->second.data();
     }
 
     bool PDv2Mgr::EntranceWorldPos(BlockPlan const& plan, float& x, float& y, float& z) const

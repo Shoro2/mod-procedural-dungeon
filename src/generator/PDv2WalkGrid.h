@@ -19,6 +19,7 @@
 #define MOD_PDUNGEON_V2_WALK_GRID_H
 
 #include "PDBlockPlan.h"
+#include "PDv2WorldMath.h"
 
 #include <cstdint>
 #include <functional>
@@ -38,15 +39,22 @@
 // pathing can be checked without a worldserver.
 namespace PDungeon
 {
-    // Cells per block side, and therefore the resolution of everything here.
-    // Fixed by the kit (48_gen_t1_blockkit.py, WALK_CELLS_PER_BLOCK).
-    constexpr int PD_CELLS_PER_BLOCK = 8;
+    // PD_CELLS_PER_BLOCK - the resolution of everything here - lives in
+    // PDv2WorldMath.h next to the yard sizes it divides.
 
     // Hands out a block variant's 8x8 walk mask, row-major, row 0 = north edge,
     // col 0 = west edge. Returns nullptr for a chunk it does not know, which
     // BuildWalkGrid treats as an error rather than as empty space - a silently
     // unwalkable room is worse than a refusal.
     using WalkMaskProvider = std::function<uint8_t const*(int chunkId)>;
+
+    struct GridPoint
+    {
+        int x = 0;
+        int y = 0;
+
+        bool operator==(GridPoint const& o) const { return x == o.x && y == o.y; }
+    };
 
     struct WalkGrid
     {
@@ -67,15 +75,22 @@ namespace PDungeon
                    cells[static_cast<size_t>(cy) * width + cx] != 0;
         }
 
+        // GLOBAL cell coordinate (PDv2WorldMath's WorldToCell frame) <-> this
+        // grid's local cells. Local coordinates may fall outside the grid;
+        // At() treats those as unwalkable, which is what every caller wants.
+        GridPoint LocalFromGlobalCell(int gcx, int gcy) const
+        {
+            return { gcx - originBX * PD_CELLS_PER_BLOCK,
+                     gcy - originBY * PD_CELLS_PER_BLOCK };
+        }
+
+        void GlobalFromLocalCell(GridPoint p, int& gcx, int& gcy) const
+        {
+            gcx = p.x + originBX * PD_CELLS_PER_BLOCK;
+            gcy = p.y + originBY * PD_CELLS_PER_BLOCK;
+        }
+
         size_t WalkableCount() const;
-    };
-
-    struct GridPoint
-    {
-        int x = 0;
-        int y = 0;
-
-        bool operator==(GridPoint const& o) const { return x == o.x && y == o.y; }
     };
 
     // Lays every placed block's mask into one grid spanning the plan's bounding
@@ -98,6 +113,34 @@ namespace PDungeon
     // that landed just off the grid. Returns false when nothing is near.
     bool NearestWalkable(WalkGrid const& grid, int cx, int cy, int radius,
                          GridPoint& out);
+
+    // True when every cell under the straight line between two cell centres is
+    // walkable. This is the chase gate: engine line-of-sight cannot serve on
+    // map 760, because the server has no VMAP and no terrain there - the
+    // engine sees a clear line straight across the void between two platforms,
+    // and a creature sent down that line walks off the world.
+    bool GridLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b);
+
+    // What a creature at `from` should do about a target at `to`.
+    enum class ApproachKind
+    {
+        Direct,      // the straight line is walkable - core chase movement is safe
+        Path,        // follow `waypoints` with MovePoint(generatePath = false)
+        Unreachable  // no walkable route within reach; hold position
+    };
+
+    // Both endpoints are snapped to the nearest walkable cell within
+    // `snapRadius` first, because a live position rarely sits dead on a
+    // walkable cell centre. `waypoints` is filled for Path only: the
+    // simplified cell chain from the snapped start (index 0) to the snapped
+    // goal, every consecutive pair joined by a walkable straight line.
+    ApproachKind PlanApproach(WalkGrid const& grid, GridPoint from, GridPoint to,
+                              int snapRadius, std::vector<GridPoint>& waypoints);
+
+    // 'RLE1:<value>*<count>[,...]' -> bytes; the wire form of a walk mask in
+    // `pdungeon_chunk_meta`. Shared by the harness and the server-side loader
+    // so there is exactly one parser to get wrong.
+    bool DecodeWalkMaskRle(std::string const& text, std::vector<uint8_t>& out);
 }
 
 #endif

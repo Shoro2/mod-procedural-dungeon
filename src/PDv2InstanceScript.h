@@ -20,6 +20,7 @@
 
 #include "InstanceScript.h"
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2WalkGrid.h"
 
 #include <cstdint>
 #include <vector>
@@ -53,8 +54,15 @@ namespace PDungeon
         void Update(uint32 diff) override;
         void OnPlayerEnter(Player* player) override;
 
+        // The walkable surface of this instance's plan, or nullptr while no
+        // plan is bound yet (or its masks are missing). The creature AI paths
+        // over this; it is built once on first entry and read-only afterwards,
+        // and AI updates run on this map's own update thread, so no lock.
+        WalkGrid const* GetWalkGrid() const { return _gridReady ? &_grid : nullptr; }
+
     private:
         void SpawnFromPlan(BlockPlan const& plan);
+        void EnsureWalkGrid(BlockPlan const& plan);
         void CatchFallers();
 
         uint32_t _accountId = 0;
@@ -64,6 +72,9 @@ namespace PDungeon
         float    _entranceY = 0.0f;
         float    _entranceZ = 0.0f;
         bool     _haveEntrance = false;
+        WalkGrid _grid;
+        bool     _gridReady = false;
+        bool     _gridTried = false;
     };
 }
 

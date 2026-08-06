@@ -187,6 +187,10 @@ private:
                                  cfg.enabled ? "enabled" : "disabled", cfg.mapId, cfg.floorZ,
                                  cfg.rooms, cfg.bossRooms, cfg.fieldBlocks,
                                  cfg.originBX, cfg.originBY);
+        // 0 here means mod_pdungeon_chunk_meta.sql never reached the world DB
+        // - the one failure that makes every mob stand still.
+        handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded | leash {:.0f} yd",
+                                 uint32(sPDv2Mgr->WalkMaskCount()), cfg.leashYd);
 
         BlockPlan const* plan = sPDv2Mgr->GetPlan(AccountOf(handler));
         if (!plan)

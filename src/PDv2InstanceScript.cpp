@@ -81,11 +81,39 @@ namespace PDungeon
             _haveEntrance = true;
         }
 
+        EnsureWalkGrid(*plan);
+
         if (!_spawned)
         {
             SpawnFromPlan(*plan);
             _spawned = true;
         }
+    }
+
+    void PDv2InstanceScript::EnsureWalkGrid(BlockPlan const& plan)
+    {
+        if (_gridTried)
+        {
+            return;
+        }
+        _gridTried = true;
+
+        std::string error;
+        if (!BuildWalkGrid(plan, [](int chunkId) { return sPDv2Mgr->WalkMaskFor(chunkId); },
+                           &_grid, &error))
+        {
+            // Without the grid the mobs stand where they spawned and never
+            // chase - the dungeon degrades, it does not crash. Loud log line
+            // because the only known cause is kit metadata that was not
+            // applied or does not match the plan's chunk ids.
+            LOG_ERROR(PD_LOG, "PDv2: instance {} could not build its walk grid ({}) - "
+                              "creatures will not chase", instance->GetInstanceId(), error);
+            return;
+        }
+        _gridReady = true;
+        LOG_DEBUG(PD_LOG, "PDv2: instance {} walk grid {}x{} cells, {} walkable",
+                  instance->GetInstanceId(), _grid.width, _grid.height,
+                  uint32(_grid.WalkableCount()));
     }
 
     void PDv2InstanceScript::SpawnFromPlan(BlockPlan const& plan)

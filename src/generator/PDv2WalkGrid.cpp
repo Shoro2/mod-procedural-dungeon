@@ -203,31 +203,29 @@ namespace PDungeon
         return true;
     }
 
-    namespace
+    // Every cell a straight line between two cell centres passes through must
+    // be walkable, or the shortcut would cut a corner. Public because it is
+    // also the creature AI's chase gate (see the header).
+    bool GridLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b)
     {
-        // Every cell a straight line between two cell centres passes through must
-        // be walkable, or the shortcut would cut a corner.
-        bool LineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b)
+        int const steps = std::max(std::abs(b.x - a.x), std::abs(b.y - a.y));
+        if (steps == 0)
         {
-            int const steps = std::max(std::abs(b.x - a.x), std::abs(b.y - a.y));
-            if (steps == 0)
-            {
-                return grid.At(a.x, a.y);
-            }
-            for (int i = 0; i <= steps; ++i)
-            {
-                // Rounded sampling: the midpoint of a step must be solid too,
-                // otherwise a diagonal run could clip a corner between cells.
-                double const t = static_cast<double>(i) / steps;
-                int const x = static_cast<int>(std::lround(a.x + (b.x - a.x) * t));
-                int const y = static_cast<int>(std::lround(a.y + (b.y - a.y) * t));
-                if (!grid.At(x, y))
-                {
-                    return false;
-                }
-            }
-            return true;
+            return grid.At(a.x, a.y);
         }
+        for (int i = 0; i <= steps; ++i)
+        {
+            // Rounded sampling: the midpoint of a step must be solid too,
+            // otherwise a diagonal run could clip a corner between cells.
+            double const t = static_cast<double>(i) / steps;
+            int const x = static_cast<int>(std::lround(a.x + (b.x - a.x) * t));
+            int const y = static_cast<int>(std::lround(a.y + (b.y - a.y) * t));
+            if (!grid.At(x, y))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     void SimplifyGridPath(WalkGrid const& grid, std::vector<GridPoint>& path)
@@ -245,7 +243,7 @@ namespace PDungeon
             size_t best = anchor + 1;
             for (size_t probe = path.size() - 1; probe > anchor + 1; --probe)
             {
-                if (LineWalkable(grid, path[anchor], path[probe]))
+                if (GridLineWalkable(grid, path[anchor], path[probe]))
                 {
                     best = probe;
                     break;
@@ -284,5 +282,67 @@ namespace PDungeon
             }
         }
         return false;
+    }
+
+    ApproachKind PlanApproach(WalkGrid const& grid, GridPoint from, GridPoint to,
+                              int snapRadius, std::vector<GridPoint>& waypoints)
+    {
+        waypoints.clear();
+
+        GridPoint start, goal;
+        if (!NearestWalkable(grid, from.x, from.y, snapRadius, start) ||
+            !NearestWalkable(grid, to.x, to.y, snapRadius, goal))
+        {
+            // One end is nowhere near the walkable surface - a target mid-jump
+            // over the void, or a position that is not on this layout at all.
+            // Walking toward it would walk off the world, so: hold.
+            return ApproachKind::Unreachable;
+        }
+
+        if (GridLineWalkable(grid, start, goal))
+        {
+            return ApproachKind::Direct;
+        }
+
+        std::vector<GridPoint> path;
+        if (!FindGridPath(grid, start, goal, path))
+        {
+            return ApproachKind::Unreachable;
+        }
+        SimplifyGridPath(grid, path);
+        waypoints.swap(path);
+        return ApproachKind::Path;
+    }
+
+    bool DecodeWalkMaskRle(std::string const& text, std::vector<uint8_t>& out)
+    {
+        out.clear();
+        if (text.compare(0, 5, "RLE1:") != 0)
+        {
+            return false;
+        }
+        size_t at = 5;
+        while (at < text.size())
+        {
+            size_t const star = text.find('*', at);
+            if (star == std::string::npos)
+            {
+                return false;
+            }
+            size_t comma = text.find(',', star);
+            if (comma == std::string::npos)
+            {
+                comma = text.size();
+            }
+            int const value = std::atoi(text.substr(at, star - at).c_str());
+            int const count = std::atoi(text.substr(star + 1, comma - star - 1).c_str());
+            if (count <= 0)
+            {
+                return false;
+            }
+            out.insert(out.end(), static_cast<size_t>(count), static_cast<uint8_t>(value));
+            at = comma + 1;
+        }
+        return true;
     }
 }
