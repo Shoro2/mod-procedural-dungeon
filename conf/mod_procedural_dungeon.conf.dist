@@ -214,3 +214,109 @@ ProceduralDungeon.Announce = 1
 #        Default:     0
 
 ProceduralDungeon.Debug = 0
+
+###############################################################################
+# PROCEDURAL DUNGEON v2 (block kit, client-composed terrain)
+#
+# v2 does not spawn a dungeon out of GameObjects. It decides which kit block
+# sits at which block coordinate, says so in an FLPD2 manifest, and the client
+# composes the terrain from that. The server keeps NO terrain files for the
+# dungeon map, which is what makes a layout per player possible at all.
+#
+# This is the FIRST slice of the engine glue. There is no AIO push and no entry
+# gate yet, so the `.pdungeon v2` commands are GM-only: a player without the
+# client DLL would enter the map and find nothing but void.
+#
+# v1's keys above are untouched and v1 keeps working until it is replaced.
+###############################################################################
+
+#
+#    ProceduralDungeon.V2.Enable
+#        Description: Enable the v2 command family. Off by default.
+#        Default:     0
+#
+
+ProceduralDungeon.V2.Enable = 0
+
+#
+#    ProceduralDungeon.V2.MapId
+#        Description: The dungeon's own map. Needs its Map/MapDifficulty/
+#                     AreaTable rows client-side and the map_dbc /
+#                     mapdifficulty_dbc / areatable_dbc / instance_template
+#                     rows server-side - both are produced by
+#                     ForgottenLand2.0/scripts/47_pd_map760_rows.py.
+#        Default:     760
+#
+
+ProceduralDungeon.V2.MapId = 760
+
+#
+#    ProceduralDungeon.V2.FloorZ
+#        Description: The kit's floor plane. MUST match the height the block kit
+#                     was generated at, or the server places players above or
+#                     below the terrain the client draws.
+#        Default:     50.0
+#
+
+ProceduralDungeon.V2.FloorZ = 50.0
+
+#
+#    ProceduralDungeon.V2.Rooms / .BossRooms
+#        Description: Rooms in a generated layout, before and as boss rooms.
+#                     dlvl scaling will drive these later; for now they are fixed.
+#        Default:     5 / 1
+#
+
+ProceduralDungeon.V2.Rooms = 5
+ProceduralDungeon.V2.BossRooms = 1
+
+#
+#    ProceduralDungeon.V2.FieldBlocks
+#        Description: Planning field, in blocks, square. 8 is exactly one ADT
+#                     tile, so a layout of that size composes into a single tile.
+#        Default:     8
+#
+
+ProceduralDungeon.V2.FieldBlocks = 8
+
+#
+#    ProceduralDungeon.V2.OriginBX / .OriginBY
+#        Description: Global block coordinate of the field's origin. A tile is 8
+#                     blocks, so 256 puts the field on tile 32. Changing these
+#                     moves the dungeon to another tile of the same map.
+#        Default:     256 / 256
+#
+
+ProceduralDungeon.V2.OriginBX = 256
+ProceduralDungeon.V2.OriginBY = 256
+
+#
+#    ProceduralDungeon.V2.LoopChance
+#        Description: Percent chance to keep a non-MST edge, which is what makes
+#                     a layout a graph rather than a tree.
+#        Default:     15
+#
+
+ProceduralDungeon.V2.LoopChance = 15
+
+#
+#    ProceduralDungeon.V2.Theme
+#        Description: 1 = floating platforms. Theme 2 (Stormwind Vault) does not
+#                     exist yet.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.Theme = 1
+
+#
+#    ProceduralDungeon.V2.ManifestPath
+#        Description: Where `.pdungeon v2 gen` writes the manifest. This is a
+#                     TEMPORARY transport: until PDClientLink pushes manifests
+#                     over AIO, the operator hands the file to the client with
+#                     the DLL's dev-only LOAD verb. Empty disables writing.
+#        Default:     "" (disabled)
+#        Example:     "C:/wowstuff/ForgottenLand2.0/output/pd_live_manifest.txt"
+#
+
+ProceduralDungeon.V2.ManifestPath = ""
+

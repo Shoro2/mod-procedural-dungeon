@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify
@@ -21,6 +21,7 @@ void AddPDCreatureScripts();
 void AddPDEntranceNPCScripts();
 void AddPDExitObjectScripts();
 void AddPDCommandScripts();
+void AddPDv2CommandScripts();
 
 // Name contract with the CMake module loader: mod-procedural-dungeon ->
 // Addmod_procedural_dungeonScripts().
@@ -32,4 +33,5 @@ void Addmod_procedural_dungeonScripts()
     AddPDEntranceNPCScripts();
     AddPDExitObjectScripts();
     AddPDCommandScripts();
+    AddPDv2CommandScripts();
 }

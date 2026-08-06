@@ -1,0 +1,110 @@
+/*
+ * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful, but WITHOUT
+ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+ * FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+ * more details.
+ *
+ * You should have received a copy of the GNU General Public License along
+ * with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef MOD_PDUNGEON_V2_MGR_H
+#define MOD_PDUNGEON_V2_MGR_H
+
+#include "generator/PDBlockPlan.h"
+
+#include <cstdint>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
+class Player;
+
+// PDv2 engine glue, first slice.
+//
+// v1 rasterises a layout and spawns it as GameObjects. v2 does neither: the
+// server decides which kit block sits where, says so in an FLPD2 manifest, and
+// the client composes the terrain from that. So this manager's whole job on the
+// world side is to hold a plan per account and to answer "where in the world is
+// that block".
+//
+// What this slice deliberately does NOT do yet, so each piece can be built and
+// tested before the next is written:
+//   * no AIO push - the manifest is written to a file and the DLL's dev-only
+//     LOAD verb picks it up. PDClientLink replaces that.
+//   * no entry gate - OnPlayerCanEnterMap is not hooked, so a player without
+//     the DLL would enter and see void. GM-only commands keep that contained.
+//   * no creatures, no walk grid, no kill plane. The server still has no idea
+//     where the floor is (`GroundZ -100000`); only the client does.
+namespace PDungeon
+{
+    struct PDv2Config
+    {
+        bool        enabled = false;
+        uint32_t    mapId = 760;
+        float       floorZ = 50.0f;      // must match the kit's floor plane
+        int         rooms = 5;
+        int         bossRooms = 1;
+        int         fieldBlocks = 8;
+        int         originBX = 256;      // 256/8 = tile 32
+        int         originBY = 256;
+        int         loopChancePct = 15;
+        int         theme = 1;
+        std::string manifestPath;        // where `v2 gen` writes the manifest
+    };
+
+    // Geometry shared with the kit generator (48_gen_t1_blockkit.py) and the
+    // composer. Changing any of these here alone silently desynchronises the
+    // server's idea of where a block is from the terrain the client draws.
+    constexpr double PD_TILE_SIZE_YD = 533.33333;
+    constexpr int    PD_BLOCKS_PER_TILE = 8;
+    constexpr double PD_BLOCK_SIZE_YD = PD_TILE_SIZE_YD / PD_BLOCKS_PER_TILE;
+
+    class PDv2Mgr
+    {
+    public:
+        static PDv2Mgr* instance();
+
+        void LoadConfig();
+        PDv2Config const& GetConfig() const { return _config; }
+        bool IsEnabled() const { return _config.enabled; }
+
+        // Builds a plan for `accountId` and replaces any previous one. Returns
+        // false when the generator could not produce a valid layout.
+        bool GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out);
+
+        // The stored plan, or nullptr when the account has none.
+        BlockPlan const* GetPlan(uint32_t accountId) const;
+
+        // Writes the manifest for `plan` to the configured path. Until
+        // PDClientLink exists this file IS the transport: the operator feeds it
+        // to the DLL by hand.
+        bool WriteManifest(BlockPlan const& plan, uint32_t seq, std::string& pathOut,
+                           std::string& error) const;
+
+        // World position of a point inside a block. `u` runs north to south and
+        // `v` west to east, both in yards from the block's north-west corner -
+        // the same FLPD-BLOCK-1 frame the kit's anchors use.
+        void BlockToWorld(int bx, int by, double u, double v,
+                          float& x, float& y, float& z) const;
+
+        // Convenience: the middle of a plan's entrance block.
+        bool EntranceWorldPos(BlockPlan const& plan, float& x, float& y, float& z) const;
+
+    private:
+        PDv2Config _config;
+        mutable std::mutex _lock;
+        std::unordered_map<uint32_t, BlockPlan> _plans;
+    };
+}
+
+#define sPDv2Mgr PDungeon::PDv2Mgr::instance()
+
+#endif

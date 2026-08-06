@@ -1,4 +1,4 @@
-/*
+﻿/*
  * This file is part of the AzerothCore Project. See AUTHORS file for Copyright information
  *
  * This program is free software; you can redistribute it and/or modify
@@ -19,6 +19,7 @@
 #include "PDDefines.h"
 #include "PDMgr.h"
 #include "PDPaletteMgr.h"
+#include "PDv2Mgr.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 
@@ -30,6 +31,7 @@ public:
     void OnAfterConfigLoad(bool reload) override
     {
         sPDMgr->LoadConfig();
+        sPDv2Mgr->LoadConfig();
         if (reload && sPDMgr->IsEnabled())
         {
             sPDPaletteMgr->Load(sPDMgr->GetConfig().theme);
