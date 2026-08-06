@@ -82,13 +82,41 @@ namespace PDungeon
             _haveEntrance = true;
         }
 
+        // A plan can be re-rolled while this instance is alive - the account
+        // keeps the instance, so the old creatures and the old walk grid would
+        // otherwise survive under new terrain. Rebuilding on a seed change is
+        // what makes `.pdungeon v2 gen` mean the same thing inside as outside.
+        if (_spawned && _spawnedSeed != plan->effectiveSeed)
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} was built for seed {}, plan is now {} - "
+                             "rebuilding", instance->GetInstanceId(), _spawnedSeed,
+                     plan->effectiveSeed);
+            DespawnAll();
+            _spawned = false;
+            _gridReady = false;
+            _gridTried = false;
+        }
+
         EnsureWalkGrid(*plan);
 
         if (!_spawned)
         {
             SpawnFromPlan(*plan);
             _spawned = true;
+            _spawnedSeed = plan->effectiveSeed;
         }
+    }
+
+    void PDv2InstanceScript::DespawnAll()
+    {
+        for (ObjectGuid const& guid : _spawnedGuids)
+        {
+            if (Creature* c = instance->GetCreature(guid))
+            {
+                c->DespawnOrUnsummon();
+            }
+        }
+        _spawnedGuids.clear();
     }
 
     void PDv2InstanceScript::EnsureWalkGrid(BlockPlan const& plan)
@@ -150,6 +178,17 @@ namespace PDungeon
                                                            Position(x, y, z + 0.5f, 0.0f)))
                 {
                     c->SetHomePosition(x, y, z + 0.5f, 0.0f);
+
+                    // Gravity OFF, and this is not cosmetic: the server has no
+                    // terrain here, so Map::GetHeight answers INVALID_HEIGHT
+                    // and every creature is permanently "above nothing" - they
+                    // fall through the platforms the client draws (operator
+                    // report 2026-08-06). Disabling gravity pins them to the
+                    // floor plane the kit was generated at, which is the only
+                    // floor the server knows. Movement is unaffected: the walk
+                    // grid drives it and every waypoint carries the same Z.
+                    c->SetDisableGravity(true);
+                    _spawnedGuids.push_back(c->GetGUID());
                     ++spawned;
                 }
             }

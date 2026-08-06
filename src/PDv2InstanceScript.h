@@ -19,6 +19,7 @@
 #define MOD_PDUNGEON_V2_INSTANCE_SCRIPT_H
 
 #include "InstanceScript.h"
+#include "ObjectGuid.h"
 #include "generator/PDBlockPlan.h"
 #include "generator/PDv2WalkGrid.h"
 
@@ -62,12 +63,15 @@ namespace PDungeon
 
     private:
         void SpawnFromPlan(BlockPlan const& plan);
+        void DespawnAll();
         void EnsureWalkGrid(BlockPlan const& plan);
         void CatchFallers();
         void EvictDisconnected();
 
         uint32_t _accountId = 0;
         bool     _spawned = false;
+        uint32_t _spawnedSeed = 0;              // plan this instance is built for
+        std::vector<ObjectGuid> _spawnedGuids;  // for a rebuild when the plan changes
         uint32   _fallCheckTimer = 0;
         float    _entranceX = 0.0f;
         float    _entranceY = 0.0f;
