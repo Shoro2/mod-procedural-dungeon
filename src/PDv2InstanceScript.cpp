@@ -91,7 +91,7 @@ namespace PDungeon
             _accountId = player->GetSession()->GetAccountId();
         }
 
-        BlockPlan const* plan = sPDv2Mgr->GetPlan(_accountId);
+        auto const plan = sPDv2Mgr->GetPlan(_accountId);
         if (!plan)
         {
             LOG_WARN(PD_LOG, "PDv2: player {} entered map {} with no stored plan - "

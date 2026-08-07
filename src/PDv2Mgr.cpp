@@ -108,8 +108,14 @@ namespace PDungeon
 
     void PDv2Mgr::StorePlan(uint32_t accountId, BlockPlan const& plan)
     {
+        // A fresh immutable object every time, replaced under the lock: readers
+        // that fetched the previous shared_ptr keep a complete, never-mutated
+        // plan for as long as they hold it. That is the whole fix for the
+        // pointer-into-the-map pattern this replaced - a re-roll can no longer
+        // pull the plan out from under a map thread mid-read.
+        auto fresh = std::make_shared<BlockPlan const>(plan);
         std::lock_guard<std::mutex> guard(_lock);
-        _plans[accountId] = plan;
+        _plans[accountId] = std::move(fresh);
     }
 
     void PDv2Mgr::SavePlanToDB(uint32_t accountId, BlockPlan const& plan)
@@ -323,11 +329,11 @@ namespace PDungeon
                  accountId, seed, uint32(plan.blocks.size()));
     }
 
-    BlockPlan const* PDv2Mgr::GetPlan(uint32_t accountId) const
+    std::shared_ptr<BlockPlan const> PDv2Mgr::GetPlan(uint32_t accountId) const
     {
         std::lock_guard<std::mutex> guard(_lock);
         auto it = _plans.find(accountId);
-        return it == _plans.end() ? nullptr : &it->second;
+        return it == _plans.end() ? nullptr : it->second;
     }
 
     bool PDv2Mgr::WriteManifest(BlockPlan const& plan, uint32_t seq, std::string& pathOut,

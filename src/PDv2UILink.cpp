@@ -266,7 +266,7 @@ namespace PDungeon
         }
 
         uint32_t const accountId = AccountOf(player);
-        BlockPlan const* plan = accountId ? sPDv2Mgr->GetPlan(accountId) : nullptr;
+        auto const plan = accountId ? sPDv2Mgr->GetPlan(accountId) : nullptr;
         if (!plan)
         {
             outcome.error = "no layout for this account yet - generate one first";
@@ -376,7 +376,7 @@ namespace PDungeon
 
     void PDv2UILink::SendMap(Player* player)
     {
-        BlockPlan const* plan = sPDv2Mgr->GetPlan(PlanOwnerFor(player));
+        auto const plan = sPDv2Mgr->GetPlan(PlanOwnerFor(player));
         if (!plan || plan->blocks.empty())
         {
             return;
@@ -445,7 +445,7 @@ namespace PDungeon
         // (which on this map means they are falling, and the fall catcher is
         // about to move them anyway).
         int px = -1, py = -1;
-        if (BlockPlan const* plan = sPDv2Mgr->GetPlan(script->GetAccountId()))
+        if (auto const plan = sPDv2Mgr->GetPlan(script->GetAccountId()))
         {
             int minBX = 0, minBY = 0, w = 0, h = 0;
             PlanBounds(*plan, minBX, minBY, w, h);

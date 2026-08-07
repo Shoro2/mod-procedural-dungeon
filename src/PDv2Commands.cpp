@@ -198,7 +198,7 @@ private:
         handler->PSendSysMessage("pdungeon v2: {}",
                                  sPDv2UILink->DebugLine(AccountOf(handler)));
 
-        BlockPlan const* plan = sPDv2Mgr->GetPlan(AccountOf(handler));
+        auto const plan = sPDv2Mgr->GetPlan(AccountOf(handler));
         if (!plan)
         {
             handler->SendSysMessage("pdungeon v2: no plan stored for this account.");

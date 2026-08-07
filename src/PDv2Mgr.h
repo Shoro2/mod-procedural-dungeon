@@ -24,6 +24,7 @@
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -126,8 +127,16 @@ namespace PDungeon
         // generator could not produce a valid layout.
         bool GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out);
 
-        // The stored plan, or nullptr when the account has none.
-        BlockPlan const* GetPlan(uint32_t accountId) const;
+        // The stored plan, or an empty pointer when the account has none.
+        //
+        // shared_ptr rather than a raw pointer into the map, and the pointee is
+        // immutable: StorePlan REPLACES the shared object instead of mutating
+        // it, so a reader on a map thread keeps a complete plan even while a
+        // re-roll swaps the account's current one. The raw-pointer form this
+        // replaced was only safe because MapUpdate.Threads = 1 - a constraint
+        // nobody should have to remember when F7 raises it (12-server-todo §5,
+        // closed 2026-08-07).
+        std::shared_ptr<BlockPlan const> GetPlan(uint32_t accountId) const;
 
         // Restores the account's persisted layout by REGENERATING it from the
         // stored seed + generation inputs (a plan is deterministic, so no
@@ -194,7 +203,7 @@ namespace PDungeon
 
         PDv2Config _config;
         mutable std::mutex _lock;
-        std::unordered_map<uint32_t, BlockPlan> _plans;
+        std::unordered_map<uint32_t, std::shared_ptr<BlockPlan const>> _plans;
         std::unordered_map<uint32_t, PDv2AccountState> _accounts;
         std::unordered_map<int, std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK>> _walkMasks;
     };

@@ -172,7 +172,7 @@ namespace PDungeon
     bool PDClientLink::PushManifest(Player* player, std::string& error)
     {
         uint32_t const accountId = AccountOf(player);
-        BlockPlan const* plan = accountId ? sPDv2Mgr->GetPlan(accountId) : nullptr;
+        auto const plan = accountId ? sPDv2Mgr->GetPlan(accountId) : nullptr;
         if (!plan)
         {
             error = "no plan stored for this account";
