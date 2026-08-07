@@ -17,6 +17,7 @@
 
 #include "Creature.h"
 #include "Log.h"
+#include "LootMgr.h"
 #include "Map.h"
 #include "PDDefines.h"
 #include "PDv2InstanceScript.h"
@@ -228,8 +229,52 @@ public:
     // it advertises.
 };
 
+// 01 §8's loot lever. The other half of it - the FL mat bonus roll - lives in
+// PDv2InstanceScript::OnMobDied, because it belongs to a KILL in a run rather
+// than to a global hook that fires everywhere on the server.
+class PDv2LootScript : public PlayerScript
+{
+public:
+    PDv2LootScript() : PlayerScript("PDv2LootScript", { PLAYERHOOK_ON_BEFORE_LOOT_MONEY }) { }
+
+    void OnPlayerBeforeLootMoney(Player* player, Loot* loot) override
+    {
+        if (!player || !loot || !loot->gold || !sPDv2Mgr->IsEnabled())
+        {
+            return;
+        }
+
+        Map* map = player->FindMap();
+        if (!map || map->GetId() != sPDv2Mgr->GetConfig().mapId)
+        {
+            return;
+        }
+
+        PDv2InstanceScript* run = dynamic_cast<PDv2InstanceScript*>(player->GetInstanceScript());
+        if (!run)
+        {
+            return;
+        }
+
+        // lootMult = d x (0.7 + 0.5 x r) - difficulty is ALREADY inside it
+        // (PDv2GameMath.h:181). Multiplying by d again here would pay a d = 3.0
+        // run nine times, not three.
+        //
+        // The creature's native loot table is untouched, here and everywhere:
+        // farming stock creatures for stock drops is the whole design of 01 §8,
+        // and a module that rewrote those tables would be a different feature.
+        uint16 const lootMultX100 = run->GetRunState().lootMultX100;
+        if (lootMultX100 == 100)
+        {
+            return;
+        }
+        loot->gold = static_cast<uint32>(static_cast<uint64>(loot->gold) * lootMultX100 / 100);
+    }
+};
+
 void AddPDv2ScalingScripts()
 {
     new PDv2CreatureScaling();
     new PDv2DamageScaling();
+    new PDv2LootScript();
 }

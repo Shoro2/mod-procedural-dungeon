@@ -23,6 +23,7 @@
 #include "InstanceScript.h"
 #include "Log.h"
 #include "Map.h"
+#include "ObjectMgr.h"
 #include "PDDefines.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
@@ -50,6 +51,24 @@ namespace PDungeon
         uint32 const PLACEHOLDER_CREATURE = 29402;   // Anub'ar Skirmisher
 
         float const SPAWN_SPREAD_YD = 12.0f;
+
+        // The 01 §8 bonus-roll table: the FL mats from mod_pdungeon_flmats.sql,
+        // weighted hard toward the cheap end (the weights are percent and sum
+        // to 100). A flat table would make the top mat as common as the bottom
+        // one and there would be no ladder left to climb.
+        struct BonusMat
+        {
+            uint32 entry;
+            int    weight;
+        };
+
+        BonusMat const BONUS_MATS[5] = {
+            { 920100, 60 },     // Forgotten Shard
+            { 920101, 25 },     // Forgotten Sliver
+            { 920102, 10 },     // Forgotten Fragment
+            { 920103,  4 },     // Forgotten Core
+            { 920104,  1 }      // Forgotten Relic
+        };
     }
 
     PDv2InstanceScript::PDv2InstanceScript(InstanceMap* map) : InstanceScript(map)
@@ -128,7 +147,62 @@ namespace PDungeon
         return dirty;
     }
 
-    void PDv2InstanceScript::OnMobDied(Creature* creature, Unit* /*killer*/)
+    void PDv2InstanceScript::RollBonusLoot(Unit* killer)
+    {
+        // A pet, guardian or totem got the last hit as often as its owner did;
+        // the credit belongs to the player either way.
+        Player* player = killer ? killer->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
+        if (!player || !player->GetSession())
+        {
+            return;
+        }
+
+        int const bonusPct = sPDv2Mgr->GetConfig().lootBonusRollPct;
+        if (bonusPct <= 0)
+        {
+            return;
+        }
+
+        // Basis points, so the loot multiplier's two decimals survive the roll:
+        // chance% is BonusRollPct x lootMult, and lootMult is already carried
+        // x100, so their product IS the chance in 1/10000.
+        int const chanceBp = bonusPct * static_cast<int>(_run.lootMultX100);
+
+        // THE DETERMINISM BOUNDARY RUNS HERE. Layout and spawn selection go
+        // through PDRandom because a dungeon that reshuffles itself between
+        // visits is a different dungeon. A loot roll must not: seeded, the same
+        // kill on the same seed would drop the same mat for ever, which turns
+        // farming into a lookup table. So the rolls below use the core's urand.
+        if (static_cast<int>(urand(1, 10000)) > chanceBp)
+        {
+            return;
+        }
+
+        int roll = static_cast<int>(urand(1, 100));
+        uint32 entry = BONUS_MATS[0].entry;
+        for (BonusMat const& mat : BONUS_MATS)
+        {
+            roll -= mat.weight;
+            if (roll <= 0)
+            {
+                entry = mat.entry;
+                break;
+            }
+        }
+
+        // AddItem sends the standard received-item line, and says so itself
+        // when the bags are full - nothing to add in that case.
+        if (!player->AddItem(entry, 1))
+        {
+            return;
+        }
+
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
+        ChatHandler(player->GetSession()).PSendSysMessage(
+            "Bonus: {}", proto ? proto->Name1 : std::string("?"));
+    }
+
+    void PDv2InstanceScript::OnMobDied(Creature* creature, Unit* killer)
     {
         if (!creature)
         {
@@ -161,6 +235,11 @@ namespace PDungeon
             }
         }
         MarkRunDirty();
+
+        // 01 §8: the FL mats drop ON TOP of whatever the creature's own loot
+        // table gives, which is what makes the dungeon a way to farm existing
+        // content rather than a replacement for it.
+        RollBonusLoot(killer);
 
         if (!_run.complete && _run.bossTotal > 0 && _run.bossKilled >= _run.bossTotal)
         {

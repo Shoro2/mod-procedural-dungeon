@@ -125,6 +125,7 @@ namespace PDungeon
         void SpawnFromPlan(BlockPlan const& plan);
         void MarkRunDirty() { _runDirty = true; }
         void FinishRun();
+        void RollBonusLoot(Unit* killer);
         void DespawnAll();
         void EnsureWalkGrid(BlockPlan const& plan);
         void CatchFallers();
