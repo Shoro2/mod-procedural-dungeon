@@ -20,9 +20,10 @@
 #include "PDClientLink.h"
 #include "PDDefines.h"
 #include "PDv2Mgr.h"
+#include "PDv2UILink.h"
 #include "Player.h"
-#include "Random.h"
 #include "ScriptMgr.h"
+#include "generator/PDBlockPlan.h"
 
 #include <sstream>
 
@@ -76,9 +77,13 @@ private:
         return player && player->GetSession() ? player->GetSession()->GetAccountId() : 0;
     }
 
-    // Plans a layout, stores it for the account and writes the manifest. Prints
-    // the LOAD line the operator needs, because until PDClientLink exists the
-    // manifest reaches the client by hand.
+    // Plans a layout, stores it for the account and pushes the manifest.
+    //
+    // The doing lives in PDv2DoGenerate, which the gen panel's Generate button
+    // calls too - ONE implementation, two entry points, so the command and the
+    // button can never diverge into two dungeons. What stays here is what only
+    // a GM wants: the ascii map and the manifest file the DLL's dev-only LOAD
+    // verb reads.
     static bool HandleV2GenCommand(ChatHandler* handler, Optional<uint32> seedArg)
     {
         if (!RequireEnabled(handler))
@@ -86,18 +91,12 @@ private:
             return true;
         }
 
-        uint32 const accountId = AccountOf(handler);
-        if (!accountId)
-        {
-            handler->SendSysMessage("pdungeon v2: needs a logged-in character (plans are per account).");
-            return true;
-        }
-
-        uint32 const seed = seedArg.value_or(urand(1, 0x7FFFFFFE));
         BlockPlan plan;
-        if (!sPDv2Mgr->GeneratePlan(accountId, seed, plan))
+        PDv2GenOutcome const outcome =
+            PDv2DoGenerate(handler->GetPlayer(), seedArg.value_or(0), &plan);
+        if (!outcome.ok)
         {
-            handler->PSendSysMessage("pdungeon v2: generation FAILED for seed {}.", seed);
+            handler->PSendSysMessage("pdungeon v2: {}.", outcome.error);
             return true;
         }
 
@@ -108,28 +107,18 @@ private:
             handler->SendSysMessage(line.c_str());
         }
 
-        uint32 rooms = 0;
-        for (PlacedBlock const& b : plan.blocks)
-        {
-            if (b.roomId >= 0)
-            {
-                ++rooms;
-            }
-        }
         handler->PSendSysMessage("pdungeon v2: seed {} -> {} blocks ({} rooms, {} corridors).",
-                                 plan.effectiveSeed, uint32(plan.blocks.size()), rooms,
-                                 uint32(plan.blocks.size()) - rooms);
+                                 outcome.seed, outcome.blocks, outcome.rooms,
+                                 outcome.blocks - outcome.rooms);
 
-        // The real transport: push over the addon channel and wait for READY.
-        std::string pushError;
-        if (sPDClientLink->PushManifest(handler->GetPlayer(), pushError))
+        if (outcome.pushed)
         {
             handler->SendSysMessage("pdungeon v2: layout pushed to your client - "
                                     "`.pdungeon v2 info` shows when it is READY.");
         }
         else
         {
-            handler->PSendSysMessage("pdungeon v2: push failed ({}).", pushError);
+            handler->PSendSysMessage("pdungeon v2: push failed ({}).", outcome.pushError);
         }
 
         // Dev fallback while the addon path earns its T2: the file the DLL's
@@ -144,6 +133,12 @@ private:
         return true;
     }
 
+    // The gate and the teleport live in PDv2DoEnter, shared with the panel's
+    // Enter button. GMs bypass OnPlayerCanEnterMap in the core
+    // (MapMgr.cpp:158-159), so that helper runs the same gate itself -
+    // otherwise the GM the tests are run on would never exercise it, and
+    // entering unready CRASHES the client. `enter force` is the one extra this
+    // command keeps: it skips the gate for the old DLL-LOAD dev loop.
     static bool HandleV2EnterCommand(ChatHandler* handler, Optional<std::string> forceArg)
     {
         if (!RequireEnabled(handler))
@@ -157,55 +152,28 @@ private:
             return false;
         }
 
-        BlockPlan const* plan = sPDv2Mgr->GetPlan(AccountOf(handler));
-        if (!plan)
-        {
-            handler->SendSysMessage("pdungeon v2: no plan for this account yet - run `.pdungeon v2 gen` first.");
-            return true;
-        }
-
-        // GMs bypass OnPlayerCanEnterMap in the core (MapMgr.cpp:158-159), so
-        // this command runs the same gate itself - otherwise the GM the tests
-        // are run on would never exercise it, and entering unready CRASHES the
-        // client. `enter force` keeps the old DLL-LOAD dev loop usable.
-        if (!forceArg || *forceArg != "force")
-        {
-            std::string whyNot;
-            if (!sPDClientLink->MayEnter(player, whyNot))
-            {
-                handler->PSendSysMessage("pdungeon v2: NOT entering - {}", whyNot);
-                handler->SendSysMessage("pdungeon v2: `.pdungeon v2 enter force` skips "
-                                        "this check (dev only - an unready client "
-                                        "CRASHES on this map).");
-                return true;
-            }
-        }
-        else
+        bool const force = forceArg && *forceArg == "force";
+        if (force)
         {
             handler->SendSysMessage("pdungeon v2: gate SKIPPED by force - your client "
                                     "better be serving this layout.");
         }
 
-        float x = 0.0f, y = 0.0f, z = 0.0f;
-        if (!sPDv2Mgr->EntranceWorldPos(*plan, x, y, z))
+        PDv2EnterOutcome const outcome = PDv2DoEnter(player, force);
+        if (!outcome.ok)
         {
-            handler->SendSysMessage("pdungeon v2: the stored plan has no entrance block.");
-            return true;
-        }
-
-        // +2 yards so the arrival is above the floor plane rather than in it.
-        // The server has no height data for this map, so nothing would catch a
-        // spawn placed below it.
-        uint32 const mapId = sPDv2Mgr->GetConfig().mapId;
-        if (!player->TeleportTo(mapId, x, y, z + 2.0f, 0.0f, TELE_TO_GM_MODE))
-        {
-            handler->PSendSysMessage("pdungeon v2: teleport to map {} failed - check the "
-                                     "instance_template and map_dbc rows.", mapId);
+            handler->PSendSysMessage("pdungeon v2: NOT entering - {}", outcome.error);
+            if (!force)
+            {
+                handler->SendSysMessage("pdungeon v2: `.pdungeon v2 enter force` skips "
+                                        "this check (dev only - an unready client "
+                                        "CRASHES on this map).");
+            }
             return true;
         }
 
         handler->PSendSysMessage("pdungeon v2: entering map {} at {:.2f} {:.2f} {:.2f}.",
-                                 mapId, x, y, z + 2.0f);
+                                 sPDv2Mgr->GetConfig().mapId, outcome.x, outcome.y, outcome.z);
         handler->SendSysMessage("pdungeon v2: if the terrain is missing, the client has not "
                                 "loaded this layout's manifest yet.");
         return true;
@@ -225,6 +193,10 @@ private:
                                  uint32(sPDv2Mgr->WalkMaskCount()));
         handler->PSendSysMessage("pdungeon v2: {}",
                                  sPDClientLink->DebugLine(AccountOf(handler)));
+        // The panel's side of the same conversation: whether this account's
+        // client has ever opened the UI, and what it last asked to change.
+        handler->PSendSysMessage("pdungeon v2: {}",
+                                 sPDv2UILink->DebugLine(AccountOf(handler)));
 
         BlockPlan const* plan = sPDv2Mgr->GetPlan(AccountOf(handler));
         if (!plan)

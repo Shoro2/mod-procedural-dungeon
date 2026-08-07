@@ -27,6 +27,7 @@
 #include "PDDefines.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
+#include "PDv2UILink.h"
 #include "Player.h"
 #include "Position.h"
 #include "TemporarySummon.h"
@@ -257,6 +258,10 @@ namespace PDungeon
         // what proves the run. Difficulty pays nothing on purpose (the formula
         // has no difficulty argument, and PDv2GameMath.h says why).
         PDv2RunReward const reward = sPDv2Mgr->GrantRunReward(_accountId, _run.roomsTotal);
+
+        // The HUD's completion toast rides the same grant the chat lines below
+        // announce, and fires exactly once because FinishRun does.
+        sPDv2UILink->SendEnd(instance, reward);
 
         Map::PlayerList const& players = instance->GetPlayers();
         for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
@@ -569,6 +574,11 @@ namespace PDungeon
             {
                 _run.elapsedSec = GetMSTimeDiffToNow(_run.startedMs) / 1000;
             }
+
+            // The HUD's whole pull side, after the clock so the frame carries
+            // the second it was sent in. The link decides whether anything is
+            // worth saying; a still dungeon costs nothing on the wire.
+            sPDv2UILink->OnInstanceTick(this);
         }
         else
         {

@@ -26,6 +26,7 @@
 #include "Opcodes.h"
 #include "PDDefines.h"
 #include "PDv2Mgr.h"
+#include "PDv2UILink.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "WorldPacket.h"
@@ -51,24 +52,31 @@ namespace PDungeon
         {
             return static_cast<uint64_t>(GameTime::GetGameTimeMS().count());
         }
+    }
 
-        // The same packet shape mod-ale's Player:SendAddonMessage builds - the
-        // one transport into the client that is already proven on this server.
-        void SendAddonWhisper(Player* player, std::string const& payload)
+    // The same packet shape mod-ale's Player:SendAddonMessage builds - the
+    // one transport into the client that is already proven on this server.
+    // Namespace scope rather than file-local since PDv2UILink pushes over the
+    // same channel with its own prefix; see the header for why it is shared.
+    void SendAddonWhisper(Player* player, char const* prefix, std::string const& payload)
+    {
+        if (!player || !player->GetSession())
         {
-            std::string const fullmsg = std::string(PREFIX_DOWN) + "\t" + payload;
-
-            WorldPacket data(SMSG_MESSAGECHAT, 100);
-            data << uint8(CHAT_MSG_WHISPER);
-            data << int32(LANG_ADDON);
-            data << player->GetGUID();
-            data << uint32(0);
-            data << player->GetGUID();
-            data << uint32(fullmsg.length() + 1);
-            data << fullmsg;
-            data << uint8(0);
-            player->GetSession()->SendPacket(&data);
+            return;
         }
+
+        std::string const fullmsg = std::string(prefix) + "\t" + payload;
+
+        WorldPacket data(SMSG_MESSAGECHAT, 100);
+        data << uint8(CHAT_MSG_WHISPER);
+        data << int32(LANG_ADDON);
+        data << player->GetGUID();
+        data << uint32(0);
+        data << player->GetGUID();
+        data << uint32(fullmsg.length() + 1);
+        data << fullmsg;
+        data << uint8(0);
+        player->GetSession()->SendPacket(&data);
     }
 
     PDClientLink* PDClientLink::instance()
@@ -140,6 +148,15 @@ namespace PDungeon
             return;
         }
 
+        // Everything the gen panel and the HUD say rides this same up channel
+        // under one verb, so the two links never have to agree on anything but
+        // where the prefix ends. PDv2UILink owns the rest of the sentence.
+        if (body.compare(0, 3, "UI ") == 0)
+        {
+            sPDv2UILink->HandleClientVerb(player, body.substr(3));
+            return;
+        }
+
         if (body.compare(0, 4, "ACK ") == 0)
         {
             std::string const ack = body.substr(4);
@@ -169,7 +186,7 @@ namespace PDungeon
         }
 
         std::string const manifest = EmitManifest(*plan, static_cast<int>(seq));
-        SendAddonWhisper(player, "M" + manifest);
+        SendAddonWhisper(player, PREFIX_DOWN, "M" + manifest);
         LOG_INFO(PD_LOG, "PDv2 link: pushed manifest seq {} ({} bytes) to account {}",
                  seq, uint32(manifest.size()), accountId);
         return true;
@@ -234,6 +251,12 @@ namespace PDungeon
                                "again in a moment";
                 return false;
         }
+    }
+
+    LinkVerdict PDClientLink::CurrentVerdict(uint32_t accountId)
+    {
+        std::lock_guard<std::mutex> guard(_lock);
+        return _state.Verdict(accountId, _requiredVersion);
     }
 
     std::string PDClientLink::DebugLine(uint32_t accountId)

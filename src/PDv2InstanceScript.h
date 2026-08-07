@@ -118,6 +118,11 @@ namespace PDungeon
         // are only ever moved by OnMobDied, on this map's own update thread.
         PDv2RunState const& GetRunState() const { return _run; }
 
+        // The account this instance was BUILT for - the one whose stored plan
+        // the terrain and the spawns came from, which is not necessarily the
+        // account of whoever is reading. 0 until the first player enters.
+        uint32_t GetAccountId() const { return _accountId; }
+
         // Returns and CLEARS "a counter moved since you last asked". The UI
         // polls the instance once a second and only sends a frame when this
         // says something happened, so a player standing still costs nothing on

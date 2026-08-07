@@ -47,6 +47,14 @@ class Player;
 // is acceptable (the gate is crash protection, not anti-cheat).
 namespace PDungeon
 {
+    // The one transport this module has into the client: a LANG_ADDON whisper
+    // the player sends to themselves, in the packet shape mod-ale's
+    // Player:SendAddonMessage builds. Shared with PDv2UILink rather than
+    // copied, because a second copy of a packet layout is a second place for
+    // it to drift - the prefix is the only thing the two links disagree about
+    // ("FLPDS" carries manifests, "FLPDU" carries the panel and the HUD).
+    void SendAddonWhisper(Player* player, char const* prefix, std::string const& payload);
+
     class PDClientLink
     {
     public:
@@ -64,6 +72,11 @@ namespace PDungeon
         // The gate. On a pending-but-unanswered push this also spends the one
         // automatic re-push before saying no.
         bool MayEnter(Player* player, std::string& whyNot);
+
+        // The gate's current answer WITHOUT MayEnter's side effects (that one
+        // can spend the automatic re-push, which a display read must never
+        // do). This is what the UI's link line reports.
+        LinkVerdict CurrentVerdict(uint32_t accountId);
 
         // One line for `.pdungeon v2 info`.
         std::string DebugLine(uint32_t accountId);
