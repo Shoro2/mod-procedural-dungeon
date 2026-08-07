@@ -24,6 +24,7 @@ void AddPDCommandScripts();
 void AddPDv2CommandScripts();
 void AddPDv2MapScripts();
 void AddPDv2CreatureScripts();
+void AddPDv2ScalingScripts();
 void AddPDClientLinkScripts();
 
 // Name contract with the CMake module loader: mod-procedural-dungeon ->
@@ -39,5 +40,6 @@ void Addmod_procedural_dungeonScripts()
     AddPDv2CommandScripts();
     AddPDv2MapScripts();
     AddPDv2CreatureScripts();
+    AddPDv2ScalingScripts();
     AddPDClientLinkScripts();
 }
