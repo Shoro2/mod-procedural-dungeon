@@ -21,6 +21,8 @@
 //
 //   pdblock <seed> [rooms]               one layout: ASCII map + FLPD2 manifest
 //   pdblock --batch <n> [rooms]          invariants + determinism over n seeds
+//   pdblock --roomcap [n]                the 01 §8 room-cap measurement table
+//                                        that decides PD_GAME_ROOMS_CAP_MEASURED
 //   pdblock --manifest <seed> <file> [rooms]
 //                                        writes the manifest as raw bytes, for
 //                                        feeding to 49_pd_compose_blocks.py
@@ -38,6 +40,7 @@
 #endif
 
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2GameMath.h"
 #include "generator/PDv2LinkState.h"
 #include "generator/PDv2WalkGrid.h"
 
@@ -632,11 +635,339 @@ namespace
               "no repush credit left over after invalidation", 0);
     }
 
+    // --- 01 §8 game math ---------------------------------------------------
+    //
+    // The formulas are cheap, so the sweeps below are exhaustive over the whole
+    // input range rather than sampled. Each sweep reports ONE check per dlvl so
+    // the failure counter stays readable; the message carries the exact input
+    // that broke, which is the part a reader needs.
+
+    void RunGameMathChecks()
+    {
+        char msg[160];
+
+        // The anchor values 01 §8 states outright. If one of these moves, the
+        // doc and the code have diverged and one of the two is wrong.
+        Check(GameLootMultX100(100, PD_GAME_CASTER_PCT_DEFAULT) == 100,
+              "lootMult at the 01 §8 defaults must be exactly 1.00", 0);
+        Check(GameDiffMinX100() == 50, "difficulty floor must be d = 0.5", 0);
+        Check(GameDiffMaxX100(0) == 100, "difficulty band at dlvl 0 must top out at d = 1.0", 0);
+        Check(GameClampDiffX100(0, 0) == 50 && GameClampDiffX100(400, 0) == 100,
+              "the dlvl 0 band must be exactly [50, 100]", 0);
+        Check(GameDiffMaxX100(8) == 300, "d = 3.0 must be reached at dlvl 8", 0);
+        Check(GameDiffMaxX100(9) == 300, "d = 3.0 is a ceiling, not another step", 0);
+        Check(GameClampDiffX100(137, 40) == 125, "137 must snap DOWN to 125", 0);
+        Check(GameBossRooms(0) == 1 && GameBossRooms(9) == 1 && GameBossRooms(10) == 2,
+              "boss rooms must follow 1 + dlvl/10", 0);
+        Check(GameCreatureTypes(0) == 1 && GameCreatureTypes(2) == 1 &&
+              GameCreatureTypes(3) == 2 && GameCreatureTypes(30) == 11,
+              "creature types must follow 1 + dlvl/3", 0);
+        Check(GameClampCasterPct(PD_GAME_CASTER_PCT_DEFAULT) == PD_GAME_CASTER_PCT_DEFAULT,
+              "the default caster ratio must survive its own clamp", 0);
+
+        // Rooms: the cap is min(measured, design, 3 + dlvl) at every dlvl, and
+        // it never goes down as dlvl goes up.
+        for (int dlvl = 0; dlvl <= 40; ++dlvl)
+        {
+            int want = 3 + dlvl;
+            if (want > PD_GAME_ROOMS_CAP_DESIGN) want = PD_GAME_ROOMS_CAP_DESIGN;
+            if (want > PD_GAME_ROOMS_CAP_MEASURED) want = PD_GAME_ROOMS_CAP_MEASURED;
+            std::snprintf(msg, sizeof(msg),
+                          "GameRoomsCap(%d) = %d, expected min(measured %d, 15, 3+dlvl)",
+                          dlvl, GameRoomsCap(dlvl), PD_GAME_ROOMS_CAP_MEASURED);
+            Check(GameRoomsCap(dlvl) == want, msg, 0);
+            if (dlvl > 0)
+            {
+                std::snprintf(msg, sizeof(msg), "GameRoomsCap went DOWN between dlvl %d and %d",
+                              dlvl - 1, dlvl);
+                Check(GameRoomsCap(dlvl) >= GameRoomsCap(dlvl - 1), msg, 0);
+            }
+        }
+
+        // Difficulty and room clamps must never return an out-of-band or
+        // off-grid value, for any input a command or a corrupt DB row can hand
+        // them - including the negative and absurd ones.
+        for (int dlvl = 0; dlvl <= 40; ++dlvl)
+        {
+            bool band = true, grid = true, down = true, stable = true;
+            bool roomsOk = true;
+            int badAt = 0;
+            for (int wanted = -100; wanted <= 400; ++wanted)
+            {
+                int const d = GameClampDiffX100(wanted, dlvl);
+                if (d < GameDiffMinX100() || d > GameDiffMaxX100(dlvl))
+                {
+                    band = false;
+                    badAt = wanted;
+                }
+                if (d % PD_GAME_DIFF_STEP_X100 != 0)
+                {
+                    grid = false;
+                    badAt = wanted;
+                }
+                // Snapping DOWN: a legal request is never rounded UP past what
+                // the player asked for.
+                if (wanted >= GameDiffMinX100() && d > wanted)
+                {
+                    down = false;
+                    badAt = wanted;
+                }
+                if (GameClampDiffX100(d, dlvl) != d)
+                {
+                    stable = false;
+                    badAt = wanted;
+                }
+
+                int const r = GameClampRooms(wanted, dlvl);
+                if (r < PD_GAME_ROOMS_MIN || r > GameRoomsCap(dlvl) ||
+                    GameClampRooms(r, dlvl) != r)
+                {
+                    roomsOk = false;
+                    badAt = wanted;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "difficulty clamp left the band at dlvl %d (wanted %d)",
+                          dlvl, badAt);
+            Check(band, msg, 0);
+            std::snprintf(msg, sizeof(msg), "difficulty clamp left the 0.25 grid at dlvl %d (wanted %d)",
+                          dlvl, badAt);
+            Check(grid, msg, 0);
+            std::snprintf(msg, sizeof(msg), "difficulty clamp rounded UP at dlvl %d (wanted %d)",
+                          dlvl, badAt);
+            Check(down, msg, 0);
+            std::snprintf(msg, sizeof(msg), "difficulty clamp is not idempotent at dlvl %d (wanted %d)",
+                          dlvl, badAt);
+            Check(stable, msg, 0);
+            std::snprintf(msg, sizeof(msg), "room clamp left [3, cap] at dlvl %d (wanted %d)",
+                          dlvl, badAt);
+            Check(roomsOk, msg, 0);
+        }
+
+        // Caster ratio: band, idempotence, and the fact that the clamp is the
+        // only thing standing between a config typo and a pack full of casters.
+        {
+            bool ok = true;
+            int badAt = 0;
+            for (int pct = -200; pct <= 400; ++pct)
+            {
+                int const c = GameClampCasterPct(pct);
+                if (c < PD_GAME_CASTER_PCT_MIN || c > PD_GAME_CASTER_PCT_MAX ||
+                    GameClampCasterPct(c) != c)
+                {
+                    ok = false;
+                    badAt = pct;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "caster ratio clamp broke at %d", badAt);
+            Check(ok, msg, 0);
+        }
+
+        // Level band: every level snaps onto the 1, 6, ... 76 grid, and the
+        // band it opens ([min, min+4]) never runs past 80.
+        {
+            bool ok = true;
+            int badAt = 0;
+            for (int lvl = -10; lvl <= 120; ++lvl)
+            {
+                int const b = GameClampBandMin(lvl);
+                if (b < PD_GAME_BAND_MIN || b > PD_GAME_BAND_MAX ||
+                    (b - PD_GAME_BAND_MIN) % PD_GAME_BAND_STEP != 0 ||
+                    b + 4 > 80 || GameClampBandMin(b) != b)
+                {
+                    ok = false;
+                    badAt = lvl;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "level band snap broke at level %d", badAt);
+            Check(ok, msg, 0);
+            Check(GameClampBandMin(80) == 76 && GameClampBandMin(76) == 76,
+                  "the top band must be 76..80", 0);
+            Check(GameClampBandMin(5) == 1 && GameClampBandMin(6) == 6,
+                  "the level band must snap DOWN, not to nearest", 0);
+        }
+
+        // Loot multiplier: exact on the whole legal grid, monotone in both
+        // inputs (a player who raises difficulty or caster share must never see
+        // loot go down), and never rounded into a surprise.
+        {
+            bool mono = true;
+            int prevD = -1;
+            int badAt = 0;
+            for (int d = GameDiffMinX100(); d <= 300; d += PD_GAME_DIFF_STEP_X100)
+            {
+                int prevC = -1;
+                for (int c = PD_GAME_CASTER_PCT_MIN; c <= PD_GAME_CASTER_PCT_MAX; ++c)
+                {
+                    int const m = GameLootMultX100(d, c);
+                    if (m < prevC || m <= 0)
+                    {
+                        mono = false;
+                        badAt = d * 1000 + c;
+                    }
+                    prevC = m;
+                }
+                int const atDefault = GameLootMultX100(d, PD_GAME_CASTER_PCT_DEFAULT);
+                if (atDefault < prevD)
+                {
+                    mono = false;
+                    badAt = d;
+                }
+                prevD = atDefault;
+            }
+            std::snprintf(msg, sizeof(msg), "loot multiplier is not monotone (at %d)", badAt);
+            Check(mono, msg, 0);
+            Check(GameLootMultX100(50, 20) == 40, "lootMult at the floor must be 0.5 x 0.8", 0);
+            Check(GameLootMultX100(300, 80) == 330, "lootMult at the ceiling must be 3.0 x 1.1", 0);
+        }
+
+        // dxp -> dlvl, and the run reward that feeds it.
+        {
+            Check(GameDlvlFromDxp(0, 100, 30) == 0, "no dxp means dlvl 0", 0);
+            Check(GameDlvlFromDxp(99, 100, 30) == 0, "a partial level is not a level", 0);
+            Check(GameDlvlFromDxp(100, 100, 30) == 1, "one level's dxp is one dlvl", 0);
+            Check(GameDlvlFromDxp(0xFFFFFFFFu, 1, 30) == 30,
+                  "the cap must hold before the narrowing cast, not after", 0);
+            Check(GameDlvlFromDxp(1000, 0, 30) == 0, "a zero curve must not divide by zero", 0);
+
+            bool mono = true;
+            uint32_t badAt = 0;
+            for (uint32_t dxp = 0; dxp <= 5000; dxp += 7)
+            {
+                if (GameDlvlFromDxp(dxp + 7, 100, 30) < GameDlvlFromDxp(dxp, 100, 30))
+                {
+                    mono = false;
+                    badAt = dxp;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "dlvl went DOWN as dxp went up (at %u)", badAt);
+            Check(mono, msg, 0);
+
+            Check(GameRunDxp(5, 10) == 50u, "run dxp must be rooms x XP.PerRoom", 0);
+            Check(GameRunDxp(0, 10) == 0u && GameRunDxp(-3, 10) == 0u,
+                  "a run that cleared nothing pays nothing", 0);
+
+            // 01 §8: difficulty must NOT be an XP lever. The signature has no
+            // difficulty argument, so this holds by construction - the loop is
+            // here to make the intent break loudly if someone ever adds one.
+            bool flat = true;
+            for (int diff = GameDiffMinX100(); diff <= 300; diff += PD_GAME_DIFF_STEP_X100)
+            {
+                (void)diff;
+                if (GameRunDxp(7, 10) != 70u)
+                {
+                    flat = false;
+                }
+            }
+            Check(flat, "run dxp must be difficulty-independent (01 §8)", 0);
+        }
+    }
+
+    // --- the room-cap measurement (01 §8 cap 15 vs. what the kit allows) ----
+    //
+    // Two physical constraints bound the room count and NEITHER is negotiable
+    // here: the manifest is one addon packet, and the field stays 8x8 (one ADT
+    // tile) because multi-tile plans are untested client-side. So the cap is
+    // measured against the shipped generator rather than designed.
+
+    struct RoomCapRow
+    {
+        int    rooms = 0;
+        int    bossRooms = 0;
+        int    failures = 0;
+        size_t maxManifest = 0;
+    };
+
+    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds)
+    {
+        RoomCapRow row;
+        row.rooms = rooms;
+        row.bossRooms = bossRooms;
+
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 1u;
+            BlockCfg cfg = MakeCfg(seed, rooms);
+            cfg.bossRooms = bossRooms;
+
+            BlockPlan plan;
+            if (!GenerateBlockPlan(cfg, &plan))
+            {
+                ++row.failures;
+                continue;
+            }
+            // seq 99 rather than 1: a two-digit sequence number is the widest
+            // the header realistically carries, so the length measured here is
+            // the worst case rather than the prettiest one.
+            std::string const m = EmitManifest(plan, 99);
+            row.maxManifest = (m.size() > row.maxManifest) ? m.size() : row.maxManifest;
+        }
+        return row;
+    }
+
+    // Largest room count that generates on EVERY seed and still fits the
+    // manifest budget, with the boss-room count a player at that dlvl would
+    // actually run (rooms R unlocks at dlvl R - 3, per 01 §8 "3 + dlvl").
+    int MeasureRoomCap(int seeds, bool verbose)
+    {
+        if (verbose)
+        {
+            std::printf("room-cap measurement: %d seeds per row, field 8x8, "
+                        "manifest budget %d B\n\n", seeds, PD_GAME_MANIFEST_BUDGET_B);
+            std::printf("  rooms  boss  cells   genfail  maxManifest  verdict\n");
+        }
+
+        int cap = PD_GAME_ROOMS_MIN;
+        for (int rooms = PD_GAME_ROOMS_MIN; rooms <= PD_GAME_ROOMS_CAP_DESIGN; ++rooms)
+        {
+            int const boss = GameBossRooms(rooms - PD_GAME_ROOMS_MIN);
+            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds);
+            bool const ok = row.failures == 0 &&
+                            row.maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B);
+            if (ok)
+            {
+                cap = rooms;
+            }
+            if (verbose)
+            {
+                std::printf("  %5d  %4d  %5d   %7d  %11d  %s\n", row.rooms, row.bossRooms,
+                            row.rooms + row.bossRooms, row.failures,
+                            static_cast<int>(row.maxManifest), ok ? "ok" : "FAILS");
+            }
+        }
+        return cap;
+    }
+
+    int RunRoomCap(int seeds)
+    {
+        int const measured = MeasureRoomCap(seeds, true);
+        std::printf("\nlargest room count clean on every seed: %d\n", measured);
+        std::printf("PD_GAME_ROOMS_CAP_MEASURED currently encodes: %d\n",
+                    PD_GAME_ROOMS_CAP_MEASURED);
+        std::printf("%s\n", measured >= PD_GAME_ROOMS_CAP_MEASURED
+                                ? "the encoded cap holds"
+                                : "THE ENCODED CAP IS TOO HIGH - update PDv2GameMath.h");
+        return measured >= PD_GAME_ROOMS_CAP_MEASURED ? 0 : 1;
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
 
         RunLinkStateChecks();
+        RunGameMathChecks();
+
+        // The encoded room cap is a MEASUREMENT, so it has to be re-measured or
+        // it rots: a generator change that makes packing harder would otherwise
+        // only surface as accounts whose dungeon stopped generating.
+        int const measuredCap = MeasureRoomCap(count, false);
+        {
+            char msg[160];
+            std::snprintf(msg, sizeof(msg),
+                          "PD_GAME_ROOMS_CAP_MEASURED is %d but only %d is clean over %d seeds "
+                          "- re-run `pdblock --roomcap`", PD_GAME_ROOMS_CAP_MEASURED,
+                          measuredCap, count);
+            Check(measuredCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
+        }
 
         size_t maxManifest = 0;
         int longestPath = 0;
@@ -761,6 +1092,10 @@ int main(int argc, char** argv)
         int const n = (argc >= 3) ? std::atoi(argv[2]) : 100;
         int const rooms = (argc >= 4) ? std::atoi(argv[3]) : 5;
         return RunBatch(n, rooms);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--roomcap") == 0)
+    {
+        return RunRoomCap((argc >= 3) ? std::atoi(argv[2]) : 300);
     }
     if (argc >= 4 && std::strcmp(argv[1], "--manifest") == 0)
     {
