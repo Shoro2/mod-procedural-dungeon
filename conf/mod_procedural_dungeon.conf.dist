@@ -263,7 +263,11 @@ ProceduralDungeon.V2.FloorZ = 50.0
 #
 #    ProceduralDungeon.V2.Rooms / .BossRooms
 #        Description: Rooms in a generated layout, before and as boss rooms.
-#                     dlvl scaling will drive these later; for now they are fixed.
+#                     These are now the FALLBACK only: an account that has a
+#                     pdungeon_account row gets 01 §8's rooms (its own cfg_rooms
+#                     clamped into 3 + dlvl, hard cap 15) and boss rooms
+#                     (1 + dlvl/10) instead. They still decide what a fresh
+#                     install generates before anyone has played.
 #        Default:     5 / 1
 #
 
@@ -340,4 +344,71 @@ ProceduralDungeon.V2.AckTimeoutMs = 5000
 #
 
 ProceduralDungeon.V2.ManifestPath = ""
+
+#
+#    ProceduralDungeon.V2.XP.PerRoom
+#        Description: Dungeon XP awarded per room cleared. 01 §8: dungeon XP is
+#                     rooms x this and NOTHING else - deliberately independent
+#                     of difficulty, because the moment difficulty pays XP the
+#                     only rational setting is the highest one.
+#        Default:     10
+#
+
+ProceduralDungeon.V2.XP.PerRoom = 10
+
+#
+#    ProceduralDungeon.V2.XP.PerDlvl
+#        Description: Dungeon XP needed per dungeon level. The dxp -> dlvl curve
+#                     is linear and lives here rather than in the code because
+#                     01 §8 leaves it open until play says what it should be.
+#        Default:     100
+#
+
+ProceduralDungeon.V2.XP.PerDlvl = 100
+
+#
+#    ProceduralDungeon.V2.DlvlCap
+#        Description: Highest reachable dungeon level. Past dlvl 12 the room
+#                     count is already at its cap and only the difficulty band
+#                     and creature variety keep growing.
+#        Default:     30
+#
+
+ProceduralDungeon.V2.DlvlCap = 30
+
+#
+#    ProceduralDungeon.V2.SpawnsPerRoom
+#        Description: Creatures placed in each non-entrance room. A boss room
+#                     spends one of these on its boss and fills the rest with
+#                     trash. The room is 66.67 yd square, so this is a density
+#                     knob, not a difficulty one - difficulty scales HP and
+#                     damage (01 §8), never the head count.
+#        Default:     3
+#
+
+ProceduralDungeon.V2.SpawnsPerRoom = 3
+
+#
+#    ProceduralDungeon.V2.Loot.BonusRollPct
+#        Description: Chance per kill of a module-side bonus roll on the FL mat
+#                     table (items 920100+), on TOP of the creature's native
+#                     loot, which stays untouched - that is what makes the
+#                     dungeon a target-farming mechanism (01 §8). The roll is
+#                     scaled by lootMult = d x (0.7 + 0.5 x r).
+#        Default:     15
+#
+
+ProceduralDungeon.V2.Loot.BonusRollPct = 15
+
+#
+#    ProceduralDungeon.V2.CastRangeYd
+#        Description: How far a caster-role creature will hold and cast from.
+#                     Pack members are only given a casterSpellId whose spell
+#                     actually reaches this far; raising it past a spell's own
+#                     range turns that caster into a mob that silently never
+#                     casts, so re-check mod_pdungeon_packs.sql if you change it.
+#        Default:     25.0
+#
+
+ProceduralDungeon.V2.CastRangeYd = 25.0
 

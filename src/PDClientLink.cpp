@@ -318,7 +318,12 @@ public:
         {
             return;
         }
-        sPDv2Mgr->LoadPlanFromDB(player->GetSession()->GetAccountId());
+        uint32 const accountId = player->GetSession()->GetAccountId();
+        // Progression and the cfg_* knobs first: GeneratePlan reads them to
+        // decide how many rooms the account's dungeon has, so a reroll that
+        // beat this load would size the dungeon off stale defaults.
+        sPDv2Mgr->LoadAccountState(accountId);
+        sPDv2Mgr->LoadPlanFromDB(accountId);
     }
 
     void OnPlayerBeforeSendChatMessage(Player* player, uint32& type, uint32& lang,
