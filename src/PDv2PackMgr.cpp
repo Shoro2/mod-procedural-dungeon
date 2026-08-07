@@ -209,27 +209,53 @@ namespace PDungeon
 
         std::vector<PackMember const*> trash;
         std::vector<PackMember const*> bosses;
-        for (Pack const& p : _packs)
+        auto fillPool = [&](bool applyBand)
         {
-            if (static_cast<int>(p.unlockDlvl) > in.unlockedDlvl)
+            trash.clear();
+            bosses.clear();
+            for (Pack const& p : _packs)
             {
-                continue;
-            }
-            if (static_cast<int>(p.levelMax) < bandLo || static_cast<int>(p.levelMin) > bandHi)
-            {
-                continue;
-            }
-            for (PackMember const& m : p.members)
-            {
-                if (m.role == PACK_ROLE_BOSS)
+                if (static_cast<int>(p.unlockDlvl) > in.unlockedDlvl)
                 {
-                    bosses.push_back(&m);
+                    continue;
                 }
-                else
+                if (applyBand &&
+                    (static_cast<int>(p.levelMax) < bandLo || static_cast<int>(p.levelMin) > bandHi))
                 {
-                    trash.push_back(&m);
+                    continue;
+                }
+                for (PackMember const& m : p.members)
+                {
+                    if (m.role == PACK_ROLE_BOSS)
+                    {
+                        bosses.push_back(&m);
+                    }
+                    else
+                    {
+                        trash.push_back(&m);
+                    }
                 }
             }
+        };
+
+        fillPool(true);
+        if (trash.empty() && bosses.empty() && !_packs.empty())
+        {
+            // A DATA state must never produce an empty dungeon. v1's imported
+            // stock is single-band (every pack is level 80), so an account row
+            // still holding cfg_mob_level_min's column default of 1 asks for a
+            // band no pack answers - and a player would walk into a dungeon
+            // with nothing in it and no way to tell why.
+            // mod_pdungeon_account_bandheal.sql repairs the rows; this repairs
+            // the RUN, for every other way a band can end up empty (a pack
+            // disabled by hand, a theme whose stock does not cover the grid).
+            //
+            // Deliberately kept trivially readable and one level deep: this
+            // path reads the world DB, so the harness cannot reach it, and a
+            // fallback nobody can test has to be a fallback anybody can read.
+            LOG_WARN(PD_LOG, "PDv2: band {}..{} matches no pack - falling back to all "
+                             "unlocked packs", bandLo, bandHi);
+            fillPool(false);
         }
 
         if (trash.empty() && bosses.empty())
