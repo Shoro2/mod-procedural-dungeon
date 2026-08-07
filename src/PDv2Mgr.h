@@ -69,6 +69,7 @@ namespace PDungeon
         int         spawnsPerRoom = 3;
         int         lootBonusRollPct = 15;
         float       castRangeYd = 25.0f;
+        float       aggroRangeYd = 20.0f;
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the

@@ -21,6 +21,8 @@
 #include "PDDefines.h"
 #include "PDv2InstanceScript.h"
 #include "PDv2Mgr.h"
+#include "PDv2PackMgr.h"
+#include "Player.h"
 #include "ScriptMgr.h"
 
 namespace PDungeon
@@ -55,6 +57,15 @@ namespace PDungeon
     PDv2MobAI::PDv2MobAI(Creature* creature) : ScriptedAI(creature)
     {
         _instance = GetV2Instance(creature);
+
+        // The tag may not be there YET. This AI is built inside SummonCreature
+        // (AddToWorld -> AIM_Initialize, Creature.cpp:319), which runs before
+        // the instance script has the pointer back and can tag anything - so
+        // the constructor takes the tag if it exists and UpdateAI keeps asking
+        // until it does. Get, never GetDefault: the tag's PRESENCE is what says
+        // "the dungeon spawned this", and creating one here would hand that
+        // status to every creature the AI has ever been attached to.
+        _mob = creature->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY);
     }
 
     void PDv2MobAI::JustEngagedWith(Unit* /*who*/)
@@ -65,6 +76,13 @@ namespace PDungeon
         // floor. Decide on the very next UpdateAI tick.
         StopWaypointRun(false);
         _repathTimer = 0;
+
+        // Same for the caster's plant. AttackStart has just put this creature
+        // back into a chase, so a _holding left over from the last fight would
+        // skip the stop and leave it running at the target while casting.
+        _holding = false;
+        _lineOk = false;
+        _lineTimer = 0;
     }
 
     void PDv2MobAI::JustDied(Unit* killer)
@@ -219,8 +237,164 @@ namespace PDungeon
         }
     }
 
+    bool PDv2MobAI::GridLineOkTo(Unit* victim) const
+    {
+        WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
+        if (!victim)
+        {
+            return false;
+        }
+        if (!grid)
+        {
+            // No grid means the server knows nothing about floor at all, which
+            // EnsureWalkGrid already reported as an error. In that state the
+            // melee mobs stand still but still swing at whatever reaches them;
+            // a caster that refused to cast on top of that would add nothing
+            // but a second symptom. Distance alone decides.
+            return true;
+        }
+
+        // The same policy the chase runs on, not a second line test:
+        // PlanApproach snaps both ends onto the walkable surface first (a live
+        // position rarely sits on a cell centre) and answers Direct exactly
+        // when the straight line between them is floor the whole way. That
+        // equivalence is what the harness pins in CheckApproachPolicy.
+        //
+        // NEVER IsWithinLOSInMap here. Map 760 has no VMAP and no terrain, so
+        // engine line of sight is true between any two points including
+        // straight across the void (pd/02 §7) - a caster gated on it would
+        // plant itself and nuke a player it has no floor to reach.
+        std::vector<GridPoint> waypoints;
+        return PlanApproach(*grid,
+                            CellOf(*grid, me->GetPositionX(), me->GetPositionY()),
+                            CellOf(*grid, victim->GetPositionX(), victim->GetPositionY()),
+                            SNAP_RADIUS_CELLS, waypoints) == ApproachKind::Direct;
+    }
+
+    void PDv2MobAI::UpdateCasterCombat(uint32 diff)
+    {
+        Unit* victim = me->GetVictim();
+        float const castRange = sPDv2Mgr->GetConfig().castRangeYd;
+
+        // Distance first, because it is a subtraction and it decides whether
+        // the expensive half is worth running at all. The line test is a grid
+        // search, so it rides the chase decision's own 500 ms cadence; between
+        // refreshes the last verdict stands.
+        bool hold = victim && me->IsWithinCombatRange(victim, castRange);
+        if (hold)
+        {
+            if (_lineTimer > diff)
+            {
+                _lineTimer -= diff;
+            }
+            else
+            {
+                _lineTimer = REPATH_INTERVAL_MS;
+                _lineOk = GridLineOkTo(victim);
+            }
+            hold = _lineOk;
+        }
+
+        if (hold)
+        {
+            if (!_holding)
+            {
+                // Once per plant, not once per tick: re-clearing the motion
+                // master every 500 ms would restart the spline of a creature
+                // that is already standing still.
+                StopWaypointRun(false);
+                me->GetMotionMaster()->Clear(false);
+                me->GetMotionMaster()->MoveIdle();
+                _holding = true;
+            }
+            me->SetFacingToObject(victim);
+
+            // ScriptedAI's own form (UnitAI.cpp:76-92): it respects
+            // UNIT_STATE_CASTING and the attack timer, and it refuses when the
+            // SPELL's own range cannot reach - which is why every caster in
+            // mod_pdungeon_packs.sql was given a spell that reaches at least
+            // V2.CastRangeYd. Raise that key past a spell's range and its
+            // caster silently stops casting.
+            DoSpellAttackIfReady(_mob->casterSpellId);
+        }
+        else
+        {
+            if (_holding)
+            {
+                _holding = false;
+                _repathTimer = 0;       // decide the approach on this very tick
+            }
+            UpdateGridChase(diff);
+        }
+
+        // Point blank: a caster a melee player has walked into swings too. No
+        // out-of-mana melee fallback beyond that in v1 - after the planner's
+        // role demotions every caster in the packs is unit_class 8 with a
+        // level-80 mana pool, so running dry is not a state these fights reach.
+        DoMeleeAttackIfReady();
+    }
+
+    void PDv2MobAI::UpdateProximityAggro(uint32 diff)
+    {
+        if (_aggroTimer > diff)
+        {
+            _aggroTimer -= diff;
+            return;
+        }
+        _aggroTimer = REPATH_INTERVAL_MS;
+
+        // WHY the module aggroes at all instead of letting the core do it: the
+        // dungeon spawns creature_template rows it SHARES with
+        // fl-underground-dungeon, where they balance map 741, so this module
+        // must not edit them - and six of them are near-blind by design
+        // (detection_range 1 on 84284-84287, 2 on the bosses; measured live
+        // 2026-08-07). Left to their templates they would stand there while a
+        // player walked through the room. So the AI supplies its own eyes and
+        // the row stays untouched.
+        if (!me->IsAlive() || me->IsInCombat() || me->IsInEvadeMode())
+        {
+            return;
+        }
+
+        float const range = sPDv2Mgr->GetConfig().aggroRangeYd;
+        if (range <= 0.0f)
+        {
+            return;
+        }
+
+        Player* target = me->SelectNearestPlayer(range);
+        if (!target || !me->IsValidAttackTarget(target))
+        {
+            return;
+        }
+
+        // Never across the void. A mob that pulls something it cannot walk to
+        // either stands in combat for ever or walks off the world, so the aggro
+        // test is the SAME reachability test the chase uses - "it noticed me"
+        // and "it can get to me" must never disagree.
+        WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
+        if (grid)
+        {
+            std::vector<GridPoint> waypoints;
+            if (PlanApproach(*grid,
+                             CellOf(*grid, me->GetPositionX(), me->GetPositionY()),
+                             CellOf(*grid, target->GetPositionX(), target->GetPositionY()),
+                             SNAP_RADIUS_CELLS, waypoints) == ApproachKind::Unreachable)
+            {
+                return;
+            }
+        }
+
+        AttackStart(target);
+    }
+
     void PDv2MobAI::UpdateAI(uint32 diff)
     {
+        if (!_mob)
+        {
+            _mob = me->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY);
+        }
+
         // Deliberately no distance leash: dungeon mobs chase for as long as
         // the target exists on the map, like any stock instance (operator
         // decision 2026-08-06, replacing a working 150 yd leash). Reset still
@@ -229,9 +403,18 @@ namespace PDungeon
         // bay by UpdateGridChase's Unreachable case, not by walking after it.
         if (!UpdateVictim())
         {
+            UpdateProximityAggro(diff);
             return;
         }
 
+        if (_mob && _mob->role == PACK_ROLE_CASTER && _mob->casterSpellId)
+        {
+            UpdateCasterCombat(diff);
+            return;
+        }
+
+        // Melee, and bosses with it: in v1 a boss's menace is its stats, and a
+        // boss that kited would be unfightable in a 66 yd room.
         UpdateGridChase(diff);
         DoMeleeAttackIfReady();
     }

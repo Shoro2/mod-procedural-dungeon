@@ -412,3 +412,18 @@ ProceduralDungeon.V2.Loot.BonusRollPct = 15
 
 ProceduralDungeon.V2.CastRangeYd = 25.0
 
+#
+#    ProceduralDungeon.V2.AggroRangeYd
+#        Description: How close a player has to get before an idle dungeon
+#                     creature attacks. The module supplies its own aggro
+#                     because it spawns SHARED creature_template rows and must
+#                     not edit them: six of v1's imported templates have
+#                     detection_range 1 or 2 (measured 2026-08-07), which is
+#                     deliberate for the map-741 dungeon they also belong to
+#                     and would make them near-blind here. A mob still only
+#                     aggroes a player it can actually walk to.
+#        Default:     20.0
+#
+
+ProceduralDungeon.V2.AggroRangeYd = 20.0
+

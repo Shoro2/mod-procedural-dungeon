@@ -58,6 +58,7 @@ namespace PDungeon
         _config.lootBonusRollPct = sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Loot.BonusRollPct", 15);
         _config.castRangeYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.CastRangeYd", 25.0f);
+        _config.aggroRangeYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.AggroRangeYd", 20.0f);
 
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{})",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,

@@ -24,6 +24,7 @@
 namespace PDungeon
 {
     class PDv2InstanceScript;
+    struct PDv2MobData;
 
     // Mob AI for the file-less v2 map.
     //
@@ -44,6 +45,14 @@ namespace PDungeon
     // grid (8.3 yd cells instead of v1's room tiles) and the gate (grid line
     // walkability instead of engine LoS, which v1 could use because its walls
     // were dynamic-tree GameObjects).
+    //
+    // Two things ride on the same grid for the same reason. A caster holds at
+    // range only where the LINE to its target is floor, so it can never plant
+    // itself and nuke across a gap it has no fight on. And the AI supplies its
+    // own proximity aggro, because the templates it spawns are SHARED with
+    // another dungeon and cannot be edited - several of them are deliberately
+    // near-blind there - so a mob that would otherwise ignore a player next to
+    // it engages, but only one it could walk to.
     struct PDv2MobAI : public ScriptedAI
     {
         explicit PDv2MobAI(Creature* creature);
@@ -55,15 +64,25 @@ namespace PDungeon
 
     protected:
         bool UpdateGridChase(uint32 diff);
+        void UpdateCasterCombat(uint32 diff);
+        void UpdateProximityAggro(uint32 diff);
+        bool GridLineOkTo(Unit* victim) const;
         void StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid);
         void MoveToWaypoint(size_t index, WalkGrid const& grid);
         void StopWaypointRun(bool resumeChase);
 
         PDv2InstanceScript* _instance = nullptr;
+        // The spawn tag. Not owned, and not resolvable in the constructor for
+        // every creature - see the comment there.
+        PDv2MobData const* _mob = nullptr;
         uint32 _repathTimer = 0;
+        uint32 _aggroTimer = 0;
+        uint32 _lineTimer = 0;
         std::vector<GridPoint> _waypoints;
         size_t _waypointIndex = 0;
         bool _followingPath = false;
+        bool _lineOk = false;       // last grid-line verdict, refreshed on the tick
+        bool _holding = false;      // a caster that has planted itself at range
     };
 }
 
