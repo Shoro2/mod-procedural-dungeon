@@ -862,6 +862,118 @@ namespace
         }
     }
 
+    // --- boss rooms (01 §8 "1 + dlvl/10", flagged as the N deepest) ---------
+
+    // The layout with bossRooms = 1 is FROZEN, and this is what freezes it.
+    //
+    // Accounts persist a layout as its seed plus the generation inputs it was
+    // made with, so any change to the planner silently reshapes every dungeon
+    // that already exists unless the old case comes out byte for byte the same.
+    // The numbers below were captured from the build BEFORE boss flagging
+    // became "the N deepest rooms" (2026-08-07); the manifest's own trailer is
+    // a CRC32 over its whole body, so length + trailer is a byte-identity pin
+    // rather than a spot check.
+    //
+    // If this check fails, the question is not "update the constants" - it is
+    // whether PD_LAYOUT_VERSION has to be bumped, because every stored seed now
+    // regenerates a different dungeon.
+    void RunLayoutFreezeCheck()
+    {
+        uint32_t const PINNED_SEED = 12345u;
+        int const PINNED_ROOMS = 5;
+        size_t const PINNED_BYTES = 551;
+        char const* const PINNED_TRAILER = "E;13df5510\n";
+
+        BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
+        cfg.bossRooms = 1;
+
+        BlockPlan plan;
+        if (!GenerateBlockPlan(cfg, &plan))
+        {
+            Check(false, "the pinned layout no longer generates at all", PINNED_SEED);
+            return;
+        }
+
+        std::string const m = EmitManifest(plan, 1);
+        char msg[160];
+        std::snprintf(msg, sizeof(msg),
+                      "pinned manifest is %d bytes, was %d - the bossRooms=1 layout MOVED",
+                      static_cast<int>(m.size()), static_cast<int>(PINNED_BYTES));
+        Check(m.size() == PINNED_BYTES, msg, PINNED_SEED);
+
+        size_t const trailer = std::strlen(PINNED_TRAILER);
+        bool const same = m.size() >= trailer &&
+                          m.compare(m.size() - trailer, trailer, PINNED_TRAILER) == 0;
+        Check(same, "pinned manifest CRC changed - the bossRooms=1 layout MOVED", PINNED_SEED);
+    }
+
+    // Exactly `bossRooms` rooms carry the boss role, the entrance never does,
+    // and bossIndex still points at the deepest of them. Run over its own seeds
+    // rather than the batch's, because the batch only ever asks for one boss.
+    void RunBossRoomChecks(int seeds)
+    {
+        char msg[160];
+        for (int bossRooms = 1; bossRooms <= 3; ++bossRooms)
+        {
+            // Rooms enough that the deepest few are never forced to be the
+            // entrance's neighbours - 8 is what dlvl 5 already unlocks.
+            int const rooms = 8;
+            for (int i = 0; i < seeds; ++i)
+            {
+                uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
+                BlockCfg cfg = MakeCfg(seed, rooms);
+                cfg.bossRooms = bossRooms;
+
+                BlockPlan plan;
+                if (!GenerateBlockPlan(cfg, &plan))
+                {
+                    std::snprintf(msg, sizeof(msg), "generation failed with %d boss room(s)",
+                                  bossRooms);
+                    Check(false, msg, seed);
+                    continue;
+                }
+
+                int found = 0;
+                int shallowestBoss = 1 << 30;
+                int deepestBoss = -1;
+                int deepestOther = -1;
+                for (PlacedBlock const& b : plan.blocks)
+                {
+                    if (b.role == BlockRole::RoomBoss)
+                    {
+                        ++found;
+                        shallowestBoss = (b.depth < shallowestBoss) ? b.depth : shallowestBoss;
+                        deepestBoss = (b.depth > deepestBoss) ? b.depth : deepestBoss;
+                    }
+                    else if (b.roomId >= 0 && b.role != BlockRole::RoomEntrance)
+                    {
+                        deepestOther = (b.depth > deepestOther) ? b.depth : deepestOther;
+                    }
+                }
+
+                std::snprintf(msg, sizeof(msg), "%d block(s) carry the boss role, asked for %d",
+                              found, bossRooms);
+                Check(found == bossRooms, msg, seed);
+
+                PlacedBlock const& entrance = plan.blocks[static_cast<size_t>(plan.entranceIndex)];
+                Check(entrance.role == BlockRole::RoomEntrance &&
+                      plan.entranceIndex != plan.bossIndex,
+                      "the entrance was flagged as a boss room", seed);
+
+                PlacedBlock const& boss = plan.blocks[static_cast<size_t>(plan.bossIndex)];
+                Check(boss.role == BlockRole::RoomBoss,
+                      "bossIndex does not point at a boss room", seed);
+
+                // "The N DEEPEST": every boss room is at least as deep as every
+                // other room, and bossIndex is the deepest of the boss rooms.
+                Check(shallowestBoss >= deepestOther,
+                      "a non-boss room is deeper than a boss room", seed);
+                Check(boss.depth == deepestBoss,
+                      "bossIndex is not the deepest boss room", seed);
+            }
+        }
+    }
+
     // --- the room-cap measurement (01 §8 cap 15 vs. what the kit allows) ----
     //
     // Two physical constraints bound the room count and NEITHER is negotiable
@@ -955,6 +1067,10 @@ namespace
 
         RunLinkStateChecks();
         RunGameMathChecks();
+        RunLayoutFreezeCheck();
+        // A tenth of the batch is plenty for three boss-room counts: the
+        // property is structural, not statistical.
+        RunBossRoomChecks(count / 10 + 1);
 
         // The encoded room cap is a MEASUREMENT, so it has to be re-measured or
         // it rots: a generator change that makes packing harder would otherwise
@@ -1017,6 +1133,15 @@ namespace
 
             // Entrance and boss must be distinct blocks.
             Check(plan.entranceIndex != plan.bossIndex, "entrance and boss are the same block", seed);
+
+            // Exactly as many boss rooms as were asked for. The batch asks for
+            // one, which is the case a stored layout can already be in.
+            int bossFound = 0;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                if (b.role == BlockRole::RoomBoss) ++bossFound;
+            }
+            Check(bossFound == cfg.bossRooms, "boss room count does not match the config", seed);
 
             // The manifest must fit the wire budget and round-trip its own CRC.
             std::string const manifest = EmitManifest(plan, 1);
