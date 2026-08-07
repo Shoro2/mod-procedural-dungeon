@@ -67,6 +67,17 @@ namespace PDungeon
         _repathTimer = 0;
     }
 
+    void PDv2MobAI::JustDied(Unit* killer)
+    {
+        // The instance owns the counters, and it is the only thing that knows
+        // how many mobs a room had. The AI just tells it who died - including
+        // for the placeholder fallback spawns, which are tagged too.
+        if (_instance)
+        {
+            _instance->OnMobDied(me, killer);
+        }
+    }
+
     void PDv2MobAI::MoveToWaypoint(size_t index, WalkGrid const& grid)
     {
         int gcx = 0, gcy = 0;

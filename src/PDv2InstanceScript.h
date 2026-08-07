@@ -110,8 +110,21 @@ namespace PDungeon
         // are only ever moved by OnMobDied, on this map's own update thread.
         PDv2RunState const& GetRunState() const { return _run; }
 
+        // Returns and CLEARS "a counter moved since you last asked". The UI
+        // polls the instance once a second and only sends a frame when this
+        // says something happened, so a player standing still costs nothing on
+        // the wire. elapsedSec deliberately does NOT set it: it is a clock, not
+        // an event, and a dirty flag that is always true is not a flag.
+        bool ConsumeRunDirty();
+
+        // A tagged dungeon mob died. Called by PDv2MobAI::JustDied; `killer` is
+        // whatever landed the blow, which may be a pet or nothing at all.
+        void OnMobDied(Creature* creature, Unit* killer);
+
     private:
         void SpawnFromPlan(BlockPlan const& plan);
+        void MarkRunDirty() { _runDirty = true; }
+        void FinishRun();
         void DespawnAll();
         void EnsureWalkGrid(BlockPlan const& plan);
         void CatchFallers();
@@ -122,6 +135,8 @@ namespace PDungeon
         uint32_t _spawnedSeed = 0;              // plan this instance is built for
         std::vector<ObjectGuid> _spawnedGuids;  // for a rebuild when the plan changes
         PDv2RunState _run;
+        bool     _runDirty = false;
+        uint64   _leaderGuid = 0;               // the character that opened this run
         std::vector<uint16> _roomAlive;         // per room, index-aligned with the spawn draw
         uint32   _fallCheckTimer = 0;
         float    _entranceX = 0.0f;

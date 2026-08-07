@@ -19,6 +19,7 @@
 
 #include "Chat.h"
 #include "Creature.h"
+#include "DatabaseEnv.h"
 #include "InstanceScript.h"
 #include "Log.h"
 #include "Map.h"
@@ -106,6 +107,116 @@ namespace PDungeon
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
+
+        // The run starts when someone walks in, not when the plan is generated:
+        // the clock has to measure play, and `.pdungeon v2 gen` can be minutes
+        // before anyone enters. A rebuild reset the state above, so a re-roll
+        // starts a fresh run with a fresh clock.
+        if (!_run.started)
+        {
+            _run.started = true;
+            _run.startedMs = getMSTime();
+            _leaderGuid = player->GetGUID().GetCounter();
+            MarkRunDirty();
+        }
+    }
+
+    bool PDv2InstanceScript::ConsumeRunDirty()
+    {
+        bool const dirty = _runDirty;
+        _runDirty = false;
+        return dirty;
+    }
+
+    void PDv2InstanceScript::OnMobDied(Creature* creature, Unit* /*killer*/)
+    {
+        if (!creature)
+        {
+            return;
+        }
+
+        // Get, not GetDefault: a creature the dungeon did not spawn has no tag
+        // and must not move a counter. Nothing else on map 760 carries one.
+        PDv2MobData* tag = creature->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY);
+        if (!tag || tag->counted)
+        {
+            // `counted` guards the one case that would otherwise double-score:
+            // a creature can die more than once as far as the AI is concerned
+            // (JustDied fires again after a resurrect or a feign-death path).
+            return;
+        }
+        tag->counted = true;
+
+        ++_run.killed;
+        if (tag->role == PACK_ROLE_BOSS && _run.bossKilled < _run.bossTotal)
+        {
+            ++_run.bossKilled;
+        }
+
+        if (tag->roomIndex < _roomAlive.size() && _roomAlive[tag->roomIndex] > 0)
+        {
+            if (--_roomAlive[tag->roomIndex] == 0)
+            {
+                ++_run.roomsCleared;
+            }
+        }
+        MarkRunDirty();
+
+        if (!_run.complete && _run.bossTotal > 0 && _run.bossKilled >= _run.bossTotal)
+        {
+            FinishRun();
+        }
+    }
+
+    void PDv2InstanceScript::FinishRun()
+    {
+        _run.complete = true;
+        MarkRunDirty();
+
+        // 01 §8 pays for the dungeon that was BUILT, not for the fraction of it
+        // that was walked: the room count is what dlvl bought, and the boss is
+        // what proves the run. Difficulty pays nothing on purpose (the formula
+        // has no difficulty argument, and PDv2GameMath.h says why).
+        PDv2RunReward const reward = sPDv2Mgr->GrantRunReward(_accountId, _run.roomsTotal);
+
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+        {
+            Player* player = it->GetSource();
+            if (!player || !player->GetSession())
+            {
+                continue;
+            }
+            ChatHandler handler(player->GetSession());
+            handler.PSendSysMessage("The Forgotten Depths yield: +{} dungeon XP (dlvl {}).",
+                                    reward.dxpGained, reward.newDlvl);
+            if (reward.leveledUp)
+            {
+                handler.PSendSysMessage("Your dungeon level is now {} - a deeper layout and a "
+                                        "wider difficulty band are open.", reward.newDlvl);
+            }
+        }
+
+        // History is written on COMPLETION only, so an abandoned run leaves no
+        // row. Accepted for v1: a run that was never finished has nothing to
+        // rank, and an "open" row would need a writer for every way a player
+        // can walk away. Full history is a later slice.
+        CharacterDatabase.Execute(
+            "INSERT INTO pdungeon_runs (seed, map_id, instance_id, leader_guid, account_id, "
+            "dlvl, difficulty_x100, loot_mult_x100, rooms_cleared, result, completed_at) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, 1, NOW())",
+            _spawnedSeed, instance->GetId(), instance->GetInstanceId(), _leaderGuid,
+            _accountId, reward.newDlvl, _run.diffX100, _run.lootMultX100, _run.roomsCleared);
+
+        LOG_INFO(PD_LOG, "PDv2: account {} completed instance {} (seed {}): {}/{} rooms, "
+                         "{} kill(s), +{} dxp -> dlvl {}", _accountId,
+                 instance->GetInstanceId(), _spawnedSeed, uint32(_run.roomsCleared),
+                 uint32(_run.roomsTotal), uint32(_run.killed), reward.dxpGained,
+                 reward.newDlvl);
+
+        // Nobody is teleported out. The dungeon stays walkable after its last
+        // boss because farming it is the point (01 §8) - the way out is the way
+        // the player came in.
     }
 
     void PDv2InstanceScript::DespawnAll()
@@ -362,6 +473,14 @@ namespace PDungeon
             _fallCheckTimer = FALL_CHECK_INTERVAL_MS;
             CatchFallers();
             EvictDisconnected();
+
+            // The clock rides the same one-second tick. It is not marked dirty:
+            // the UI polls at 1 Hz anyway, and a flag that ticks on its own
+            // would tell a reader "something happened" once a second forever.
+            if (_run.started && !_run.complete)
+            {
+                _run.elapsedSec = GetMSTimeDiffToNow(_run.startedMs) / 1000;
+            }
         }
         else
         {

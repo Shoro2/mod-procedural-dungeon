@@ -49,6 +49,7 @@ namespace PDungeon
         explicit PDv2MobAI(Creature* creature);
 
         void JustEngagedWith(Unit* who) override;
+        void JustDied(Unit* killer) override;
         void UpdateAI(uint32 diff) override;
         void MovementInform(uint32 type, uint32 id) override;
 
