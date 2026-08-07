@@ -18,6 +18,7 @@
 #ifndef MOD_PDUNGEON_V2_INSTANCE_SCRIPT_H
 #define MOD_PDUNGEON_V2_INSTANCE_SCRIPT_H
 
+#include "DataMap.h"
 #include "InstanceScript.h"
 #include "ObjectGuid.h"
 #include "generator/PDBlockPlan.h"
@@ -26,11 +27,55 @@
 #include <cstdint>
 #include <vector>
 
+class Creature;
 class InstanceMap;
 class Player;
+class Unit;
 
 namespace PDungeon
 {
+    // Every creature the instance script spawns carries this, and nothing else
+    // on the map does. That is the whole gate: "is this a PDv2 dungeon mob" is
+    // answered by CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY) != nullptr, so
+    // the scaling and damage hooks can never reach a player's guardian, a GM's
+    // test spawn or anything else that happens to stand on map 760.
+    //
+    // Get, never GetDefault, outside the spawner - GetDefault CREATES the entry
+    // and would turn the gate into "anything the AI has ever looked at".
+    char const* const PD_MOB_DATA_KEY = "mod-procedural-dungeon";
+
+    // AzerothCore's DataMap (src/common/Utilities/DataMap.h); the precedent in
+    // this fork is mod-dungeon-challenge's CreatureChallengeData.
+    struct PDv2MobData : public DataMap::Base
+    {
+        uint8  role = 0;                // PDungeon::PackRole
+        uint32 casterSpellId = 0;       // 0 for anything that is not a caster
+        uint32 roomIndex = 0;           // index into the instance's room list
+        bool   counted = false;         // this kill was already scored
+    };
+
+    // What a player is doing right now, in the form the UI wants to read it.
+    //
+    // diffX100 and lootMultX100 are FROZEN into this at spawn time and every
+    // gameplay hook reads them from here, never from the live account row: a
+    // settings change in the middle of a run must not retune the mobs already
+    // standing in the dungeon.
+    struct PDv2RunState
+    {
+        uint32 startedMs = 0;
+        uint32 elapsedSec = 0;
+        uint16 killed = 0;
+        uint16 total = 0;
+        uint8  bossKilled = 0;
+        uint8  bossTotal = 0;
+        uint8  roomsCleared = 0;
+        uint8  roomsTotal = 0;
+        uint16 diffX100 = 100;
+        uint16 lootMultX100 = 100;
+        bool   complete = false;
+        bool   started = false;
+    };
+
     // One PDv2 run.
     //
     // The map has no terrain server-side, which changes what an instance script
@@ -61,6 +106,10 @@ namespace PDungeon
         // and AI updates run on this map's own update thread, so no lock.
         WalkGrid const* GetWalkGrid() const { return _gridReady ? &_grid : nullptr; }
 
+        // The live run. Read-only for everyone outside this class: the counters
+        // are only ever moved by OnMobDied, on this map's own update thread.
+        PDv2RunState const& GetRunState() const { return _run; }
+
     private:
         void SpawnFromPlan(BlockPlan const& plan);
         void DespawnAll();
@@ -72,6 +121,8 @@ namespace PDungeon
         bool     _spawned = false;
         uint32_t _spawnedSeed = 0;              // plan this instance is built for
         std::vector<ObjectGuid> _spawnedGuids;  // for a rebuild when the plan changes
+        PDv2RunState _run;
+        std::vector<uint16> _roomAlive;         // per room, index-aligned with the spawn draw
         uint32   _fallCheckTimer = 0;
         float    _entranceX = 0.0f;
         float    _entranceY = 0.0f;

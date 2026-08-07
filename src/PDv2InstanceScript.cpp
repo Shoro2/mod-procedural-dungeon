@@ -24,6 +24,7 @@
 #include "Map.h"
 #include "PDDefines.h"
 #include "PDv2Mgr.h"
+#include "PDv2PackMgr.h"
 #include "Player.h"
 #include "Position.h"
 #include "TemporarySummon.h"
@@ -42,11 +43,11 @@ namespace PDungeon
         // Checking every tick would be waste; a fall is not urgent to the yard.
         uint32 const FALL_CHECK_INTERVAL_MS = 1000;
 
-        // Placeholder trash until creature packs exist. Chosen because it is a
-        // stock, level-appropriate humanoid every client already has art for.
+        // Stand-in for a run whose packs could not be drawn (the SQL was not
+        // applied, or every pack is disabled). Chosen because it is a stock,
+        // level-appropriate humanoid every client already has art for.
         uint32 const PLACEHOLDER_CREATURE = 29402;   // Anub'ar Skirmisher
 
-        int const SPAWNS_PER_ROOM = 3;
         float const SPAWN_SPREAD_YD = 12.0f;
     }
 
@@ -148,24 +149,88 @@ namespace PDungeon
     void PDv2InstanceScript::SpawnFromPlan(BlockPlan const& plan)
     {
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
-        uint32 spawned = 0;
+        PDv2AccountState const account = sPDv2Mgr->GetAccountState(_accountId);
+        int const dlvl = static_cast<int>(account.dlvl);
 
+        // The run's numbers are FROZEN here and every later reader - the damage
+        // hooks, the gold hook, the bonus roll - goes through the run state
+        // rather than the live account row. A `.pdungeon v2 set` in the middle
+        // of a run must not retune the mobs already standing in the dungeon;
+        // the account row is what the NEXT run is built from.
+        _run = PDv2RunState();
+        _run.diffX100 = static_cast<uint16>(account.cfgDiffX100);
+        _run.lootMultX100 = static_cast<uint16>(
+            GameLootMultX100(account.cfgDiffX100, account.cfgCasterPct));
+
+        // Rooms only, in plan order. A corridor is 8.3 yd wide, so anything
+        // standing in one would be shoulder to shoulder with the walls; the
+        // entrance stays empty so an arriving player is not already in combat.
+        std::vector<PlacedBlock const*> roomBlocks;
+        SpawnSelectInputs inputs;
         for (PlacedBlock const& b : plan.blocks)
         {
-            // Rooms only. A corridor is 8.3 yd wide, so anything standing in one
-            // would be shoulder to shoulder with the walls.
             if (b.roomId < 0 || b.role == BlockRole::RoomEntrance)
             {
                 continue;
             }
 
-            double const mid = PD_BLOCK_SIZE_YD / 2.0;
-            for (int i = 0; i < SPAWNS_PER_ROOM; ++i)
+            RoomRequest room;
+            room.roomIndex = static_cast<int>(roomBlocks.size());
+            room.isBoss = b.role == BlockRole::RoomBoss;
+            inputs.rooms.push_back(room);
+            roomBlocks.push_back(&b);
+        }
+
+        inputs.spawnsPerRoom = cfg.spawnsPerRoom;
+        inputs.casterPct = account.cfgCasterPct;
+        inputs.bandMin = account.cfgBandMin;
+        inputs.creatureTypesCap = GameCreatureTypes(dlvl);
+        inputs.unlockedDlvl = dlvl;
+
+        // The draw is seeded from the PLAN's seed, so the same dungeon holds
+        // the same creatures every time it is regenerated. That is where the
+        // determinism boundary runs: layout and spawn SELECTION are pinned,
+        // loot rolls are not (see the bonus roll in OnMobDied).
+        std::vector<RoomSpawns> spawns;
+        if (!sPDv2PackMgr->SelectSpawns(plan.effectiveSeed, inputs, spawns))
+        {
+            // Exactly the degradation this had before packs existed: an
+            // unapplied mod_pdungeon_packs.sql leaves a dungeon with
+            // placeholder trash in it rather than an empty one, and says so.
+            LOG_WARN(PD_LOG, "PDv2: no creature pack could be drawn for instance {} - "
+                             "falling back to the placeholder creature",
+                     instance->GetInstanceId());
+
+            spawns.clear();
+            spawns.reserve(inputs.rooms.size());
+            for (RoomRequest const& room : inputs.rooms)
+            {
+                RoomSpawns fallback;
+                fallback.roomIndex = room.roomIndex;
+                fallback.picks.assign(static_cast<size_t>(cfg.spawnsPerRoom > 0
+                                                              ? cfg.spawnsPerRoom : 1),
+                                      SpawnPick{ PLACEHOLDER_CREATURE, PACK_ROLE_MELEE, 0 });
+                spawns.push_back(fallback);
+            }
+        }
+
+        _roomAlive.assign(roomBlocks.size(), 0);
+        _run.roomsTotal = static_cast<uint8>(roomBlocks.size());
+
+        uint32 spawned = 0;
+        double const mid = PD_BLOCK_SIZE_YD / 2.0;
+        for (size_t r = 0; r < roomBlocks.size() && r < spawns.size(); ++r)
+        {
+            PlacedBlock const& b = *roomBlocks[r];
+            std::vector<SpawnPick> const& picks = spawns[r].picks;
+            int const count = static_cast<int>(picks.size());
+
+            for (int i = 0; i < count; ++i)
             {
                 // A small fixed pattern around the block centre. Deliberately
                 // NOT random: the same plan must produce the same dungeon, and
                 // an unseeded draw here would break that quietly.
-                double const angle = 2.0 * 3.14159265358979 * i / SPAWNS_PER_ROOM;
+                double const angle = 2.0 * 3.14159265358979 * i / count;
                 double const du = std::cos(angle) * SPAWN_SPREAD_YD;
                 double const dv = std::sin(angle) * SPAWN_SPREAD_YD;
 
@@ -178,7 +243,7 @@ namespace PDungeon
                 // that offset is a permanent hover (operator report
                 // 2026-08-06: mobs stood slightly in the air until a pull and
                 // evade walked them onto their home position).
-                if (Creature* c = instance->SummonCreature(PLACEHOLDER_CREATURE,
+                if (Creature* c = instance->SummonCreature(picks[i].entry,
                                                            Position(x, y, z, 0.0f)))
                 {
                     c->SetHomePosition(x, y, z, 0.0f);
@@ -192,16 +257,34 @@ namespace PDungeon
                     // floor the server knows. Movement is unaffected: the walk
                     // grid drives it and every waypoint carries the same Z.
                     c->SetDisableGravity(true);
+
+                    // The tag is what makes this creature a PDv2 mob for every
+                    // other hook in the module. GetDefault here (it creates),
+                    // Get everywhere else (it must not).
+                    PDv2MobData* tag = c->CustomData.GetDefault<PDv2MobData>(PD_MOB_DATA_KEY);
+                    tag->role = picks[i].role;
+                    tag->casterSpellId = picks[i].casterSpellId;
+                    tag->roomIndex = static_cast<uint32>(r);
+                    tag->counted = false;
+
                     _spawnedGuids.push_back(c->GetGUID());
+                    ++_roomAlive[r];
                     ++spawned;
+                    if (picks[i].role == PACK_ROLE_BOSS)
+                    {
+                        ++_run.bossTotal;
+                    }
                 }
             }
         }
+        _run.total = static_cast<uint16>(spawned);
 
-        LOG_INFO(PD_LOG, "PDv2: instance {} on map {} spawned {} creature(s) from a "
-                         "{}-block plan", instance->GetInstanceId(), instance->GetId(),
-                 spawned, uint32(plan.blocks.size()));
-        (void)cfg;
+        LOG_INFO(PD_LOG, "PDv2: instance {} on map {} spawned {} creature(s) in {} room(s) "
+                         "({} boss) from a {}-block plan, d {} lootMult {}",
+                 instance->GetInstanceId(), instance->GetId(), spawned,
+                 uint32(_run.roomsTotal), uint32(_run.bossTotal),
+                 uint32(plan.blocks.size()), uint32(_run.diffX100),
+                 uint32(_run.lootMultX100));
     }
 
     void PDv2InstanceScript::CatchFallers()
