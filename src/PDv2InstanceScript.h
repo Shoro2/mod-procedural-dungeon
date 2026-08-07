@@ -52,6 +52,14 @@ namespace PDungeon
         uint32 casterSpellId = 0;       // 0 for anything that is not a caster
         uint32 roomIndex = 0;           // index into the instance's room list
         bool   counted = false;         // this kill was already scored
+
+        // Occupies a boss room's boss slot. Separate from `role` on purpose:
+        // when the unlocked packs hold no role-2 member at all, PDv2PackMgr
+        // fills the slot with a trash stand-in, and a run whose completion
+        // waited on role 2 could then never finish. This flag says "the room
+        // is done with you", which is what completion actually means, while
+        // `role` keeps steering the AI.
+        bool   isRunBoss = false;
     };
 
     // What a player is doing right now, in the form the UI wants to read it.

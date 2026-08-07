@@ -222,7 +222,7 @@ namespace PDungeon
         tag->counted = true;
 
         ++_run.killed;
-        if (tag->role == PACK_ROLE_BOSS && _run.bossKilled < _run.bossTotal)
+        if (tag->isRunBoss && _run.bossKilled < _run.bossTotal)
         {
             ++_run.bossKilled;
         }
@@ -412,6 +412,7 @@ namespace PDungeon
         for (size_t r = 0; r < roomBlocks.size() && r < spawns.size(); ++r)
         {
             PlacedBlock const& b = *roomBlocks[r];
+            bool const isBossRoom = b.role == BlockRole::RoomBoss;
             std::vector<SpawnPick> const& picks = spawns[r].picks;
             int const count = static_cast<int>(picks.size());
 
@@ -457,13 +458,21 @@ namespace PDungeon
                     tag->roomIndex = static_cast<uint32>(r);
                     tag->counted = false;
 
-                    _spawnedGuids.push_back(c->GetGUID());
-                    ++_roomAlive[r];
-                    ++spawned;
-                    if (picks[i].role == PACK_ROLE_BOSS)
+                    // A boss room's FIRST pick is its boss - PDv2PackMgr.h
+                    // states that contract ("every boss room gets exactly one
+                    // role-2 entry, drawn fresh"), and it holds even when the
+                    // packs have no role-2 member and a trash stand-in takes
+                    // the slot. Keying completion on the slot rather than on
+                    // the drawn role is what keeps that data state finishable.
+                    tag->isRunBoss = isBossRoom && i == 0;
+                    if (tag->isRunBoss)
                     {
                         ++_run.bossTotal;
                     }
+
+                    _spawnedGuids.push_back(c->GetGUID());
+                    ++_roomAlive[r];
+                    ++spawned;
                 }
             }
         }
