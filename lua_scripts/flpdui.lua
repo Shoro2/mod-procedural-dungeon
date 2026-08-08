@@ -400,7 +400,17 @@ local function ApplyCfg(c)
     verdictLine:SetText("Client link: " .. colour .. text .. "|r")
 
     genBtn:Enable()
-    enterBtn:Enable()
+
+    -- Enter follows the verdict, not the payload's mere existence: an unready
+    -- client would only collect the polite refusal, and a grey button says the
+    -- same thing without the round trip. verdictCode is the server's word and
+    -- the server pushes a fresh C on every link-state change, so this greys
+    -- and lights up by itself as READY comes and goes.
+    if c.verdictCode == 0 then
+        enterBtn:Enable()
+    else
+        enterBtn:Disable()
+    end
 
     setLoop = false
 

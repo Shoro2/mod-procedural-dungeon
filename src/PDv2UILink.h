@@ -109,6 +109,14 @@ namespace PDungeon
         // Completion, once per run, to everyone standing in it.
         void SendEnd(Map* map, PDv2RunReward const& reward);
 
+        // Called by PDClientLink whenever a VER or ACK moved the link state.
+        // The panel's verdict line (and the Enter button hanging off it) is
+        // only ever as fresh as the last C payload - without this, a READY
+        // that arrived AFTER the generate-triggered push stayed invisible
+        // until the next HELLO or SET (operator report, first live test).
+        // Quiet for accounts whose panel never said HELLO this session.
+        void OnLinkStateChanged(Player* player);
+
         // Called from PDv2InstanceScript::Update's one-second block. Sends a
         // run frame to every player on the map while there is something to
         // say; a finished or unstarted run with no counter change is silent.

@@ -325,6 +325,24 @@ namespace PDungeon
         return it == _clients.end() || !it->second.hudOff;
     }
 
+    void PDv2UILink::OnLinkStateChanged(Player* player)
+    {
+        uint32_t const accountId = AccountOf(player);
+        if (!accountId)
+        {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> guard(_lock);
+            auto it = _clients.find(accountId);
+            if (it == _clients.end() || !it->second.helloMs)
+            {
+                return;     // no panel this session - nothing is listening
+            }
+        }
+        SendCfg(player);
+    }
+
     void PDv2UILink::ForgetAccount(uint32_t accountId)
     {
         std::lock_guard<std::mutex> guard(_lock);

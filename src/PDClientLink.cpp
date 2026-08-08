@@ -145,6 +145,10 @@ namespace PDungeon
                                       "(reported version {})", accountId, version);
                 }
             }
+
+            // A version report moved the verdict too (it invalidates earlier
+            // readiness) - same reason as the ack notification below.
+            sPDv2UILink->OnLinkStateChanged(player);
             return;
         }
 
@@ -160,9 +164,18 @@ namespace PDungeon
         if (body.compare(0, 4, "ACK ") == 0)
         {
             std::string const ack = body.substr(4);
-            std::lock_guard<std::mutex> guard(_lock);
-            _state.ReportAck(accountId, ack);
+            {
+                std::lock_guard<std::mutex> guard(_lock);
+                _state.ReportAck(accountId, ack);
+            }
             LOG_DEBUG(PD_LOG, "PDv2 link: account {} relayed ack '{}'", accountId, ack);
+
+            // The ack is what turns AwaitingAck into Ready (or Nak), and the
+            // panel only knows what its last C payload said - tell it now, or
+            // a READY arriving after the generate-triggered push stays
+            // invisible until the player pokes a slider (operator report,
+            // first live test). Outside the lock: SendCfg reads link state.
+            sPDv2UILink->OnLinkStateChanged(player);
             return;
         }
 
