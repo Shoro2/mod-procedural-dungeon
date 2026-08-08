@@ -87,6 +87,15 @@ namespace PDungeon
     uint32 const AFFIX_IMMOLATION_DMG_PER_DIFF = 80;
     float const AFFIX_IMMOLATION_RANGE_YD = 8.0f;
 
+    // Lil' Bro (7): on death, two copies at 10 % of the dying creature's max
+    // health, twice over - 1 -> 2 -> 4 and then no more
+    // (DungeonChallengeScripts.cpp:849 for the depth, :868 for the tenth, :875
+    // for the pair). The children inherit the parent's WHOLE affix set there
+    // (:890), so a Lil' Bro child is a Lil' Bro too until the depth stops it.
+    float const AFFIX_LIL_BRO_HEALTH_PCT = 0.1f;
+    uint8 const AFFIX_LIL_BRO_MAX_DEPTH = 2;
+    uint8 const AFFIX_LIL_BRO_CHILDREN = 2;
+
     // Writes a creature's max health through ALL FOUR of the lines the core's
     // own SelectLevel uses (Creature.cpp:1495-1556), the UNIT_MOD_HEALTH base
     // value included. Miss that last one and the next stat recompute quietly

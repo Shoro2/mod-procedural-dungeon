@@ -22,6 +22,7 @@
 #include "DatabaseEnv.h"
 #include "InstanceScript.h"
 #include "Log.h"
+#include "LootMgr.h"
 #include "Map.h"
 #include "ObjectMgr.h"
 #include "PDDefines.h"
@@ -53,6 +54,12 @@ namespace PDungeon
         uint32 const PLACEHOLDER_CREATURE = 29402;   // Anub'ar Skirmisher
 
         float const SPAWN_SPREAD_YD = 12.0f;
+
+        // Where a Lil' Bro's two children land relative to the corpse. That
+        // module's own offsets, mirrored (DungeonChallengeScripts.cpp:877-878);
+        // the second child takes the negatives.
+        float const LIL_BRO_OFFSET_X_YD = 2.0f;
+        float const LIL_BRO_OFFSET_Y_YD = 1.0f;
 
         // The 01 §8 bonus-roll table: the FL mats from mod_pdungeon_flmats.sql,
         // weighted hard toward the cheap end (the weights are percent and sum
@@ -223,6 +230,18 @@ namespace PDungeon
         }
         tag->counted = true;
 
+        // THE SPLIT GOES FIRST, before a single counter moves. It raises the
+        // run total and the room's live count by the number of children it
+        // actually managed to summon, so the decrements below land on numbers
+        // that already know about them: "Mobs 23/25" becomes "24/27" instead of
+        // overflowing past its own total, and a room whose last mob just became
+        // two children is not announced as cleared and then cleared again.
+        if (HasAffix(tag->affixMask, PD_AFFIX_LIL_BRO)
+            && tag->splitDepth < AFFIX_LIL_BRO_MAX_DEPTH)
+        {
+            SplitOnDeath(creature, *tag, killer);
+        }
+
         ++_run.killed;
         if (tag->isRunBoss && _run.bossKilled < _run.bossTotal)
         {
@@ -241,7 +260,23 @@ namespace PDungeon
         // 01 §8: the FL mats drop ON TOP of whatever the creature's own loot
         // table gives, which is what makes the dungeon a way to farm existing
         // content rather than a replacement for it.
-        RollBonusLoot(killer);
+        //
+        // A Lil' Bro child pays nothing, native table included - one carrier is
+        // seven corpses (1 -> 2 -> 4), and seven loot tables plus seven bonus
+        // rolls out of one mob would make the highest difficulty the cheapest
+        // place to farm. That module suppresses exactly this, and by both
+        // halves: the children are flagged noLoot at birth
+        // (DungeonChallengeScripts.cpp:898) and the flag is spent on death by
+        // clearing the loot and the lootable dynamic flag (:838-843).
+        if (tag->splitDepth)
+        {
+            creature->loot.clear();
+            creature->RemoveDynamicFlag(UNIT_DYNFLAG_LOOTABLE);
+        }
+        else
+        {
+            RollBonusLoot(killer);
+        }
 
         if (!_run.complete && _run.bossTotal > 0 && _run.bossKilled >= _run.bossTotal)
         {
@@ -351,6 +386,188 @@ namespace PDungeon
         LOG_DEBUG(PD_LOG, "PDv2: instance {} walk grid {}x{} cells, {} walkable",
                   instance->GetInstanceId(), _grid.width, _grid.height,
                   uint32(_grid.WalkableCount()));
+    }
+
+    Creature* PDv2InstanceScript::SpawnTaggedMob(uint32 entry, PDv2MobData const& proto,
+                                                 float x, float y, float z,
+                                                 uint32 baseHealthOverride)
+    {
+        // Exactly ON the floor plane. This used to add 0.5 yd "so a creature is
+        // not spawned inside the floor" - harmless while gravity would have
+        // settled them, but with gravity disabled that offset is a permanent
+        // hover (operator report 2026-08-06: mobs stood slightly in the air
+        // until a pull and evade walked them onto their home position).
+        Creature* c = instance->SummonCreature(entry, Position(x, y, z, 0.0f));
+        if (!c)
+        {
+            return nullptr;
+        }
+
+        c->SetHomePosition(x, y, z, 0.0f);
+
+        // Gravity OFF, and this is not cosmetic: the server has no terrain
+        // here, so Map::GetHeight answers INVALID_HEIGHT and every creature is
+        // permanently "above nothing" - they fall through the platforms the
+        // client draws (operator report 2026-08-06). Disabling gravity pins
+        // them to the floor plane the kit was generated at, which is the only
+        // floor the server knows. Movement is unaffected: the walk grid drives
+        // it and every waypoint carries the same Z.
+        c->SetDisableGravity(true);
+
+        // The tag is what makes this creature a PDv2 mob for every other hook
+        // in the module. GetDefault here (it creates), Get everywhere else (it
+        // must not). Field by field rather than one assignment: DataMap::Base
+        // declares a destructor, so copying a derived tag wholesale leans on an
+        // implicitly generated operator the standard has deprecated.
+        PDv2MobData* tag = c->CustomData.GetDefault<PDv2MobData>(PD_MOB_DATA_KEY);
+        tag->role = proto.role;
+        tag->casterSpellId = proto.casterSpellId;
+        tag->roomIndex = proto.roomIndex;
+        tag->counted = false;
+        tag->isRunBoss = proto.isRunBoss;
+        tag->affixMask = proto.affixMask;
+        tag->splitDepth = proto.splitDepth;
+
+        // Before the affixes, never after: a Lil' Bro child is a TENTH of its
+        // parent that a Big Boy bit then grows by half again, and reversing
+        // these two would hand the child a full-size bar instead.
+        if (baseHealthOverride)
+        {
+            SetDungeonHealth(c, baseHealthOverride);
+        }
+
+        if (tag->affixMask)
+        {
+            // The affixes, cast the way mod-dungeon-challenge casts them
+            // (ApplyAffixToCreature: CastSpell on self, triggered,
+            // DungeonChallenge.cpp:676-768) so a mob wearing one looks the same
+            // in both dungeons. Which mobs are affixed came out of the SEEDED
+            // draw, so nothing about it is stored: a rebuild of the same plan
+            // re-rolls the identical set.
+            for (AffixDef const& affix : _runAffixes)
+            {
+                c->CastSpell(c, affix.spellId, true);
+            }
+
+            // ...and the spawn-time teeth: Big Boy and Bigger Boy are x1.5 max
+            // health each. This lands AFTER the difficulty HP scale, which
+            // PDv2Scaling's OnCreatureSelectLevel already applied inside the
+            // SummonCreature above - the same order that module uses, and the
+            // reason both affixes together are x2.25 of a difficulty-scaled bar
+            // rather than of the template's.
+            ApplyAffixSpawnHealth(c, tag->affixMask);
+        }
+
+        _spawnedGuids.push_back(c->GetGUID());
+        return c;
+    }
+
+    void PDv2InstanceScript::SplitOnDeath(Creature* parent, PDv2MobData const& parentTag,
+                                          Unit* killer)
+    {
+        // 10 % of what the PARENT ended up with, so the halving compounds down
+        // the generations exactly as it does in that module
+        // (DungeonChallengeScripts.cpp:868).
+        uint32 const childHealth = static_cast<uint32>(
+            static_cast<double>(parent->GetMaxHealth()) * AFFIX_LIL_BRO_HEALTH_PCT);
+
+        // A dead creature has usually lost its victim already; the killer is
+        // the fallback that module uses too (DungeonChallengeScripts.cpp:870-873).
+        Unit* target = parent->GetVictim();
+        if (!target)
+        {
+            target = killer;
+        }
+
+        PDv2MobData proto;
+        proto.role = parentTag.role;
+        proto.casterSpellId = parentTag.casterSpellId;
+        proto.roomIndex = parentTag.roomIndex;
+
+        // The children inherit the WHOLE set, which is what that module does
+        // (DungeonChallengeScripts.cpp:890 copies the parent's affix vector and
+        // :901-902 re-applies every one of them). So a Big Boy's child is a big
+        // child of a small corpse: SpawnTaggedMob writes the tenth first and
+        // the x1.5 on top of it.
+        proto.affixMask = parentTag.affixMask;
+        proto.splitDepth = static_cast<uint8>(parentTag.splitDepth + 1);
+
+        // Never a boss, whatever the parent was: `bossTotal` was counted once
+        // at spawn and a child that could be killed for boss credit would let a
+        // run finish twice over.
+        proto.isRunBoss = false;
+
+        WalkGrid const* grid = GetWalkGrid();
+        float const floorZ = sPDv2Mgr->GetConfig().floorZ;
+
+        uint16 born = 0;
+        for (uint8 i = 0; i < AFFIX_LIL_BRO_CHILDREN; ++i)
+        {
+            // That module's own offsets (DungeonChallengeScripts.cpp:877-878):
+            // far enough apart to be two creatures, close enough to read as one
+            // splitting.
+            float const sign = (i == 0) ? 1.0f : -1.0f;
+            float cx = parent->GetPositionX() + sign * LIL_BRO_OFFSET_X_YD;
+            float cy = parent->GetPositionY() + sign * LIL_BRO_OFFSET_Y_YD;
+
+            // A parent can die standing at a platform edge, and 2 yd past that
+            // edge is the void - where a gravity-less child would hover for
+            // ever, unreachable and uncountable. The walk grid is the only
+            // thing on this server that knows where floor is (pd/02 §7), so it
+            // decides: not floor, no offset.
+            if (grid)
+            {
+                int gcx = 0, gcy = 0;
+                WorldToCell(cx, cy, gcx, gcy);
+                GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                if (!grid->At(cell.x, cell.y))
+                {
+                    cx = parent->GetPositionX();
+                    cy = parent->GetPositionY();
+                }
+            }
+
+            // Z comes from the config, not from the corpse: the floor plane is
+            // where every other spawn stands, and a parent that was knocked
+            // upward must not hand its children a hover.
+            Creature* child = SpawnTaggedMob(parent->GetEntry(), proto, cx, cy, floorZ,
+                                             childHealth);
+            if (!child)
+            {
+                continue;
+            }
+            ++born;
+
+            if (target)
+            {
+                if (CreatureAI* ai = child->AI())
+                {
+                    ai->AttackStart(target);
+                }
+            }
+        }
+
+        if (!born)
+        {
+            return;
+        }
+
+        // THE COUNTERS, AND THIS IS WHY THE CALLER RUNS US FIRST. OnMobDied has
+        // not scored the parent yet, so raising the totals here means "killed"
+        // never passes "total" (23/25 becomes 24/27, not 24/25) and the room's
+        // live count never touches zero while children are standing in it -
+        // which would otherwise count the room cleared and then count it again
+        // when the children died.
+        _run.total = static_cast<uint16>(_run.total + born);
+        if (proto.roomIndex < _roomAlive.size())
+        {
+            _roomAlive[proto.roomIndex] = static_cast<uint16>(_roomAlive[proto.roomIndex] + born);
+        }
+        MarkRunDirty();
+
+        LOG_DEBUG(PD_LOG, "PDv2: instance {} Lil' Bro depth {} split into {} - run total {}",
+                  instance->GetInstanceId(), uint32(proto.splitDepth), uint32(born),
+                  uint32(_run.total));
     }
 
     void PDv2InstanceScript::SpawnFromPlan(BlockPlan const& plan)
@@ -472,83 +689,37 @@ namespace PDungeon
                 float x = 0.0f, y = 0.0f, z = 0.0f;
                 sPDv2Mgr->BlockToWorld(b.bx, b.by, mid + du, mid + dv, x, y, z);
 
-                // Exactly ON the floor plane. This used to add 0.5 yd "so a
-                // creature is not spawned inside the floor" - harmless while
-                // gravity would have settled them, but with gravity disabled
-                // that offset is a permanent hover (operator report
-                // 2026-08-06: mobs stood slightly in the air until a pull and
-                // evade walked them onto their home position).
-                if (Creature* c = instance->SummonCreature(picks[i].entry,
-                                                           Position(x, y, z, 0.0f)))
+                PDv2MobData proto;
+                proto.role = picks[i].role;
+                proto.casterSpellId = picks[i].casterSpellId;
+                proto.roomIndex = static_cast<uint32>(r);
+
+                // A boss room's FIRST pick is its boss - PDv2PackMgr.h states
+                // that contract ("every boss room gets exactly one role-2
+                // entry, drawn fresh"), and it holds even when the packs have
+                // no role-2 member and a trash stand-in takes the slot. Keying
+                // completion on the slot rather than on the drawn role is what
+                // keeps that data state finishable.
+                proto.isRunBoss = isBossRoom && i == 0;
+
+                // MEMBERSHIP FIRST, AURA SECOND. The mask is what every affix
+                // hook in the module reads; the spells are only the look.
+                // Writing it here - the one site that knows which mobs the
+                // seeded draw picked - is what lets a hook gate on a bit test
+                // instead of on HasAura, which a dispel or a purge could
+                // quietly take away (PDv2Affixes.h).
+                proto.affixMask = picks[i].affixed ? _runAffixMask : uint16(0);
+
+                if (SpawnTaggedMob(picks[i].entry, proto, x, y, z))
                 {
-                    c->SetHomePosition(x, y, z, 0.0f);
-
-                    // Gravity OFF, and this is not cosmetic: the server has no
-                    // terrain here, so Map::GetHeight answers INVALID_HEIGHT
-                    // and every creature is permanently "above nothing" - they
-                    // fall through the platforms the client draws (operator
-                    // report 2026-08-06). Disabling gravity pins them to the
-                    // floor plane the kit was generated at, which is the only
-                    // floor the server knows. Movement is unaffected: the walk
-                    // grid drives it and every waypoint carries the same Z.
-                    c->SetDisableGravity(true);
-
-                    // The tag is what makes this creature a PDv2 mob for every
-                    // other hook in the module. GetDefault here (it creates),
-                    // Get everywhere else (it must not).
-                    PDv2MobData* tag = c->CustomData.GetDefault<PDv2MobData>(PD_MOB_DATA_KEY);
-                    tag->role = picks[i].role;
-                    tag->casterSpellId = picks[i].casterSpellId;
-                    tag->roomIndex = static_cast<uint32>(r);
-                    tag->counted = false;
-
-                    // A boss room's FIRST pick is its boss - PDv2PackMgr.h
-                    // states that contract ("every boss room gets exactly one
-                    // role-2 entry, drawn fresh"), and it holds even when the
-                    // packs have no role-2 member and a trash stand-in takes
-                    // the slot. Keying completion on the slot rather than on
-                    // the drawn role is what keeps that data state finishable.
-                    tag->isRunBoss = isBossRoom && i == 0;
-                    if (tag->isRunBoss)
+                    if (proto.isRunBoss)
                     {
                         ++_run.bossTotal;
                     }
-
-                    // MEMBERSHIP FIRST, AURA SECOND. The mask is what every
-                    // affix hook in the module reads; the spells below are the
-                    // look. Writing the mask here - the one site that knows
-                    // which mobs the seeded draw picked - is what lets a hook
-                    // gate on a bit test instead of on HasAura, which a dispel
-                    // or a purge could quietly take away (PDv2Affixes.h).
-                    tag->splitDepth = 0;
-                    tag->affixMask = picks[i].affixed ? _runAffixMask : uint16(0);
-
-                    // The affixes, cast the way mod-dungeon-challenge casts
-                    // them (ApplyAffixToCreature: CastSpell on self, triggered,
-                    // DungeonChallenge.cpp:676-768) so a mob wearing one looks
-                    // the same in both dungeons. Which mobs are affixed came
-                    // out of the SEEDED draw, so nothing about it is stored: a
-                    // rebuild of the same plan re-rolls the identical set.
-                    if (tag->affixMask)
+                    if (proto.affixMask)
                     {
-                        for (AffixDef const& affix : _runAffixes)
-                        {
-                            c->CastSpell(c, affix.spellId, true);
-                        }
-
-                        // ...and the spawn-time teeth: Big Boy and Bigger Boy
-                        // are x1.5 max health each. This lands AFTER the
-                        // difficulty HP scale, which PDv2Scaling's
-                        // OnCreatureSelectLevel already applied inside the
-                        // SummonCreature above - the same order that module
-                        // uses, and the reason both affixes together are x2.25
-                        // of a difficulty-scaled bar rather than of the
-                        // template's.
-                        ApplyAffixSpawnHealth(c, tag->affixMask);
                         ++affixedMobs;
                     }
-
-                    _spawnedGuids.push_back(c->GetGUID());
                     ++_roomAlive[r];
                     ++spawned;
                 }

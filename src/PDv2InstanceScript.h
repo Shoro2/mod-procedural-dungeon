@@ -164,6 +164,24 @@ namespace PDungeon
 
     private:
         void SpawnFromPlan(BlockPlan const& plan);
+
+        // Summons ONE dungeon mob: the floor plane, the disabled gravity, the
+        // tag copied off `proto`, the run's affix auras and their spawn-time
+        // health effects. Every creature this module puts on the map is born
+        // here, so "what a PDv2 mob is" has exactly one definition and a Lil'
+        // Bro child cannot drift from the mobs it was cut out of.
+        //
+        // `baseHealthOverride` is written BEFORE the affix multipliers, which
+        // is what makes a split child a small copy that a Big Boy bit then
+        // grows again - the order that module's own split relies on.
+        // Returns nullptr when the summon failed; the caller owns the counters.
+        Creature* SpawnTaggedMob(uint32 entry, PDv2MobData const& proto,
+                                 float x, float y, float z,
+                                 uint32 baseHealthOverride = 0);
+
+        // Lil' Bro (affix 7). Called from OnMobDied BEFORE the death moves any
+        // counter, which is the only ordering that keeps them honest.
+        void SplitOnDeath(Creature* parent, PDv2MobData const& parentTag, Unit* killer);
         void MarkRunDirty() { _runDirty = true; }
         void FinishRun();
         void RollBonusLoot(Unit* killer);
