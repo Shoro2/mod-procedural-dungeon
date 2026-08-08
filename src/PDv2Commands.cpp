@@ -20,6 +20,7 @@
 #include "PDClientLink.h"
 #include "PDDefines.h"
 #include "PDv2Mgr.h"
+#include "PDv2PackMgr.h"
 #include "PDv2UILink.h"
 #include "Player.h"
 #include "ScriptMgr.h"
@@ -191,6 +192,14 @@ private:
         // - the one failure that makes every mob stand still.
         handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded",
                                  uint32(sPDv2Mgr->WalkMaskCount()));
+        // The same failure class, one table over: 0 packs means
+        // mod_pdungeon_packs.sql never landed and every room falls back to the
+        // placeholder creature; 0 affixes means mod_pdungeon_affixes.sql did
+        // not, and the dungeon runs clean at every difficulty. Both degrade
+        // quietly in play, so this line is where they become visible.
+        handler->PSendSysMessage("pdungeon v2: {} pack(s), {} affix(es) loaded",
+                                 uint32(sPDv2PackMgr->PackCount()),
+                                 uint32(sPDv2PackMgr->AffixCount()));
         handler->PSendSysMessage("pdungeon v2: {}",
                                  sPDClientLink->DebugLine(AccountOf(handler)));
         // The panel's side of the same conversation: whether this account's

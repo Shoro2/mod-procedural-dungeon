@@ -85,6 +85,12 @@ namespace PDungeon
     {
         _packs.clear();
 
+        // FIRST, not last: the pack query below returns early on an environment
+        // with no packs, and hanging the affix load off the end of it would
+        // make one missing SQL file silently take a second, unrelated feature
+        // with it.
+        LoadAffixesFromDB();
+
         // The LEFT JOIN on creature_template is the defensive half: pack
         // members point at entries this module does not own, so on any
         // environment without the imported stock some of them simply are not
@@ -174,17 +180,15 @@ namespace PDungeon
             LOG_WARN(PD_LOG, "PDv2: no role-2 (boss) pack member exists for theme {} - "
                              "boss rooms will be filled with a trash stand-in", theme);
         }
-
-        // Same startup site as the packs: everything the spawner draws from is
-        // read once here and immutable afterwards, which is what lets map
-        // threads query it without a lock.
-        LoadAffixesFromDB();
     }
 
     void PDv2PackMgr::LoadAffixesFromDB()
     {
         _affixes.clear();
 
+        // Read once at startup and immutable afterwards, exactly like the pack
+        // tables - that is what lets map threads query it without a lock.
+        //
         // No theme column: the affix set is a property of the DIFFICULTY dial,
         // not of the kit a dungeon is built from. Ordered by minDiff so the
         // spells are handed to a creature in the order they unlock, which is
