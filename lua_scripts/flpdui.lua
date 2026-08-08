@@ -115,7 +115,7 @@ local function ToNumbers(fields, count)
     return true
 end
 
-local CFG_FIELDS = 21
+local CFG_FIELDS = 23
 
 local function ParseCfg(body)
     local f = SplitHead(body, CFG_FIELDS)
@@ -127,7 +127,8 @@ local function ParseCfg(body)
         diff = f[8], diffMin = f[9], diffMax = f[10], diffStep = f[11],
         caster = f[12], casterMin = f[13], casterMax = f[14],
         bandMin = f[15], bandLo = f[16], bandHi = f[17], bandStep = f[18],
-        bandLocked = f[19], lootMultX100 = f[20], verdictCode = f[21],
+        bandLocked = f[19], lootMultX100 = f[20],
+        curRooms = f[21], curBoss = f[22], verdictCode = f[23],
         verdictText = f.tail,
     }
 
@@ -149,8 +150,12 @@ local function ParseMap(body)
     local m = { w = f[1], h = f[2], cpb = f[3], ex = f[4], ey = f[5], blocks = {} }
     if m.w <= 0 or m.h <= 0 or m.cpb <= 0 then return nil end
 
-    for bx, by, role in string.gmatch(f.tail, "(%-?%d+),(%-?%d+),(%a);") do
-        table.insert(m.blocks, { bx = tonumber(bx), by = tonumber(by), role = role })
+    -- The fourth field is the block's socket mask (N=1 E=2 S=4 W=8): the
+    -- REAL connections, which is what the map draws corridors along. Cell
+    -- adjacency alone suggested doors that were not there.
+    for bx, by, role, mask in string.gmatch(f.tail, "(%-?%d+),(%-?%d+),(%a),(%d+);") do
+        table.insert(m.blocks, { bx = tonumber(bx), by = tonumber(by), role = role,
+                                 mask = tonumber(mask) })
     end
     if #m.blocks == 0 then return nil end
     return m
@@ -178,7 +183,7 @@ end
 -- ============================================================================
 
 local PANEL_W = 420
-local PANEL_H = 330
+local PANEL_H = 350            -- +20 for the current-depths line (2026-08-07)
 local BAND_ROW_H = 52           -- what the hidden band row would add back
 local BAR_W = PANEL_W - 48
 
@@ -291,8 +296,16 @@ local lootLine = Panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 lootLine:SetPoint("TOP", casterSlider, "BOTTOM", 0, -16)
 lootLine:SetText("...")
 
+-- What the account's CURRENT layout holds - which can differ from the sliders:
+-- a stored dungeon keeps its frozen generation inputs, the sliders only shape
+-- the NEXT roll. The first in-game test read that difference as a bug, so the
+-- panel says it out loud.
+local curLine = Panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+curLine:SetPoint("TOP", lootLine, "BOTTOM", 0, -6)
+curLine:SetText("")
+
 local sep2 = Panel:CreateTexture(nil, "ARTWORK")
-sep2:SetPoint("TOP", lootLine, "BOTTOM", 0, -8)
+sep2:SetPoint("TOP", curLine, "BOTTOM", 0, -8)
 sep2:SetWidth(BAR_W)
 sep2:SetHeight(1)
 sep2:SetTexture(0.4, 0.4, 0.6, 0.5)
@@ -371,6 +384,13 @@ local function ApplyCfg(c)
 
     lootLine:SetText(string.format("Loot  |cffFFD700x%.2f|r", c.lootMultX100 / 100))
 
+    if c.curRooms > 0 then
+        curLine:SetText(string.format(
+            "|cffaaaaaaCurrent depths: %d rooms - %d boss|r", c.curRooms, c.curBoss))
+    else
+        curLine:SetText("|cffaaaaaaNo depths rolled yet|r")
+    end
+
     -- "code 0 means go" is the wire contract, and the server pins it with a
     -- static_assert so a reordered enum breaks the build instead of the line.
     local text = c.verdictText
@@ -448,6 +468,7 @@ local ROLE_COLOUR = {
 }
 
 local cells = {}
+local cellsUsed = 0
 
 local dot = canvas:CreateTexture(nil, "OVERLAY")
 dot:SetWidth(6)
@@ -455,31 +476,73 @@ dot:SetHeight(6)
 dot:SetTexture(1.0, 0.95, 0.20, 1.0)
 dot:Hide()
 
+-- One pooled rectangle. A block is no longer one texture: a corridor is up to
+-- four bars, so the pool hands out however many a layout needs and hides the
+-- rest.
+local function Rect(x, y, w, h, colour)
+    cellsUsed = cellsUsed + 1
+    local t = cells[cellsUsed]
+    if not t then
+        t = canvas:CreateTexture(nil, "ARTWORK")
+        cells[cellsUsed] = t
+    end
+    t:SetTexture(colour[1], colour[2], colour[3], 0.9)
+    t:ClearAllPoints()
+    t:SetPoint("TOPLEFT", canvas, "TOPLEFT", x, -y)
+    t:SetWidth(math.max(1, w))
+    t:SetHeight(math.max(1, h))
+    t:Show()
+end
+
 -- Normalise and place, the FLContinentNav idiom: the payload's blocks are
 -- already relative to the plan's bounding box, so one division per axis maps
 -- them onto whatever the canvas happens to be.
+--
+-- Rooms are near-full cells. A corridor is drawn as THIN BARS along its
+-- socket mask (N=1 E=2 S=4 W=8, matching the planner: N is dy = -1, which is
+-- UP on this canvas) - never as a full cell, because a full cell touches all
+-- four neighbours and the first in-game test read that as doors that do not
+-- exist. Rooms never touch each other (the planner keeps them 2 apart), so
+-- every real connection is a corridor bar reaching the room's edge.
 local function BuildMap(m)
     mapData = m
+    cellsUsed = 0
     local bw = CANVAS / m.w
     local bh = CANVAS / m.h
-    local used = 0
-    for i, b in ipairs(m.blocks) do
-        used = i
-        local t = cells[i]
-        if not t then
-            t = canvas:CreateTexture(nil, "ARTWORK")
-            cells[i] = t
+    local bar = math.max(3, math.floor(math.min(bw, bh) / 3))
+
+    for _, b in ipairs(m.blocks) do
+        local colour = ROLE_COLOUR[b.role] or ROLE_COLOUR.c
+        local x0 = b.bx * bw
+        local y0 = b.by * bh
+        if b.role == "c" then
+            local cx = x0 + bw / 2
+            local cy = y0 + bh / 2
+            local mask = b.mask or 0
+            if mask == 0 then
+                Rect(cx - bar / 2, cy - bar / 2, bar, bar, colour)
+            end
+            if mask >= 8 then                               -- W: toward x0
+                Rect(x0, cy - bar / 2, bw / 2 + bar / 2, bar, colour)
+                mask = mask - 8
+            end
+            if mask >= 4 then                               -- S: toward y0 + bh
+                Rect(cx - bar / 2, cy - bar / 2, bar, bh / 2 + bar / 2, colour)
+                mask = mask - 4
+            end
+            if mask >= 2 then                               -- E: toward x0 + bw
+                Rect(cx - bar / 2, cy - bar / 2, bw / 2 + bar / 2, bar, colour)
+                mask = mask - 2
+            end
+            if mask >= 1 then                               -- N: toward y0
+                Rect(cx - bar / 2, y0, bar, bh / 2 + bar / 2, colour)
+            end
+        else
+            Rect(x0 + 1, y0 + 1, bw - 2, bh - 2, colour)
         end
-        local colour = ROLE_COLOUR[b.role]
-        if not colour then colour = ROLE_COLOUR.c end
-        t:SetTexture(colour[1], colour[2], colour[3], 0.9)
-        t:ClearAllPoints()
-        t:SetPoint("TOPLEFT", canvas, "TOPLEFT", b.bx * bw, -(b.by * bh))
-        t:SetWidth(math.max(1, bw - 1))
-        t:SetHeight(math.max(1, bh - 1))
-        t:Show()
     end
-    for i = used + 1, #cells do
+
+    for i = cellsUsed + 1, #cells do
         cells[i]:Hide()
     end
 end

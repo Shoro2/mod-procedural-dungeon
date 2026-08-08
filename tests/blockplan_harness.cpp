@@ -659,8 +659,8 @@ namespace
         Check(GameClampDiffX100(137, 40) == 125, "137 must snap DOWN to 125", 0);
         Check(GameBossRooms(0) == 1 && GameBossRooms(9) == 1 && GameBossRooms(10) == 2,
               "boss rooms must follow 1 + dlvl/10", 0);
-        Check(GameCreatureTypes(0) == 1 && GameCreatureTypes(2) == 1 &&
-              GameCreatureTypes(3) == 2 && GameCreatureTypes(30) == 11,
+        Check(GameCreatureTypes(0) == 4 && GameCreatureTypes(2) == 4 &&
+              GameCreatureTypes(3) == 5 && GameCreatureTypes(30) == 14,
               "creature types must follow 1 + dlvl/3", 0);
         Check(GameClampCasterPct(PD_GAME_CASTER_PCT_DEFAULT) == PD_GAME_CASTER_PCT_DEFAULT,
               "the default caster ratio must survive its own clamp", 0);
@@ -816,8 +816,8 @@ namespace
             }
             std::snprintf(msg, sizeof(msg), "loot multiplier is not monotone (at %d)", badAt);
             Check(mono, msg, 0);
-            Check(GameLootMultX100(50, 20) == 40, "lootMult at the floor must be 0.5 x 0.8", 0);
-            Check(GameLootMultX100(300, 80) == 330, "lootMult at the ceiling must be 3.0 x 1.1", 0);
+            Check(GameLootMultX100(50, 20) == 45, "lootMult at the floor must be 0.5 x 0.9", 0);
+            Check(GameLootMultX100(300, 80) == 360, "lootMult at the ceiling must be 3.0 x 1.2", 0);
         }
 
         // dxp -> dlvl, and the run reward that feeds it.
@@ -1031,7 +1031,13 @@ namespace
         int cap = PD_GAME_ROOMS_MIN;
         for (int rooms = PD_GAME_ROOMS_MIN; rooms <= PD_GAME_ROOMS_CAP_DESIGN; ++rooms)
         {
-            int const boss = GameBossRooms(rooms - PD_GAME_ROOMS_MIN);
+            // bossRooms as a player at that room count would run them: the cap
+            // formula is 3 + dlvl, so room count R unlocks at dlvl R - 3. The
+            // floor is lower than 3 (a 1-room boss rush is legal), which is
+            // why the dlvl here is clamped at 0 rather than derived from the
+            // floor constant.
+            int const unlockDlvl = rooms > 3 ? rooms - 3 : 0;
+            int const boss = GameBossRooms(unlockDlvl);
             RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds);
             bool const ok = row.failures == 0 &&
                             row.maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B);

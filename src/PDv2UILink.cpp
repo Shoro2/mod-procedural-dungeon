@@ -344,6 +344,28 @@ namespace PDungeon
         int const dlvl = static_cast<int>(account.dlvl);
         LinkVerdict const verdict = sPDClientLink->CurrentVerdict(accountId);
 
+        // What the account's CURRENT layout actually contains - distinct from
+        // the cfg_* knobs, which only shape the NEXT roll. A restored plan can
+        // be larger than today's band allows (its gen inputs are frozen by
+        // design), and the first in-game test proved a panel that shows only
+        // the next roll's bounds reads as a bug when the live dungeon differs.
+        int curRooms = 0, curBoss = 0;
+        if (auto const plan = sPDv2Mgr->GetPlan(accountId))
+        {
+            for (PlacedBlock const& b : plan->blocks)
+            {
+                if (b.roomId < 0 || b.role == BlockRole::RoomEntrance)
+                {
+                    continue;
+                }
+                ++curRooms;
+                if (b.role == BlockRole::RoomBoss)
+                {
+                    ++curBoss;
+                }
+            }
+        }
+
         // EVERY bound on this line is computed here. The panel is not allowed
         // to know that rooms start at 3, that difficulty moves in quarters or
         // what the loot multiplier is made of - it is told, every time.
@@ -368,6 +390,8 @@ namespace PDungeon
             << ' ' << PD_GAME_BAND_STEP
             << ' ' << PD_UI_BAND_LOCKED
             << ' ' << GameLootMultX100(account.cfgDiffX100, account.cfgCasterPct)
+            << ' ' << curRooms
+            << ' ' << curBoss
             << ' ' << static_cast<int>(verdict)
             << ' ' << Sanitize(LinkState::Describe(verdict));
 
@@ -404,7 +428,14 @@ namespace PDungeon
 
         for (PlacedBlock const& b : plan->blocks)
         {
-            out << (b.bx - minBX) << ',' << (b.by - minBY) << ',' << RoleChar(b.role) << ';';
+            // The socket mask travels with every block (N=1 E=2 S=4 W=8, the
+            // kit's own bit values) so the map can draw a corridor as a thin
+            // bar along its REAL connections. Full-cell corridors suggested
+            // connections that did not exist - adjacency on the map is not
+            // adjacency in the dungeon, only a shared open socket is (operator
+            // report, first in-game test 2026-08-07).
+            out << (b.bx - minBX) << ',' << (b.by - minBY) << ',' << RoleChar(b.role)
+                << ',' << b.socketMask << ';';
         }
 
         // A layout that outgrew one packet would arrive truncated and the

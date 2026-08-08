@@ -46,13 +46,26 @@ namespace PDungeon
     constexpr int PD_GAME_BAND_MIN = 1;
     constexpr int PD_GAME_BAND_MAX = 76;
 
-    // 01 §8 caster ratio r in [0.20, 0.80], default 0.60.
+    // 01 §8 caster ratio r in [0.20, 0.80]. Default 40 - the operator flipped
+    // the original 60/40 caster-heavy default to 40 % casters / 60 % melee at
+    // the first in-game test (2026-08-07).
     constexpr int PD_GAME_CASTER_PCT_MIN = 20;
     constexpr int PD_GAME_CASTER_PCT_MAX = 80;
-    constexpr int PD_GAME_CASTER_PCT_DEFAULT = 60;
+    constexpr int PD_GAME_CASTER_PCT_DEFAULT = 40;
 
-    // 01 §8 room floor - "3 + dlvl" at dlvl 0.
-    constexpr int PD_GAME_ROOMS_MIN = 3;
+    // Room floor. 01 §8's "3 + dlvl" is the CAP, not a floor - the floor was 3
+    // until the first in-game test, when the operator asked for 1 (2026-08-07):
+    // a 1-room run is entrance + boss room, a legal boss-rush micro-dungeon
+    // (the planner scatters max(2, rooms + bossRooms) cells, so the layout
+    // never degenerates below two rooms).
+    constexpr int PD_GAME_ROOMS_MIN = 1;
+
+    // The "3" in 01 §8's cap formula "3 + dlvl" - deliberately its own
+    // constant: when the FLOOR moved from 3 to 1 the cap borrowed the floor
+    // constant and silently became "1 + dlvl" until the harness's
+    // independently-coded expectation caught it. Formula base and slider floor
+    // are different quantities that happened to share a value once.
+    constexpr int PD_GAME_ROOMS_CAP_BASE = 3;
 
     // 01 §8 design ceiling on rooms. PD_GAME_ROOMS_CAP_MEASURED below is what
     // the kit actually supports and wins where the two disagree.
@@ -102,7 +115,7 @@ namespace PDungeon
     constexpr int GameRoomsCap(int dlvl)
     {
         int const safeDlvl = dlvl > 0 ? dlvl : 0;
-        int cap = PD_GAME_ROOMS_MIN + safeDlvl;
+        int cap = PD_GAME_ROOMS_CAP_BASE + safeDlvl;
         if (cap > PD_GAME_ROOMS_CAP_DESIGN)
         {
             cap = PD_GAME_ROOMS_CAP_DESIGN;
@@ -120,10 +133,16 @@ namespace PDungeon
         return 1 + (dlvl > 0 ? dlvl / 10 : 0);
     }
 
-    // 01 §8 "Creature types 1 + floor(dlvl / 3)", drawn from the unlocked packs.
+    // Distinct trash types per run, drawn from the unlocked packs. 01 §8 wrote
+    // "1 + floor(dlvl / 3)" - at dlvl 0 that is ONE type, and the first
+    // in-game run was wall-to-wall Ashen Wailers with the caster ratio a
+    // no-op (a single type has a single role). Operator verdict 2026-08-07:
+    // runs must be mixed from the start. The base moves to 4 - enough for the
+    // role seeding to guarantee melee AND casters - and the §8 progression
+    // slope (+1 type per 3 dlvl) stays.
     constexpr int GameCreatureTypes(int dlvl)
     {
-        return 1 + (dlvl > 0 ? dlvl / 3 : 0);
+        return 4 + (dlvl > 0 ? dlvl / 3 : 0);
     }
 
     // 01 §8 difficulty floor: d = 0.5.
@@ -174,13 +193,17 @@ namespace PDungeon
         return wanted > hi ? hi : wanted;
     }
 
-    // 01 §8 "lootMult = d * (0.7 + 0.5 * r)", carried as x100 so no float ever
-    // touches the number: at the defaults (d = 1.0, r = 0.60) this is exactly
-    // 100 * (70 + 30) / 100 = 100. int64 intermediate because the product is
-    // the only place that could overflow if the bands are ever widened.
+    // "lootMult = d * (0.8 + 0.5 * r)", carried as x100 so no float ever
+    // touches the number: at the defaults (d = 1.0, r = 0.40) this is exactly
+    // 100 * (80 + 20) / 100 = 100. The 01 §8 original was 0.7 + 0.5r anchored
+    // on the old 0.60 caster default; when the operator moved the default to
+    // 0.40 (2026-08-07) the intercept moved with it - same slope, so a caster
+    // percent is worth the same loot either way, and the DEFAULT stays the
+    // 1.00 anchor a neutral run advertises. int64 intermediate because the
+    // product is the only place that could overflow if the bands are widened.
     constexpr int GameLootMultX100(int diffX100, int casterPct)
     {
-        int64_t const factor = 70 + GameClampCasterPct(casterPct) / 2;
+        int64_t const factor = 80 + GameClampCasterPct(casterPct) / 2;
         return static_cast<int>(static_cast<int64_t>(diffX100) * factor / 100);
     }
 

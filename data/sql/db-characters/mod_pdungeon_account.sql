@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS `pdungeon_account` (
     `dxp`               INT UNSIGNED      NOT NULL DEFAULT 0,
     `cfg_rooms`         TINYINT UNSIGNED  NOT NULL DEFAULT 5,
     `cfg_diff_x100`     SMALLINT UNSIGNED NOT NULL DEFAULT 100,
-    `cfg_caster_pct`    TINYINT UNSIGNED  NOT NULL DEFAULT 60,
+    `cfg_caster_pct`    TINYINT UNSIGNED  NOT NULL DEFAULT 40,
     `cfg_packs`         VARCHAR(255)      NOT NULL DEFAULT '',
     `cfg_mob_level_min` TINYINT UNSIGNED  NOT NULL DEFAULT 1,
     `theme`             TINYINT UNSIGNED  NOT NULL DEFAULT 1,
