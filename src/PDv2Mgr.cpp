@@ -60,6 +60,16 @@ namespace PDungeon
         _config.castRangeYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.CastRangeYd", 25.0f);
         _config.aggroRangeYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.AggroRangeYd", 20.0f);
 
+        // Clamped at 0 on the way in: a negative percentage would make a HARDER
+        // dungeon hit softer, and at difficulty 100 it would drive the x100
+        // multiplier below zero and underflow the unsigned arithmetic the
+        // scaling hooks do. There is no upper clamp - an operator who wants a
+        // brutal curve is entitled to one.
+        _config.diffHealthPctPerLevel = std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Diff.HealthPctPerLevel", 5));
+        _config.diffDamagePctPerLevel = std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Diff.DamagePctPerLevel", 2));
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{})",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,
@@ -137,7 +147,7 @@ namespace PDungeon
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
-            "gen_loop_pct, cfg_rooms, cfg_diff_x100, cfg_caster_pct, cfg_mob_level_min, "
+            "gen_loop_pct, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
             "cfg_packs) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE theme = VALUES(theme), "
             "layout_seed = VALUES(layout_seed), layout_version = VALUES(layout_version), "
@@ -146,7 +156,7 @@ namespace PDungeon
             "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct)",
             accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
             cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.loopChancePct,
-            state.cfgRooms, state.cfgDiffX100, state.cfgCasterPct, state.cfgBandMin, packs);
+            state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct, state.cfgBandMin, packs);
     }
 
     void PDv2Mgr::LoadAccountState(uint32_t accountId)
@@ -161,7 +171,7 @@ namespace PDungeon
 
         PDv2AccountState state;
         QueryResult result = CharacterDatabase.Query(
-            "SELECT dlvl, dxp, cfg_rooms, cfg_diff_x100, cfg_caster_pct, cfg_mob_level_min, "
+            "SELECT dlvl, dxp, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
             "cfg_packs FROM pdungeon_account WHERE accountId = {}", accountId);
         if (result)
         {
@@ -169,7 +179,7 @@ namespace PDungeon
             state.dlvl = fields[0].Get<uint32>();
             state.dxp = fields[1].Get<uint32>();
             state.cfgRooms = fields[2].Get<uint8>();
-            state.cfgDiffX100 = fields[3].Get<uint16>();
+            state.cfgDifficulty = fields[3].Get<uint8>();
             state.cfgCasterPct = fields[4].Get<uint8>();
             state.cfgBandMin = fields[5].Get<uint8>();
             state.cfgPacks = fields[6].Get<std::string>();
@@ -186,7 +196,9 @@ namespace PDungeon
         }
         int const dlvl = static_cast<int>(state.dlvl);
         state.cfgRooms = GameClampRooms(state.cfgRooms, dlvl);
-        state.cfgDiffX100 = GameClampDiffX100(state.cfgDiffX100, dlvl);
+        // No dlvl argument any more: the dial is open from the first run, so
+        // the only illegal difficulty is one outside [1, 100].
+        state.cfgDifficulty = GameClampDiff(state.cfgDifficulty);
         state.cfgCasterPct = GameClampCasterPct(state.cfgCasterPct);
         state.cfgBandMin = GameClampBandMin(state.cfgBandMin);
 
@@ -207,7 +219,7 @@ namespace PDungeon
         PDv2AccountState& state = _accounts[accountId];
         int const dlvl = static_cast<int>(state.dlvl);
         state.cfgRooms = GameClampRooms(cfg.cfgRooms, dlvl);
-        state.cfgDiffX100 = GameClampDiffX100(cfg.cfgDiffX100, dlvl);
+        state.cfgDifficulty = GameClampDiff(cfg.cfgDifficulty);
         state.cfgCasterPct = GameClampCasterPct(cfg.cfgCasterPct);
         state.cfgBandMin = GameClampBandMin(cfg.cfgBandMin);
         state.cfgPacks = cfg.cfgPacks;
@@ -226,12 +238,12 @@ namespace PDungeon
         // cfg_* columns only, the mirror image of SavePlanToDB: a settings
         // change must never touch progression or the stored layout.
         CharacterDatabase.Execute(
-            "INSERT INTO pdungeon_account (accountId, cfg_rooms, cfg_diff_x100, "
+            "INSERT INTO pdungeon_account (accountId, cfg_rooms, cfg_difficulty, "
             "cfg_caster_pct, cfg_mob_level_min, cfg_packs) VALUES ({}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE cfg_rooms = VALUES(cfg_rooms), "
-            "cfg_diff_x100 = VALUES(cfg_diff_x100), cfg_caster_pct = VALUES(cfg_caster_pct), "
+            "cfg_difficulty = VALUES(cfg_difficulty), cfg_caster_pct = VALUES(cfg_caster_pct), "
             "cfg_mob_level_min = VALUES(cfg_mob_level_min), cfg_packs = VALUES(cfg_packs)",
-            accountId, state.cfgRooms, state.cfgDiffX100, state.cfgCasterPct,
+            accountId, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
             state.cfgBandMin, packs);
     }
 

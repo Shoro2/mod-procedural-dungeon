@@ -369,12 +369,41 @@ ProceduralDungeon.V2.XP.PerDlvl = 100
 #
 #    ProceduralDungeon.V2.DlvlCap
 #        Description: Highest reachable dungeon level. Past dlvl 12 the room
-#                     count is already at its cap and only the difficulty band
-#                     and creature variety keep growing.
+#                     count is already at its cap, so what dlvl still buys is
+#                     boss rooms (1 + dlvl/10) and pack unlocks. It does NOT
+#                     gate difficulty any more - that dial is open from the
+#                     first run (2026-08-08).
 #        Default:     30
 #
 
 ProceduralDungeon.V2.DlvlCap = 30
+
+#
+#    ProceduralDungeon.V2.Diff.HealthPctPerLevel
+#        Description: Percent added to a dungeon mob's HP per point of the
+#                     difficulty dial (1..100). mult = 1 + difficulty * pct/100,
+#                     so 5 means difficulty 1 is x1.05 and difficulty 100 is x6.
+#                     The default is mod-dungeon-challenge's LIVE value on this
+#                     server (DungeonChallenge.HealthMultiplierPerLevel = 5 in
+#                     dcore/configs/modules/mod_dungeon_challenge.conf; note the
+#                     .dist there still says 15). PDv2 owns its own key so the
+#                     two dungeons can be tuned apart.
+#        Default:     5
+#
+
+ProceduralDungeon.V2.Diff.HealthPctPerLevel = 5
+
+#
+#    ProceduralDungeon.V2.Diff.DamagePctPerLevel
+#        Description: The same curve for outgoing damage - melee, spell and
+#                     periodic alike. Default = mod-dungeon-challenge's LIVE
+#                     DungeonChallenge.DamageMultiplierPerLevel = 2. Damage
+#                     climbs slower than HP on purpose: a fight that takes
+#                     longer is tense, a fight that one-shots is not.
+#        Default:     2
+#
+
+ProceduralDungeon.V2.Diff.DamagePctPerLevel = 2
 
 #
 #    ProceduralDungeon.V2.SpawnsPerRoom
@@ -394,7 +423,9 @@ ProceduralDungeon.V2.SpawnsPerRoom = 3
 #                     table (items 920100+), on TOP of the creature's native
 #                     loot, which stays untouched - that is what makes the
 #                     dungeon a target-farming mechanism (01 §8). The roll is
-#                     scaled by lootMult = d x (0.7 + 0.5 x r).
+#                     scaled by lootMult, which runs from x1.00 at difficulty 1
+#                     to x3.00 at difficulty 100, times the caster factor
+#                     (0.8 + 0.5 x r).
 #        Default:     15
 #
 

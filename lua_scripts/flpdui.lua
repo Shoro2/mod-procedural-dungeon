@@ -241,11 +241,17 @@ sep1:SetWidth(BAR_W)
 sep1:SetHeight(1)
 sep1:SetTexture(0.4, 0.4, 0.6, 0.5)
 
--- How each slider renders one value. The x100 divisions decode the wire's
--- fixed point (the field is NAMED x100); they do not recompute anything -
--- difficulty and the loot multiplier are both decided in PDv2GameMath.h.
+-- How each slider renders one value. The one x100 division left decodes the
+-- wire's fixed point (the field is NAMED x100); it does not recompute anything
+-- - the loot multiplier is decided in PDv2GameMath.h.
+--
+-- Difficulty is a PLAIN INTEGER since 2026-08-08: the value on the wire IS the
+-- difficulty (1..100), so rendering it is a "%d" and nothing else. The old
+-- "%.2fx" divided by 100 because difficulty used to be carried x100 - printing
+-- that formula against the new scale would show the player "0.37x" for a
+-- difficulty of 37.
 local function RenderRooms(v) return string.format("%d", v) end
-local function RenderDiff(v) return string.format("%.2fx", v / 100) end
+local function RenderDiff(v) return string.format("%d", v) end
 local function RenderCaster(v) return string.format("%d%%", v) end
 local function RenderBand(v)
     if not cfg then return "..." end

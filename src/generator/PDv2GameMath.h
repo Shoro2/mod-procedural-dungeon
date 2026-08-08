@@ -27,18 +27,34 @@
 // it standalone. That is the point - every number a player can feel is decided
 // here and pinned by the harness, not scattered across the instance script.
 //
-// Two quantities are carried as INTEGERS scaled by 100: difficulty and the loot
-// multiplier. 01 §7 says why for difficulty ("cfg_diff_x100 stores difficulty as
-// an integer so the step-0.25 grid cannot drift through float storage"); the loot
-// multiplier follows it end to end for the same reason, because a multiplier that
-// drifts is a multiplier players will eventually find.
+// The loot multiplier is carried as an INTEGER scaled by 100, because a
+// multiplier that drifts through float storage is a multiplier players will
+// eventually find. Difficulty used to be carried the same way (01 §7's
+// cfg_diff_x100, a 0.5..3.0 band on a 0.25 grid); since the 2026-08-08 operator
+// directive it is a plain integer 1..100 and needs no fixed point at all.
 //
 // Every clamp snaps DOWN rather than to-nearest, so a value a player asked for
 // can never quietly become a value above the band they unlocked.
 namespace PDungeon
 {
-    // 01 §8 difficulty grid: d in [0.5, 3.0] in steps of 0.25.
-    constexpr int PD_GAME_DIFF_STEP_X100 = 25;
+    // Difficulty, the dungeon-challenge model adopted whole (operator directive
+    // 2026-08-08, after the first live test): an integer 1..100, FREELY
+    // choosable from the very first run. dlvl no longer gates it - it still
+    // gates rooms and which packs are unlocked, but the dial itself is open,
+    // exactly as mod-dungeon-challenge's keystone difficulty is.
+    //
+    // The floor is 1 rather than 0 because difficulty 0 would mean "no scaling
+    // at all" and the dial would have a dead first position; at 1 the mobs are
+    // 5 % tougher and 2 % harder-hitting (V2.Diff.*PctPerLevel), which is the
+    // gentle floor the directive asked for.
+    constexpr int PD_GAME_DIFF_MIN = 1;
+    constexpr int PD_GAME_DIFF_MAX = 100;
+    constexpr int PD_GAME_DIFF_DEFAULT = 1;
+
+    // The dial's step, as a named constant rather than a literal 1 on the wire:
+    // the panel is told every bound it draws (PDv2UILink.h's rule), and a step
+    // it had to assume would be the first Lua copy of a server-owned number.
+    constexpr int PD_GAME_DIFF_STEP = 1;
 
     // 01 §8 mob level band, "in steps of 5"; band = [min, min + 4], so 76 is
     // the highest legal start and the top band is 76..80.
@@ -133,43 +149,22 @@ namespace PDungeon
         return 1 + (dlvl > 0 ? dlvl / 10 : 0);
     }
 
-    // Distinct trash types per run, drawn from the unlocked packs. 01 §8 wrote
-    // "1 + floor(dlvl / 3)" - at dlvl 0 that is ONE type, and the first
-    // in-game run was wall-to-wall Ashen Wailers with the caster ratio a
-    // no-op (a single type has a single role). Operator verdict 2026-08-07:
-    // runs must be mixed from the start. The base moves to 4 - enough for the
-    // role seeding to guarantee melee AND casters - and the §8 progression
-    // slope (+1 type per 3 dlvl) stays.
-    constexpr int GameCreatureTypes(int dlvl)
-    {
-        return 4 + (dlvl > 0 ? dlvl / 3 : 0);
-    }
+    // There is deliberately no GameCreatureTypes() any more. 01 §8 capped a run
+    // at "1 + floor(dlvl / 3)" DISTINCT trash entries and PDv2PackMgr drew that
+    // subset once per run; the second live test read exactly what that does -
+    // "only a few of the available mobs get picked and then only those are
+    // used". Operator verdict 2026-08-08: every spawn slot rolls independently
+    // from the whole unlocked pool, so there is no cap left to compute.
 
-    // 01 §8 difficulty floor: d = 0.5.
-    constexpr int GameDiffMinX100()
+    // Difficulty clamp. No grid to snap onto and no dlvl argument: the dial is
+    // every integer in [1, 100] and a fresh account may pick any of them.
+    constexpr int GameClampDiff(int wanted)
     {
-        return 50;
-    }
-
-    // 01 §8 difficulty ceiling: d = min(3.0, 1 + 0.25 * dlvl).
-    constexpr int GameDiffMaxX100(int dlvl)
-    {
-        int const hi = 100 + PD_GAME_DIFF_STEP_X100 * (dlvl > 0 ? dlvl : 0);
-        return hi < 300 ? hi : 300;
-    }
-
-    // 01 §8: clamp into the band, then snap DOWN onto the 0.25 grid (137 -> 125).
-    // Both band ends are multiples of the step, so the result is always legal.
-    constexpr int GameClampDiffX100(int wanted, int dlvl)
-    {
-        int const lo = GameDiffMinX100();
-        int const hi = GameDiffMaxX100(dlvl);
-        int v = wanted < lo ? lo : wanted;
-        if (v > hi)
+        if (wanted < PD_GAME_DIFF_MIN)
         {
-            v = hi;
+            return PD_GAME_DIFF_MIN;
         }
-        return v - (v % PD_GAME_DIFF_STEP_X100);
+        return wanted > PD_GAME_DIFF_MAX ? PD_GAME_DIFF_MAX : wanted;
     }
 
     // 01 §8 caster ratio, as a percent.
@@ -193,18 +188,34 @@ namespace PDungeon
         return wanted > hi ? hi : wanted;
     }
 
-    // "lootMult = d * (0.8 + 0.5 * r)", carried as x100 so no float ever
-    // touches the number: at the defaults (d = 1.0, r = 0.40) this is exactly
-    // 100 * (80 + 20) / 100 = 100. The 01 §8 original was 0.7 + 0.5r anchored
-    // on the old 0.60 caster default; when the operator moved the default to
-    // 0.40 (2026-08-07) the intercept moved with it - same slope, so a caster
-    // percent is worth the same loot either way, and the DEFAULT stays the
-    // 1.00 anchor a neutral run advertises. int64 intermediate because the
-    // product is the only place that could overflow if the bands are widened.
-    constexpr int GameLootMultX100(int diffX100, int casterPct)
+    // "lootMult = base(d) * (0.8 + 0.5 * r)", carried as x100 so no float ever
+    // touches the number.
+    //
+    // base(d) is a LINE across the whole dial: 1.00 at difficulty 1, 3.00 at
+    // difficulty 100 (operator decision 2026-08-08). The old formula multiplied
+    // by the difficulty itself, which only worked while difficulty WAS a
+    // multiplier around 1.0; on a 1..100 dial that would pay a hundredfold. The
+    // 3x ceiling is kept from the old band deliberately - the dial got longer,
+    // the reward for the top of it did not.
+    //
+    // The caster factor is 01 §8's, unchanged: 0.7 + 0.5r originally, moved to
+    // 0.8 + 0.5r when the operator flipped the caster default to 0.40
+    // (2026-08-07) so the DEFAULT run still advertises exactly 1.00.
+    //
+    // Anchors, exact by construction (200 / 99 never rounds at the ends):
+    //   (1, 40)   -> 100 * 100 / 100 = 100      the neutral run
+    //   (100, 40) -> 300 * 100 / 100 = 300      the top of the dial
+    //   (100, 80) -> 300 * 120 / 100 = 360      top dial, all casters
+    //
+    // int64 intermediate because the product is the only place that could
+    // overflow if the dial or the caster band is ever widened.
+    constexpr int GameLootMultX100(int diff, int casterPct)
     {
+        int const d = GameClampDiff(diff);
+        int64_t const base = 100 + static_cast<int64_t>(d - PD_GAME_DIFF_MIN) * 200 /
+                                       (PD_GAME_DIFF_MAX - PD_GAME_DIFF_MIN);
         int64_t const factor = 80 + GameClampCasterPct(casterPct) / 2;
-        return static_cast<int>(static_cast<int64_t>(diffX100) * factor / 100);
+        return static_cast<int>(base * factor / 100);
     }
 
     // 01 §8 mob level band in steps of 5: clamp to [1, 76], snap DOWN onto the

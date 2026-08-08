@@ -285,12 +285,19 @@ namespace PDungeon
         // row. Accepted for v1: a run that was never finished has nothing to
         // rank, and an "open" row would need a writer for every way a player
         // can walk away. Full history is a later slice.
+        // `difficulty` is the 1..100 dial the run was played at;
+        // `difficulty_x100` is deliberately absent - it is the retired band
+        // column and is left at its default rather than fed a number from a
+        // different scale (mod_pdungeon_runs_difficulty.sql says why the column
+        // survives). loot_mult_x100 stays, because the loot multiplier really
+        // is a x100 quantity.
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_runs (seed, map_id, instance_id, leader_guid, account_id, "
-            "dlvl, difficulty_x100, loot_mult_x100, rooms_cleared, result, completed_at) "
+            "dlvl, difficulty, loot_mult_x100, rooms_cleared, result, completed_at) "
             "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, 1, NOW())",
             _spawnedSeed, instance->GetId(), instance->GetInstanceId(), _leaderGuid,
-            _accountId, reward.newDlvl, _run.diffX100, _run.lootMultX100, _run.roomsCleared);
+            _accountId, reward.newDlvl, uint32(_run.difficulty), _run.lootMultX100,
+            _run.roomsCleared);
 
         LOG_INFO(PD_LOG, "PDv2: account {} completed instance {} (seed {}): {}/{} rooms, "
                          "{} kill(s), +{} dxp -> dlvl {}", _accountId,
@@ -353,9 +360,9 @@ namespace PDungeon
         // of a run must not retune the mobs already standing in the dungeon;
         // the account row is what the NEXT run is built from.
         _run = PDv2RunState();
-        _run.diffX100 = static_cast<uint16>(account.cfgDiffX100);
+        _run.difficulty = static_cast<uint8>(GameClampDiff(account.cfgDifficulty));
         _run.lootMultX100 = static_cast<uint16>(
-            GameLootMultX100(account.cfgDiffX100, account.cfgCasterPct));
+            GameLootMultX100(account.cfgDifficulty, account.cfgCasterPct));
 
         // Rooms only, in plan order. A corridor is 8.3 yd wide, so anything
         // standing in one would be shoulder to shoulder with the walls; the
@@ -379,7 +386,9 @@ namespace PDungeon
         inputs.spawnsPerRoom = cfg.spawnsPerRoom;
         inputs.casterPct = account.cfgCasterPct;
         inputs.bandMin = account.cfgBandMin;
-        inputs.creatureTypesCap = GameCreatureTypes(dlvl);
+        // No creature-type cap any more: every trash slot draws from the whole
+        // unlocked pool (PDv2PackMgr.h says why). dlvl still decides which
+        // packs are unlocked, which is the variety lever that remains.
         inputs.unlockedDlvl = dlvl;
 
         // The draw is seeded from the PLAN's seed, so the same dungeon holds
@@ -484,10 +493,10 @@ namespace PDungeon
         _run.total = static_cast<uint16>(spawned);
 
         LOG_INFO(PD_LOG, "PDv2: instance {} on map {} spawned {} creature(s) in {} room(s) "
-                         "({} boss) from a {}-block plan, d {} lootMult {}",
+                         "({} boss) from a {}-block plan, difficulty {} lootMult {}",
                  instance->GetInstanceId(), instance->GetId(), spawned,
                  uint32(_run.roomsTotal), uint32(_run.bossTotal),
-                 uint32(plan.blocks.size()), uint32(_run.diffX100),
+                 uint32(plan.blocks.size()), uint32(_run.difficulty),
                  uint32(_run.lootMultX100));
     }
 

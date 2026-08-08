@@ -25,8 +25,6 @@
 #include "generator/PDRandom.h"
 #include "generator/PDv2GameMath.h"
 
-#include <algorithm>
-
 namespace PDungeon
 {
     namespace
@@ -41,15 +39,6 @@ namespace PDungeon
         // levels [bandMin, bandMin + 4]. Derived rather than restated so the
         // band cannot mean two different things in two files.
         int const BAND_WIDTH = PD_GAME_BAND_STEP - 1;
-
-        void EraseFrom(std::vector<PackMember const*>& pool, PackMember const* m)
-        {
-            auto it = std::find(pool.begin(), pool.end(), m);
-            if (it != pool.end())
-            {
-                pool.erase(it);
-            }
-        }
 
         int EffectiveWeight(PackMember const* m)
         {
@@ -83,15 +72,6 @@ namespace PDungeon
                 }
             }
             return pool.back();
-        }
-
-        // Weighted draw WITHOUT replacement: used for the run's creature-type
-        // subset, where the same entry must not be drawn twice.
-        PackMember const* WeightedTake(std::vector<PackMember const*>& pool, PDRandom& rng)
-        {
-            PackMember const* picked = WeightedPick(pool, rng);
-            EraseFrom(pool, picked);
-            return picked;
         }
     }
 
@@ -265,58 +245,15 @@ namespace PDungeon
 
         PDRandom rng(seed ^ SPAWN_STREAM_MIX);
 
-        // The run's creature-type subset: `creatureTypesCap` DISTINCT trash
-        // entries, drawn by weight without replacement.
+        // The two role pools, and they are the WHOLE pool: every trash slot in
+        // the dungeon draws from these, independently. There is deliberately no
+        // per-run subset any more - one was drawn here until 2026-08-08, and it
+        // made a 25-creature stock read in-game as a four-creature one.
         std::vector<PackMember const*> melee;
         std::vector<PackMember const*> casters;
         for (PackMember const* m : trash)
         {
             (m->role == PACK_ROLE_CASTER ? casters : melee).push_back(m);
-        }
-
-        int cap = in.creatureTypesCap;
-        if (cap < 1)
-        {
-            cap = 1;
-        }
-        if (cap > static_cast<int>(trash.size()))
-        {
-            cap = static_cast<int>(trash.size());
-        }
-
-        std::vector<PackMember const*> subsetMelee;
-        std::vector<PackMember const*> subsetCasters;
-        std::vector<PackMember const*> remaining = trash;
-
-        // Seed the subset with one of each role before filling it freely. Left
-        // to a pure weighted draw, a small cap (dlvl 0-2 allows exactly one
-        // creature type) would routinely produce an all-melee or all-caster
-        // subset and quietly make the caster ratio a no-op for that run.
-        if (cap >= 2 && !melee.empty() && !casters.empty())
-        {
-            std::vector<PackMember const*> pool = melee;
-            if (PackMember const* m = WeightedTake(pool, rng))
-            {
-                subsetMelee.push_back(m);
-                EraseFrom(remaining, m);
-            }
-            pool = casters;
-            if (PackMember const* c = WeightedTake(pool, rng))
-            {
-                subsetCasters.push_back(c);
-                EraseFrom(remaining, c);
-            }
-        }
-
-        while (static_cast<int>(subsetMelee.size() + subsetCasters.size()) < cap &&
-               !remaining.empty())
-        {
-            PackMember const* m = WeightedTake(remaining, rng);
-            if (!m)
-            {
-                break;
-            }
-            (m->role == PACK_ROLE_CASTER ? subsetCasters : subsetMelee).push_back(m);
         }
 
         // A boss room with no boss to put in it is a data problem, not a
@@ -339,12 +276,13 @@ namespace PDungeon
 
         auto pickTrash = [&]() -> PackMember const*
         {
-            // Caster or melee by the 01 §8 ratio; when the subset has none of
-            // the wanted role the other one answers, because a room short of
-            // spawns is worse than a room off-ratio.
+            // Caster or melee by the 01 §8 ratio, then a weighted draw from
+            // that role's FULL pool; when the pool for the wanted role is empty
+            // the other one answers, because a room short of spawns is worse
+            // than a room off-ratio.
             bool const wantCaster = rng.Chance(in.casterPct);
-            std::vector<PackMember const*> const& first = wantCaster ? subsetCasters : subsetMelee;
-            std::vector<PackMember const*> const& second = wantCaster ? subsetMelee : subsetCasters;
+            std::vector<PackMember const*> const& first = wantCaster ? casters : melee;
+            std::vector<PackMember const*> const& second = wantCaster ? melee : casters;
             PackMember const* m = WeightedPick(first, rng);
             return m ? m : WeightedPick(second, rng);
         };

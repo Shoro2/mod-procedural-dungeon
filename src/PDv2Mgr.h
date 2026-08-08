@@ -71,6 +71,14 @@ namespace PDungeon
         int         lootBonusRollPct = 15;
         float       castRangeYd = 25.0f;
         float       aggroRangeYd = 20.0f;
+
+        // The difficulty curve, per point of the 1..100 dial. Percent of the
+        // creature's own numbers, added linearly, exactly like
+        // mod-dungeon-challenge's HealthMultiplierPerLevel /
+        // DamageMultiplierPerLevel - the defaults ARE that module's live values
+        // on this box. PDv2 owns its own keys so the two dungeons can diverge.
+        int         diffHealthPctPerLevel = 5;
+        int         diffDamagePctPerLevel = 2;
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the
@@ -85,7 +93,10 @@ namespace PDungeon
         uint32_t    dlvl = 0;
         uint32_t    dxp = 0;
         int         cfgRooms = 5;
-        int         cfgDiffX100 = 100;
+        // The 1..100 dial (2026-08-08). cfg_diff_x100 is not read or written
+        // anywhere any more - see mod_pdungeon_account_difficulty.sql for why
+        // the column survives its own retirement.
+        int         cfgDifficulty = PD_GAME_DIFF_DEFAULT;
         int         cfgCasterPct = PD_GAME_CASTER_PCT_DEFAULT;
         // 76 rather than the column's default of 1: 76..80 is the only band v1's
         // imported pack stock actually covers, so a fresh account that never

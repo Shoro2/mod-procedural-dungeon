@@ -646,22 +646,18 @@ namespace
     {
         char msg[160];
 
-        // The anchor values 01 §8 states outright. If one of these moves, the
-        // doc and the code have diverged and one of the two is wrong.
-        Check(GameLootMultX100(100, PD_GAME_CASTER_PCT_DEFAULT) == 100,
-              "lootMult at the 01 §8 defaults must be exactly 1.00", 0);
-        Check(GameDiffMinX100() == 50, "difficulty floor must be d = 0.5", 0);
-        Check(GameDiffMaxX100(0) == 100, "difficulty band at dlvl 0 must top out at d = 1.0", 0);
-        Check(GameClampDiffX100(0, 0) == 50 && GameClampDiffX100(400, 0) == 100,
-              "the dlvl 0 band must be exactly [50, 100]", 0);
-        Check(GameDiffMaxX100(8) == 300, "d = 3.0 must be reached at dlvl 8", 0);
-        Check(GameDiffMaxX100(9) == 300, "d = 3.0 is a ceiling, not another step", 0);
-        Check(GameClampDiffX100(137, 40) == 125, "137 must snap DOWN to 125", 0);
+        // The anchor values the design states outright. If one of these moves,
+        // the doc and the code have diverged and one of the two is wrong.
+        Check(GameLootMultX100(PD_GAME_DIFF_DEFAULT, PD_GAME_CASTER_PCT_DEFAULT) == 100,
+              "lootMult at the defaults must be exactly 1.00", 0);
+        Check(GameLootMultX100(PD_GAME_DIFF_MAX, PD_GAME_CASTER_PCT_DEFAULT) == 300,
+              "lootMult at difficulty 100 must be exactly 3.00", 0);
+        Check(GameLootMultX100(PD_GAME_DIFF_MAX, PD_GAME_CASTER_PCT_MAX) == 360,
+              "lootMult at difficulty 100 with all casters must be 3.60", 0);
+        Check(PD_GAME_DIFF_MIN == 1 && PD_GAME_DIFF_MAX == 100 && PD_GAME_DIFF_DEFAULT == 1,
+              "the difficulty dial must be the integers 1..100, default 1", 0);
         Check(GameBossRooms(0) == 1 && GameBossRooms(9) == 1 && GameBossRooms(10) == 2,
               "boss rooms must follow 1 + dlvl/10", 0);
-        Check(GameCreatureTypes(0) == 4 && GameCreatureTypes(2) == 4 &&
-              GameCreatureTypes(3) == 5 && GameCreatureTypes(30) == 14,
-              "creature types must follow 1 + dlvl/3", 0);
         Check(GameClampCasterPct(PD_GAME_CASTER_PCT_DEFAULT) == PD_GAME_CASTER_PCT_DEFAULT,
               "the default caster ratio must survive its own clamp", 0);
 
@@ -684,40 +680,51 @@ namespace
             }
         }
 
-        // Difficulty and room clamps must never return an out-of-band or
-        // off-grid value, for any input a command or a corrupt DB row can hand
-        // them - including the negative and absurd ones.
-        for (int dlvl = 0; dlvl <= 40; ++dlvl)
+        // The difficulty clamp takes NO dlvl: the dial is open from the first
+        // run (operator directive 2026-08-08), so the sweep is one pass over
+        // every input a command, a panel or a corrupt DB row can hand it -
+        // including the negative and the absurd ones.
         {
-            bool band = true, grid = true, down = true, stable = true;
-            bool roomsOk = true;
+            bool band = true, stable = true, kept = true;
             int badAt = 0;
-            for (int wanted = -100; wanted <= 400; ++wanted)
+            for (int wanted = -50; wanted <= 150; ++wanted)
             {
-                int const d = GameClampDiffX100(wanted, dlvl);
-                if (d < GameDiffMinX100() || d > GameDiffMaxX100(dlvl))
+                int const d = GameClampDiff(wanted);
+                if (d < PD_GAME_DIFF_MIN || d > PD_GAME_DIFF_MAX)
                 {
                     band = false;
                     badAt = wanted;
                 }
-                if (d % PD_GAME_DIFF_STEP_X100 != 0)
-                {
-                    grid = false;
-                    badAt = wanted;
-                }
-                // Snapping DOWN: a legal request is never rounded UP past what
-                // the player asked for.
-                if (wanted >= GameDiffMinX100() && d > wanted)
-                {
-                    down = false;
-                    badAt = wanted;
-                }
-                if (GameClampDiffX100(d, dlvl) != d)
+                if (GameClampDiff(d) != d)
                 {
                     stable = false;
                     badAt = wanted;
                 }
+                // A value already inside the dial must come back untouched -
+                // there is no grid to snap onto any more, so a clamp that
+                // "corrected" a legal 37 would be silently eating player input.
+                if (wanted >= PD_GAME_DIFF_MIN && wanted <= PD_GAME_DIFF_MAX && d != wanted)
+                {
+                    kept = false;
+                    badAt = wanted;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "difficulty clamp left [1, 100] (wanted %d)", badAt);
+            Check(band, msg, 0);
+            std::snprintf(msg, sizeof(msg), "difficulty clamp is not idempotent (wanted %d)", badAt);
+            Check(stable, msg, 0);
+            std::snprintf(msg, sizeof(msg), "difficulty clamp moved a legal value (wanted %d)", badAt);
+            Check(kept, msg, 0);
+        }
 
+        // The room clamp still depends on dlvl and still has to hold for every
+        // input, so it keeps its own per-dlvl sweep.
+        for (int dlvl = 0; dlvl <= 40; ++dlvl)
+        {
+            bool roomsOk = true;
+            int badAt = 0;
+            for (int wanted = -100; wanted <= 400; ++wanted)
+            {
                 int const r = GameClampRooms(wanted, dlvl);
                 if (r < PD_GAME_ROOMS_MIN || r > GameRoomsCap(dlvl) ||
                     GameClampRooms(r, dlvl) != r)
@@ -726,18 +733,6 @@ namespace
                     badAt = wanted;
                 }
             }
-            std::snprintf(msg, sizeof(msg), "difficulty clamp left the band at dlvl %d (wanted %d)",
-                          dlvl, badAt);
-            Check(band, msg, 0);
-            std::snprintf(msg, sizeof(msg), "difficulty clamp left the 0.25 grid at dlvl %d (wanted %d)",
-                          dlvl, badAt);
-            Check(grid, msg, 0);
-            std::snprintf(msg, sizeof(msg), "difficulty clamp rounded UP at dlvl %d (wanted %d)",
-                          dlvl, badAt);
-            Check(down, msg, 0);
-            std::snprintf(msg, sizeof(msg), "difficulty clamp is not idempotent at dlvl %d (wanted %d)",
-                          dlvl, badAt);
-            Check(stable, msg, 0);
             std::snprintf(msg, sizeof(msg), "room clamp left [3, cap] at dlvl %d (wanted %d)",
                           dlvl, badAt);
             Check(roomsOk, msg, 0);
@@ -786,14 +781,14 @@ namespace
                   "the level band must snap DOWN, not to nearest", 0);
         }
 
-        // Loot multiplier: exact on the whole legal grid, monotone in both
-        // inputs (a player who raises difficulty or caster share must never see
-        // loot go down), and never rounded into a surprise.
+        // Loot multiplier: monotone in BOTH inputs over the whole dial (a player
+        // who raises difficulty or caster share must never see loot go down),
+        // positive everywhere, and exact at the three anchors above.
         {
             bool mono = true;
             int prevD = -1;
             int badAt = 0;
-            for (int d = GameDiffMinX100(); d <= 300; d += PD_GAME_DIFF_STEP_X100)
+            for (int d = PD_GAME_DIFF_MIN; d <= PD_GAME_DIFF_MAX; ++d)
             {
                 int prevC = -1;
                 for (int c = PD_GAME_CASTER_PCT_MIN; c <= PD_GAME_CASTER_PCT_MAX; ++c)
@@ -816,8 +811,12 @@ namespace
             }
             std::snprintf(msg, sizeof(msg), "loot multiplier is not monotone (at %d)", badAt);
             Check(mono, msg, 0);
-            Check(GameLootMultX100(50, 20) == 45, "lootMult at the floor must be 0.5 x 0.9", 0);
-            Check(GameLootMultX100(300, 80) == 360, "lootMult at the ceiling must be 3.0 x 1.2", 0);
+
+            // Out-of-dial inputs are clamped rather than extrapolated: a corrupt
+            // row must not be able to buy loot nobody could have earned.
+            Check(GameLootMultX100(0, PD_GAME_CASTER_PCT_DEFAULT) == 100 &&
+                  GameLootMultX100(1000, PD_GAME_CASTER_PCT_DEFAULT) == 300,
+                  "lootMult must clamp its difficulty, not extrapolate it", 0);
         }
 
         // dxp -> dlvl, and the run reward that feeds it.
@@ -849,8 +848,10 @@ namespace
             // 01 §8: difficulty must NOT be an XP lever. The signature has no
             // difficulty argument, so this holds by construction - the loop is
             // here to make the intent break loudly if someone ever adds one.
+            // It sweeps the WHOLE new dial, because the 1..100 rework is exactly
+            // the kind of change that invites "surely 100 should pay more".
             bool flat = true;
-            for (int diff = GameDiffMinX100(); diff <= 300; diff += PD_GAME_DIFF_STEP_X100)
+            for (int diff = PD_GAME_DIFF_MIN; diff <= PD_GAME_DIFF_MAX; ++diff)
             {
                 (void)diff;
                 if (GameRunDxp(7, 10) != 70u)

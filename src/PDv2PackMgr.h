@@ -87,7 +87,6 @@ namespace PDungeon
         int spawnsPerRoom = 3;
         int casterPct = 60;             // 01 §8 caster ratio, already clamped
         int bandMin = 76;               // band is [bandMin, bandMin + 4]
-        int creatureTypesCap = 1;       // 01 §8 GameCreatureTypes(dlvl)
         int unlockedDlvl = 0;
     };
 
@@ -113,11 +112,13 @@ namespace PDungeon
         // Returns false when no pack survives the pool filter, which is the
         // caller's cue to fall back to its placeholder creature.
         //
-        // 01 §8 semantics worth stating once: `creatureTypesCap` caps the
-        // number of DISTINCT TRASH entries the whole run may use - it is a
-        // variety knob, not a spawn count. The boss draw is separate and
-        // uncapped: every boss room gets exactly one role-2 entry, drawn fresh,
-        // and boss entries never count against the trash cap.
+        // EVERY TRASH SLOT ROLLS INDEPENDENTLY from the whole band-filtered,
+        // unlocked pool (operator directive 2026-08-08). There used to be a
+        // per-run subset of `creatureTypesCap` distinct entries drawn once and
+        // reused for the entire dungeon; the second live test read exactly what
+        // that does - "only a few of the available mobs get picked and then
+        // only those are used". The boss draw is separate as before: every boss
+        // room gets exactly one role-2 entry, drawn fresh.
         bool SelectSpawns(uint32_t seed, SpawnSelectInputs const& in,
                           std::vector<RoomSpawns>& out) const;
 

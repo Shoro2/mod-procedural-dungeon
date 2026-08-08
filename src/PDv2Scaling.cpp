@@ -34,11 +34,19 @@
 // those two sentences lives here, so the list of things difficulty touches can
 // be read in one file instead of inferred from five.
 //
+// Since the 2026-08-08 operator directive difficulty is an INTEGER 1..100 and
+// each lever is a straight line over it, mirroring mod-dungeon-challenge:
+//   HP     x100 = 100 + difficulty * V2.Diff.HealthPctPerLevel   (default 5)
+//   damage x100 = 100 + difficulty * V2.Diff.DamagePctPerLevel   (default 2)
+// The two percentages are config rather than constants for the reason that
+// module's are: they are the numbers an operator retunes after watching a
+// night of play, and a rebuild is a bad price for that.
+//
 // The value both levers use is FROZEN into the instance's run state at spawn
 // time (PDv2InstanceScript::SpawnFromPlan). Nothing here reads the live
 // account row: a player who raises difficulty mid-run must not watch the mobs
-// around them get tougher, and a run that paid out at d = 1.0 must not be
-// auditable as a d = 3.0 run.
+// around them get tougher, and a run that paid out at difficulty 1 must not be
+// auditable as a difficulty 100 run.
 namespace
 {
     using namespace PDungeon;
@@ -89,11 +97,11 @@ namespace
         return dynamic_cast<PDv2InstanceScript*>(creature->GetInstanceScript());
     }
 
-    // 01 §8 difficulty, x100, for a creature the DUNGEON spawned. The tag is
-    // part of the gate here (unlike IsDungeonCreature above) because by the
+    // The DAMAGE multiplier, x100, for a creature the DUNGEON spawned. The tag
+    // is part of the gate here (unlike IsDungeonCreature above) because by the
     // time anything deals damage it exists, and it is what keeps a GM's test
     // spawn or a summoned add out of the multiplier.
-    uint16 DungeonDiffX100(Unit* attacker)
+    uint32 DungeonDamageMultX100(Unit* attacker)
     {
         Creature* creature = attacker ? attacker->ToCreature() : nullptr;
         if (!creature || !creature->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY))
@@ -102,7 +110,14 @@ namespace
         }
 
         PDv2InstanceScript* run = RunOf(creature);
-        return run ? run->GetRunState().diffX100 : 100;
+        if (!run)
+        {
+            return 100;
+        }
+
+        uint32 const difficulty = run->GetRunState().difficulty;
+        return 100 + difficulty *
+                         static_cast<uint32>(sPDv2Mgr->GetConfig().diffDamagePctPerLevel);
     }
 
     void ScaleOutgoing(Unit* attacker, uint32& damage)
@@ -112,12 +127,12 @@ namespace
             return;
         }
 
-        uint16 const diffX100 = DungeonDiffX100(attacker);
-        if (diffX100 == 100)
+        uint32 const multX100 = DungeonDamageMultX100(attacker);
+        if (multX100 == 100)
         {
             return;
         }
-        damage = static_cast<uint32>(static_cast<uint64>(damage) * diffX100 / 100);
+        damage = static_cast<uint32>(static_cast<uint64>(damage) * multX100 / 100);
     }
 }
 
@@ -154,8 +169,10 @@ public:
         // The run's difficulty, not the account's: SpawnFromPlan froze it
         // before the first SummonCreature, so it is already there.
         PDv2InstanceScript* run = RunOf(creature);
-        uint16 const diffX100 = run ? run->GetRunState().diffX100 : 100;
-        if (diffX100 == 100)
+        uint32 const difficulty = run ? run->GetRunState().difficulty : 0u;
+        uint32 const multX100 = 100 + difficulty *
+            static_cast<uint32>(sPDv2Mgr->GetConfig().diffHealthPctPerLevel);
+        if (multX100 == 100)
         {
             return;
         }
@@ -169,7 +186,7 @@ public:
         // the UNIT_MOD_HEALTH base value: without that last one the creature's
         // max health is recomputed back to the unscaled number the first time
         // anything touches its stats.
-        uint64 const scaled = static_cast<uint64>(creature->GetMaxHealth()) * diffX100 / 100;
+        uint64 const scaled = static_cast<uint64>(creature->GetMaxHealth()) * multX100 / 100;
         uint32 const health = static_cast<uint32>(scaled > 1 ? scaled : 1);
 
         creature->SetCreateHealth(health);
@@ -256,9 +273,10 @@ public:
             return;
         }
 
-        // lootMult = d x (0.7 + 0.5 x r) - difficulty is ALREADY inside it
-        // (PDv2GameMath.h:181). Multiplying by d again here would pay a d = 3.0
-        // run nine times, not three.
+        // lootMult = base(difficulty) x (0.8 + 0.5 x r) - the difficulty is
+        // ALREADY inside it (PDv2GameMath.h, GameLootMultX100). Multiplying by
+        // it again here would pay a difficulty-100 run 300 times over, not
+        // three.
         //
         // The creature's native loot table is untouched, here and everywhere:
         // farming stock creatures for stock drops is the whole design of 01 §8,

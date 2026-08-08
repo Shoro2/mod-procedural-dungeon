@@ -385,8 +385,8 @@ namespace PDungeon
         }
 
         // EVERY bound on this line is computed here. The panel is not allowed
-        // to know that rooms start at 3, that difficulty moves in quarters or
-        // what the loot multiplier is made of - it is told, every time.
+        // to know that rooms start at 3, that the difficulty dial runs 1..100
+        // or what the loot multiplier is made of - it is told, every time.
         std::ostringstream out;
         out << "C " << account.dlvl
             << ' ' << account.dxp
@@ -395,10 +395,10 @@ namespace PDungeon
             << ' ' << account.cfgRooms
             << ' ' << PD_GAME_ROOMS_MIN
             << ' ' << GameRoomsCap(dlvl)
-            << ' ' << account.cfgDiffX100
-            << ' ' << GameDiffMinX100()
-            << ' ' << GameDiffMaxX100(dlvl)
-            << ' ' << PD_GAME_DIFF_STEP_X100
+            << ' ' << account.cfgDifficulty
+            << ' ' << PD_GAME_DIFF_MIN
+            << ' ' << PD_GAME_DIFF_MAX
+            << ' ' << PD_GAME_DIFF_STEP
             << ' ' << account.cfgCasterPct
             << ' ' << PD_GAME_CASTER_PCT_MIN
             << ' ' << PD_GAME_CASTER_PCT_MAX
@@ -407,7 +407,7 @@ namespace PDungeon
             << ' ' << PD_GAME_BAND_MAX
             << ' ' << PD_GAME_BAND_STEP
             << ' ' << PD_UI_BAND_LOCKED
-            << ' ' << GameLootMultX100(account.cfgDiffX100, account.cfgCasterPct)
+            << ' ' << GameLootMultX100(account.cfgDifficulty, account.cfgCasterPct)
             << ' ' << curRooms
             << ' ' << curBoss
             << ' ' << static_cast<int>(verdict)
@@ -634,7 +634,10 @@ namespace PDungeon
             }
             else if (key == "diff")
             {
-                wanted.cfgDiffX100 = value;
+                // The wire key stays "diff" through the rework: it names the
+                // SETTING, not its scale, and renaming it would break every
+                // panel that is already loaded in a client.
+                wanted.cfgDifficulty = value;
             }
             else if (key == "caster")
             {
@@ -661,9 +664,9 @@ namespace PDungeon
             }
 
             // SetAccountCfg clamps EVERY field through the 01 §8 math on the
-            // way in (PDv2Mgr.cpp:198-209), which is what makes an untrusted
-            // panel harmless: an off-grid difficulty cannot reach an account
-            // row no matter what the client typed into the wire.
+            // way in (PDv2Mgr.cpp, SetAccountCfg), which is what makes an
+            // untrusted panel harmless: a difficulty of 5000 cannot reach an
+            // account row no matter what the client typed into the wire.
             sPDv2Mgr->SetAccountCfg(accountId, wanted);
             sPDv2Mgr->SaveAccountCfg(accountId);
 

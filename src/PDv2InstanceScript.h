@@ -64,7 +64,7 @@ namespace PDungeon
 
     // What a player is doing right now, in the form the UI wants to read it.
     //
-    // diffX100 and lootMultX100 are FROZEN into this at spawn time and every
+    // difficulty and lootMultX100 are FROZEN into this at spawn time and every
     // gameplay hook reads them from here, never from the live account row: a
     // settings change in the middle of a run must not retune the mobs already
     // standing in the dungeon.
@@ -78,7 +78,11 @@ namespace PDungeon
         uint8  bossTotal = 0;
         uint8  roomsCleared = 0;
         uint8  roomsTotal = 0;
-        uint16 diffX100 = 100;
+        // The 1..100 dial, frozen at spawn. 0 rather than the dial's floor is
+        // the deliberate "no run bound yet" value: the scaling hooks read it as
+        // "multiply by nothing", and SpawnFromPlan overwrites it before the
+        // first SummonCreature, so no creature can ever be built from it.
+        uint8  difficulty = 0;
         uint16 lootMultX100 = 100;
         bool   complete = false;
         bool   started = false;
