@@ -395,13 +395,18 @@ namespace PDungeon
         // is why it read "100 / 200 XP" right after the first level-up
         // (operator report 2026-08-08). The lifetime total does not travel any
         // more: nothing on the panel shows it.
-        uint32_t xpInto = GameDxpIntoLevel(account.dxp, cfg.xpPerDlvl, cfg.dlvlCap);
-        uint32_t const xpNeed = GameDlvlCost(dlvl, cfg.xpPerDlvl);
+        // ONE walk, so the remainder and the cost it is measured against are
+        // always the same level's - calling GameDxpIntoLevel and GameDlvlCost
+        // separately would let a stale stored dlvl pair a bar with the wrong
+        // denominator.
+        DlvlWalk const walk = GameWalkDlvl(account.dxp, cfg.xpPerDlvl, cfg.dlvlCap);
+        uint32_t xpInto = walk.into;
+        uint32_t const xpNeed = walk.cost;
 
         // At the cap there IS no next level, and the walk keeps counting the
         // overflow (GameDxpIntoLevel says why it must). A full bar is the
         // honest render of "you are done"; a bar reading 12000 / 1745 is not.
-        if (dlvl >= cfg.dlvlCap && xpInto > xpNeed)
+        if (walk.dlvl >= cfg.dlvlCap && xpInto > xpNeed)
         {
             xpInto = xpNeed;
         }
