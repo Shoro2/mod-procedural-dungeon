@@ -37,12 +37,13 @@
 --    9  Bigger Boy        900057       90  SetMaxHealth x1.5 (aura carries size+dmg)
 --   10  Hell Touched      900054      100  666 hellfire on hit + player debuff
 --
--- PDv2 CASTS THE AURA AND NOTHING ELSE, which is exactly what the last column
--- makes visible: affixes 2, 5 and 6 (and the damage half of 9) arrive whole,
--- because their DBC aura IS the effect; 1, 3, 4, 7, 8, 10 arrive as the visual
--- plus whatever the aura itself does, because their teeth live in that module's
--- script hooks and copying those hooks would be a second implementation of
--- somebody else's feature. Extending them is a later slice with its own test.
+-- Every affix works WHOLE in PDv2 (since the 2026-08-08 hook-half port): 2, 5
+-- and 6 (and the damage half of 9) through their DBC aura alone, and 1, 3, 4,
+-- 7, 8, 10 through PDv2's OWN re-implementations of the behaviour halves that
+-- mod-dungeon-challenge keeps in its script hooks (PDv2Affixes.cpp + the AI/
+-- instance/scaling call sites - each cites the DC lines it mirrors). Membership
+-- rides the spawn tag's affixMask, never HasAura: the aura is visual, and a
+-- dispelled visual must not disarm a mechanic.
 --
 -- 900053 is deliberately ABSENT: it is the Hell Touched DEBUFF, cast on the
 -- PLAYER by that module's damage hook, not an aura a creature ever wears.
