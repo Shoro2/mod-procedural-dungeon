@@ -358,9 +358,14 @@ ProceduralDungeon.V2.XP.PerRoom = 10
 
 #
 #    ProceduralDungeon.V2.XP.PerDlvl
-#        Description: Dungeon XP needed per dungeon level. The dxp -> dlvl curve
-#                     is linear and lives here rather than in the code because
-#                     01 §8 leaves it open until play says what it should be.
+#        Description: Cost of the FIRST dungeon level. Every next level costs
+#                     10 % more than the one before it, floored to a whole
+#                     number at each step (100, 110, 121, 133, 146, 160, 176,
+#                     193, 212, 233, ... - reaching dlvl 10 costs 1584 in
+#                     total). The curve lives here rather than in the code
+#                     because 01 §8 leaves it open until play says what it
+#                     should be; the 10 % growth itself is in PDv2GameMath.h,
+#                     where the harness can pin it.
 #        Default:     100
 #
 

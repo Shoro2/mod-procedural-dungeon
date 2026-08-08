@@ -276,8 +276,12 @@ namespace PDungeon
                                     reward.dxpGained, reward.newDlvl);
             if (reward.leveledUp)
             {
-                handler.PSendSysMessage("Your dungeon level is now {} - a deeper layout and a "
-                                        "wider difficulty band are open.", reward.newDlvl);
+                // No longer "a wider difficulty band": the dial has been open
+                // from the first run since 2026-08-08, and telling a player
+                // they just unlocked something they always had is the kind of
+                // small lie that makes the rest of the UI untrustworthy.
+                handler.PSendSysMessage("Your dungeon level is now {} - a deeper layout and "
+                                        "more of the depths are open.", reward.newDlvl);
             }
         }
 

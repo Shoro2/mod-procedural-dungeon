@@ -819,14 +819,99 @@ namespace
                   "lootMult must clamp its difficulty, not extrapolate it", 0);
         }
 
+        // The level-cost chain: each level costs 10 % more than the one before,
+        // integer floor at every step. These ten numbers ARE the curve - if one
+        // of them moves, every stored dxp means a different level than it did.
+        {
+            uint32_t const WANT[10] = { 100, 110, 121, 133, 146, 160, 176, 193, 212, 233 };
+            bool chain = true;
+            uint32_t total = 0;
+            int badAt = 0;
+            for (int n = 0; n < 10; ++n)
+            {
+                uint32_t const cost = GameDlvlCost(n, 100);
+                if (cost != WANT[n])
+                {
+                    chain = false;
+                    badAt = n;
+                }
+                total += cost;
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "level cost chain broke at level %d (got %u, want %u)",
+                          badAt, GameDlvlCost(badAt, 100), WANT[badAt]);
+            Check(chain, msg, 0);
+            std::snprintf(msg, sizeof(msg),
+                          "reaching dlvl 10 must cost 1584 dxp at PerDlvl 100, not %u", total);
+            Check(total == 1584u, msg, 0);
+
+            Check(GameDlvlCost(0, 100) == 100u,
+                  "the first level must cost V2.XP.PerDlvl exactly", 0);
+            Check(GameDlvlCost(5, 0) == 0u && GameDlvlCost(-3, 100) == 100u,
+                  "a zero curve costs nothing and a negative level is level 0", 0);
+        }
+
         // dxp -> dlvl, and the run reward that feeds it.
         {
             Check(GameDlvlFromDxp(0, 100, 30) == 0, "no dxp means dlvl 0", 0);
             Check(GameDlvlFromDxp(99, 100, 30) == 0, "a partial level is not a level", 0);
             Check(GameDlvlFromDxp(100, 100, 30) == 1, "one level's dxp is one dlvl", 0);
+            Check(GameDlvlFromDxp(209, 100, 30) == 1 && GameDlvlFromDxp(210, 100, 30) == 2,
+                  "the second level must cost 110 on top of the first", 0);
+            Check(GameDlvlFromDxp(1584, 100, 30) == 10 &&
+                  GameDlvlFromDxp(1583, 100, 30) == 9,
+                  "1584 lifetime dxp must be exactly dlvl 10", 0);
             Check(GameDlvlFromDxp(0xFFFFFFFFu, 1, 30) == 30,
-                  "the cap must hold before the narrowing cast, not after", 0);
-            Check(GameDlvlFromDxp(1000, 0, 30) == 0, "a zero curve must not divide by zero", 0);
+                  "the cap must hold however much dxp arrives", 0);
+            Check(GameDlvlFromDxp(1000, 0, 30) == 0, "a zero curve must not level anyone", 0);
+            Check(GameDxpIntoLevel(1584, 100, 30) == 0u &&
+                  GameDxpIntoLevel(1583, 100, 30) == 232u,
+                  "the bar must restart at 0 on a level and sit one short below it", 0);
+
+            // The pair has to reconstruct the lifetime total exactly, or the
+            // panel's bar and the level beside it are describing different
+            // players. Swept rather than spot-checked: this is the invariant
+            // that broke when the display was cumulative (operator report
+            // 2026-08-08, "100 / 200 XP" after the first level-up).
+            bool exact = true, fits = true, capped = true;
+            uint32_t badDxp = 0;
+            for (uint32_t dxp = 0; dxp <= 20000; dxp += 13)
+            {
+                int const dlvl = GameDlvlFromDxp(dxp, 100, 30);
+                uint32_t const into = GameDxpIntoLevel(dxp, 100, 30);
+
+                uint32_t spent = 0;
+                for (int n = 0; n < dlvl; ++n)
+                {
+                    spent += GameDlvlCost(n, 100);
+                }
+                if (spent + into != dxp)
+                {
+                    exact = false;
+                    badDxp = dxp;
+                }
+                // Below the cap the remainder must be short of the next level,
+                // or a level-up was missed. AT the cap it may run past, because
+                // there is no next level to spend it on.
+                if (dlvl < 30 && into >= GameDlvlCost(dlvl, 100))
+                {
+                    fits = false;
+                    badDxp = dxp;
+                }
+                if (dlvl > 30)
+                {
+                    capped = false;
+                    badDxp = dxp;
+                }
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "spent + into did not add up to the lifetime dxp (at %u)", badDxp);
+            Check(exact, msg, 0);
+            std::snprintf(msg, sizeof(msg),
+                          "a level-up was left unpaid below the cap (at %u)", badDxp);
+            Check(fits, msg, 0);
+            std::snprintf(msg, sizeof(msg), "the dlvl cap was exceeded (at %u)", badDxp);
+            Check(capped, msg, 0);
 
             bool mono = true;
             uint32_t badAt = 0;

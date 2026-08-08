@@ -388,10 +388,28 @@ namespace PDungeon
         // EVERY bound on this line is computed here. The panel is not allowed
         // to know that rooms start at 3, that the difficulty dial runs 1..100
         // or what the loot multiplier is made of - it is told, every time.
+        // The XP pair the bar is drawn from: how far INTO the current level the
+        // account is, and what that level costs. Both computed here, because
+        // the curve is a chain (each level 10 % dearer than the last) and the
+        // panel used to divide a LIFETIME dxp by a cumulative threshold - which
+        // is why it read "100 / 200 XP" right after the first level-up
+        // (operator report 2026-08-08). The lifetime total does not travel any
+        // more: nothing on the panel shows it.
+        uint32_t xpInto = GameDxpIntoLevel(account.dxp, cfg.xpPerDlvl, cfg.dlvlCap);
+        uint32_t const xpNeed = GameDlvlCost(dlvl, cfg.xpPerDlvl);
+
+        // At the cap there IS no next level, and the walk keeps counting the
+        // overflow (GameDxpIntoLevel says why it must). A full bar is the
+        // honest render of "you are done"; a bar reading 12000 / 1745 is not.
+        if (dlvl >= cfg.dlvlCap && xpInto > xpNeed)
+        {
+            xpInto = xpNeed;
+        }
+
         std::ostringstream out;
         out << "C " << account.dlvl
-            << ' ' << account.dxp
-            << ' ' << cfg.xpPerDlvl
+            << ' ' << xpInto
+            << ' ' << xpNeed
             << ' ' << cfg.xpPerRoom
             << ' ' << account.cfgRooms
             << ' ' << PD_GAME_ROOMS_MIN

@@ -122,7 +122,10 @@ local function ParseCfg(body)
     if not f or not ToNumbers(f, CFG_FIELDS) then return nil end
 
     local c = {
-        dlvl = f[1], dxp = f[2], xpPerDlvl = f[3], xpPerRoom = f[4],
+        -- xpInto / xpNeed are per LEVEL, not lifetime: the server walks the
+        -- 10 %-per-level cost chain and sends the pair the bar needs. There is
+        -- no arithmetic to do here, which is the point.
+        dlvl = f[1], xpInto = f[2], xpNeed = f[3], xpPerRoom = f[4],
         rooms = f[5], roomsMin = f[6], roomsMax = f[7],
         diff = f[8], diffMin = f[9], diffMax = f[10], diffStep = f[11],
         caster = f[12], casterMin = f[13], casterMax = f[14],
@@ -381,14 +384,15 @@ local function ApplyCfg(c)
     cfg = c
     setLoop = true
 
-    -- Derived DISPLAY math over authoritative inputs: dlvl, dxp and xpPerDlvl
-    -- all come from the server, and (dlvl + 1) * xpPerDlvl is the threshold
-    -- they already describe. No gameplay constant is invented.
-    local nextAt = (c.dlvl + 1) * c.xpPerDlvl
+    -- Both numbers arrive finished. The bar RESTARTS at 0 on every level-up
+    -- because xpInto is the remainder into the current level - the old line
+    -- multiplied a threshold out of (dlvl + 1) * xpPerDlvl and drew a lifetime
+    -- total against it, which stopped being true the moment levels stopped
+    -- costing the same (2026-08-08). Nothing is derived here any more.
     levelLine:SetText(string.format(
-        "Dungeon level |cffFFD700%d|r   %d / %d XP", c.dlvl, c.dxp, nextAt))
+        "Dungeon level |cffFFD700%d|r   %d / %d XP", c.dlvl, c.xpInto, c.xpNeed))
     local frac = 0
-    if nextAt > 0 then frac = c.dxp / nextAt end
+    if c.xpNeed > 0 then frac = c.xpInto / c.xpNeed end
     if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
     xpFill:SetWidth(math.max(1, frac * BAR_W))
 

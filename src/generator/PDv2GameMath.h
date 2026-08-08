@@ -230,18 +230,91 @@ namespace PDungeon
         return v - ((v - PD_GAME_BAND_MIN) % PD_GAME_BAND_STEP);
     }
 
-    // 01 §8 leaves the dxp -> dlvl curve open; it is linear and config-tunable
-    // (V2.XP.PerDlvl, V2.DlvlCap) until play says otherwise. Divided in uint32
-    // and capped BEFORE the narrowing cast, because dxp / 1 can exceed INT_MAX.
-    constexpr int GameDlvlFromDxp(uint32_t dxp, int xpPerDlvl, int dlvlCap)
+    // 01 §8 left the dxp -> dlvl curve open. It was linear until 2026-08-08,
+    // when the operator asked for each dungeon level to cost 10 % more than the
+    // one before it: V2.XP.PerDlvl is now the price of the FIRST level and
+    // every next one grows from it.
+    constexpr int PD_GAME_XP_GROWTH_PCT = 10;
+
+    // One growth step, INTEGER FLOOR - the chain is the definition, not a
+    // rounded pow(): 100, 110, 121, 133, 146, 160, 176, 193, 212, 233. A float
+    // formula would agree for a while and then disagree by one at some level
+    // nobody is watching, and a level that costs a different amount to reach
+    // than to display is the kind of bug players report as "my bar is stuck".
+    //
+    // Saturating: past the guard one more multiplication would wrap uint32 and
+    // hand out a level for free. Unreachable with any sane V2.XP.PerDlvl (from
+    // 100 it takes ~175 levels), which is exactly why it is written down.
+    constexpr uint32_t PD_GAME_XP_COST_MAX = 0xFFFFFFFFu / (100 + PD_GAME_XP_GROWTH_PCT);
+
+    constexpr uint32_t GameGrowDlvlCost(uint32_t cost)
     {
-        if (xpPerDlvl <= 0 || dlvlCap <= 0)
+        return cost > PD_GAME_XP_COST_MAX
+                   ? cost
+                   : cost * (100 + PD_GAME_XP_GROWTH_PCT) / 100;
+    }
+
+    // What the step dlvl -> dlvl+1 costs, in dungeon XP.
+    constexpr uint32_t GameDlvlCost(int dlvl, int xpPerDlvl)
+    {
+        if (xpPerDlvl <= 0)
         {
             return 0;
         }
-        uint32_t const raw = dxp / static_cast<uint32_t>(xpPerDlvl);
-        uint32_t const cap = static_cast<uint32_t>(dlvlCap);
-        return static_cast<int>(raw < cap ? raw : cap);
+        uint32_t cost = static_cast<uint32_t>(xpPerDlvl);
+        for (int n = 0; n < dlvl; ++n)
+        {
+            cost = GameGrowDlvlCost(cost);
+        }
+        return cost;
+    }
+
+    // The walk both public accessors below are made of, so the level a player
+    // is on and the XP they have INTO it can never be computed two different
+    // ways. dxp stays LIFETIME in the database; this is what turns it into the
+    // per-level pair the panel shows.
+    //
+    // Bounded by dlvlCap iterations by construction, which is what replaced the
+    // old "cap before the narrowing cast" trap: there is no division left to
+    // overflow, and a huge dxp simply stops at the cap.
+    struct DlvlWalk
+    {
+        int      dlvl = 0;
+        uint32_t into = 0;      // dxp INTO the current level
+        uint32_t cost = 0;      // what the current level costs
+    };
+
+    constexpr DlvlWalk GameWalkDlvl(uint32_t dxp, int xpPerDlvl, int dlvlCap)
+    {
+        DlvlWalk walk;
+        if (xpPerDlvl <= 0 || dlvlCap <= 0)
+        {
+            return walk;
+        }
+
+        walk.into = dxp;
+        walk.cost = static_cast<uint32_t>(xpPerDlvl);
+        while (walk.dlvl < dlvlCap && walk.cost > 0 && walk.into >= walk.cost)
+        {
+            walk.into -= walk.cost;
+            ++walk.dlvl;
+            walk.cost = GameGrowDlvlCost(walk.cost);
+        }
+        return walk;
+    }
+
+    constexpr int GameDlvlFromDxp(uint32_t dxp, int xpPerDlvl, int dlvlCap)
+    {
+        return GameWalkDlvl(dxp, xpPerDlvl, dlvlCap).dlvl;
+    }
+
+    // The remainder INTO the current level - what the XP bar fills with. At the
+    // cap the walk stops and this keeps counting the overflow, because dxp is a
+    // lifetime total and lying about it here would make the two disagree; the
+    // display decides what to do with a level that has no next one.
+    constexpr uint32_t GameDxpIntoLevel(uint32_t dxp, int xpPerDlvl, int dlvlCap)
+    {
+        return GameWalkDlvl(dxp, xpPerDlvl, dlvlCap).into;
     }
 
     // 01 §8 "Dungeon XP = XP.PerRoom * rooms", difficulty-INDEPENDENT by
