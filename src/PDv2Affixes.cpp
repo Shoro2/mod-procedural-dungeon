@@ -18,7 +18,11 @@
 #include "PDv2Affixes.h"
 
 #include "Creature.h"
+#include "PDv2InstanceScript.h"
+#include "Timer.h"
 #include "Unit.h"
+
+#include <list>
 
 namespace PDungeon
 {
@@ -65,5 +69,63 @@ namespace PDungeon
 
         SetDungeonHealth(creature,
                          static_cast<uint32>(static_cast<double>(creature->GetMaxHealth()) * factor));
+    }
+
+    bool DamageReduceActive(Creature* victim, PDv2MobData* tag)
+    {
+        if (!victim || !tag)
+        {
+            return false;
+        }
+
+        if (tag->dmgReduceCheckedMs
+            && GetMSTimeDiffToNow(tag->dmgReduceCheckedMs) < AFFIX_CARRIER_RECHECK_MS)
+        {
+            return tag->dmgReduceActive;
+        }
+        tag->dmgReduceCheckedMs = getMSTime();
+        tag->dmgReduceActive = false;
+
+        // The grid search, with that module's padded radius and its 30 yd cut
+        // kept verbatim (DungeonChallenge.cpp:733-746).
+        //
+        // Its `reqAlive` argument reads backwards: true REJECTS living units,
+        // so false means "no aliveness filter at all" and the IsAlive() check
+        // below is ours.
+        std::list<Creature*> nearby;
+        victim->GetDeadCreatureListInGrid(nearby, AFFIX_CARRIER_SEARCH_YD, false);
+
+        for (Creature* ally : nearby)
+        {
+            if (!ally || !ally->IsAlive())
+            {
+                continue;
+            }
+
+            // THE TAG IS THE FILTER, and it is not optional here: that module
+            // rejects pets and summons at this point, and every creature PDv2
+            // owns is a summon, so mirroring those two lines would reject the
+            // entire dungeon. The tag says the same thing better - it is what
+            // "the dungeon spawned this" means everywhere else in the module -
+            // and the bit says the carrier really has the affix rather than
+            // merely wearing its aura. Get, never GetDefault.
+            PDv2MobData const* allyTag = ally->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY);
+            if (!allyTag || !HasAffix(allyTag->affixMask, PD_AFFIX_DAMAGE_REDUCE))
+            {
+                continue;
+            }
+            if (ally->GetDistance(victim) > AFFIX_DAMAGE_REDUCE_RANGE_YD)
+            {
+                continue;
+            }
+
+            // One is enough: the reduction is a flat quarter and does not
+            // stack, so a second carrier changes nothing (that module takes the
+            // max of 0.25 and 0.25 for the same reason).
+            tag->dmgReduceActive = true;
+            break;
+        }
+
+        return tag->dmgReduceActive;
     }
 }

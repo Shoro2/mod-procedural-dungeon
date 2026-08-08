@@ -135,6 +135,48 @@ namespace
         }
         damage = static_cast<uint32>(static_cast<uint64>(damage) * multX100 / 100);
     }
+
+    // Damage Reduce (affix 8), the target side: a dungeon mob standing within
+    // 30 yd of a carrier takes a quarter less. Every gate here is cheaper than
+    // the one after it, in that order - most damage on this server never gets
+    // past the first.
+    void ReduceIncoming(Unit* target, uint32& damage)
+    {
+        if (!damage)
+        {
+            return;
+        }
+
+        // Only a mob the DUNGEON spawned can be shielded. A player, a pet or a
+        // GM's test spawn has no tag and stops here.
+        Creature* creature = target ? target->ToCreature() : nullptr;
+        PDv2MobData* tag = creature
+                               ? creature->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY)
+                               : nullptr;
+        if (!tag)
+        {
+            return;
+        }
+
+        // Then the run: below the affix's own minDiff no mob in this dungeon
+        // carries it, so there is nobody to look for and the search never runs.
+        // That is what keeps the cost off every run that is not at the top of
+        // the dial.
+        PDv2InstanceScript* run = RunOf(creature);
+        if (!run || !HasAffix(run->GetRunAffixMask(), PD_AFFIX_DAMAGE_REDUCE))
+        {
+            return;
+        }
+
+        // And only then the grid search, itself cached for half a second.
+        if (!DamageReduceActive(creature, tag))
+        {
+            return;
+        }
+
+        damage = static_cast<uint32>(static_cast<uint64>(damage)
+                                     * (100 - AFFIX_DAMAGE_REDUCE_PCT) / 100);
+    }
 }
 
 // 01 §8's two difficulty levers, half one: normalise the level, then scale HP.
@@ -202,12 +244,17 @@ public:
         { UNITHOOK_MODIFY_MELEE_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN,
           UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK }) { }
 
-    void ModifyMeleeDamage(Unit* /*target*/, Unit* attacker, uint32& damage) override
+    void ModifyMeleeDamage(Unit* target, Unit* attacker, uint32& damage) override
     {
+        // Attacker's multiplier first, target's reduction second - the order
+        // mod-dungeon-challenge applies them in (DungeonChallengeScripts.cpp:
+        // 939-965), so the quarter comes off the scaled number rather than the
+        // raw one.
         ScaleOutgoing(attacker, damage);
+        ReduceIncoming(target, damage);
     }
 
-    void ModifySpellDamageTaken(Unit* /*target*/, Unit* attacker, int32& damage,
+    void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& damage,
                                 SpellInfo const* /*spellInfo*/) override
     {
         // Signed, and the sign is load-bearing: absorbs and other reductions
@@ -227,6 +274,7 @@ public:
 
         uint32 scaled = static_cast<uint32>(damage);
         ScaleOutgoing(attacker, scaled);
+        ReduceIncoming(target, scaled);
         damage = static_cast<int32>(scaled);
     }
 
@@ -235,6 +283,12 @@ public:
     {
         // attacker can be nullptr here when the caster despawned while its DoT
         // is still ticking (UnitScript.h says so); ScaleOutgoing handles it.
+        //
+        // No Damage Reduce on this path, deliberately: that module spends the
+        // reduction in the melee and direct-spell hooks only and leaves ticks
+        // alone (DungeonChallengeScripts.cpp:1052-1054 applies the attacker's
+        // multiplier here and nothing else). A shield that stopped DoTs too
+        // would be a different affix.
         ScaleOutgoing(attacker, damage);
     }
 

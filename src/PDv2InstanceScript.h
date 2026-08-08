@@ -73,6 +73,15 @@ namespace PDungeon
         // its children, 2 for theirs. Depth 2 does not split again, so one
         // carrier is worth 1 -> 2 -> 4 corpses and no more.
         uint8  splitDepth = 0;
+
+        // Damage Reduce (affix 8) is the one affix a creature cannot answer
+        // about itself: the carrier is somebody else, so the verdict costs a
+        // grid search. It is taken lazily on the damage path and kept for
+        // AFFIX_CARRIER_RECHECK_MS (PDv2Affixes.h says why both halves of that
+        // matter). 0 means "never asked", which the first hit turns into an
+        // answer - the arithmetic works out to a recheck either way.
+        uint32 dmgReduceCheckedMs = 0;
+        bool   dmgReduceActive = false;
     };
 
     // What a player is doing right now, in the form the UI wants to read it.

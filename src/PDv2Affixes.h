@@ -22,6 +22,11 @@
 
 class Creature;
 
+namespace PDungeon
+{
+    struct PDv2MobData;
+}
+
 // PDv2's half of the affixes: the BEHAVIOUR that mod-dungeon-challenge keeps in
 // its own script hooks, re-gated on PDv2's own state.
 //
@@ -96,6 +101,27 @@ namespace PDungeon
     uint8 const AFFIX_LIL_BRO_MAX_DEPTH = 2;
     uint8 const AFFIX_LIL_BRO_CHILDREN = 2;
 
+    // Damage Reduce (8): allies within 30 yd of a carrier take 25 % less
+    // (DungeonChallenge.cpp:742-745 for the range and the quarter,
+    // DungeonChallengeScripts.cpp:963-964 for where it is spent). The carrier
+    // shields itself too - that module's loop has no "not me" case and this
+    // one keeps that.
+    uint32 const AFFIX_DAMAGE_REDUCE_PCT = 25;
+    float const AFFIX_DAMAGE_REDUCE_RANGE_YD = 30.0f;
+
+    // The candidate radius for the search, padded far beyond the 30 yd cut so
+    // the candidates are a strict superset of anything the distance test could
+    // accept: GetDistance subtracts BOTH object sizes, and Big Boy plus Bigger
+    // Boy scale a model up to 2.25x (DungeonChallenge.cpp:18 and :709-732).
+    float const AFFIX_CARRIER_SEARCH_YD = 50.0f;
+
+    // How long a carrier verdict stands before it is asked again. The module's
+    // own decision cadence (PDv2CreatureAI's REPATH_INTERVAL_MS): long enough
+    // that an area spell landing on a room does not run one grid search per mob
+    // per hit, short enough that a carrier who dies stops shielding within half
+    // a second of dying.
+    uint32 const AFFIX_CARRIER_RECHECK_MS = 500;
+
     // Writes a creature's max health through ALL FOUR of the lines the core's
     // own SelectLevel uses (Creature.cpp:1495-1556), the UNIT_MOD_HEALTH base
     // value included. Miss that last one and the next stat recompute quietly
@@ -114,6 +140,20 @@ namespace PDungeon
     // creature is 1.5 x 1.5 = x2.25, the multiplier that module's own mass-pull
     // note cites (DungeonChallenge.cpp:721-723).
     void ApplyAffixSpawnHealth(Creature* creature, uint16 affixMask);
+
+    // Damage Reduce (8), asked from the TARGET's side: is a carrier standing
+    // within 30 yd of this creature right now?
+    //
+    // The carrier is a DIFFERENT creature, so this is the one affix that cannot
+    // be answered from a bit test - it takes a grid search. That module runs
+    // the search ONCE, when it hands the affix out, and writes a fixed
+    // reduction onto whoever stood nearby at the time (DungeonChallenge.cpp:
+    // 704-748). Here it is asked at damage time and cached for
+    // AFFIX_CARRIER_RECHECK_MS, because PDv2's mobs are not standing where they
+    // spawned by the time a fight is on: an answer frozen at spawn would shield
+    // a mob that walked away from its carrier and leave one that walked to it
+    // unprotected. `tag` carries the cache and is written through.
+    bool DamageReduceActive(Creature* victim, PDv2MobData* tag);
 }
 
 #endif
