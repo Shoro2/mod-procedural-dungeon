@@ -21,6 +21,7 @@
 #include "DataMap.h"
 #include "InstanceScript.h"
 #include "ObjectGuid.h"
+#include "PDv2PackMgr.h"
 #include "generator/PDBlockPlan.h"
 #include "generator/PDv2WalkGrid.h"
 
@@ -60,6 +61,18 @@ namespace PDungeon
         // is done with you", which is what completion actually means, while
         // `role` keeps steering the AI.
         bool   isRunBoss = false;
+
+        // Which affixes this creature carries: bit i-1 = `pdungeon_affixes`.id
+        // i (PDv2Affixes.h). THE MASK IS THE MEMBERSHIP TEST for every affix
+        // hook in the module - never HasAura(spellId), because the affix auras
+        // are player-visible and dispellable and a purged marker must not
+        // silently disarm a mechanic. The aura is the look; this is the fact.
+        uint16 affixMask = 0;
+
+        // Lil' Bro (affix 7) generation: 0 for a mob the dungeon spawned, 1 for
+        // its children, 2 for theirs. Depth 2 does not split again, so one
+        // carrier is worth 1 -> 2 -> 4 corpses and no more.
+        uint8  splitDepth = 0;
     };
 
     // What a player is doing right now, in the form the UI wants to read it.
@@ -122,6 +135,17 @@ namespace PDungeon
         // are only ever moved by OnMobDied, on this map's own update thread.
         PDv2RunState const& GetRunState() const { return _run; }
 
+        // The affixes this run hands to every affixed mob, as a bit mask
+        // (PDv2Affixes.h). Frozen at spawn beside the difficulty, for the same
+        // reason: a `.pdungeon v2 set` mid-run must not change what the mobs
+        // already standing in the dungeon do.
+        //
+        // A creature's own mask is either this or nothing, so the two never
+        // disagree - but a hook whose carrier is a DIFFERENT creature (Damage
+        // Reduce) needs the run-wide answer to decide whether looking for one
+        // is worth anything at all.
+        uint16 GetRunAffixMask() const { return _runAffixMask; }
+
         // The account this instance was BUILT for - the one whose stored plan
         // the terrain and the spawns came from, which is not necessarily the
         // account of whoever is reading. 0 until the first player enters.
@@ -153,6 +177,8 @@ namespace PDungeon
         uint32_t _spawnedSeed = 0;              // plan this instance is built for
         std::vector<ObjectGuid> _spawnedGuids;  // for a rebuild when the plan changes
         PDv2RunState _run;
+        std::vector<AffixDef> _runAffixes;      // the rows, for re-casting on a split
+        uint16   _runAffixMask = 0;             // the same rows as bits
         bool     _runDirty = false;
         uint64   _leaderGuid = 0;               // the character that opened this run
         std::vector<uint16> _roomAlive;         // per room, index-aligned with the spawn draw

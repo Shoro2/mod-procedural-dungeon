@@ -126,7 +126,11 @@ namespace PDungeon
         // mob - ALL of them, not one drawn at random, which is how
         // mod-dungeon-challenge does it and what makes the dial's top end feel
         // like a different dungeon rather than a bigger health bar.
-        std::vector<uint32_t> AffixSpellsForDifficulty(int difficulty) const;
+        //
+        // The ROWS, not the bare spell ids: the spawn site needs the id as well
+        // to build a creature's affix mask, and the mask - never the aura - is
+        // what every behaviour hook reads (PDv2Affixes.h says why).
+        std::vector<AffixDef> AffixesForDifficulty(int difficulty) const;
 
         // How many of them there are. The panel shows this number, so it is
         // computed here rather than counted in Lua.

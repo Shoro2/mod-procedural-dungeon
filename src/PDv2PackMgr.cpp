@@ -229,14 +229,14 @@ namespace PDungeon
                  uint32(_affixes.size()));
     }
 
-    std::vector<uint32_t> PDv2PackMgr::AffixSpellsForDifficulty(int difficulty) const
+    std::vector<AffixDef> PDv2PackMgr::AffixesForDifficulty(int difficulty) const
     {
-        std::vector<uint32_t> out;
+        std::vector<AffixDef> out;
         for (AffixDef const& affix : _affixes)
         {
             if (static_cast<int>(affix.minDiff) <= difficulty)
             {
-                out.push_back(affix.spellId);
+                out.push_back(affix);
             }
         }
         return out;

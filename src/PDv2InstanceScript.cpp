@@ -25,6 +25,7 @@
 #include "Map.h"
 #include "ObjectMgr.h"
 #include "PDDefines.h"
+#include "PDv2Affixes.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
 #include "PDv2UILink.h"
@@ -438,8 +439,16 @@ namespace PDungeon
         // mod-dungeon-challenge assigns them - all of the unlocked ones, not
         // one drawn per mob), and the run's difficulty is frozen above, so
         // there is nothing to recompute per creature.
-        std::vector<uint32_t> const affixSpells =
-            sPDv2PackMgr->AffixSpellsForDifficulty(static_cast<int>(_run.difficulty));
+        //
+        // Kept on the instance because a Lil' Bro split has to hand the same
+        // set to a child that is born minutes later, and re-reading it then
+        // would read a dial the player may have moved since.
+        _runAffixes = sPDv2PackMgr->AffixesForDifficulty(static_cast<int>(_run.difficulty));
+        _runAffixMask = 0;
+        for (AffixDef const& affix : _runAffixes)
+        {
+            _runAffixMask |= AffixBit(affix.id);
+        }
 
         uint32 spawned = 0;
         uint32 affixedMobs = 0;
@@ -505,23 +514,26 @@ namespace PDungeon
                         ++_run.bossTotal;
                     }
 
+                    // MEMBERSHIP FIRST, AURA SECOND. The mask is what every
+                    // affix hook in the module reads; the spells below are the
+                    // look. Writing the mask here - the one site that knows
+                    // which mobs the seeded draw picked - is what lets a hook
+                    // gate on a bit test instead of on HasAura, which a dispel
+                    // or a purge could quietly take away (PDv2Affixes.h).
+                    tag->splitDepth = 0;
+                    tag->affixMask = picks[i].affixed ? _runAffixMask : uint16(0);
+
                     // The affixes, cast the way mod-dungeon-challenge casts
-                    // them (ApplyAffixToCreature: CastSpell on self, triggered)
-                    // so a mob wearing one looks and behaves the same in both
-                    // dungeons. Which mobs are affixed came out of the SEEDED
-                    // draw, so nothing about it is stored: a rebuild of the
-                    // same plan re-rolls the identical set.
-                    //
-                    // What arrives is the AURA. The parts that live in that
-                    // module's own script hooks - Lil' Bro's split, Big Boy's
-                    // +50 % HP, Immolation's tick - do not follow the spell,
-                    // and mod_pdungeon_affixes.sql lists exactly which affixes
-                    // that costs.
-                    if (picks[i].affixed && !affixSpells.empty())
+                    // them (ApplyAffixToCreature: CastSpell on self, triggered,
+                    // DungeonChallenge.cpp:676-768) so a mob wearing one looks
+                    // the same in both dungeons. Which mobs are affixed came
+                    // out of the SEEDED draw, so nothing about it is stored: a
+                    // rebuild of the same plan re-rolls the identical set.
+                    if (tag->affixMask)
                     {
-                        for (uint32_t spellId : affixSpells)
+                        for (AffixDef const& affix : _runAffixes)
                         {
-                            c->CastSpell(c, spellId, true);
+                            c->CastSpell(c, affix.spellId, true);
                         }
                         ++affixedMobs;
                     }
@@ -540,7 +552,7 @@ namespace PDungeon
                  instance->GetInstanceId(), instance->GetId(), spawned,
                  uint32(_run.roomsTotal), uint32(_run.bossTotal),
                  uint32(plan.blocks.size()), uint32(_run.difficulty),
-                 uint32(_run.lootMultX100), affixedMobs, uint32(affixSpells.size()));
+                 uint32(_run.lootMultX100), affixedMobs, uint32(_runAffixes.size()));
     }
 
     void PDv2InstanceScript::CatchFallers()
