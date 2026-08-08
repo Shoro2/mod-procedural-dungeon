@@ -21,6 +21,7 @@
 #include "Define.h"
 
 class Creature;
+class Unit;
 
 namespace PDungeon
 {
@@ -122,6 +123,20 @@ namespace PDungeon
     // a second of dying.
     uint32 const AFFIX_CARRIER_RECHECK_MS = 500;
 
+    // Hell Touched (10): every landed hit adds 666 environmental fire on top
+    // and stacks a debuff on the player - -2 % stats, 10 s, ten stacks
+    // (DungeonChallengeScripts.cpp:947-955, melee, and :1001-1009, direct
+    // spells; ticks are excluded there and here).
+    uint32 const AFFIX_HELL_TOUCHED_DAMAGE = 666;
+
+    // The debuff is that module's spell, cast on the PLAYER, and it is the one
+    // affix spell `pdungeon_affixes` deliberately does NOT carry: no creature
+    // ever wears it, so it is not assignment metadata (mod_pdungeon_affixes.sql
+    // says so). The id is that module's SPELL_AFFIX_HELL_TOUCHED_DEBUFF
+    // (DungeonChallenge.h:58). On a server without those spell rows the cast
+    // no-ops, exactly like the affix auras do.
+    uint32 const SPELL_AFFIX_HELL_TOUCHED_DEBUFF = 900053;
+
     // Writes a creature's max health through ALL FOUR of the lines the core's
     // own SelectLevel uses (Creature.cpp:1495-1556), the UNIT_MOD_HEALTH base
     // value included. Miss that last one and the next stat recompute quietly
@@ -154,6 +169,11 @@ namespace PDungeon
     // a mob that walked away from its carrier and leave one that walked to it
     // unprotected. `tag` carries the cache and is written through.
     bool DamageReduceActive(Creature* victim, PDv2MobData* tag);
+
+    // Hell Touched (10), spent on whatever a carrier just hit. Does nothing to
+    // a target that is not a player - that module only ever reaches for
+    // ToPlayer() here, and a mob searing another mob is not the affix.
+    void ApplyHellTouched(Unit* target);
 }
 
 #endif

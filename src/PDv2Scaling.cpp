@@ -136,6 +136,24 @@ namespace
         damage = static_cast<uint32>(static_cast<uint64>(damage) * multX100 / 100);
     }
 
+    // Hell Touched (affix 10), the attacker side: a carrier's landed hit sears
+    // its target for a flat 666 on top and stacks the stat debuff. Separate
+    // from ScaleOutgoing on purpose - that one also serves the periodic tick
+    // hook, and a damage-over-time tick must NOT sear (that module excludes it
+    // in as many words, DungeonChallengeScripts.cpp:1052).
+    void HellTouchedOnHit(Unit* attacker, Unit* target)
+    {
+        Creature* creature = attacker ? attacker->ToCreature() : nullptr;
+        PDv2MobData const* tag = creature
+                                     ? creature->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY)
+                                     : nullptr;
+        if (!tag || !HasAffix(tag->affixMask, PD_AFFIX_HELL_TOUCHED))
+        {
+            return;
+        }
+        ApplyHellTouched(target);
+    }
+
     // Damage Reduce (affix 8), the target side: a dungeon mob standing within
     // 30 yd of a carrier takes a quarter less. Every gate here is cheaper than
     // the one after it, in that order - most damage on this server never gets
@@ -246,11 +264,13 @@ public:
 
     void ModifyMeleeDamage(Unit* target, Unit* attacker, uint32& damage) override
     {
-        // Attacker's multiplier first, target's reduction second - the order
-        // mod-dungeon-challenge applies them in (DungeonChallengeScripts.cpp:
-        // 939-965), so the quarter comes off the scaled number rather than the
-        // raw one.
+        // Attacker's multiplier first, then the attacker's affix, then the
+        // target's reduction - the order mod-dungeon-challenge applies them in
+        // (DungeonChallengeScripts.cpp:939-965), so the quarter comes off the
+        // scaled number rather than the raw one and the 666 is never scaled or
+        // reduced by either.
         ScaleOutgoing(attacker, damage);
+        HellTouchedOnHit(attacker, target);
         ReduceIncoming(target, damage);
     }
 
@@ -274,6 +294,7 @@ public:
 
         uint32 scaled = static_cast<uint32>(damage);
         ScaleOutgoing(attacker, scaled);
+        HellTouchedOnHit(attacker, target);
         ReduceIncoming(target, scaled);
         damage = static_cast<int32>(scaled);
     }

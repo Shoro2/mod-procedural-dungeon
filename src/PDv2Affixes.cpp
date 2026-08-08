@@ -19,6 +19,7 @@
 
 #include "Creature.h"
 #include "PDv2InstanceScript.h"
+#include "Player.h"
 #include "Timer.h"
 #include "Unit.h"
 
@@ -127,5 +128,25 @@ namespace PDungeon
         }
 
         return tag->dmgReduceActive;
+    }
+
+    void ApplyHellTouched(Unit* target)
+    {
+        Player* player = target ? target->ToPlayer() : nullptr;
+        if (!player)
+        {
+            return;
+        }
+
+        // ENVIRONMENTAL again, and for the same reason as Immolation: 666 that
+        // nothing resists, absorbs or reflects, and that the difficulty damage
+        // lever does not touch a second time. Mirrored from
+        // DungeonChallengeScripts.cpp:952-953, both lines and their order.
+        //
+        // This deals damage from INSIDE a damage hook and can be the blow that
+        // kills - which is that module's live behaviour, not an accident of the
+        // port.
+        player->EnvironmentalDamage(DAMAGE_FIRE, AFFIX_HELL_TOUCHED_DAMAGE);
+        player->CastSpell(player, SPELL_AFFIX_HELL_TOUCHED_DEBUFF, true);
     }
 }
