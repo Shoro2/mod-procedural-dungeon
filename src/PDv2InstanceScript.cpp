@@ -384,6 +384,7 @@ namespace PDungeon
         }
 
         inputs.spawnsPerRoom = cfg.spawnsPerRoom;
+        inputs.bossRoomAdds = cfg.bossRoomAdds;
         inputs.casterPct = account.cfgCasterPct;
         inputs.bandMin = account.cfgBandMin;
         // No creature-type cap any more: every trash slot draws from the whole
@@ -409,10 +410,16 @@ namespace PDungeon
             spawns.reserve(inputs.rooms.size());
             for (RoomRequest const& room : inputs.rooms)
             {
+                // Same room SHAPES as a real draw (boss room = 1 + adds,
+                // normal room = spawnsPerRoom), so a degraded dungeon is the
+                // real one with placeholder art rather than a different layout.
+                int const count = room.isBoss
+                                      ? 1 + (cfg.bossRoomAdds > 0 ? cfg.bossRoomAdds : 0)
+                                      : (cfg.spawnsPerRoom > 0 ? cfg.spawnsPerRoom : 1);
+
                 RoomSpawns fallback;
                 fallback.roomIndex = room.roomIndex;
-                fallback.picks.assign(static_cast<size_t>(cfg.spawnsPerRoom > 0
-                                                              ? cfg.spawnsPerRoom : 1),
+                fallback.picks.assign(static_cast<size_t>(count),
                                       SpawnPick{ PLACEHOLDER_CREATURE, PACK_ROLE_MELEE, 0 });
                 spawns.push_back(fallback);
             }

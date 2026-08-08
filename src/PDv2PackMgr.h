@@ -84,7 +84,8 @@ namespace PDungeon
     struct SpawnSelectInputs
     {
         std::vector<RoomRequest> rooms;
-        int spawnsPerRoom = 3;
+        int spawnsPerRoom = 5;          // trash in a NORMAL room
+        int bossRoomAdds = 2;           // trash BESIDE the boss, boss rooms
         int casterPct = 60;             // 01 §8 caster ratio, already clamped
         int bandMin = 76;               // band is [bandMin, bandMin + 4]
         int unlockedDlvl = 0;

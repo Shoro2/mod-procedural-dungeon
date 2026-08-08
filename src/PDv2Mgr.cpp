@@ -54,7 +54,8 @@ namespace PDungeon
         _config.xpPerRoom = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.XP.PerRoom", 10);
         _config.xpPerDlvl = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.XP.PerDlvl", 100);
         _config.dlvlCap = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.DlvlCap", 30);
-        _config.spawnsPerRoom = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.SpawnsPerRoom", 3);
+        _config.spawnsPerRoom = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.SpawnsPerRoom", 5);
+        _config.bossRoomAdds = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.BossRoomAdds", 2);
         _config.lootBonusRollPct = sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Loot.BonusRollPct", 15);
         _config.castRangeYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.CastRangeYd", 25.0f);

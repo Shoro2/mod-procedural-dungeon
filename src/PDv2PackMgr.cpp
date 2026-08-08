@@ -300,20 +300,25 @@ namespace PDungeon
             picks.push_back(pick);
         };
 
+        // A normal room is `spawnsPerRoom` trash; a boss room is the boss PLUS
+        // `bossRoomAdds` trash, not spawnsPerRoom-minus-the-boss. The two are
+        // separate knobs since 2026-08-08: normal rooms were asked to grow to
+        // five, boss rooms were asked to stay at three (boss + 2 adds).
         int const perRoom = in.spawnsPerRoom > 0 ? in.spawnsPerRoom : 1;
+        int const bossAdds = in.bossRoomAdds > 0 ? in.bossRoomAdds : 0;
         out.reserve(in.rooms.size());
         for (RoomRequest const& room : in.rooms)
         {
             RoomSpawns spawns;
             spawns.roomIndex = room.roomIndex;
-            spawns.picks.reserve(static_cast<size_t>(perRoom));
+            int const trashWanted = room.isBoss ? bossAdds : perRoom;
+            spawns.picks.reserve(static_cast<size_t>(trashWanted + (room.isBoss ? 1 : 0)));
 
-            int trashWanted = perRoom;
             if (room.isBoss)
             {
-                // Exactly one boss, then trash for the remaining slots.
+                // Exactly one boss, and it is the room's FIRST pick - the
+                // instance script keys run completion on that slot.
                 emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), spawns.picks);
-                --trashWanted;
             }
             for (int i = 0; i < trashWanted; ++i)
             {

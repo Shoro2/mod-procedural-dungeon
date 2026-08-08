@@ -407,15 +407,30 @@ ProceduralDungeon.V2.Diff.DamagePctPerLevel = 2
 
 #
 #    ProceduralDungeon.V2.SpawnsPerRoom
-#        Description: Creatures placed in each non-entrance room. A boss room
-#                     spends one of these on its boss and fills the rest with
-#                     trash. The room is 66.67 yd square, so this is a density
-#                     knob, not a difficulty one - difficulty scales HP and
-#                     damage (01 §8), never the head count.
-#        Default:     3
+#        Description: Trash placed in each NORMAL (non-entrance, non-boss) room.
+#                     Boss rooms have their own count - see BossRoomAdds below;
+#                     this key stopped covering them on 2026-08-08, when normal
+#                     rooms were asked to grow and boss rooms were not. The room
+#                     is 66.67 yd square, so this is a density knob, not a
+#                     difficulty one - difficulty scales HP and damage (01 §8),
+#                     never the head count.
+#        Default:     5
 #
 
-ProceduralDungeon.V2.SpawnsPerRoom = 3
+ProceduralDungeon.V2.SpawnsPerRoom = 5
+
+#
+#    ProceduralDungeon.V2.BossRoomAdds
+#        Description: Trash placed BESIDE the boss in a boss room. The boss
+#                     itself is always exactly one creature on top of this, so
+#                     the default gives a boss room of three. The room's first
+#                     spawn is the boss and run completion keys on that slot,
+#                     so 0 here is legal (a lone boss) - it does not strand the
+#                     run.
+#        Default:     2
+#
+
+ProceduralDungeon.V2.BossRoomAdds = 2
 
 #
 #    ProceduralDungeon.V2.Loot.BonusRollPct

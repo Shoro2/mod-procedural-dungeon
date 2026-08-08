@@ -67,7 +67,11 @@ namespace PDungeon
         int         xpPerRoom = 10;
         int         xpPerDlvl = 100;
         int         dlvlCap = 30;
-        int         spawnsPerRoom = 3;
+        // Trash in a NORMAL room, and trash beside the boss in a boss room.
+        // Two knobs because one cannot say "rooms got fuller, boss rooms did
+        // not" - which is exactly what the operator asked for on 2026-08-08.
+        int         spawnsPerRoom = 5;
+        int         bossRoomAdds = 2;
         int         lootBonusRollPct = 15;
         float       castRangeYd = 25.0f;
         float       aggroRangeYd = 20.0f;
