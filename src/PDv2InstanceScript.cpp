@@ -385,6 +385,7 @@ namespace PDungeon
 
         inputs.spawnsPerRoom = cfg.spawnsPerRoom;
         inputs.bossRoomAdds = cfg.bossRoomAdds;
+        inputs.affixPct = cfg.affixPct;
         inputs.casterPct = account.cfgCasterPct;
         inputs.bandMin = account.cfgBandMin;
         // No creature-type cap any more: every trash slot draws from the whole
@@ -428,7 +429,16 @@ namespace PDungeon
         _roomAlive.assign(roomBlocks.size(), 0);
         _run.roomsTotal = static_cast<uint8>(roomBlocks.size());
 
+        // The affix set for THIS run's difficulty, resolved once: it is the
+        // same list for every affixed mob in the dungeon (that is how
+        // mod-dungeon-challenge assigns them - all of the unlocked ones, not
+        // one drawn per mob), and the run's difficulty is frozen above, so
+        // there is nothing to recompute per creature.
+        std::vector<uint32_t> const affixSpells =
+            sPDv2PackMgr->AffixSpellsForDifficulty(static_cast<int>(_run.difficulty));
+
         uint32 spawned = 0;
+        uint32 affixedMobs = 0;
         double const mid = PD_BLOCK_SIZE_YD / 2.0;
         for (size_t r = 0; r < roomBlocks.size() && r < spawns.size(); ++r)
         {
@@ -491,6 +501,27 @@ namespace PDungeon
                         ++_run.bossTotal;
                     }
 
+                    // The affixes, cast the way mod-dungeon-challenge casts
+                    // them (ApplyAffixToCreature: CastSpell on self, triggered)
+                    // so a mob wearing one looks and behaves the same in both
+                    // dungeons. Which mobs are affixed came out of the SEEDED
+                    // draw, so nothing about it is stored: a rebuild of the
+                    // same plan re-rolls the identical set.
+                    //
+                    // What arrives is the AURA. The parts that live in that
+                    // module's own script hooks - Lil' Bro's split, Big Boy's
+                    // +50 % HP, Immolation's tick - do not follow the spell,
+                    // and mod_pdungeon_affixes.sql lists exactly which affixes
+                    // that costs.
+                    if (picks[i].affixed && !affixSpells.empty())
+                    {
+                        for (uint32_t spellId : affixSpells)
+                        {
+                            c->CastSpell(c, spellId, true);
+                        }
+                        ++affixedMobs;
+                    }
+
                     _spawnedGuids.push_back(c->GetGUID());
                     ++_roomAlive[r];
                     ++spawned;
@@ -500,11 +531,12 @@ namespace PDungeon
         _run.total = static_cast<uint16>(spawned);
 
         LOG_INFO(PD_LOG, "PDv2: instance {} on map {} spawned {} creature(s) in {} room(s) "
-                         "({} boss) from a {}-block plan, difficulty {} lootMult {}",
+                         "({} boss) from a {}-block plan, difficulty {} lootMult {}, "
+                         "{} mob(s) wearing {} affix(es)",
                  instance->GetInstanceId(), instance->GetId(), spawned,
                  uint32(_run.roomsTotal), uint32(_run.bossTotal),
                  uint32(plan.blocks.size()), uint32(_run.difficulty),
-                 uint32(_run.lootMultX100));
+                 uint32(_run.lootMultX100), affixedMobs, uint32(affixSpells.size()));
     }
 
     void PDv2InstanceScript::CatchFallers()

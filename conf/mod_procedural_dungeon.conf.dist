@@ -406,6 +406,25 @@ ProceduralDungeon.V2.Diff.HealthPctPerLevel = 5
 ProceduralDungeon.V2.Diff.DamagePctPerLevel = 2
 
 #
+#    ProceduralDungeon.V2.Affix.Percentage
+#        Description: Percent of a run's TRASH that wears the affixes unlocked
+#                     by its difficulty (bosses never do, mirroring
+#                     mod-dungeon-challenge). The affix SPELLS are that module's
+#                     (900050-900060, its own DBC work); PDv2 only references
+#                     them, and which ones apply at which difficulty lives in
+#                     the `pdungeon_affixes` table - so retuning is SQL, not a
+#                     rebuild. Default = that module's LIVE
+#                     DungeonChallenge.AffixPercentage. 0 turns affixes off.
+#
+#                     NOTE: this number is part of the spawn draw's seeded
+#                     stream, so changing it re-rolls WHICH creatures a stored
+#                     layout spawns (the layout itself is unaffected).
+#        Default:     40
+#
+
+ProceduralDungeon.V2.Affix.Percentage = 40
+
+#
 #    ProceduralDungeon.V2.SpawnsPerRoom
 #        Description: Trash placed in each NORMAL (non-entrance, non-boss) room.
 #                     Boss rooms have their own count - see BossRoomAdds below;

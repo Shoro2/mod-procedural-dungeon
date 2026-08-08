@@ -60,11 +60,26 @@ namespace PDungeon
         std::vector<PackMember> members;
     };
 
+    // One row of `pdungeon_affixes`: which mod-dungeon-challenge affix spell,
+    // and from which point of the difficulty dial it may appear. The SPELLS
+    // belong to that module (see mod_pdungeon_affixes.sql); this is only the
+    // assignment metadata, so a retune is a SQL statement rather than a build.
+    struct AffixDef
+    {
+        uint8_t  id = 0;
+        uint32_t spellId = 0;
+        uint8_t  minDiff = 1;
+    };
+
     struct SpawnPick
     {
         uint32_t entry = 0;
         uint8_t  role = PACK_ROLE_MELEE;
         uint32_t casterSpellId = 0;
+        // This spawn wears the run's affixes. Rolled inside SelectSpawns so it
+        // rides the seeded stream with every other spawn decision - the same
+        // seed brings back the same affixed mobs after a restart.
+        bool     affixed = false;
     };
 
     // One room the caller wants filled. `roomIndex` is opaque here and simply
@@ -89,6 +104,7 @@ namespace PDungeon
         int casterPct = 60;             // 01 §8 caster ratio, already clamped
         int bandMin = 76;               // band is [bandMin, bandMin + 4]
         int unlockedDlvl = 0;
+        int affixPct = 40;              // share of TRASH that wears the affixes
     };
 
     class PDv2PackMgr
@@ -96,14 +112,27 @@ namespace PDungeon
     public:
         static PDv2PackMgr* instance();
 
-        // Reads both pack tables for `theme`. Members whose creature_template
-        // row is missing are dropped loudly rather than spawned into a
-        // "creature does not exist" error later - packs reference entries this
-        // module does not own, so a foreign environment WILL be missing some.
+        // Reads both pack tables for `theme`, and the affix table beside them.
+        // Members whose creature_template row is missing are dropped loudly
+        // rather than spawned into a "creature does not exist" error later -
+        // packs reference entries this module does not own, so a foreign
+        // environment WILL be missing some.
         void LoadFromDB(int theme);
 
         size_t PackCount() const { return _packs.size(); }
         bool Empty() const { return _packs.empty(); }
+
+        // The enabled affixes a run at `difficulty` hands to every affixed
+        // mob - ALL of them, not one drawn at random, which is how
+        // mod-dungeon-challenge does it and what makes the dial's top end feel
+        // like a different dungeon rather than a bigger health bar.
+        std::vector<uint32_t> AffixSpellsForDifficulty(int difficulty) const;
+
+        // How many of them there are. The panel shows this number, so it is
+        // computed here rather than counted in Lua.
+        int AffixCountForDifficulty(int difficulty) const;
+
+        size_t AffixCount() const { return _affixes.size(); }
 
         // Fills `out` with one entry per requested room. Deterministic: the
         // same seed and inputs always produce the same spawns on any compiler,
@@ -124,7 +153,10 @@ namespace PDungeon
                           std::vector<RoomSpawns>& out) const;
 
     private:
+        void LoadAffixesFromDB();
+
         std::vector<Pack> _packs;
+        std::vector<AffixDef> _affixes;     // enabled rows only, by minDiff
     };
 }
 

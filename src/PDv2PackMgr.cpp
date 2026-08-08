@@ -174,6 +174,81 @@ namespace PDungeon
             LOG_WARN(PD_LOG, "PDv2: no role-2 (boss) pack member exists for theme {} - "
                              "boss rooms will be filled with a trash stand-in", theme);
         }
+
+        // Same startup site as the packs: everything the spawner draws from is
+        // read once here and immutable afterwards, which is what lets map
+        // threads query it without a lock.
+        LoadAffixesFromDB();
+    }
+
+    void PDv2PackMgr::LoadAffixesFromDB()
+    {
+        _affixes.clear();
+
+        // No theme column: the affix set is a property of the DIFFICULTY dial,
+        // not of the kit a dungeon is built from. Ordered by minDiff so the
+        // spells are handed to a creature in the order they unlock, which is
+        // the order a reader of the log would expect.
+        QueryResult result = WorldDatabase.Query(
+            "SELECT id, spellId, minDiff FROM pdungeon_affixes "
+            "WHERE enabled = 1 ORDER BY minDiff, id");
+        if (!result)
+        {
+            LOG_WARN(PD_LOG, "PDv2: pdungeon_affixes has no enabled rows - dungeons run "
+                             "clean (no affixes). Apply mod_pdungeon_affixes.sql if that "
+                             "is not what you wanted");
+            return;
+        }
+
+        do
+        {
+            Field* fields = result->Fetch();
+
+            AffixDef affix;
+            affix.id = fields[0].Get<uint8>();
+            affix.spellId = fields[1].Get<uint32>();
+            affix.minDiff = fields[2].Get<uint8>();
+
+            // A row with no spell would cost a roll and then do nothing, which
+            // reads in-game as an affix that silently fails rather than as a
+            // data problem.
+            if (!affix.spellId)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: affix {} has spellId 0 - row dropped", affix.id);
+                continue;
+            }
+            _affixes.push_back(affix);
+        } while (result->NextRow());
+
+        LOG_INFO(PD_LOG, "PDv2: loaded {} affix(es); the spells belong to "
+                         "mod-dungeon-challenge and are only referenced here",
+                 uint32(_affixes.size()));
+    }
+
+    std::vector<uint32_t> PDv2PackMgr::AffixSpellsForDifficulty(int difficulty) const
+    {
+        std::vector<uint32_t> out;
+        for (AffixDef const& affix : _affixes)
+        {
+            if (static_cast<int>(affix.minDiff) <= difficulty)
+            {
+                out.push_back(affix.spellId);
+            }
+        }
+        return out;
+    }
+
+    int PDv2PackMgr::AffixCountForDifficulty(int difficulty) const
+    {
+        int count = 0;
+        for (AffixDef const& affix : _affixes)
+        {
+            if (static_cast<int>(affix.minDiff) <= difficulty)
+            {
+                ++count;
+            }
+        }
+        return count;
     }
 
     bool PDv2PackMgr::SelectSpawns(uint32_t seed, SpawnSelectInputs const& in,
@@ -245,6 +320,25 @@ namespace PDungeon
 
         PDRandom rng(seed ^ SPAWN_STREAM_MIX);
 
+        // THE SPAWN STREAM, in the order it is consumed - this list IS the
+        // determinism contract, because every draw below shifts every draw
+        // after it:
+        //
+        //   per boss room   one weighted boss pick (no affix roll - bosses are
+        //                   never affixed, see the emit below)
+        //   per trash slot  one caster/melee Chance, one weighted entry pick,
+        //                   then one affix Chance
+        //
+        // Same seed and same inputs therefore rebuild the identical dungeon,
+        // affixed mobs included, across restarts and compilers. The INPUTS are
+        // part of that: casterPct, bandMin, the room list and now affixPct all
+        // steer the sequence, so changing one re-rolls WHICH creatures a stored
+        // seed spawns (the layout itself is untouched - it comes from a
+        // different stream). PDRandom::Chance also short-circuits at 0 and 100
+        // without drawing, so those two values move the sequence as well.
+        // Nothing here is a bug; it is why the pack tables and these knobs are
+        // startup/config state rather than something a player can nudge.
+
         // The two role pools, and they are the WHOLE pool: every trash slot in
         // the dungeon draws from these, independently. There is deliberately no
         // per-run subset any more - one was drawn here until 2026-08-08, and it
@@ -287,7 +381,7 @@ namespace PDungeon
             return m ? m : WeightedPick(second, rng);
         };
 
-        auto emit = [](PackMember const* m, std::vector<SpawnPick>& picks)
+        auto emit = [](PackMember const* m, bool affixed, std::vector<SpawnPick>& picks)
         {
             if (!m)
             {
@@ -297,6 +391,7 @@ namespace PDungeon
             pick.entry = m->entry;
             pick.role = m->role;
             pick.casterSpellId = m->casterSpellId;
+            pick.affixed = affixed;
             picks.push_back(pick);
         };
 
@@ -317,12 +412,26 @@ namespace PDungeon
             if (room.isBoss)
             {
                 // Exactly one boss, and it is the room's FIRST pick - the
-                // instance script keys run completion on that slot.
-                emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), spawns.picks);
+                // instance script keys run completion on that slot. It is
+                // never affixed and never rolls for it: mod-dungeon-challenge
+                // excludes bosses from its affix draw outright
+                // (AssignAffixesToCreatures skips isWorldBoss / IsDungeonBoss /
+                // rank >= 3), and a boss that is also Bigger Boy + Hell Touched
+                // on top of the difficulty curve is a wall, not a fight.
+                emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), false,
+                     spawns.picks);
             }
             for (int i = 0; i < trashWanted; ++i)
             {
-                emit(pickTrash(), spawns.picks);
+                // TWO statements, not one call. C++ leaves the evaluation order
+                // of function arguments unspecified, so writing
+                // emit(pickTrash(), rng.Chance(...)) would let the compiler
+                // decide which draw comes first - and a spawn stream whose
+                // order depends on the compiler is not deterministic, which is
+                // the one property this whole file exists to keep.
+                PackMember const* m = pickTrash();
+                bool const affixed = rng.Chance(in.affixPct);
+                emit(m, affixed, spawns.picks);
             }
 
             out.push_back(spawns);

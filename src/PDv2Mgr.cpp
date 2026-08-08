@@ -71,6 +71,12 @@ namespace PDungeon
         _config.diffDamagePctPerLevel = std::max(0, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Diff.DamagePctPerLevel", 2));
 
+        // Clamped into [0, 100] because it is handed straight to a percent
+        // roll: 0 means "no affixed mobs", 100 means "all of them", and there
+        // is nothing sensible outside that.
+        _config.affixPct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Affix.Percentage", 40)));
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{})",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,

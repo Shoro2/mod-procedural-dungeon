@@ -83,6 +83,10 @@ namespace PDungeon
         // on this box. PDv2 owns its own keys so the two dungeons can diverge.
         int         diffHealthPctPerLevel = 5;
         int         diffDamagePctPerLevel = 2;
+
+        // Share of a run's TRASH that wears the affixes, in percent. Default =
+        // mod-dungeon-challenge's live DungeonChallenge.AffixPercentage.
+        int         affixPct = 40;
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the

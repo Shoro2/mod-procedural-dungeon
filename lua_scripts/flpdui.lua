@@ -115,7 +115,7 @@ local function ToNumbers(fields, count)
     return true
 end
 
-local CFG_FIELDS = 23
+local CFG_FIELDS = 24
 
 local function ParseCfg(body)
     local f = SplitHead(body, CFG_FIELDS)
@@ -128,7 +128,8 @@ local function ParseCfg(body)
         caster = f[12], casterMin = f[13], casterMax = f[14],
         bandMin = f[15], bandLo = f[16], bandHi = f[17], bandStep = f[18],
         bandLocked = f[19], lootMultX100 = f[20],
-        curRooms = f[21], curBoss = f[22], verdictCode = f[23],
+        curRooms = f[21], curBoss = f[22], affixCount = f[23],
+        verdictCode = f[24],
         verdictText = f.tail,
     }
 
@@ -183,7 +184,7 @@ end
 -- ============================================================================
 
 local PANEL_W = 420
-local PANEL_H = 350            -- +20 for the current-depths line (2026-08-07)
+local PANEL_H = 364            -- +20 current-depths (2026-08-07), +14 affixes
 local BAND_ROW_H = 52           -- what the hidden band row would add back
 local BAR_W = PANEL_W - 48
 
@@ -310,8 +311,17 @@ local curLine = Panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 curLine:SetPoint("TOP", lootLine, "BOTTOM", 0, -6)
 curLine:SetText("")
 
+-- How many affixes the difficulty on the slider buys. The COUNT is the
+-- server's - it comes down in the C payload from the same table the dungeon
+-- spawns from - because a Lua-side copy of that number is precisely the bug
+-- this addon exists not to have. "0" is a legal, common answer: the affix
+-- gates start at difficulty 10.
+local affixLine = Panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+affixLine:SetPoint("TOP", curLine, "BOTTOM", 0, -4)
+affixLine:SetText("")
+
 local sep2 = Panel:CreateTexture(nil, "ARTWORK")
-sep2:SetPoint("TOP", curLine, "BOTTOM", 0, -8)
+sep2:SetPoint("TOP", affixLine, "BOTTOM", 0, -8)
 sep2:SetWidth(BAR_W)
 sep2:SetHeight(1)
 sep2:SetTexture(0.4, 0.4, 0.6, 0.5)
@@ -396,6 +406,9 @@ local function ApplyCfg(c)
     else
         curLine:SetText("|cffaaaaaaNo depths rolled yet|r")
     end
+
+    affixLine:SetText(string.format(
+        "|cffaaaaaaAffixes at this difficulty: %d|r", c.affixCount))
 
     -- "code 0 means go" is the wire contract, and the server pins it with a
     -- static_assert so a reordered enum breaks the build instead of the line.

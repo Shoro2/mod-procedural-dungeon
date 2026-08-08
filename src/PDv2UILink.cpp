@@ -24,6 +24,7 @@
 #include "PDDefines.h"
 #include "PDv2InstanceScript.h"
 #include "PDv2Mgr.h"
+#include "PDv2PackMgr.h"
 #include "Player.h"
 #include "Random.h"
 #include "ScriptMgr.h"
@@ -410,6 +411,12 @@ namespace PDungeon
             << ' ' << GameLootMultX100(account.cfgDifficulty, account.cfgCasterPct)
             << ' ' << curRooms
             << ' ' << curBoss
+            // How many affixes the NEXT run would carry at the account's
+            // current difficulty. Counted here, from the table the dungeon
+            // actually spawns from, for the reason this whole file exists: the
+            // cautionary tale in PDv2UILink.h is a hand-copied affix number in
+            // Lua that disagreed with the server for months.
+            << ' ' << sPDv2PackMgr->AffixCountForDifficulty(account.cfgDifficulty)
             << ' ' << static_cast<int>(verdict)
             << ' ' << Sanitize(LinkState::Describe(verdict));
 
