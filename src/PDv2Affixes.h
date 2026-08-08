@@ -78,6 +78,15 @@ namespace PDungeon
     // (DungeonChallenge.cpp:684 and :699 - the same literal in both cases).
     float const AFFIX_BIG_BOY_HEALTH_MULT = 1.5f;
 
+    // Immolation Aura (4): every 2 s, difficulty x 80 fire damage to every
+    // player within 8 yd (DungeonChallengeScripts.cpp:711-722). The damage is
+    // ENVIRONMENTAL there, not a spell - it has no caster, so nothing resists,
+    // reflects or scales it, and it does not run through the difficulty damage
+    // lever a second time.
+    uint32 const AFFIX_IMMOLATION_INTERVAL_MS = 2000;
+    uint32 const AFFIX_IMMOLATION_DMG_PER_DIFF = 80;
+    float const AFFIX_IMMOLATION_RANGE_YD = 8.0f;
+
     // Writes a creature's max health through ALL FOUR of the lines the core's
     // own SelectLevel uses (Creature.cpp:1495-1556), the UNIT_MOD_HEALTH base
     // value included. Miss that last one and the next stat recompute quietly

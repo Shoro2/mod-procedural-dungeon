@@ -66,6 +66,7 @@ namespace PDungeon
         bool UpdateGridChase(uint32 diff);
         void UpdateCasterCombat(uint32 diff);
         void UpdateProximityAggro(uint32 diff);
+        void UpdateImmolation(uint32 diff);
         bool GridLineOkTo(Unit* victim) const;
         void StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid);
         void MoveToWaypoint(size_t index, WalkGrid const& grid);
@@ -78,6 +79,7 @@ namespace PDungeon
         uint32 _repathTimer = 0;
         uint32 _aggroTimer = 0;
         uint32 _lineTimer = 0;
+        uint32 _immolationTimer = 0;    // affix 4, accumulates toward 2 s
         std::vector<GridPoint> _waypoints;
         size_t _waypointIndex = 0;
         bool _followingPath = false;

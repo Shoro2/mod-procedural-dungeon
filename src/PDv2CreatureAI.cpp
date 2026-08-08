@@ -19,6 +19,7 @@
 #include "Map.h"
 #include "MotionMaster.h"
 #include "PDDefines.h"
+#include "PDv2Affixes.h"
 #include "PDv2InstanceScript.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
@@ -388,12 +389,71 @@ namespace PDungeon
         AttackStart(target);
     }
 
+    void PDv2MobAI::UpdateImmolation(uint32 diff)
+    {
+        // The bit, never the aura: a player who dispels the fire visual off a
+        // mob must not also switch its burn off (PDv2Affixes.h).
+        if (!_mob || !HasAffix(_mob->affixMask, PD_AFFIX_IMMOLATION))
+        {
+            return;
+        }
+
+        _immolationTimer += diff;
+        if (_immolationTimer < AFFIX_IMMOLATION_INTERVAL_MS)
+        {
+            return;
+        }
+        // Subtract rather than reset, so a long map tick does not swallow the
+        // remainder and stretch the interval.
+        _immolationTimer -= AFFIX_IMMOLATION_INTERVAL_MS;
+
+        // OUT OF COMBAT TOO, which is deliberate and mirrored: that module's
+        // tick is gated on the creature being alive and nothing else
+        // (DungeonChallengeScripts.cpp:622 and :708-726). It is an aura, so
+        // walking past one hurts and pulls the mob - which is the mechanic.
+        uint32 const difficulty = _instance ? _instance->GetRunState().difficulty : 0u;
+        if (!difficulty)
+        {
+            return;
+        }
+        uint32 const damage = difficulty * AFFIX_IMMOLATION_DMG_PER_DIFF;
+
+        // No grid-line gate here, unlike every ranged decision in this file:
+        // the radius is 8 yd and a walk-grid cell is 8.3 yd, so the grid cannot
+        // resolve anything at this scale and a line test would answer about the
+        // cells the two stand in rather than about the 8 yd between them.
+        Map::PlayerList const& players = me->GetMap()->GetPlayers();
+        for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+        {
+            Player* player = it->GetSource();
+            if (!player || !player->IsAlive())
+            {
+                continue;
+            }
+            if (me->GetDistance(player) > AFFIX_IMMOLATION_RANGE_YD)
+            {
+                continue;
+            }
+
+            // ENVIRONMENTAL damage, exactly as that module deals it
+            // (DungeonChallengeScripts.cpp:722): it has no caster, so it is not
+            // resisted, not reflected, and not run through the difficulty
+            // damage lever a second time - the difficulty is already the 80x
+            // factor above.
+            player->EnvironmentalDamage(DAMAGE_FIRE, damage);
+        }
+    }
+
     void PDv2MobAI::UpdateAI(uint32 diff)
     {
         if (!_mob)
         {
             _mob = me->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY);
         }
+
+        // Before the victim check: an aura burns whoever stands next to it,
+        // fight or no fight.
+        UpdateImmolation(diff);
 
         // Deliberately no distance leash: dungeon mobs chase for as long as
         // the target exists on the map, like any stock instance (operator
