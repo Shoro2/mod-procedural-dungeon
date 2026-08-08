@@ -535,6 +535,16 @@ namespace PDungeon
                         {
                             c->CastSpell(c, affix.spellId, true);
                         }
+
+                        // ...and the spawn-time teeth: Big Boy and Bigger Boy
+                        // are x1.5 max health each. This lands AFTER the
+                        // difficulty HP scale, which PDv2Scaling's
+                        // OnCreatureSelectLevel already applied inside the
+                        // SummonCreature above - the same order that module
+                        // uses, and the reason both affixes together are x2.25
+                        // of a difficulty-scaled bar rather than of the
+                        // template's.
+                        ApplyAffixSpawnHealth(c, tag->affixMask);
                         ++affixedMobs;
                     }
 

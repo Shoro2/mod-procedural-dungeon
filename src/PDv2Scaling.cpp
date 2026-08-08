@@ -20,6 +20,7 @@
 #include "LootMgr.h"
 #include "Map.h"
 #include "PDDefines.h"
+#include "PDv2Affixes.h"
 #include "PDv2InstanceScript.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
@@ -182,17 +183,14 @@ public:
         // mana or attack power, or difficulty stops being the one honest knob
         // it was designed to be.
         //
-        // Mirrors the four lines SelectLevel itself uses for health, including
-        // the UNIT_MOD_HEALTH base value: without that last one the creature's
-        // max health is recomputed back to the unscaled number the first time
-        // anything touches its stats.
+        // SetDungeonHealth writes the four lines SelectLevel itself uses for
+        // health, the UNIT_MOD_HEALTH base value included - without that last
+        // one the creature's max health is recomputed back to the unscaled
+        // number the first time anything touches its stats. The affixes' own
+        // health effects go through the same helper, so there is one place on
+        // this map that knows how to move a creature's health.
         uint64 const scaled = static_cast<uint64>(creature->GetMaxHealth()) * multX100 / 100;
-        uint32 const health = static_cast<uint32>(scaled > 1 ? scaled : 1);
-
-        creature->SetCreateHealth(health);
-        creature->SetMaxHealth(health);
-        creature->SetHealth(health);
-        creature->SetStatFlatModifier(UNIT_MOD_HEALTH, BASE_VALUE, static_cast<float>(health));
+        SetDungeonHealth(creature, static_cast<uint32>(scaled));
     }
 };
 

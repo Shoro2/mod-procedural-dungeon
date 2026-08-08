@@ -20,6 +20,8 @@
 
 #include "Define.h"
 
+class Creature;
+
 // PDv2's half of the affixes: the BEHAVIOUR that mod-dungeon-challenge keeps in
 // its own script hooks, re-gated on PDv2's own state.
 //
@@ -71,6 +73,29 @@ namespace PDungeon
     {
         return (affixMask & AffixBit(id)) != 0;
     }
+
+    // Big Boy (3) and Bigger Boy (9): x1.5 max health EACH
+    // (DungeonChallenge.cpp:684 and :699 - the same literal in both cases).
+    float const AFFIX_BIG_BOY_HEALTH_MULT = 1.5f;
+
+    // Writes a creature's max health through ALL FOUR of the lines the core's
+    // own SelectLevel uses (Creature.cpp:1495-1556), the UNIT_MOD_HEALTH base
+    // value included. Miss that last one and the next stat recompute quietly
+    // puts the creature back to its unscaled health (pd/02 §7).
+    //
+    // mod-dungeon-challenge writes two of them (SetMaxHealth + SetFullHealth,
+    // DungeonChallenge.cpp:684-685), which is why that module needs a loop that
+    // notices lost affixes and re-applies everything. PDv2 pays the two extra
+    // lines instead and needs no such loop.
+    void SetDungeonHealth(Creature* creature, uint32 health);
+
+    // The spawn-time half of Big Boy and Bigger Boy, applied AFTER the
+    // difficulty HP scale - the same order mod-dungeon-challenge uses
+    // (AssignAffixesToCreatures scales first, then applies the affixes,
+    // DungeonChallenge.cpp:655-661 with the note at :770-771). Both bits on one
+    // creature is 1.5 x 1.5 = x2.25, the multiplier that module's own mass-pull
+    // note cites (DungeonChallenge.cpp:721-723).
+    void ApplyAffixSpawnHealth(Creature* creature, uint16 affixMask);
 }
 
 #endif
