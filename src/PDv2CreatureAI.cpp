@@ -26,6 +26,8 @@
 #include "Player.h"
 #include "ScriptMgr.h"
 
+#include <list>
+
 namespace PDungeon
 {
     namespace
@@ -84,6 +86,21 @@ namespace PDungeon
         _holding = false;
         _lineOk = false;
         _lineTimer = 0;
+
+        // Call for Help (affix 1) is ARMED here and fired on the next tick,
+        // not shouted from inside this hook. Two reasons, and the second is the
+        // load-bearing one. It matches where that module actually does the work
+        // - its own update loop, not an engage hook
+        // (DungeonChallengeScripts.cpp:674-705) - and it keeps the pull FLAT:
+        // calling AttackStart on an ally runs that ally's JustEngagedWith
+        // synchronously, so shouting from in here would recurse one stack frame
+        // per mob in the chain, and a mass pull is exactly the case where that
+        // chain is long. Armed and deferred, each mob calls from its own tick.
+        //
+        // Re-arming on every engage is deliberate: a mob that evaded and was
+        // pulled again calls again, which is what that module's reset of its
+        // hasCalled flag after an evade amounts to (:671).
+        _hasCalled = false;
     }
 
     void PDv2MobAI::JustDied(Unit* killer)
@@ -444,6 +461,80 @@ namespace PDungeon
         }
     }
 
+    void PDv2MobAI::CallAlliesForHelp(Unit* victim)
+    {
+        if (!victim)
+        {
+            return;
+        }
+
+        WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
+
+        // A grid search, not a walk of the map's spawn store: that module can
+        // iterate GetCreatureBySpawnIdStore because its dungeons are populated
+        // from creature tables, while every mob PDv2 owns is a SUMMON and
+        // appears in no such store.
+        std::list<Creature*> nearby;
+        me->GetDeadCreatureListInGrid(nearby, AFFIX_CARRIER_SEARCH_YD, false);
+
+        uint32 called = 0;
+        for (Creature* ally : nearby)
+        {
+            if (!ally || ally == me || !ally->IsAlive() || ally->IsInCombat())
+            {
+                continue;
+            }
+
+            // The tag replaces that module's pet/summon/totem/faction filters
+            // wholesale. It has to: its IsSummon() line would reject every
+            // creature in this dungeon, and the tag says the stronger thing
+            // anyway - the dungeon spawned this, so it is dungeon content.
+            if (!ally->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY))
+            {
+                continue;
+            }
+            if (ally->GetDistance(me) > AFFIX_CALL_FOR_HELP_RANGE_YD)
+            {
+                continue;
+            }
+            if (!ally->IsValidAttackTarget(victim))
+            {
+                continue;
+            }
+
+            // AND IT MUST BE ABLE TO GET THERE. The same reachability test the
+            // proximity aggro and the chase run on, for the same reason: a mob
+            // that answers a call it cannot walk to either stands in combat for
+            // ever or walks off the world. "It was called" and "it can reach
+            // the fight" must never disagree, and on this map only the walk
+            // grid can say - engine line of sight is true across the void
+            // (pd/02 §7).
+            if (grid)
+            {
+                std::vector<GridPoint> waypoints;
+                if (PlanApproach(*grid,
+                                 CellOf(*grid, ally->GetPositionX(), ally->GetPositionY()),
+                                 CellOf(*grid, victim->GetPositionX(), victim->GetPositionY()),
+                                 SNAP_RADIUS_CELLS, waypoints) == ApproachKind::Unreachable)
+                {
+                    continue;
+                }
+            }
+
+            if (CreatureAI* ai = ally->AI())
+            {
+                ai->AttackStart(victim);
+                ++called;
+            }
+        }
+
+        if (called)
+        {
+            LOG_DEBUG(PD_LOG, "PDv2: {} called {} reachable ally(s) into the fight",
+                      me->GetName(), called);
+        }
+    }
+
     void PDv2MobAI::UpdateAI(uint32 diff)
     {
         if (!_mob)
@@ -465,6 +556,14 @@ namespace PDungeon
         {
             UpdateProximityAggro(diff);
             return;
+        }
+
+        // In combat with a live victim: the tick JustEngagedWith armed. Once
+        // per fight, and only for a carrier.
+        if (!_hasCalled && _mob && HasAffix(_mob->affixMask, PD_AFFIX_CALL_FOR_HELP))
+        {
+            _hasCalled = true;
+            CallAlliesForHelp(me->GetVictim());
         }
 
         if (_mob && _mob->role == PACK_ROLE_CASTER && _mob->casterSpellId)

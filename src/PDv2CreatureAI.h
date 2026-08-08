@@ -67,6 +67,7 @@ namespace PDungeon
         void UpdateCasterCombat(uint32 diff);
         void UpdateProximityAggro(uint32 diff);
         void UpdateImmolation(uint32 diff);
+        void CallAlliesForHelp(Unit* victim);
         bool GridLineOkTo(Unit* victim) const;
         void StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid);
         void MoveToWaypoint(size_t index, WalkGrid const& grid);
@@ -85,6 +86,7 @@ namespace PDungeon
         bool _followingPath = false;
         bool _lineOk = false;       // last grid-line verdict, refreshed on the tick
         bool _holding = false;      // a caster that has planted itself at range
+        bool _hasCalled = false;    // affix 1 already shouted for THIS fight
     };
 }
 

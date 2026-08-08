@@ -80,6 +80,10 @@ namespace PDungeon
         return (affixMask & AffixBit(id)) != 0;
     }
 
+    // Call for Help (1): on entering combat, every ally within 30 yd joins the
+    // fight on the same victim (DungeonChallengeScripts.cpp:692-695).
+    float const AFFIX_CALL_FOR_HELP_RANGE_YD = 30.0f;
+
     // Big Boy (3) and Bigger Boy (9): x1.5 max health EACH
     // (DungeonChallenge.cpp:684 and :699 - the same literal in both cases).
     float const AFFIX_BIG_BOY_HEALTH_MULT = 1.5f;
