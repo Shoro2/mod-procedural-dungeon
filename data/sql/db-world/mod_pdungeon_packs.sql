@@ -20,45 +20,47 @@
 -- that do not exist.
 --
 -- ----------------------------------------------------------------------------
--- ROLE ASSIGNMENT (role: 0 melee, 1 caster, 2 boss)
+-- ROLE ASSIGNMENT (role: 0 melee, 1 range, 2 boss)
 --
--- Roles are NOT taken from fl-underground's own melee/caster vectors
--- (UndergroundData.cpp:388-441): the name comments there disagree with the
--- world DB for 19 of 25 entries, and the DB is the truth. Every role below was
--- assigned from the measured entry -> ScriptName mapping (2026-08-07).
+-- The role table below is the operator's, verified in game on 2026-08-09, and
+-- it replaces the earlier assignment that was derived from fl-underground's
+-- own melee/caster vectors. Those vectors could never be the source anyway:
+-- their entry -> name comments (UndergroundData.cpp:388-441) disagree with the
+-- world DB for 19 of 25 entries, and the DB is the truth.
 --
--- Four entries that module calls casters (84267, 84271, 84277, 84279) are
--- MELEE here on purpose: they are unit_class 1 (warrior), so at level 80 they
--- have no mana pool, and PDv2's caster AI casts real power-checked spells. A
--- uc1 "caster" would stand there doing nothing.
+--   RANGE (5)   84263 Underground Occultist, 84276 Soul-Leech Banshee,
+--               84281 Ashen Wailer, 84285 Underground Spectrum,
+--               84287 Awakened Bones
+--   MELEE (20)  every other trash entry in 84264..84286
+--   BOSS  (3)   84288, 84289, 84290
+--
+-- Five entries that used to be role 1 here are MELEE now - 84272, 84278,
+-- 84280, 84282, 84283 - on the operator's live report that a demoted caster
+-- "steht nach dem cast nur auf range und ist kein meele". Their ranged nukes
+-- are not lost: they come back as melee-cast cooldown spells in
+-- mod_pdungeon_member_spells.sql, which is where the flavour now lives.
 --
 -- ----------------------------------------------------------------------------
--- casterSpellId - the ranged nuke the caster AI fires (measured, not guessed)
+-- casterSpellId - the RANGE mob's filler, and a fallback only
 --
--- Each caster's spell is taken from ITS OWN fl-underground kit
--- (UndergroundData.cpp TrashKits(), resolved through the creature's REAL
--- ScriptName), and then checked against Spell.dbc + SpellRange.dbc, because a
--- kit slot that cannot reach the target is a caster that silently never lands
--- anything. The picked spell must (a) deal damage, (b) target a single enemy,
--- and (c) have a max range at or above ProceduralDungeon.V2.CastRangeYd (25).
+-- pdungeon_member_spells is the truth for every spell a mob casts, including
+-- the filler (its slot-0 row). This column is kept because the AI still reads
+-- it when a role-1 member has no slot-0 row at all, so a half-applied SQL set
+-- degrades to "the old nuke" instead of to a mob that stands and stares. The
+-- two are deliberately identical today:
 --
---  entry  ScriptName                  spell  name                range  why
---  84263  npc_underground_occultist   47809  Shadow Bolt R13      30 yd  kit tier 0
---  84272  npc_voidbound_revenant      47857  Drain Life R9        30 yd  kit tier 0
---  84278  npc_hellpit_crawler         26476  Digestive Acid        any   kit tier 50 *
---  84280  npc_warped_bonefiend        48125  Shadow Word: Pain    30 yd  kit tier 50 *
---  84281  npc_ashen_wailer            62129  Wail of Souls       100 yd  kit tier 0
---  84282  npc_twisted_abomination     20791  Shadow Bolt          40 yd  FALLBACK **
---  84283  npc_gloomfang               47857  Drain Life R9        30 yd  kit tier 50 *
---  84285  npc_underground_spectrum    42842  Frostbolt R16        30 yd  kit tier 0
+--  entry  ScriptName                  spell  name              range  cast
+--  84263  npc_underground_occultist   47809  Shadow Bolt R13   30 yd  3.0 s
+--  84276  npc_soul_leech_banshee      47857  Drain Life R9     30 yd  5 s channel
+--  84281  npc_ashen_wailer            62129  Wail of Souls    100 yd  instant
+--  84285  npc_underground_spectrum    42842  Frostbolt R16     30 yd  3.0 s
+--  84287  npc_awakened_bones          47809  Shadow Bolt R13   30 yd  3.0 s
 --
---  *  the kit's tier-0 damage slots are melee (5 yd Bite / Bone Slice / Shadow
---     Bite) or self-centred AoE (Acid Splash, Spirit Burst, Shadow Breath cone),
---     none of which can land from 25 yd, so the pick moves up the same kit to
---     its first ranged single-target damage slot.
---  ** npc_twisted_abomination's whole kit is Slam (10 yd), Cleave (5 yd),
---     Enrage (self buff) and Curse of Idiocy (no damage) - it has no ranged
---     damage at any tier, so it takes the generic fallback.
+-- Each one deals damage to a single enemy and reaches at least
+-- ProceduralDungeon.V2.CastRangeYd (25), which is the whole point of the
+-- column: a filler that cannot reach is a mob that silently never lands
+-- anything. 84287 is unit_class 1 and its power cost is argued in full in
+-- mod_pdungeon_member_spells.sql.
 --
 -- All ids are stock 3.3.5 Spell.dbc entries (fl-underground remapped its dead
 -- FL 8006xx ids onto real spells - UndergroundData.h:27-106). No spell_dbc row
@@ -105,32 +107,32 @@ INSERT INTO `pdungeon_packs`
 
 INSERT INTO `pdungeon_pack_members`
   (`packId`, `entry`, `role`, `casterSpellId`, `weight`) VALUES
-  -- Pack 1 "Crypt Horrors" - 13 members, 5 casters
-  (1, 84263, 1, 47809, 100),  -- Underground Occultist  (uc8)
+  -- Pack 1 "Crypt Horrors" - 13 members, 5 range
+  (1, 84263, 1, 47809, 100),  -- Underground Occultist  (uc8, RANGE)
   (1, 84264, 0,     0, 100),  -- Crypt Howler           (uc1)
-  (1, 84265, 0,     0, 100),  -- Shadowbone Stalker     (uc8, melee by role split)
-  (1, 84266, 0,     0, 100),  -- Dread Maggot           (uc8, melee by role split)
-  (1, 84268, 0,     0, 100),  -- Tormented Soul         (uc8, melee by role split)
-  (1, 84272, 1, 47857, 100),  -- Voidbound Revenant     (uc8)
-  (1, 84274, 0,     0, 100),  -- Carrion Watcher        (uc8, melee by role split)
-  (1, 84276, 0,     0, 100),  -- Soul-Leech Banshee     (uc8, melee by role split)
-  (1, 84280, 1, 48125, 100),  -- Warped Bonefiend       (uc8)
-  (1, 84281, 1, 62129, 100),  -- Ashen Wailer           (uc8)
+  (1, 84265, 0,     0, 100),  -- Shadowbone Stalker     (uc8)
+  (1, 84266, 0,     0, 100),  -- Dread Maggot           (uc8)
+  (1, 84268, 0,     0, 100),  -- Tormented Soul         (uc8)
+  (1, 84272, 0,     0, 100),  -- Voidbound Revenant     (uc8, demoted to melee)
+  (1, 84274, 0,     0, 100),  -- Carrion Watcher        (uc8)
+  (1, 84276, 1, 47857, 100),  -- Soul-Leech Banshee     (uc8, RANGE)
+  (1, 84280, 0,     0, 100),  -- Warped Bonefiend       (uc8, demoted to melee)
+  (1, 84281, 1, 62129, 100),  -- Ashen Wailer           (uc8, RANGE)
   (1, 84284, 0,     0, 100),  -- Underground Ghoul      (uc1)
-  (1, 84285, 1, 42842, 100),  -- Underground Spectrum   (uc8)
-  (1, 84287, 0,     0, 100),  -- Awakened Bones         (uc1)
-  -- Pack 2 "Abyssal Broodpit" - 12 members, 3 casters
-  (2, 84267, 0,     0, 100),  -- Abyss Hound            (uc1 - demoted from caster)
+  (1, 84285, 1, 42842, 100),  -- Underground Spectrum   (uc8, RANGE)
+  (1, 84287, 1, 47809, 100),  -- Awakened Bones         (uc1, RANGE)
+  -- Pack 2 "Abyssal Broodpit" - 12 members, all melee
+  (2, 84267, 0,     0, 100),  -- Abyss Hound            (uc1)
   (2, 84269, 0,     0, 100),  -- Putrid Fleshbeast      (uc1)
-  (2, 84270, 0,     0, 100),  -- Netherclaw Demon       (uc8, melee by role split)
-  (2, 84271, 0,     0, 100),  -- Fleshbound Horror      (uc1 - demoted from caster)
+  (2, 84270, 0,     0, 100),  -- Netherclaw Demon       (uc8)
+  (2, 84271, 0,     0, 100),  -- Fleshbound Horror      (uc1)
   (2, 84273, 0,     0, 100),  -- Blightfang             (uc1)
   (2, 84275, 0,     0, 100),  -- Grotesque Brute        (uc1)
-  (2, 84277, 0,     0, 100),  -- Rotting Hound          (uc1 - demoted from caster)
-  (2, 84278, 1, 26476, 100),  -- Hellpit Crawler        (uc8)
-  (2, 84279, 0,     0, 100),  -- Bloodspike Beast       (uc1 - demoted from caster)
-  (2, 84282, 1, 20791, 100),  -- Twisted Abomination    (uc8, fallback nuke)
-  (2, 84283, 1, 47857, 100),  -- Gloomfang              (uc8)
+  (2, 84277, 0,     0, 100),  -- Rotting Hound          (uc1)
+  (2, 84278, 0,     0, 100),  -- Hellpit Crawler        (uc8, demoted to melee)
+  (2, 84279, 0,     0, 100),  -- Bloodspike Beast       (uc1)
+  (2, 84282, 0,     0, 100),  -- Twisted Abomination    (uc8, demoted to melee)
+  (2, 84283, 0,     0, 100),  -- Gloomfang              (uc8, demoted to melee)
   (2, 84286, 0,     0, 100),  -- Disgusting Larva       (uc1)
   -- Pack 3 "Lords of the Deep" - the boss draw, one entry per boss room
   (3, 84288, 2,     0, 100),  -- Dralak      (boss_dralak)
