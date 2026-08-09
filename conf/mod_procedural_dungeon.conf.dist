@@ -412,14 +412,17 @@ ProceduralDungeon.V2.Diff.DamagePctPerLevel = 2
 
 #
 #    ProceduralDungeon.V2.Affix.Percentage
-#        Description: Percent of a run's TRASH that wears the affixes unlocked
-#                     by its difficulty (bosses never do, mirroring
-#                     mod-dungeon-challenge). The affix SPELLS are that module's
-#                     (900050-900060, its own DBC work); PDv2 only references
-#                     them, and which ones apply at which difficulty lives in
-#                     the `pdungeon_affixes` table - so retuning is SQL, not a
-#                     rebuild. Default = that module's LIVE
-#                     DungeonChallenge.AffixPercentage. 0 turns affixes off.
+#        Description: Percent chance PER ROOM that exactly ONE of its trash
+#                     mobs is that room's affix carrier - at most one per room
+#                     (operator rule 2026-08-09; the earlier per-mob roll
+#                     clustered). The carrier wears every affix its difficulty
+#                     unlocks; bosses never do, mirroring mod-dungeon-challenge.
+#                     The affix SPELLS are that module's (900050-900060, its
+#                     own DBC work); PDv2 only references them, and which ones
+#                     apply at which difficulty lives in the `pdungeon_affixes`
+#                     table - so retuning is SQL, not a rebuild. Default = that
+#                     module's LIVE DungeonChallenge.AffixPercentage. 0 turns
+#                     affixes off.
 #
 #                     NOTE: this number is part of the spawn draw's seeded
 #                     stream, so changing it re-rolls WHICH creatures a stored

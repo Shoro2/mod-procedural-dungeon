@@ -328,10 +328,12 @@ namespace PDungeon
         // determinism contract, because every draw below shifts every draw
         // after it:
         //
-        //   per boss room   one weighted boss pick (no affix roll - bosses are
-        //                   never affixed, see the emit below)
-        //   per trash slot  one caster/melee Chance, one weighted entry pick,
-        //                   then one affix Chance
+        //   per room        one carrier Chance + one slot draw (the at-most-
+        //                   one-affix-per-room rule, drawn hit or miss so the
+        //                   stream stays aligned)
+        //   per boss room   additionally one weighted boss pick (no affix -
+        //                   bosses are never carriers, see the emit below)
+        //   per trash slot  one caster/melee Chance, one weighted entry pick
         //
         // Same seed and same inputs therefore rebuild the identical dungeon,
         // affixed mobs included, across restarts and compilers. The INPUTS are
@@ -425,16 +427,28 @@ namespace PDungeon
                 emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), false,
                      spawns.picks);
             }
+            // AT MOST ONE carrier per room (operator verdict, first affix test
+            // 2026-08-09: the independent per-mob roll clustered - a 5-mob room
+            // could carry 0..5 and read as lopsided). The percentage now means
+            // "chance that THIS ROOM has its one carrier"; if it hits, one slot
+            // index is drawn. Both draws happen for every room, hit or miss,
+            // trash or boss - a constant draw count per room keeps the stream
+            // aligned however the knobs move. Boss rooms roll over their ADD
+            // slots only (the boss keeps its own no-affix rule above).
+            bool const roomHasCarrier = rng.Chance(in.affixPct) && trashWanted > 0;
+            int const carrierSlot = rng.UniformInt(0, trashWanted > 0 ? trashWanted - 1 : 0);
+
             for (int i = 0; i < trashWanted; ++i)
             {
                 // TWO statements, not one call. C++ leaves the evaluation order
                 // of function arguments unspecified, so writing
-                // emit(pickTrash(), rng.Chance(...)) would let the compiler
-                // decide which draw comes first - and a spawn stream whose
-                // order depends on the compiler is not deterministic, which is
-                // the one property this whole file exists to keep.
+                // emit(pickTrash(), ...) with a second draw inline would let
+                // the compiler decide which draw comes first - and a spawn
+                // stream whose order depends on the compiler is not
+                // deterministic, which is the one property this whole file
+                // exists to keep.
                 PackMember const* m = pickTrash();
-                bool const affixed = rng.Chance(in.affixPct);
+                bool const affixed = roomHasCarrier && i == carrierSlot;
                 emit(m, affixed, spawns.picks);
             }
 
