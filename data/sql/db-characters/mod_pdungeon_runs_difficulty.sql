@@ -20,6 +20,15 @@
 --
 -- Separate file + information_schema guard for the reasons
 -- mod_pdungeon_runs_gameplay.sql states.
+--
+-- NO `AFTER` clause on purpose (2026-08-09 host crash-loop lesson): the AC
+-- updater applies a module's NEW files in FILENAME order, and on a fresh
+-- deployment this file ('d') runs before mod_pdungeon_runs_gameplay.sql ('g'),
+-- which is what creates `difficulty_x100`. `AFTER difficulty_x100` therefore
+-- aborted the very first host boot with error 1054 while every workbench boot
+-- had been fine (there the files arrived one authoring day apart). Column
+-- position is cosmetic; every reader binds by name. Incremental installs that
+-- already ran the old text simply hit the guard's 'DO 0'.
 -- ----------------------------------------------------------------------------
 
 SET @dbname := DATABASE();
@@ -28,6 +37,6 @@ SET @col := (SELECT COUNT(*) FROM information_schema.COLUMNS
              WHERE TABLE_SCHEMA = @dbname AND TABLE_NAME = 'pdungeon_runs'
                AND COLUMN_NAME = 'difficulty');
 SET @sql := IF(@col = 0,
-    'ALTER TABLE `pdungeon_runs` ADD COLUMN `difficulty` TINYINT UNSIGNED NOT NULL DEFAULT 0 AFTER `difficulty_x100`',
+    'ALTER TABLE `pdungeon_runs` ADD COLUMN `difficulty` TINYINT UNSIGNED NOT NULL DEFAULT 0',
     'DO 0');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
