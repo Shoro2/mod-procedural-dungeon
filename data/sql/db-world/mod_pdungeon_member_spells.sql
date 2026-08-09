@@ -205,14 +205,22 @@
 -- ----------------------------------------------------------------------------
 -- TWO THINGS THE OPERATOR SHOULD KNOW BEFORE THE FIRST RUN
 --
--- 1) 62129 Wail of Souls (84281's filler, unchanged from the packs table) is
---    single-target Shadow damage PLUS a KNOCK BACK and an INTERRUPT on
---    everything within 30 yd of the caster (effects 1 and 2, radius index 10).
---    As a cooldown-less filler an Ashen Wailer therefore knocks back and
---    interrupts its whole neighbourhood continuously, on a map whose floor
---    ends at the platform edge. If that reads badly in game it needs no build:
---    UPDATE pdungeon_member_spells SET cooldownMs = 8000
---      WHERE entry = 84281 AND slot = 0;
+-- 1) 62129 Wail of Souls is NOT 84281's filler, and must never become one.
+--    Two independent facts agree on that. Its own kit cadence is 60000 ms
+--    (UndergroundData.cpp, npc_ashen_wailer slot 1: the ability was authored
+--    as a minute cooldown, not a rotation spell). And its second effect is
+--    KNOCK_BACK on TARGET_SRC_CASTER - an area punt around the caster, plus
+--    an interrupt - so spamming it on a map whose floor ends at the platform
+--    edge is a mob launching every player near it into the void once per
+--    cast, forever. It keeps its signature ability at the cadence its own kit
+--    asked for, in the 60 s CC band its knock-back + interrupt earns.
+--    The filler falls back to the generic Shadow Bolt because the Wailer's
+--    only other ranged option, 69900 Spirit Burst, has range 0 - a
+--    self-centred AoE that cannot land from V2.CastRangeYd at all. (Measured
+--    in Spell.dbc 2026-08-09: 62129 range 100, effect2 98 KNOCK_BACK target
+--    22; 69900 range 0 target 22; 32315 Soul Strike - the Banshee's other
+--    tier-0 - range 5, which is why 84276 keeps Drain Life despite the
+--    channel.)
 -- 2) 42940 Blizzard (84285 @75) channels for 8 s. On a 12 s cadence an
 --    Underground Spectrum spends two thirds of a difficulty-75 fight in that
 --    channel and its filler stays silent meanwhile. Same one-line remedy.
@@ -245,8 +253,8 @@ INSERT INTO `pdungeon_member_spells`
   (84276, 47857, 0,     0,  1, 1),  -- Drain Life R9     30 yd single leech         t0 FILLER
   (84276, 71264, 1, 12000, 75, 1),  -- Swarming Shadows  any range, single DoT      t75
   -- 84281 Ashen Wailer  npc_ashen_wailer  (uc8)
-  (84281, 62129, 0,     0,  1, 1),  -- Wail of Souls    100 yd single (see note 1)  t0 FILLER
-  (84281, 36576, 1, 10000, 50, 1),  -- Shaleskin         self, damage-taken buff    t50
+  (84281, 47809, 0,     0,  1, 1),  -- Shadow Bolt R13   30 yd single (see note 1)  FILLER
+  (84281, 62129, 1, 60000, 50, 1),  -- Wail of Souls    100 yd + area knock-back    t0 -> CC band
   (84281, 71264, 1, 12000, 75, 1),  -- Swarming Shadows  any range, single DoT      t75
   -- 84285 Underground Spectrum  npc_underground_spectrum  (uc8)
   (84285, 42842, 0,     0,  1, 1),  -- Frostbolt R16     30 yd single, 3.0s cast    t0 FILLER
