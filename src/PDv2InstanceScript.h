@@ -155,6 +155,14 @@ namespace PDungeon
         // is worth anything at all.
         uint16 GetRunAffixMask() const { return _runAffixMask; }
 
+        // Re-casts the affix auras a carrier's mask names. The AI calls this
+        // from JustReachedHome: an evade strips every aura (core behaviour),
+        // which disarmed nothing - the mechanics ride the tag - but left the
+        // carrier LOOKING clean (operator report, first affix test). The
+        // spawn-time health effects are deliberately NOT re-applied: max
+        // health survives an aura wipe.
+        void ReapplyAffixAuras(Creature* creature, uint16 affixMask) const;
+
         // The account this instance was BUILT for - the one whose stored plan
         // the terrain and the spawns came from, which is not necessarily the
         // account of whoever is reading. 0 until the first player enters.

@@ -462,6 +462,24 @@ namespace PDungeon
         return c;
     }
 
+    void PDv2InstanceScript::ReapplyAffixAuras(Creature* creature, uint16 affixMask) const
+    {
+        if (!creature || !affixMask)
+        {
+            return;
+        }
+        // The same triggered self-casts the spawn used. _runAffixes is frozen
+        // at spawn and a carrier's mask is all-or-nothing against it, so
+        // filtering by bit here is exact rather than approximate.
+        for (AffixDef const& affix : _runAffixes)
+        {
+            if (HasAffix(affixMask, affix.id))
+            {
+                creature->CastSpell(creature, affix.spellId, true);
+            }
+        }
+    }
+
     void PDv2InstanceScript::SplitOnDeath(Creature* parent, PDv2MobData const& parentTag,
                                           Unit* killer)
     {

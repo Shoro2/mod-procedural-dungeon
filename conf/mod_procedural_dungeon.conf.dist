@@ -486,6 +486,19 @@ ProceduralDungeon.V2.Loot.BonusRollPct = 15
 ProceduralDungeon.V2.CastRangeYd = 25.0
 
 #
+#    ProceduralDungeon.V2.CasterNukeCooldownMs
+#        Description: Gap between a caster's nukes, in milliseconds. Without
+#                     one, a CHANNELLED nuke (both Drain Life casters) re-cast
+#                     the instant its channel ended - an unbroken drain chain
+#                     with no auto-attacks ever (operator report 2026-08-09).
+#                     Between nukes the caster swings normally at whatever is
+#                     in melee reach. A fresh fight always opens with the nuke.
+#        Default:     8000
+#
+
+ProceduralDungeon.V2.CasterNukeCooldownMs = 8000
+
+#
 #    ProceduralDungeon.V2.AggroRangeYd
 #        Description: How close a player has to get before an idle dungeon
 #                     creature attacks. The module supplies its own aggro

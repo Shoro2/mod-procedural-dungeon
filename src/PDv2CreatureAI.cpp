@@ -86,6 +86,7 @@ namespace PDungeon
         _holding = false;
         _lineOk = false;
         _lineTimer = 0;
+        _nukeCooldown = 0;      // a fresh fight opens with the nuke
 
         // Call for Help (affix 1) is ARMED here and fired on the next tick,
         // not shouted from inside this hook. Two reasons, and the second is the
@@ -111,6 +112,20 @@ namespace PDungeon
         if (_instance)
         {
             _instance->OnMobDied(me, killer);
+        }
+    }
+
+    void PDv2MobAI::JustReachedHome()
+    {
+        ScriptedAI::JustReachedHome();
+
+        // An evade stripped every aura on the way home (core behaviour), and
+        // for a carrier that included the affix VISUALS - the mechanics ride
+        // the tag and never noticed, but the mob walked back looking clean
+        // (operator report, first affix test 2026-08-09). Dress it again.
+        if (_instance && _mob && _mob->affixMask)
+        {
+            _instance->ReapplyAffixAuras(me, _mob->affixMask);
         }
     }
 
@@ -327,13 +342,27 @@ namespace PDungeon
             }
             me->SetFacingToObject(victim);
 
-            // ScriptedAI's own form (UnitAI.cpp:76-92): it respects
-            // UNIT_STATE_CASTING and the attack timer, and it refuses when the
-            // SPELL's own range cannot reach - which is why every caster in
-            // mod_pdungeon_packs.sql was given a spell that reaches at least
-            // V2.CastRangeYd. Raise that key past a spell's range and its
-            // caster silently stops casting.
-            DoSpellAttackIfReady(_mob->casterSpellId);
+            // The nuke fires on ITS OWN COOLDOWN, not back to back. Without
+            // one, a channelled nuke (both Drain Life casters) re-cast the
+            // instant its channel ended - an unbroken drain chain with no
+            // auto-attacks ever, reported from the first live affix test as
+            // "casts non-stop and never swings". Between nukes the melee line
+            // below does the swinging whenever the target is in reach.
+            if (_nukeCooldown > diff)
+            {
+                _nukeCooldown -= diff;
+            }
+            else if (!me->HasUnitState(UNIT_STATE_CASTING))
+            {
+                // DoCastVictim rather than DoSpellAttackIfReady: the latter
+                // ties the cast to the MELEE attack timer, and this branch
+                // wants the two rhythms independent. The spell still refuses
+                // when its own range cannot reach - which is why every caster
+                // in mod_pdungeon_packs.sql was given a spell that reaches at
+                // least V2.CastRangeYd.
+                DoCastVictim(_mob->casterSpellId);
+                _nukeCooldown = sPDv2Mgr->GetConfig().casterNukeCooldownMs;
+            }
         }
         else
         {

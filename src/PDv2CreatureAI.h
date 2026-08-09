@@ -59,6 +59,7 @@ namespace PDungeon
 
         void JustEngagedWith(Unit* who) override;
         void JustDied(Unit* killer) override;
+        void JustReachedHome() override;
         void UpdateAI(uint32 diff) override;
         void MovementInform(uint32 type, uint32 id) override;
 
@@ -81,6 +82,7 @@ namespace PDungeon
         uint32 _aggroTimer = 0;
         uint32 _lineTimer = 0;
         uint32 _immolationTimer = 0;    // affix 4, accumulates toward 2 s
+        uint32 _nukeCooldown = 0;       // caster nuke gap; 0 = ready to cast
         std::vector<GridPoint> _waypoints;
         size_t _waypointIndex = 0;
         bool _followingPath = false;
