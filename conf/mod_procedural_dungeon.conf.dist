@@ -475,28 +475,21 @@ ProceduralDungeon.V2.Loot.BonusRollPct = 15
 
 #
 #    ProceduralDungeon.V2.CastRangeYd
-#        Description: How far a caster-role creature will hold and cast from.
-#                     Pack members are only given a casterSpellId whose spell
-#                     actually reaches this far; raising it past a spell's own
-#                     range turns that caster into a mob that silently never
-#                     casts, so re-check mod_pdungeon_packs.sql if you change it.
+#        Description: How far a range-role creature will hold and cast from.
+#                     A range mob is only given a filler whose spell actually
+#                     reaches this far; raising it past a spell's own range
+#                     turns that mob into one that silently never casts, so
+#                     re-check mod_pdungeon_member_spells.sql if you change it.
+#
+#                     There is deliberately no companion key for HOW OFTEN a
+#                     mob casts. Every cooldown, the filler's included, is a
+#                     column in pdungeon_member_spells - one server-wide number
+#                     could never say "spam the Frostbolt but not the
+#                     knockback".
 #        Default:     25.0
 #
 
 ProceduralDungeon.V2.CastRangeYd = 25.0
-
-#
-#    ProceduralDungeon.V2.CasterNukeCooldownMs
-#        Description: Gap between a caster's nukes, in milliseconds. Without
-#                     one, a CHANNELLED nuke (both Drain Life casters) re-cast
-#                     the instant its channel ended - an unbroken drain chain
-#                     with no auto-attacks ever (operator report 2026-08-09).
-#                     Between nukes the caster swings normally at whatever is
-#                     in melee reach. A fresh fight always opens with the nuke.
-#        Default:     8000
-#
-
-ProceduralDungeon.V2.CasterNukeCooldownMs = 8000
 
 #
 #    ProceduralDungeon.V2.AggroRangeYd

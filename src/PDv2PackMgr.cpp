@@ -91,6 +91,10 @@ namespace PDungeon
         // with it.
         LoadAffixesFromDB();
 
+        // Before the packs, because the member loop below asks the kits
+        // whether a role-1 member has a filler of its own.
+        LoadMemberSpellsFromDB();
+
         // The LEFT JOIN on creature_template is the defensive half: pack
         // members point at entries this module does not own, so on any
         // environment without the imported stock some of them simply are not
@@ -148,12 +152,17 @@ namespace PDungeon
             member.casterSpellId = fields[7].Get<uint32>();
             member.weight = fields[8].Get<uint16>();
 
-            // A caster with no spell would stand at range doing nothing at all,
-            // which reads in-game as a broken mob rather than a data problem.
-            if (member.role == PACK_ROLE_CASTER && !member.casterSpellId)
+            // A range mob with nothing to cast would stand at range doing
+            // nothing at all, which reads in-game as a broken mob rather than
+            // as a data problem. Both sources have to be empty before that is
+            // true: pdungeon_member_spells is the truth for the filler and the
+            // casterSpellId column is only its fallback.
+            if (member.role == PACK_ROLE_CASTER && !member.casterSpellId &&
+                MemberSpells(entry).empty())
             {
-                LOG_ERROR(PD_LOG, "PDv2: pack {} member {} is a caster with casterSpellId 0 - "
-                                  "demoted to melee", packId, entry);
+                LOG_ERROR(PD_LOG, "PDv2: pack {} member {} is a range mob with casterSpellId 0 "
+                                  "and no pdungeon_member_spells rows - demoted to melee",
+                          packId, entry);
                 member.role = PACK_ROLE_MELEE;
             }
 
@@ -179,6 +188,129 @@ namespace PDungeon
         {
             LOG_WARN(PD_LOG, "PDv2: no role-2 (boss) pack member exists for theme {} - "
                              "boss rooms will be filled with a trash stand-in", theme);
+        }
+
+        ReportFillerlessCasters();
+    }
+
+    void PDv2PackMgr::LoadMemberSpellsFromDB()
+    {
+        _memberSpells.clear();
+        _memberSpellRows = 0;
+
+        // ORDER BY is part of the contract, not decoration: the AI casts the
+        // FIRST ready row it finds, so the order this comes back in IS the
+        // priority order a fight plays out in. slot puts the filler at the
+        // front, minDiff makes the always-on ability outrank the gated ones,
+        // and spellId breaks the remaining ties so two servers with the same
+        // table behave identically.
+        QueryResult result = WorldDatabase.Query(
+            "SELECT entry, spellId, slot, cooldownMs, minDiff FROM pdungeon_member_spells "
+            "WHERE enabled = 1 ORDER BY entry, slot, minDiff, spellId");
+        if (!result)
+        {
+            LOG_WARN(PD_LOG, "PDv2: pdungeon_member_spells has no enabled rows - every mob "
+                             "fights with auto-attacks only (range mobs fall back to their "
+                             "pack casterSpellId). Apply mod_pdungeon_member_spells.sql if "
+                             "that is not what you wanted");
+            return;
+        }
+
+        uint32 fillers = 0, cooldowns = 0;
+        do
+        {
+            Field* fields = result->Fetch();
+
+            uint32 const entry = fields[0].Get<uint32>();
+            MemberSpell spell;
+            spell.spellId = fields[1].Get<uint32>();
+            spell.slot = fields[2].Get<uint8>();
+            spell.cooldownMs = fields[3].Get<uint32>();
+            spell.minDiff = fields[4].Get<uint8>();
+
+            // A row with no spell would take a slot in the rotation and then
+            // do nothing, which reads in-game as a mob that stutters rather
+            // than as a data problem.
+            if (!spell.spellId)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: creature {} has a pdungeon_member_spells row with "
+                                  "spellId 0 - row dropped", entry);
+                continue;
+            }
+
+            // A cooldown spell with no cooldown is a contradiction the AI
+            // cannot resolve: it takes the first ready row, so a zero would
+            // fire every tick and starve every row behind it - the filler
+            // included.
+            if (spell.slot != MEMBER_SPELL_SLOT_FILLER && !spell.cooldownMs)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: creature {} spell {} is a slot-{} row with "
+                                  "cooldownMs 0 - row dropped (only the slot-0 filler may "
+                                  "have no cooldown)", entry, spell.spellId, spell.slot);
+                continue;
+            }
+
+            std::vector<MemberSpell>& kit = _memberSpells[entry];
+            if (spell.slot == MEMBER_SPELL_SLOT_FILLER)
+            {
+                // Exactly one filler. A second one could never fire - the AI
+                // takes the first slot-0 row and spams it - so say so instead
+                // of letting the extra spell quietly not exist.
+                if (!kit.empty() && kit.front().slot == MEMBER_SPELL_SLOT_FILLER)
+                {
+                    LOG_ERROR(PD_LOG, "PDv2: creature {} has more than one slot-0 filler; "
+                                      "spell {} dropped, {} keeps the slot",
+                              entry, spell.spellId, kit.front().spellId);
+                    continue;
+                }
+                ++fillers;
+            }
+            else
+            {
+                ++cooldowns;
+            }
+
+            kit.push_back(spell);
+            ++_memberSpellRows;
+        } while (result->NextRow());
+
+        LOG_INFO(PD_LOG, "PDv2: loaded {} member spell(s) for {} creature(s) - {} filler, "
+                         "{} cooldown; the spells are stock Spell.dbc and only referenced here",
+                 uint32(_memberSpellRows), uint32(_memberSpells.size()), fillers, cooldowns);
+    }
+
+    std::vector<MemberSpell> const& PDv2PackMgr::MemberSpells(uint32_t entry) const
+    {
+        static std::vector<MemberSpell> const empty;
+        auto const it = _memberSpells.find(entry);
+        return it != _memberSpells.end() ? it->second : empty;
+    }
+
+    void PDv2PackMgr::ReportFillerlessCasters() const
+    {
+        for (Pack const& pack : _packs)
+        {
+            for (PackMember const& member : pack.members)
+            {
+                if (member.role != PACK_ROLE_CASTER)
+                {
+                    continue;
+                }
+
+                std::vector<MemberSpell> const& kit = MemberSpells(member.entry);
+                if (!kit.empty() && kit.front().slot == MEMBER_SPELL_SLOT_FILLER)
+                {
+                    continue;
+                }
+
+                // The fallback still gives it something to spam, so this is a
+                // warning about the DATA being half applied, not about a mob
+                // that is already broken. Without either it IS broken, and the
+                // member loop above has already demoted it.
+                LOG_WARN(PD_LOG, "PDv2: range member {} has no slot-0 filler in "
+                                 "pdungeon_member_spells - falling back to the pack's "
+                                 "casterSpellId {}", member.entry, member.casterSpellId);
+            }
         }
     }
 

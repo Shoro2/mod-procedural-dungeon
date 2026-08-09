@@ -86,7 +86,11 @@ namespace PDungeon
         _holding = false;
         _lineOk = false;
         _lineTimer = 0;
-        _nukeCooldown = 0;      // a fresh fight opens with the nuke
+
+        // A fresh fight opens with everything ready. The cooldowns are per
+        // FIGHT, not per creature lifetime, so a pack that was pulled, evaded
+        // and pulled again opens the same way both times.
+        ResetKitCooldowns();
 
         // Call for Help (affix 1) is ARMED here and fired on the next tick,
         // not shouted from inside this hook. Two reasons, and the second is the
@@ -304,6 +308,108 @@ namespace PDungeon
                             SNAP_RADIUS_CELLS, waypoints) == ApproachKind::Direct;
     }
 
+    void PDv2MobAI::BuildKit()
+    {
+        _kitBuilt = true;
+        _kit.clear();
+        _fillerSpellId = 0;
+        _fillerCooldownMs = 0;
+        _fillerRemainingMs = 0;
+
+        // The run's difficulty, frozen at spawn like every other number these
+        // mobs fight with. No instance means no run, and a creature outside a
+        // run has no kit - which is the honest answer, not a missing one.
+        uint32 const difficulty = _instance ? _instance->GetRunState().difficulty : 0u;
+
+        for (MemberSpell const& spell : sPDv2PackMgr->MemberSpells(me->GetEntry()))
+        {
+            if (static_cast<uint32>(spell.minDiff) > difficulty)
+            {
+                continue;
+            }
+
+            if (spell.slot == MEMBER_SPELL_SLOT_FILLER)
+            {
+                _fillerSpellId = spell.spellId;
+                _fillerCooldownMs = spell.cooldownMs;
+                continue;
+            }
+
+            KitSpell entry;
+            entry.spellId = spell.spellId;
+            entry.cooldownMs = spell.cooldownMs;
+            _kit.push_back(entry);
+        }
+
+        // The pack column is the fallback the loader warns about: a half
+        // applied SQL set leaves a range mob spamming its old nuke instead of
+        // standing at range doing nothing. member_spells is the truth when it
+        // has an answer.
+        if (!_fillerSpellId && _mob)
+        {
+            _fillerSpellId = _mob->casterSpellId;
+        }
+    }
+
+    void PDv2MobAI::ResetKitCooldowns()
+    {
+        for (KitSpell& spell : _kit)
+        {
+            spell.remainingMs = 0;
+        }
+        _fillerRemainingMs = 0;
+    }
+
+    void PDv2MobAI::TickKit(uint32 diff)
+    {
+        for (KitSpell& spell : _kit)
+        {
+            spell.remainingMs = spell.remainingMs > diff ? spell.remainingMs - diff : 0;
+        }
+        _fillerRemainingMs = _fillerRemainingMs > diff ? _fillerRemainingMs - diff : 0;
+    }
+
+    bool PDv2MobAI::CastReadyKitSpell()
+    {
+        // FIRST READY WINS, in table order - and there is deliberately no
+        // PDRandom anywhere in this file. The seeded stream is the SPAWN
+        // contract (PDv2PackMgr::SelectSpawns lists every draw it contains, in
+        // order); which spell a mob picks in a fight is combat behaviour, and
+        // one extra draw here would re-roll the creatures of every room after
+        // this one for the same seed.
+        for (KitSpell& spell : _kit)
+        {
+            if (spell.remainingMs)
+            {
+                continue;
+            }
+
+            // The cooldown is spent on the ATTEMPT. A spell that refuses -
+            // out of range, out of power, target immune - would otherwise be
+            // retried on every single tick, and for a range mob the filler
+            // below would never get a turn again.
+            spell.remainingMs = spell.cooldownMs;
+            return DoCastVictim(spell.spellId) == SPELL_CAST_OK;
+        }
+        return false;
+    }
+
+    bool PDv2MobAI::CastFiller()
+    {
+        if (!_fillerSpellId || _fillerRemainingMs)
+        {
+            return false;
+        }
+
+        // Normally 0, i.e. back to back for as long as the mob holds, which is
+        // the operator's design ("durchspammen", 2026-08-09). The column is
+        // honoured all the same, so a filler that turns out to be too much in
+        // game - Wail of Souls carries a 30 yd knockback - can be paced from
+        // the table without a build.
+        _fillerRemainingMs = _fillerCooldownMs;
+        return DoCastVictim(_fillerSpellId) == SPELL_CAST_OK;
+    }
+
     void PDv2MobAI::UpdateCasterCombat(uint32 diff)
     {
         Unit* victim = me->GetVictim();
@@ -342,26 +448,20 @@ namespace PDungeon
             }
             me->SetFacingToObject(victim);
 
-            // The nuke fires on ITS OWN COOLDOWN, not back to back. Without
-            // one, a channelled nuke (both Drain Life casters) re-cast the
-            // instant its channel ended - an unbroken drain chain with no
-            // auto-attacks ever, reported from the first live affix test as
-            // "casts non-stop and never swings". Between nukes the melee line
-            // below does the swinging whenever the target is in reach.
-            if (_nukeCooldown > diff)
+            // A cooldown spell whenever one is ready, the filler otherwise -
+            // and the filler has no gap of its own, so between cooldowns the
+            // mob casts back to back. UNIT_STATE_CASTING is the ONLY thing
+            // that paces it, which is what turns a 3 s Frostbolt or a 5 s
+            // Drain Life channel into a cast rhythm rather than a stutter.
+            //
+            // DoCastVictim throughout rather than DoSpellAttackIfReady: the
+            // latter ties the cast to the MELEE attack timer, and this branch
+            // wants the two rhythms independent. A spell still refuses when
+            // its own range cannot reach, which is why every filler in
+            // mod_pdungeon_member_spells.sql reaches at least V2.CastRangeYd.
+            if (!me->HasUnitState(UNIT_STATE_CASTING) && !CastReadyKitSpell())
             {
-                _nukeCooldown -= diff;
-            }
-            else if (!me->HasUnitState(UNIT_STATE_CASTING))
-            {
-                // DoCastVictim rather than DoSpellAttackIfReady: the latter
-                // ties the cast to the MELEE attack timer, and this branch
-                // wants the two rhythms independent. The spell still refuses
-                // when its own range cannot reach - which is why every caster
-                // in mod_pdungeon_packs.sql was given a spell that reaches at
-                // least V2.CastRangeYd.
-                DoCastVictim(_mob->casterSpellId);
-                _nukeCooldown = sPDv2Mgr->GetConfig().casterNukeCooldownMs;
+                CastFiller();
             }
         }
         else
@@ -374,10 +474,11 @@ namespace PDungeon
             UpdateGridChase(diff);
         }
 
-        // Point blank: a caster a melee player has walked into swings too. No
-        // out-of-mana melee fallback beyond that in v1 - after the planner's
-        // role demotions every caster in the packs is unit_class 8 with a
-        // level-80 mana pool, so running dry is not a state these fights reach.
+        // Point blank: a range mob a melee player has walked into swings too.
+        // No out-of-power fallback beyond that: four of the five range mobs
+        // are unit_class 8 with a level-80 mana pool, and the fifth (84287,
+        // unit_class 1) was given a kit whose every spell costs it nothing -
+        // mod_pdungeon_member_spells.sql carries that measurement.
         DoMeleeAttackIfReady();
     }
 
@@ -587,6 +688,16 @@ namespace PDungeon
             return;
         }
 
+        // Built on the first tick of the first fight, not in the constructor:
+        // the spawn tag may still be missing there (the constructor's own
+        // comment says why), and the run's difficulty - which decides what the
+        // kit contains - is only knowable once the instance script has one.
+        if (!_kitBuilt && _mob)
+        {
+            BuildKit();
+        }
+        TickKit(diff);
+
         // In combat with a live victim: the tick JustEngagedWith armed. Once
         // per fight, and only for a carrier.
         if (!_hasCalled && _mob && HasAffix(_mob->affixMask, PD_AFFIX_CALL_FOR_HELP))
@@ -595,7 +706,10 @@ namespace PDungeon
             CallAlliesForHelp(me->GetVictim());
         }
 
-        if (_mob && _mob->role == PACK_ROLE_CASTER && _mob->casterSpellId)
+        // A range mob with nothing to spam is not a range mob. The loader
+        // already said so once per template at startup, so this is silent:
+        // it just fights like everything else.
+        if (_mob && _mob->role == PACK_ROLE_CASTER && _fillerSpellId)
         {
             UpdateCasterCombat(diff);
             return;
@@ -604,6 +718,18 @@ namespace PDungeon
         // Melee, and bosses with it: in v1 a boss's menace is its stats, and a
         // boss that kited would be unfightable in a 66 yd room.
         UpdateGridChase(diff);
+
+        // Kit spells are cast FROM MELEE, between swings. In melee because
+        // that is where the mob is going anyway and because several of these
+        // spells are 5 yd weapon abilities that would refuse anywhere else;
+        // between swings because DoMeleeAttackIfReady below skips only the
+        // moment the mob is actually mid-cast, so an instant ability costs no
+        // auto-attack at all.
+        if (!me->HasUnitState(UNIT_STATE_CASTING) && me->IsWithinMeleeRange(me->GetVictim()))
+        {
+            CastReadyKitSpell();
+        }
+
         DoMeleeAttackIfReady();
     }
 }

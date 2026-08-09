@@ -20,6 +20,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // PDv2 creature packs: which existing creature_template entries a run may
@@ -48,6 +49,31 @@ namespace PDungeon
         uint8_t  role = PACK_ROLE_MELEE;
         uint32_t casterSpellId = 0;     // 0 for anything that is not a caster
         uint16_t weight = 100;
+    };
+
+    enum MemberSpellSlot : uint8_t
+    {
+        // The range mob's filler: cast back to back for as long as it holds,
+        // with cooldownMs 0 meaning "no artificial gap".
+        MEMBER_SPELL_SLOT_FILLER = 0,
+        // Woven between fillers by a range mob, cast from melee by everything
+        // else, each on its own cooldown.
+        MEMBER_SPELL_SLOT_COOLDOWN = 1
+    };
+
+    // One row of `pdungeon_member_spells`: what a creature template casts and
+    // how often. The SPELLS are stock Spell.dbc entries; this is only the
+    // assignment, so a retune is a SQL statement rather than a build - the
+    // same split pdungeon_affixes uses.
+    //
+    // Read once at startup and immutable afterwards, so map threads may query
+    // it without a lock.
+    struct MemberSpell
+    {
+        uint32_t spellId = 0;
+        uint32_t cooldownMs = 0;
+        uint8_t  slot = MEMBER_SPELL_SLOT_COOLDOWN;
+        uint8_t  minDiff = 1;   // in the kit when minDiff <= run difficulty
     };
 
     struct Pack
@@ -138,6 +164,18 @@ namespace PDungeon
 
         size_t AffixCount() const { return _affixes.size(); }
 
+        // Every spell row for a creature template, in the order the AI should
+        // consider them: filler first, then the cooldown spells by minDiff.
+        // Returns an empty vector for a template with no kit, which is a valid
+        // state - such a mob simply auto-attacks.
+        //
+        // A REFERENCE into the immutable store, not a copy: this is called
+        // once per pull from a map thread, and the store never changes after
+        // startup (same contract as the pack tables).
+        std::vector<MemberSpell> const& MemberSpells(uint32_t entry) const;
+
+        size_t MemberSpellCount() const { return _memberSpellRows; }
+
         // Fills `out` with one entry per requested room. Deterministic: the
         // same seed and inputs always produce the same spawns on any compiler,
         // because every draw goes through PDRandom (PDRandom.h:26-29 explains
@@ -158,9 +196,17 @@ namespace PDungeon
 
     private:
         void LoadAffixesFromDB();
+        void LoadMemberSpellsFromDB();
+        // Says out loud, at startup, which range members will fight without a
+        // filler. Deliberately here rather than in the AI: the check wants to
+        // fire once per template per boot, and doing that from a map thread
+        // would need state shared across every creature on the map.
+        void ReportFillerlessCasters() const;
 
         std::vector<Pack> _packs;
         std::vector<AffixDef> _affixes;     // enabled rows only, by minDiff
+        std::unordered_map<uint32_t, std::vector<MemberSpell>> _memberSpells;
+        size_t _memberSpellRows = 0;
     };
 }
 

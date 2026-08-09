@@ -59,8 +59,6 @@ namespace PDungeon
         _config.lootBonusRollPct = sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Loot.BonusRollPct", 15);
         _config.castRangeYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.CastRangeYd", 25.0f);
-        _config.casterNukeCooldownMs = sConfigMgr->GetOption<uint32>(
-            "ProceduralDungeon.V2.CasterNukeCooldownMs", 8000);
         _config.aggroRangeYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.AggroRangeYd", 20.0f);
 
         // Clamped at 0 on the way in: a negative percentage would make a HARDER

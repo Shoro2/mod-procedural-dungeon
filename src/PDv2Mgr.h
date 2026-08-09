@@ -75,10 +75,10 @@ namespace PDungeon
         int         lootBonusRollPct = 15;
         float       castRangeYd = 25.0f;
         float       aggroRangeYd = 20.0f;
-        // Gap between a caster's nukes. Without one, a channelled nuke re-cast
-        // the instant its channel ended - an unbroken drain chain with no
-        // auto-attacks (operator report 2026-08-09).
-        uint32_t    casterNukeCooldownMs = 8000;
+        // No cast-pacing knob lives here. Every cooldown a mob has is a
+        // per-spell column in pdungeon_member_spells, including the filler's
+        // - one server-wide number could never say "spam the Frostbolt but
+        //   not the knockback".
 
         // The difficulty curve, per point of the 1..100 dial. Percent of the
         // creature's own numbers, added linearly, exactly like
