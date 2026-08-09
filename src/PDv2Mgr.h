@@ -19,10 +19,12 @@
 #define MOD_PDUNGEON_V2_MGR_H
 
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2GameMath.h"
 #include "generator/PDv2WorldMath.h"
 
 #include <array>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -60,6 +62,68 @@ namespace PDungeon
         int         loopChancePct = 15;
         int         theme = 1;
         std::string manifestPath;        // where `v2 gen` writes the manifest
+
+        // 01 §8 gameplay knobs.
+        int         xpPerRoom = 10;
+        int         xpPerDlvl = 100;
+        int         dlvlCap = 30;
+        // Trash in a NORMAL room, and trash beside the boss in a boss room.
+        // Two knobs because one cannot say "rooms got fuller, boss rooms did
+        // not" - which is exactly what the operator asked for on 2026-08-08.
+        int         spawnsPerRoom = 5;
+        int         bossRoomAdds = 2;
+        int         lootBonusRollPct = 15;
+        float       castRangeYd = 25.0f;
+        float       aggroRangeYd = 20.0f;
+        // No cast-pacing knob lives here. Every cooldown a mob has is a
+        // per-spell column in pdungeon_member_spells, including the filler's
+        // - one server-wide number could never say "spam the Frostbolt but
+        //   not the knockback".
+
+        // The difficulty curve, per point of the 1..100 dial. Percent of the
+        // creature's own numbers, added linearly, exactly like
+        // mod-dungeon-challenge's HealthMultiplierPerLevel /
+        // DamageMultiplierPerLevel - the defaults ARE that module's live values
+        // on this box. PDv2 owns its own keys so the two dungeons can diverge.
+        int         diffHealthPctPerLevel = 5;
+        int         diffDamagePctPerLevel = 2;
+
+        // Share of a run's TRASH that wears the affixes, in percent. Default =
+        // mod-dungeon-challenge's live DungeonChallenge.AffixPercentage.
+        int         affixPct = 40;
+    };
+
+    // The 01 §7 gameplay half of a pdungeon_account row: progression, and the
+    // cfg_* knobs the player owns. Cached beside the plans and under the same
+    // lock, because both are per account and both are read from map threads.
+    //
+    // `loaded` distinguishes "the account has a row" from "these are defaults",
+    // which is what decides whether GeneratePlan follows the account or the
+    // server config.
+    struct PDv2AccountState
+    {
+        uint32_t    dlvl = 0;
+        uint32_t    dxp = 0;
+        int         cfgRooms = 5;
+        // The 1..100 dial (2026-08-08). cfg_diff_x100 is not read or written
+        // anywhere any more - see mod_pdungeon_account_difficulty.sql for why
+        // the column survives its own retirement.
+        int         cfgDifficulty = PD_GAME_DIFF_DEFAULT;
+        int         cfgCasterPct = PD_GAME_CASTER_PCT_DEFAULT;
+        // 76 rather than the column's default of 1: 76..80 is the only band v1's
+        // imported pack stock actually covers, so a fresh account that never
+        // touched the setting still gets real creatures instead of an empty
+        // pool. A stored row is always taken at face value.
+        int         cfgBandMin = PD_GAME_BAND_MAX;
+        std::string cfgPacks;
+        bool        loaded = false;
+    };
+
+    struct PDv2RunReward
+    {
+        uint32_t dxpGained = 0;
+        int      newDlvl = 0;
+        bool     leveledUp = false;
     };
 
     // The geometry constants (PD_TILE_SIZE_YD and friends) moved to
@@ -86,8 +150,16 @@ namespace PDungeon
         // generator could not produce a valid layout.
         bool GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out);
 
-        // The stored plan, or nullptr when the account has none.
-        BlockPlan const* GetPlan(uint32_t accountId) const;
+        // The stored plan, or an empty pointer when the account has none.
+        //
+        // shared_ptr rather than a raw pointer into the map, and the pointee is
+        // immutable: StorePlan REPLACES the shared object instead of mutating
+        // it, so a reader on a map thread keeps a complete plan even while a
+        // re-roll swaps the account's current one. The raw-pointer form this
+        // replaced was only safe because MapUpdate.Threads = 1 - a constraint
+        // nobody should have to remember when F7 raises it (12-server-todo §5,
+        // closed 2026-08-07).
+        std::shared_ptr<BlockPlan const> GetPlan(uint32_t accountId) const;
 
         // Restores the account's persisted layout by REGENERATING it from the
         // stored seed + generation inputs (a plan is deterministic, so no
@@ -95,6 +167,29 @@ namespace PDungeon
         // or a foreign layout_version simply means "no dungeon yet". No-op
         // when a plan is already cached for this account.
         void LoadPlanFromDB(uint32_t accountId);
+
+        // Restores the account's dlvl/dxp and cfg_* knobs. Called at login
+        // beside LoadPlanFromDB; a missing row simply means "the defaults".
+        // No-op when the account is already cached.
+        void LoadAccountState(uint32_t accountId);
+
+        // A copy, because callers run on map threads and the cache is shared.
+        PDv2AccountState GetAccountState(uint32_t accountId) const;
+
+        // Replaces ONLY the cfg_* knobs in the cache, each clamped through the
+        // 01 §8 math on the way in - so an out-of-band value can never reach a
+        // dungeon regardless of which command or DB edit produced it. Does not
+        // persist; call SaveAccountCfg for that.
+        void SetAccountCfg(uint32_t accountId, PDv2AccountState const& cfg);
+
+        // Writes ONLY the cfg_* columns, mirroring the rule SavePlanToDB
+        // documents for the layout columns: settings must never clobber
+        // progression, and a reroll must never clobber settings.
+        void SaveAccountCfg(uint32_t accountId);
+
+        // Pays out a finished run: 01 §8 dxp (difficulty-independent by
+        // design), recomputes dlvl, and persists dlvl/dxp only.
+        PDv2RunReward GrantRunReward(uint32_t accountId, int roomsUsed);
 
         // Writes the manifest for `plan` to the configured path. Until
         // PDClientLink exists this file IS the transport: the operator feeds it
@@ -131,7 +226,8 @@ namespace PDungeon
 
         PDv2Config _config;
         mutable std::mutex _lock;
-        std::unordered_map<uint32_t, BlockPlan> _plans;
+        std::unordered_map<uint32_t, std::shared_ptr<BlockPlan const>> _plans;
+        std::unordered_map<uint32_t, PDv2AccountState> _accounts;
         std::unordered_map<int, std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK>> _walkMasks;
     };
 }

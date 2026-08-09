@@ -263,7 +263,11 @@ ProceduralDungeon.V2.FloorZ = 50.0
 #
 #    ProceduralDungeon.V2.Rooms / .BossRooms
 #        Description: Rooms in a generated layout, before and as boss rooms.
-#                     dlvl scaling will drive these later; for now they are fixed.
+#                     These are now the FALLBACK only: an account that has a
+#                     pdungeon_account row gets 01 §8's rooms (its own cfg_rooms
+#                     clamped into 3 + dlvl, hard cap 15) and boss rooms
+#                     (1 + dlvl/10) instead. They still decide what a fresh
+#                     install generates before anyone has played.
 #        Default:     5 / 1
 #
 
@@ -340,4 +344,165 @@ ProceduralDungeon.V2.AckTimeoutMs = 5000
 #
 
 ProceduralDungeon.V2.ManifestPath = ""
+
+#
+#    ProceduralDungeon.V2.XP.PerRoom
+#        Description: Dungeon XP awarded per room cleared. 01 §8: dungeon XP is
+#                     rooms x this and NOTHING else - deliberately independent
+#                     of difficulty, because the moment difficulty pays XP the
+#                     only rational setting is the highest one.
+#        Default:     10
+#
+
+ProceduralDungeon.V2.XP.PerRoom = 10
+
+#
+#    ProceduralDungeon.V2.XP.PerDlvl
+#        Description: Cost of the FIRST dungeon level. Every next level costs
+#                     10 % more than the one before it, floored to a whole
+#                     number at each step (100, 110, 121, 133, 146, 160, 176,
+#                     193, 212, 233, ... - reaching dlvl 10 costs 1584 in
+#                     total). The curve lives here rather than in the code
+#                     because 01 §8 leaves it open until play says what it
+#                     should be; the 10 % growth itself is in PDv2GameMath.h,
+#                     where the harness can pin it.
+#        Default:     100
+#
+
+ProceduralDungeon.V2.XP.PerDlvl = 100
+
+#
+#    ProceduralDungeon.V2.DlvlCap
+#        Description: Highest reachable dungeon level. Past dlvl 12 the room
+#                     count is already at its cap, so what dlvl still buys is
+#                     boss rooms (1 + dlvl/10) and pack unlocks. It does NOT
+#                     gate difficulty any more - that dial is open from the
+#                     first run (2026-08-08).
+#        Default:     30
+#
+
+ProceduralDungeon.V2.DlvlCap = 30
+
+#
+#    ProceduralDungeon.V2.Diff.HealthPctPerLevel
+#        Description: Percent added to a dungeon mob's HP per point of the
+#                     difficulty dial (1..100). mult = 1 + difficulty * pct/100,
+#                     so 5 means difficulty 1 is x1.05 and difficulty 100 is x6.
+#                     The default is mod-dungeon-challenge's LIVE value on this
+#                     server (DungeonChallenge.HealthMultiplierPerLevel = 5 in
+#                     dcore/configs/modules/mod_dungeon_challenge.conf; note the
+#                     .dist there still says 15). PDv2 owns its own key so the
+#                     two dungeons can be tuned apart.
+#        Default:     5
+#
+
+ProceduralDungeon.V2.Diff.HealthPctPerLevel = 5
+
+#
+#    ProceduralDungeon.V2.Diff.DamagePctPerLevel
+#        Description: The same curve for outgoing damage - melee, spell and
+#                     periodic alike. Default = mod-dungeon-challenge's LIVE
+#                     DungeonChallenge.DamageMultiplierPerLevel = 2. Damage
+#                     climbs slower than HP on purpose: a fight that takes
+#                     longer is tense, a fight that one-shots is not.
+#        Default:     2
+#
+
+ProceduralDungeon.V2.Diff.DamagePctPerLevel = 2
+
+#
+#    ProceduralDungeon.V2.Affix.Percentage
+#        Description: Percent chance PER ROOM that exactly ONE of its trash
+#                     mobs is that room's affix carrier - at most one per room
+#                     (operator rule 2026-08-09; the earlier per-mob roll
+#                     clustered). The carrier wears every affix its difficulty
+#                     unlocks; bosses never do, mirroring mod-dungeon-challenge.
+#                     The affix SPELLS are that module's (900050-900060, its
+#                     own DBC work); PDv2 only references them, and which ones
+#                     apply at which difficulty lives in the `pdungeon_affixes`
+#                     table - so retuning is SQL, not a rebuild. Default = that
+#                     module's LIVE DungeonChallenge.AffixPercentage. 0 turns
+#                     affixes off.
+#
+#                     NOTE: this number is part of the spawn draw's seeded
+#                     stream, so changing it re-rolls WHICH creatures a stored
+#                     layout spawns (the layout itself is unaffected).
+#        Default:     40
+#
+
+ProceduralDungeon.V2.Affix.Percentage = 40
+
+#
+#    ProceduralDungeon.V2.SpawnsPerRoom
+#        Description: Trash placed in each NORMAL (non-entrance, non-boss) room.
+#                     Boss rooms have their own count - see BossRoomAdds below;
+#                     this key stopped covering them on 2026-08-08, when normal
+#                     rooms were asked to grow and boss rooms were not. The room
+#                     is 66.67 yd square, so this is a density knob, not a
+#                     difficulty one - difficulty scales HP and damage (01 §8),
+#                     never the head count.
+#        Default:     5
+#
+
+ProceduralDungeon.V2.SpawnsPerRoom = 5
+
+#
+#    ProceduralDungeon.V2.BossRoomAdds
+#        Description: Trash placed BESIDE the boss in a boss room. The boss
+#                     itself is always exactly one creature on top of this, so
+#                     the default gives a boss room of three. The room's first
+#                     spawn is the boss and run completion keys on that slot,
+#                     so 0 here is legal (a lone boss) - it does not strand the
+#                     run.
+#        Default:     2
+#
+
+ProceduralDungeon.V2.BossRoomAdds = 2
+
+#
+#    ProceduralDungeon.V2.Loot.BonusRollPct
+#        Description: Chance per kill of a module-side bonus roll on the FL mat
+#                     table (items 920100+), on TOP of the creature's native
+#                     loot, which stays untouched - that is what makes the
+#                     dungeon a target-farming mechanism (01 §8). The roll is
+#                     scaled by lootMult, which runs from x1.00 at difficulty 1
+#                     to x3.00 at difficulty 100, times the caster factor
+#                     (0.8 + 0.5 x r).
+#        Default:     15
+#
+
+ProceduralDungeon.V2.Loot.BonusRollPct = 15
+
+#
+#    ProceduralDungeon.V2.CastRangeYd
+#        Description: How far a range-role creature will hold and cast from.
+#                     A range mob is only given a filler whose spell actually
+#                     reaches this far; raising it past a spell's own range
+#                     turns that mob into one that silently never casts, so
+#                     re-check mod_pdungeon_member_spells.sql if you change it.
+#
+#                     There is deliberately no companion key for HOW OFTEN a
+#                     mob casts. Every cooldown, the filler's included, is a
+#                     column in pdungeon_member_spells - one server-wide number
+#                     could never say "spam the Frostbolt but not the
+#                     knockback".
+#        Default:     25.0
+#
+
+ProceduralDungeon.V2.CastRangeYd = 25.0
+
+#
+#    ProceduralDungeon.V2.AggroRangeYd
+#        Description: How close a player has to get before an idle dungeon
+#                     creature attacks. The module supplies its own aggro
+#                     because it spawns SHARED creature_template rows and must
+#                     not edit them: six of v1's imported templates have
+#                     detection_range 1 or 2 (measured 2026-08-07), which is
+#                     deliberate for the map-741 dungeon they also belong to
+#                     and would make them near-blind here. A mob still only
+#                     aggroes a player it can actually walk to.
+#        Default:     20.0
+#
+
+ProceduralDungeon.V2.AggroRangeYd = 20.0
 

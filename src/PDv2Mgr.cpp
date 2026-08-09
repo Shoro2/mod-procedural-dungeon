@@ -51,6 +51,32 @@ namespace PDungeon
         _config.manifestPath = sConfigMgr->GetOption<std::string>(
             "ProceduralDungeon.V2.ManifestPath", "");
 
+        _config.xpPerRoom = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.XP.PerRoom", 10);
+        _config.xpPerDlvl = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.XP.PerDlvl", 100);
+        _config.dlvlCap = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.DlvlCap", 30);
+        _config.spawnsPerRoom = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.SpawnsPerRoom", 5);
+        _config.bossRoomAdds = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.BossRoomAdds", 2);
+        _config.lootBonusRollPct = sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.BonusRollPct", 15);
+        _config.castRangeYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.CastRangeYd", 25.0f);
+        _config.aggroRangeYd = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.AggroRangeYd", 20.0f);
+
+        // Clamped at 0 on the way in: a negative percentage would make a HARDER
+        // dungeon hit softer, and at difficulty 100 it would drive the x100
+        // multiplier below zero and underflow the unsigned arithmetic the
+        // scaling hooks do. There is no upper clamp - an operator who wants a
+        // brutal curve is entitled to one.
+        _config.diffHealthPctPerLevel = std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Diff.HealthPctPerLevel", 5));
+        _config.diffDamagePctPerLevel = std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Diff.DamagePctPerLevel", 2));
+
+        // Clamped into [0, 100] because it is handed straight to a percent
+        // roll: 0 means "no affixed mobs", 100 means "all of them", and there
+        // is nothing sensible outside that.
+        _config.affixPct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Affix.Percentage", 40)));
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{})",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,
@@ -64,10 +90,22 @@ namespace PDungeon
 
     bool PDv2Mgr::GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out)
     {
+        PDv2AccountState const state = GetAccountState(accountId);
+        int const dlvl = static_cast<int>(state.dlvl);
+
         BlockCfg cfg;
         cfg.seed = seed;
-        cfg.rooms = _config.rooms;
-        cfg.bossRooms = _config.bossRooms;
+        // 01 §8: the shape of the dungeon follows the account's progression and
+        // its chosen room count, clamped into the band that dlvl unlocked. The
+        // server config stays as the fallback for an account with no row, so a
+        // fresh install still generates what the operator configured.
+        cfg.rooms = state.loaded ? GameClampRooms(state.cfgRooms, dlvl)
+                                 : GameClampRooms(_config.rooms, dlvl);
+        cfg.bossRooms = state.loaded ? GameBossRooms(dlvl) : _config.bossRooms;
+        // fieldBlocks is NOT derived from the room count: 8 blocks is exactly
+        // one ADT tile, and a multi-tile plan is untested on the client side.
+        // The room cap (PD_GAME_ROOMS_CAP_MEASURED) is what keeps the layout
+        // inside this field instead - see the measurement in PDv2GameMath.h.
         cfg.fieldBlocks = _config.fieldBlocks;
         cfg.loopChancePct = _config.loopChancePct;
         cfg.originBX = _config.originBX;
@@ -87,26 +125,169 @@ namespace PDungeon
 
     void PDv2Mgr::StorePlan(uint32_t accountId, BlockPlan const& plan)
     {
+        // A fresh immutable object every time, replaced under the lock: readers
+        // that fetched the previous shared_ptr keep a complete, never-mutated
+        // plan for as long as they hold it. That is the whole fix for the
+        // pointer-into-the-map pattern this replaced - a re-roll can no longer
+        // pull the plan out from under a map thread mid-read.
+        auto fresh = std::make_shared<BlockPlan const>(plan);
         std::lock_guard<std::mutex> guard(_lock);
-        _plans[accountId] = plan;
+        _plans[accountId] = std::move(fresh);
     }
 
     void PDv2Mgr::SavePlanToDB(uint32_t accountId, BlockPlan const& plan)
     {
         BlockCfg const& cfg = plan.config;
-        // Layout columns only - dlvl/dxp and the cfg_* gameplay knobs belong
-        // to the gameplay slice, and a reroll must never clobber them.
+        PDv2AccountState const state = GetAccountState(accountId);
+        std::string packs = state.cfgPacks;
+        CharacterDatabase.EscapeString(packs);
+
+        // Layout columns only on UPDATE - dlvl/dxp and the cfg_* gameplay knobs
+        // belong to the gameplay slice, and a reroll must never clobber them.
+        //
+        // The cfg_* values appear in the INSERT half all the same, and only
+        // there: when this statement CREATES the row it would otherwise write
+        // the column defaults, and cfg_mob_level_min's default of 1 selects no
+        // pack at all against v1's level-80 stock. Seeding the row from the
+        // cached state keeps a first `v2 gen` from silently disagreeing with
+        // the state the server has been using since login.
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
-            "gen_loop_pct) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}) "
+            "gen_loop_pct, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
+            "cfg_packs) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE theme = VALUES(theme), "
             "layout_seed = VALUES(layout_seed), layout_version = VALUES(layout_version), "
             "gen_rooms = VALUES(gen_rooms), gen_boss_rooms = VALUES(gen_boss_rooms), "
             "gen_field_blocks = VALUES(gen_field_blocks), gen_origin_bx = VALUES(gen_origin_bx), "
             "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct)",
             accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
-            cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.loopChancePct);
+            cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.loopChancePct,
+            state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct, state.cfgBandMin, packs);
+    }
+
+    void PDv2Mgr::LoadAccountState(uint32_t accountId)
+    {
+        {
+            std::lock_guard<std::mutex> guard(_lock);
+            if (_accounts.find(accountId) != _accounts.end())
+            {
+                return;
+            }
+        }
+
+        PDv2AccountState state;
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT dlvl, dxp, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
+            "cfg_packs FROM pdungeon_account WHERE accountId = {}", accountId);
+        if (result)
+        {
+            Field* fields = result->Fetch();
+            state.dlvl = fields[0].Get<uint32>();
+            state.dxp = fields[1].Get<uint32>();
+            state.cfgRooms = fields[2].Get<uint8>();
+            state.cfgDifficulty = fields[3].Get<uint8>();
+            state.cfgCasterPct = fields[4].Get<uint8>();
+            state.cfgBandMin = fields[5].Get<uint8>();
+            state.cfgPacks = fields[6].Get<std::string>();
+            state.loaded = true;
+        }
+
+        // Clamp on the way IN, not only on the way out. A row edited by hand,
+        // or written before a band or grid rule changed, must not be able to
+        // put an illegal value into a live dungeon - and dlvl in particular
+        // decides what the other clamps even allow.
+        if (state.dlvl > static_cast<uint32_t>(_config.dlvlCap > 0 ? _config.dlvlCap : 0))
+        {
+            state.dlvl = static_cast<uint32_t>(_config.dlvlCap > 0 ? _config.dlvlCap : 0);
+        }
+        int const dlvl = static_cast<int>(state.dlvl);
+        state.cfgRooms = GameClampRooms(state.cfgRooms, dlvl);
+        // No dlvl argument any more: the dial is open from the first run, so
+        // the only illegal difficulty is one outside [1, 100].
+        state.cfgDifficulty = GameClampDiff(state.cfgDifficulty);
+        state.cfgCasterPct = GameClampCasterPct(state.cfgCasterPct);
+        state.cfgBandMin = GameClampBandMin(state.cfgBandMin);
+
+        std::lock_guard<std::mutex> guard(_lock);
+        _accounts[accountId] = state;
+    }
+
+    PDv2AccountState PDv2Mgr::GetAccountState(uint32_t accountId) const
+    {
+        std::lock_guard<std::mutex> guard(_lock);
+        auto it = _accounts.find(accountId);
+        return it == _accounts.end() ? PDv2AccountState() : it->second;
+    }
+
+    void PDv2Mgr::SetAccountCfg(uint32_t accountId, PDv2AccountState const& cfg)
+    {
+        std::lock_guard<std::mutex> guard(_lock);
+        PDv2AccountState& state = _accounts[accountId];
+        int const dlvl = static_cast<int>(state.dlvl);
+        state.cfgRooms = GameClampRooms(cfg.cfgRooms, dlvl);
+        state.cfgDifficulty = GameClampDiff(cfg.cfgDifficulty);
+        state.cfgCasterPct = GameClampCasterPct(cfg.cfgCasterPct);
+        state.cfgBandMin = GameClampBandMin(cfg.cfgBandMin);
+        state.cfgPacks = cfg.cfgPacks;
+        state.loaded = true;
+    }
+
+    void PDv2Mgr::SaveAccountCfg(uint32_t accountId)
+    {
+        PDv2AccountState const state = GetAccountState(accountId);
+        std::string packs = state.cfgPacks;
+        // cfg_packs is the one free-text column here and it reaches this
+        // statement from a player-facing command, so it is escaped rather than
+        // trusted - the module's format-style Execute does not quote for us.
+        CharacterDatabase.EscapeString(packs);
+
+        // cfg_* columns only, the mirror image of SavePlanToDB: a settings
+        // change must never touch progression or the stored layout.
+        CharacterDatabase.Execute(
+            "INSERT INTO pdungeon_account (accountId, cfg_rooms, cfg_difficulty, "
+            "cfg_caster_pct, cfg_mob_level_min, cfg_packs) VALUES ({}, {}, {}, {}, {}, '{}') "
+            "ON DUPLICATE KEY UPDATE cfg_rooms = VALUES(cfg_rooms), "
+            "cfg_difficulty = VALUES(cfg_difficulty), cfg_caster_pct = VALUES(cfg_caster_pct), "
+            "cfg_mob_level_min = VALUES(cfg_mob_level_min), cfg_packs = VALUES(cfg_packs)",
+            accountId, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
+            state.cfgBandMin, packs);
+    }
+
+    PDv2RunReward PDv2Mgr::GrantRunReward(uint32_t accountId, int roomsUsed)
+    {
+        PDv2RunReward reward;
+        uint32_t dxp = 0;
+
+        {
+            std::lock_guard<std::mutex> guard(_lock);
+            PDv2AccountState& state = _accounts[accountId];
+            uint32_t const oldDlvl = state.dlvl;
+
+            reward.dxpGained = GameRunDxp(roomsUsed, _config.xpPerRoom);
+            // Saturating add. 4 billion dxp is not reachable in play, but a
+            // wrap would hand the account a dlvl reset it did not earn, and
+            // that is not a bug anyone would think to look for.
+            state.dxp = (state.dxp > UINT32_MAX - reward.dxpGained)
+                            ? UINT32_MAX
+                            : state.dxp + reward.dxpGained;
+            dxp = state.dxp;
+            state.dlvl = static_cast<uint32_t>(
+                GameDlvlFromDxp(dxp, _config.xpPerDlvl, _config.dlvlCap));
+            state.loaded = true;
+
+            reward.newDlvl = static_cast<int>(state.dlvl);
+            reward.leveledUp = state.dlvl > oldDlvl;
+        }
+
+        // dlvl and dxp only - the cfg_* knobs and the whole layout half of the
+        // row have their own writers, and a reward must not speak for them.
+        CharacterDatabase.Execute(
+            "INSERT INTO pdungeon_account (accountId, dlvl, dxp) VALUES ({}, {}, {}) "
+            "ON DUPLICATE KEY UPDATE dlvl = VALUES(dlvl), dxp = VALUES(dxp)",
+            accountId, reward.newDlvl, dxp);
+
+        return reward;
     }
 
     void PDv2Mgr::LoadPlanFromDB(uint32_t accountId)
@@ -167,11 +348,11 @@ namespace PDungeon
                  accountId, seed, uint32(plan.blocks.size()));
     }
 
-    BlockPlan const* PDv2Mgr::GetPlan(uint32_t accountId) const
+    std::shared_ptr<BlockPlan const> PDv2Mgr::GetPlan(uint32_t accountId) const
     {
         std::lock_guard<std::mutex> guard(_lock);
         auto it = _plans.find(accountId);
-        return it == _plans.end() ? nullptr : &it->second;
+        return it == _plans.end() ? nullptr : it->second;
     }
 
     bool PDv2Mgr::WriteManifest(BlockPlan const& plan, uint32_t seq, std::string& pathOut,

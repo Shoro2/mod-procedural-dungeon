@@ -503,21 +503,59 @@ namespace PDungeon
                 }
             }
 
+            // The `cfg.bossRooms` DEEPEST rooms become boss rooms, picked one at
+            // a time so the order is the same "deepest, ties to the lowest room
+            // id" rule that used to pick the single boss. Written as a repeated
+            // selection rather than a sort ON PURPOSE: the first pass is
+            // literally the old code, so a layout with bossRooms = 1 comes out
+            // byte-identical (pinned by the fixed-seed manifest check in
+            // tests/blockplan_harness.cpp) and no PD_LAYOUT_VERSION bump is
+            // needed for the accounts that already have a stored seed.
+            //
+            // A stored plan with gen_boss_rooms > 1 WOULD regenerate differently
+            // than before this change - it gains boss rooms it did not have. No
+            // such account exists yet (boss rooms only pass 1 at dlvl 10), and
+            // that is the whole reason this lands now rather than later.
+            //
+            // A configured 0 still yields ONE boss room, as it always did:
+            // plan.bossIndex has to point at a block, and every reader from the
+            // manifest to the harness assumes a dungeon has an end.
+            int const wantBossRooms = cfg.bossRooms > 0 ? cfg.bossRooms : 1;
+
+            std::set<int> bossRooms;
             int bossRoom = -1;
-            int bossDepth = -1;
-            for (Node const& n : nodes)
+            for (int picked = 0; picked < wantBossRooms; ++picked)
             {
-                auto it = depth.find(n.cell);
-                if (it == depth.end()) continue;        // unreachable; caught by validation
-                if (it->second > bossDepth || (it->second == bossDepth && n.id < bossRoom))
+                int best = -1;
+                int bestDepth = -1;
+                for (Node const& n : nodes)
                 {
-                    bossDepth = it->second;
-                    bossRoom = n.id;
+                    auto it = depth.find(n.cell);
+                    if (it == depth.end()) continue;    // unreachable; caught by validation
+                    if (n.id == entranceRoom) continue; // the way in is never the boss
+                    if (bossRooms.find(n.id) != bossRooms.end()) continue;
+                    if (it->second > bestDepth || (it->second == bestDepth && n.id < best))
+                    {
+                        bestDepth = it->second;
+                        best = n.id;
+                    }
+                }
+                if (best < 0)
+                {
+                    break;          // fewer reachable rooms than boss rooms asked for
+                }
+                bossRooms.insert(best);
+                if (bossRoom < 0)
+                {
+                    // The FIRST pick stays "the" boss: plan.bossIndex means the
+                    // deepest room (entrance distance), and the manifest, the
+                    // harness and the client all read it that way.
+                    bossRoom = best;
                 }
             }
-            if (bossRoom < 0 || bossRoom == entranceRoom)
+            if (bossRoom < 0 || static_cast<int>(bossRooms.size()) < wantBossRooms)
             {
-                continue;
+                continue;           // try the next seed rather than ship a layout short of bosses
             }
 
             // Materialise. Fixed iteration order (masks is an ordered map keyed
@@ -538,9 +576,10 @@ namespace PDungeon
                 auto rit = roomOf.find(c);
                 if (rit != roomOf.end())
                 {
+                    bool const isBoss = bossRooms.find(rit->second) != bossRooms.end();
                     b.roomId = rit->second;
                     b.role = (rit->second == entranceRoom) ? BlockRole::RoomEntrance
-                           : (rit->second == bossRoom)     ? BlockRole::RoomBoss
+                           : isBoss                        ? BlockRole::RoomBoss
                                                            : BlockRole::Room;
                 }
                 else
@@ -556,8 +595,11 @@ namespace PDungeon
                 {
                     plan.entranceIndex = static_cast<int>(plan.blocks.size());
                 }
-                else if (b.role == BlockRole::RoomBoss)
+                else if (b.roomId == bossRoom)
                 {
+                    // The PRIMARY boss room only. With several boss rooms the
+                    // role is shared, but bossIndex still means "the deepest
+                    // room", which is what makes it a stable landmark.
                     plan.bossIndex = static_cast<int>(plan.blocks.size());
                 }
                 plan.blocks.push_back(b);

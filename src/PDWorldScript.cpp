@@ -22,6 +22,7 @@
 #include "PDMgr.h"
 #include "PDPaletteMgr.h"
 #include "PDv2Mgr.h"
+#include "PDv2PackMgr.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 
@@ -54,6 +55,11 @@ public:
             // that is a restart. Keeping the table immutable after startup is
             // what lets map threads read it without a lock.
             sPDv2Mgr->LoadChunkMeta();
+
+            // Same startup-only rule as the walk masks above: the packs are
+            // read-only after this point, which is what lets map threads draw
+            // spawns from them without a lock.
+            sPDv2PackMgr->LoadFromDB(sPDv2Mgr->GetConfig().theme);
 
             // Rescue sweep: a character SAVED inside the composed-only map
             // crashes its client at the character screen (the client loads

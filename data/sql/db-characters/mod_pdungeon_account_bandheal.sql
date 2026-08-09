@@ -1,0 +1,27 @@
+-- ----------------------------------------------------------------------------
+-- mod-procedural-dungeon: heal cfg_mob_level_min on existing accounts
+-- (characters database)
+--
+-- WHY this file exists at all. `pdungeon_account.cfg_mob_level_min` defaults to
+-- 1, which is the bottom of the 01 §8 band grid and means the band 1..5. v1's
+-- imported pack stock is single-band: every pack in mod_pdungeon_packs.sql is
+-- level_min = level_max = 80, so 76..80 is the ONLY band that selects anything
+-- and a row still holding the column default selects no pack at all. The cached
+-- default in PDv2AccountState was already moved to 76 for accounts with no row;
+-- rows written before that (or by hand) are what this file repairs.
+--
+-- A SEPARATE file rather than a default change on the base table, for the same
+-- reason mod_pdungeon_runs_gameplay.sql is separate: the updater applies each
+-- SQL file exactly once and remembers it by hash, so editing the CREATE TABLE
+-- would leave every existing database untouched while claiming to be current.
+--
+-- Idempotent BY CONSTRUCTION rather than by a guard: the WHERE clause is the
+-- negation of what the statement writes, so a second apply matches zero rows.
+--
+-- This is a ONE-TIME heal of v1's stock, not a policy. The moment a pack with
+-- sub-80 members ships, the other 15 values of GameClampBandMin become real
+-- choices and a player's stored band must be left exactly as they set it - so
+-- this file must never be re-run or generalised into a recurring UPDATE.
+-- ----------------------------------------------------------------------------
+
+UPDATE `pdungeon_account` SET `cfg_mob_level_min` = 76 WHERE `cfg_mob_level_min` <> 76;

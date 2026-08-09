@@ -21,6 +21,8 @@
 //
 //   pdblock <seed> [rooms]               one layout: ASCII map + FLPD2 manifest
 //   pdblock --batch <n> [rooms]          invariants + determinism over n seeds
+//   pdblock --roomcap [n]                the 01 §8 room-cap measurement table
+//                                        that decides PD_GAME_ROOMS_CAP_MEASURED
 //   pdblock --manifest <seed> <file> [rooms]
 //                                        writes the manifest as raw bytes, for
 //                                        feeding to 49_pd_compose_blocks.py
@@ -38,6 +40,7 @@
 #endif
 
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2GameMath.h"
 #include "generator/PDv2LinkState.h"
 #include "generator/PDv2WalkGrid.h"
 
@@ -632,11 +635,547 @@ namespace
               "no repush credit left over after invalidation", 0);
     }
 
+    // --- 01 §8 game math ---------------------------------------------------
+    //
+    // The formulas are cheap, so the sweeps below are exhaustive over the whole
+    // input range rather than sampled. Each sweep reports ONE check per dlvl so
+    // the failure counter stays readable; the message carries the exact input
+    // that broke, which is the part a reader needs.
+
+    void RunGameMathChecks()
+    {
+        char msg[160];
+
+        // The anchor values the design states outright. If one of these moves,
+        // the doc and the code have diverged and one of the two is wrong.
+        Check(GameLootMultX100(PD_GAME_DIFF_DEFAULT, PD_GAME_CASTER_PCT_DEFAULT) == 100,
+              "lootMult at the defaults must be exactly 1.00", 0);
+        Check(GameLootMultX100(PD_GAME_DIFF_MAX, PD_GAME_CASTER_PCT_DEFAULT) == 300,
+              "lootMult at difficulty 100 must be exactly 3.00", 0);
+        Check(GameLootMultX100(PD_GAME_DIFF_MAX, PD_GAME_CASTER_PCT_MAX) == 360,
+              "lootMult at difficulty 100 with all casters must be 3.60", 0);
+        Check(PD_GAME_DIFF_MIN == 1 && PD_GAME_DIFF_MAX == 100 && PD_GAME_DIFF_DEFAULT == 1,
+              "the difficulty dial must be the integers 1..100, default 1", 0);
+        Check(GameBossRooms(0) == 1 && GameBossRooms(9) == 1 && GameBossRooms(10) == 2,
+              "boss rooms must follow 1 + dlvl/10", 0);
+        Check(GameClampCasterPct(PD_GAME_CASTER_PCT_DEFAULT) == PD_GAME_CASTER_PCT_DEFAULT,
+              "the default caster ratio must survive its own clamp", 0);
+
+        // Rooms: the cap is min(measured, design, 3 + dlvl) at every dlvl, and
+        // it never goes down as dlvl goes up.
+        for (int dlvl = 0; dlvl <= 40; ++dlvl)
+        {
+            int want = 3 + dlvl;
+            if (want > PD_GAME_ROOMS_CAP_DESIGN) want = PD_GAME_ROOMS_CAP_DESIGN;
+            if (want > PD_GAME_ROOMS_CAP_MEASURED) want = PD_GAME_ROOMS_CAP_MEASURED;
+            std::snprintf(msg, sizeof(msg),
+                          "GameRoomsCap(%d) = %d, expected min(measured %d, 15, 3+dlvl)",
+                          dlvl, GameRoomsCap(dlvl), PD_GAME_ROOMS_CAP_MEASURED);
+            Check(GameRoomsCap(dlvl) == want, msg, 0);
+            if (dlvl > 0)
+            {
+                std::snprintf(msg, sizeof(msg), "GameRoomsCap went DOWN between dlvl %d and %d",
+                              dlvl - 1, dlvl);
+                Check(GameRoomsCap(dlvl) >= GameRoomsCap(dlvl - 1), msg, 0);
+            }
+        }
+
+        // The difficulty clamp takes NO dlvl: the dial is open from the first
+        // run (operator directive 2026-08-08), so the sweep is one pass over
+        // every input a command, a panel or a corrupt DB row can hand it -
+        // including the negative and the absurd ones.
+        {
+            bool band = true, stable = true, kept = true;
+            int badAt = 0;
+            for (int wanted = -50; wanted <= 150; ++wanted)
+            {
+                int const d = GameClampDiff(wanted);
+                if (d < PD_GAME_DIFF_MIN || d > PD_GAME_DIFF_MAX)
+                {
+                    band = false;
+                    badAt = wanted;
+                }
+                if (GameClampDiff(d) != d)
+                {
+                    stable = false;
+                    badAt = wanted;
+                }
+                // A value already inside the dial must come back untouched -
+                // there is no grid to snap onto any more, so a clamp that
+                // "corrected" a legal 37 would be silently eating player input.
+                if (wanted >= PD_GAME_DIFF_MIN && wanted <= PD_GAME_DIFF_MAX && d != wanted)
+                {
+                    kept = false;
+                    badAt = wanted;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "difficulty clamp left [1, 100] (wanted %d)", badAt);
+            Check(band, msg, 0);
+            std::snprintf(msg, sizeof(msg), "difficulty clamp is not idempotent (wanted %d)", badAt);
+            Check(stable, msg, 0);
+            std::snprintf(msg, sizeof(msg), "difficulty clamp moved a legal value (wanted %d)", badAt);
+            Check(kept, msg, 0);
+        }
+
+        // The room clamp still depends on dlvl and still has to hold for every
+        // input, so it keeps its own per-dlvl sweep.
+        for (int dlvl = 0; dlvl <= 40; ++dlvl)
+        {
+            bool roomsOk = true;
+            int badAt = 0;
+            for (int wanted = -100; wanted <= 400; ++wanted)
+            {
+                int const r = GameClampRooms(wanted, dlvl);
+                if (r < PD_GAME_ROOMS_MIN || r > GameRoomsCap(dlvl) ||
+                    GameClampRooms(r, dlvl) != r)
+                {
+                    roomsOk = false;
+                    badAt = wanted;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "room clamp left [3, cap] at dlvl %d (wanted %d)",
+                          dlvl, badAt);
+            Check(roomsOk, msg, 0);
+        }
+
+        // Caster ratio: band, idempotence, and the fact that the clamp is the
+        // only thing standing between a config typo and a pack full of casters.
+        {
+            bool ok = true;
+            int badAt = 0;
+            for (int pct = -200; pct <= 400; ++pct)
+            {
+                int const c = GameClampCasterPct(pct);
+                if (c < PD_GAME_CASTER_PCT_MIN || c > PD_GAME_CASTER_PCT_MAX ||
+                    GameClampCasterPct(c) != c)
+                {
+                    ok = false;
+                    badAt = pct;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "caster ratio clamp broke at %d", badAt);
+            Check(ok, msg, 0);
+        }
+
+        // Level band: every level snaps onto the 1, 6, ... 76 grid, and the
+        // band it opens ([min, min+4]) never runs past 80.
+        {
+            bool ok = true;
+            int badAt = 0;
+            for (int lvl = -10; lvl <= 120; ++lvl)
+            {
+                int const b = GameClampBandMin(lvl);
+                if (b < PD_GAME_BAND_MIN || b > PD_GAME_BAND_MAX ||
+                    (b - PD_GAME_BAND_MIN) % PD_GAME_BAND_STEP != 0 ||
+                    b + 4 > 80 || GameClampBandMin(b) != b)
+                {
+                    ok = false;
+                    badAt = lvl;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "level band snap broke at level %d", badAt);
+            Check(ok, msg, 0);
+            Check(GameClampBandMin(80) == 76 && GameClampBandMin(76) == 76,
+                  "the top band must be 76..80", 0);
+            Check(GameClampBandMin(5) == 1 && GameClampBandMin(6) == 6,
+                  "the level band must snap DOWN, not to nearest", 0);
+        }
+
+        // Loot multiplier: monotone in BOTH inputs over the whole dial (a player
+        // who raises difficulty or caster share must never see loot go down),
+        // positive everywhere, and exact at the three anchors above.
+        {
+            bool mono = true;
+            int prevD = -1;
+            int badAt = 0;
+            for (int d = PD_GAME_DIFF_MIN; d <= PD_GAME_DIFF_MAX; ++d)
+            {
+                int prevC = -1;
+                for (int c = PD_GAME_CASTER_PCT_MIN; c <= PD_GAME_CASTER_PCT_MAX; ++c)
+                {
+                    int const m = GameLootMultX100(d, c);
+                    if (m < prevC || m <= 0)
+                    {
+                        mono = false;
+                        badAt = d * 1000 + c;
+                    }
+                    prevC = m;
+                }
+                int const atDefault = GameLootMultX100(d, PD_GAME_CASTER_PCT_DEFAULT);
+                if (atDefault < prevD)
+                {
+                    mono = false;
+                    badAt = d;
+                }
+                prevD = atDefault;
+            }
+            std::snprintf(msg, sizeof(msg), "loot multiplier is not monotone (at %d)", badAt);
+            Check(mono, msg, 0);
+
+            // Out-of-dial inputs are clamped rather than extrapolated: a corrupt
+            // row must not be able to buy loot nobody could have earned.
+            Check(GameLootMultX100(0, PD_GAME_CASTER_PCT_DEFAULT) == 100 &&
+                  GameLootMultX100(1000, PD_GAME_CASTER_PCT_DEFAULT) == 300,
+                  "lootMult must clamp its difficulty, not extrapolate it", 0);
+        }
+
+        // The level-cost chain: each level costs 10 % more than the one before,
+        // integer floor at every step. These ten numbers ARE the curve - if one
+        // of them moves, every stored dxp means a different level than it did.
+        {
+            uint32_t const WANT[10] = { 100, 110, 121, 133, 146, 160, 176, 193, 212, 233 };
+            bool chain = true;
+            uint32_t total = 0;
+            int badAt = 0;
+            for (int n = 0; n < 10; ++n)
+            {
+                uint32_t const cost = GameDlvlCost(n, 100);
+                if (cost != WANT[n])
+                {
+                    chain = false;
+                    badAt = n;
+                }
+                total += cost;
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "level cost chain broke at level %d (got %u, want %u)",
+                          badAt, GameDlvlCost(badAt, 100), WANT[badAt]);
+            Check(chain, msg, 0);
+            std::snprintf(msg, sizeof(msg),
+                          "reaching dlvl 10 must cost 1584 dxp at PerDlvl 100, not %u", total);
+            Check(total == 1584u, msg, 0);
+
+            Check(GameDlvlCost(0, 100) == 100u,
+                  "the first level must cost V2.XP.PerDlvl exactly", 0);
+            Check(GameDlvlCost(5, 0) == 0u && GameDlvlCost(-3, 100) == 100u,
+                  "a zero curve costs nothing and a negative level is level 0", 0);
+        }
+
+        // dxp -> dlvl, and the run reward that feeds it.
+        {
+            Check(GameDlvlFromDxp(0, 100, 30) == 0, "no dxp means dlvl 0", 0);
+            Check(GameDlvlFromDxp(99, 100, 30) == 0, "a partial level is not a level", 0);
+            Check(GameDlvlFromDxp(100, 100, 30) == 1, "one level's dxp is one dlvl", 0);
+            Check(GameDlvlFromDxp(209, 100, 30) == 1 && GameDlvlFromDxp(210, 100, 30) == 2,
+                  "the second level must cost 110 on top of the first", 0);
+            Check(GameDlvlFromDxp(1584, 100, 30) == 10 &&
+                  GameDlvlFromDxp(1583, 100, 30) == 9,
+                  "1584 lifetime dxp must be exactly dlvl 10", 0);
+            Check(GameDlvlFromDxp(0xFFFFFFFFu, 1, 30) == 30,
+                  "the cap must hold however much dxp arrives", 0);
+            Check(GameDlvlFromDxp(1000, 0, 30) == 0, "a zero curve must not level anyone", 0);
+            Check(GameDxpIntoLevel(1584, 100, 30) == 0u &&
+                  GameDxpIntoLevel(1583, 100, 30) == 232u,
+                  "the bar must restart at 0 on a level and sit one short below it", 0);
+
+            // The pair has to reconstruct the lifetime total exactly, or the
+            // panel's bar and the level beside it are describing different
+            // players. Swept rather than spot-checked: this is the invariant
+            // that broke when the display was cumulative (operator report
+            // 2026-08-08, "100 / 200 XP" after the first level-up).
+            bool exact = true, fits = true, capped = true;
+            uint32_t badDxp = 0;
+            for (uint32_t dxp = 0; dxp <= 20000; dxp += 13)
+            {
+                int const dlvl = GameDlvlFromDxp(dxp, 100, 30);
+                uint32_t const into = GameDxpIntoLevel(dxp, 100, 30);
+
+                uint32_t spent = 0;
+                for (int n = 0; n < dlvl; ++n)
+                {
+                    spent += GameDlvlCost(n, 100);
+                }
+                if (spent + into != dxp)
+                {
+                    exact = false;
+                    badDxp = dxp;
+                }
+                // Below the cap the remainder must be short of the next level,
+                // or a level-up was missed. AT the cap it may run past, because
+                // there is no next level to spend it on.
+                if (dlvl < 30 && into >= GameDlvlCost(dlvl, 100))
+                {
+                    fits = false;
+                    badDxp = dxp;
+                }
+                if (dlvl > 30)
+                {
+                    capped = false;
+                    badDxp = dxp;
+                }
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "spent + into did not add up to the lifetime dxp (at %u)", badDxp);
+            Check(exact, msg, 0);
+            std::snprintf(msg, sizeof(msg),
+                          "a level-up was left unpaid below the cap (at %u)", badDxp);
+            Check(fits, msg, 0);
+            std::snprintf(msg, sizeof(msg), "the dlvl cap was exceeded (at %u)", badDxp);
+            Check(capped, msg, 0);
+
+            bool mono = true;
+            uint32_t badAt = 0;
+            for (uint32_t dxp = 0; dxp <= 5000; dxp += 7)
+            {
+                if (GameDlvlFromDxp(dxp + 7, 100, 30) < GameDlvlFromDxp(dxp, 100, 30))
+                {
+                    mono = false;
+                    badAt = dxp;
+                }
+            }
+            std::snprintf(msg, sizeof(msg), "dlvl went DOWN as dxp went up (at %u)", badAt);
+            Check(mono, msg, 0);
+
+            Check(GameRunDxp(5, 10) == 50u, "run dxp must be rooms x XP.PerRoom", 0);
+            Check(GameRunDxp(0, 10) == 0u && GameRunDxp(-3, 10) == 0u,
+                  "a run that cleared nothing pays nothing", 0);
+
+            // 01 §8: difficulty must NOT be an XP lever. The signature has no
+            // difficulty argument, so this holds by construction - the loop is
+            // here to make the intent break loudly if someone ever adds one.
+            // It sweeps the WHOLE new dial, because the 1..100 rework is exactly
+            // the kind of change that invites "surely 100 should pay more".
+            bool flat = true;
+            for (int diff = PD_GAME_DIFF_MIN; diff <= PD_GAME_DIFF_MAX; ++diff)
+            {
+                (void)diff;
+                if (GameRunDxp(7, 10) != 70u)
+                {
+                    flat = false;
+                }
+            }
+            Check(flat, "run dxp must be difficulty-independent (01 §8)", 0);
+        }
+    }
+
+    // --- boss rooms (01 §8 "1 + dlvl/10", flagged as the N deepest) ---------
+
+    // The layout with bossRooms = 1 is FROZEN, and this is what freezes it.
+    //
+    // Accounts persist a layout as its seed plus the generation inputs it was
+    // made with, so any change to the planner silently reshapes every dungeon
+    // that already exists unless the old case comes out byte for byte the same.
+    // The numbers below were captured from the build BEFORE boss flagging
+    // became "the N deepest rooms" (2026-08-07); the manifest's own trailer is
+    // a CRC32 over its whole body, so length + trailer is a byte-identity pin
+    // rather than a spot check.
+    //
+    // If this check fails, the question is not "update the constants" - it is
+    // whether PD_LAYOUT_VERSION has to be bumped, because every stored seed now
+    // regenerates a different dungeon.
+    void RunLayoutFreezeCheck()
+    {
+        uint32_t const PINNED_SEED = 12345u;
+        int const PINNED_ROOMS = 5;
+        size_t const PINNED_BYTES = 551;
+        char const* const PINNED_TRAILER = "E;13df5510\n";
+
+        BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
+        cfg.bossRooms = 1;
+
+        BlockPlan plan;
+        if (!GenerateBlockPlan(cfg, &plan))
+        {
+            Check(false, "the pinned layout no longer generates at all", PINNED_SEED);
+            return;
+        }
+
+        std::string const m = EmitManifest(plan, 1);
+        char msg[160];
+        std::snprintf(msg, sizeof(msg),
+                      "pinned manifest is %d bytes, was %d - the bossRooms=1 layout MOVED",
+                      static_cast<int>(m.size()), static_cast<int>(PINNED_BYTES));
+        Check(m.size() == PINNED_BYTES, msg, PINNED_SEED);
+
+        size_t const trailer = std::strlen(PINNED_TRAILER);
+        bool const same = m.size() >= trailer &&
+                          m.compare(m.size() - trailer, trailer, PINNED_TRAILER) == 0;
+        Check(same, "pinned manifest CRC changed - the bossRooms=1 layout MOVED", PINNED_SEED);
+    }
+
+    // Exactly `bossRooms` rooms carry the boss role, the entrance never does,
+    // and bossIndex still points at the deepest of them. Run over its own seeds
+    // rather than the batch's, because the batch only ever asks for one boss.
+    void RunBossRoomChecks(int seeds)
+    {
+        char msg[160];
+        for (int bossRooms = 1; bossRooms <= 3; ++bossRooms)
+        {
+            // Rooms enough that the deepest few are never forced to be the
+            // entrance's neighbours - 8 is what dlvl 5 already unlocks.
+            int const rooms = 8;
+            for (int i = 0; i < seeds; ++i)
+            {
+                uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
+                BlockCfg cfg = MakeCfg(seed, rooms);
+                cfg.bossRooms = bossRooms;
+
+                BlockPlan plan;
+                if (!GenerateBlockPlan(cfg, &plan))
+                {
+                    std::snprintf(msg, sizeof(msg), "generation failed with %d boss room(s)",
+                                  bossRooms);
+                    Check(false, msg, seed);
+                    continue;
+                }
+
+                int found = 0;
+                int shallowestBoss = 1 << 30;
+                int deepestBoss = -1;
+                int deepestOther = -1;
+                for (PlacedBlock const& b : plan.blocks)
+                {
+                    if (b.role == BlockRole::RoomBoss)
+                    {
+                        ++found;
+                        shallowestBoss = (b.depth < shallowestBoss) ? b.depth : shallowestBoss;
+                        deepestBoss = (b.depth > deepestBoss) ? b.depth : deepestBoss;
+                    }
+                    else if (b.roomId >= 0 && b.role != BlockRole::RoomEntrance)
+                    {
+                        deepestOther = (b.depth > deepestOther) ? b.depth : deepestOther;
+                    }
+                }
+
+                std::snprintf(msg, sizeof(msg), "%d block(s) carry the boss role, asked for %d",
+                              found, bossRooms);
+                Check(found == bossRooms, msg, seed);
+
+                PlacedBlock const& entrance = plan.blocks[static_cast<size_t>(plan.entranceIndex)];
+                Check(entrance.role == BlockRole::RoomEntrance &&
+                      plan.entranceIndex != plan.bossIndex,
+                      "the entrance was flagged as a boss room", seed);
+
+                PlacedBlock const& boss = plan.blocks[static_cast<size_t>(plan.bossIndex)];
+                Check(boss.role == BlockRole::RoomBoss,
+                      "bossIndex does not point at a boss room", seed);
+
+                // "The N DEEPEST": every boss room is at least as deep as every
+                // other room, and bossIndex is the deepest of the boss rooms.
+                Check(shallowestBoss >= deepestOther,
+                      "a non-boss room is deeper than a boss room", seed);
+                Check(boss.depth == deepestBoss,
+                      "bossIndex is not the deepest boss room", seed);
+            }
+        }
+    }
+
+    // --- the room-cap measurement (01 §8 cap 15 vs. what the kit allows) ----
+    //
+    // Two physical constraints bound the room count and NEITHER is negotiable
+    // here: the manifest is one addon packet, and the field stays 8x8 (one ADT
+    // tile) because multi-tile plans are untested client-side. So the cap is
+    // measured against the shipped generator rather than designed.
+
+    struct RoomCapRow
+    {
+        int    rooms = 0;
+        int    bossRooms = 0;
+        int    failures = 0;
+        size_t maxManifest = 0;
+    };
+
+    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds)
+    {
+        RoomCapRow row;
+        row.rooms = rooms;
+        row.bossRooms = bossRooms;
+
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 1u;
+            BlockCfg cfg = MakeCfg(seed, rooms);
+            cfg.bossRooms = bossRooms;
+
+            BlockPlan plan;
+            if (!GenerateBlockPlan(cfg, &plan))
+            {
+                ++row.failures;
+                continue;
+            }
+            // seq 99 rather than 1: a two-digit sequence number is the widest
+            // the header realistically carries, so the length measured here is
+            // the worst case rather than the prettiest one.
+            std::string const m = EmitManifest(plan, 99);
+            row.maxManifest = (m.size() > row.maxManifest) ? m.size() : row.maxManifest;
+        }
+        return row;
+    }
+
+    // Largest room count that generates on EVERY seed and still fits the
+    // manifest budget, with the boss-room count a player at that dlvl would
+    // actually run (rooms R unlocks at dlvl R - 3, per 01 §8 "3 + dlvl").
+    int MeasureRoomCap(int seeds, bool verbose)
+    {
+        if (verbose)
+        {
+            std::printf("room-cap measurement: %d seeds per row, field 8x8, "
+                        "manifest budget %d B\n\n", seeds, PD_GAME_MANIFEST_BUDGET_B);
+            std::printf("  rooms  boss  cells   genfail  maxManifest  verdict\n");
+        }
+
+        int cap = PD_GAME_ROOMS_MIN;
+        for (int rooms = PD_GAME_ROOMS_MIN; rooms <= PD_GAME_ROOMS_CAP_DESIGN; ++rooms)
+        {
+            // bossRooms as a player at that room count would run them: the cap
+            // formula is 3 + dlvl, so room count R unlocks at dlvl R - 3. The
+            // floor is lower than 3 (a 1-room boss rush is legal), which is
+            // why the dlvl here is clamped at 0 rather than derived from the
+            // floor constant.
+            int const unlockDlvl = rooms > 3 ? rooms - 3 : 0;
+            int const boss = GameBossRooms(unlockDlvl);
+            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds);
+            bool const ok = row.failures == 0 &&
+                            row.maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B);
+            if (ok)
+            {
+                cap = rooms;
+            }
+            if (verbose)
+            {
+                std::printf("  %5d  %4d  %5d   %7d  %11d  %s\n", row.rooms, row.bossRooms,
+                            row.rooms + row.bossRooms, row.failures,
+                            static_cast<int>(row.maxManifest), ok ? "ok" : "FAILS");
+            }
+        }
+        return cap;
+    }
+
+    int RunRoomCap(int seeds)
+    {
+        int const measured = MeasureRoomCap(seeds, true);
+        std::printf("\nlargest room count clean on every seed: %d\n", measured);
+        std::printf("PD_GAME_ROOMS_CAP_MEASURED currently encodes: %d\n",
+                    PD_GAME_ROOMS_CAP_MEASURED);
+        std::printf("%s\n", measured >= PD_GAME_ROOMS_CAP_MEASURED
+                                ? "the encoded cap holds"
+                                : "THE ENCODED CAP IS TOO HIGH - update PDv2GameMath.h");
+        return measured >= PD_GAME_ROOMS_CAP_MEASURED ? 0 : 1;
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
 
         RunLinkStateChecks();
+        RunGameMathChecks();
+        RunLayoutFreezeCheck();
+        // A tenth of the batch is plenty for three boss-room counts: the
+        // property is structural, not statistical.
+        RunBossRoomChecks(count / 10 + 1);
+
+        // The encoded room cap is a MEASUREMENT, so it has to be re-measured or
+        // it rots: a generator change that makes packing harder would otherwise
+        // only surface as accounts whose dungeon stopped generating.
+        int const measuredCap = MeasureRoomCap(count, false);
+        {
+            char msg[160];
+            std::snprintf(msg, sizeof(msg),
+                          "PD_GAME_ROOMS_CAP_MEASURED is %d but only %d is clean over %d seeds "
+                          "- re-run `pdblock --roomcap`", PD_GAME_ROOMS_CAP_MEASURED,
+                          measuredCap, count);
+            Check(measuredCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
+        }
 
         size_t maxManifest = 0;
         int longestPath = 0;
@@ -686,6 +1225,15 @@ namespace
 
             // Entrance and boss must be distinct blocks.
             Check(plan.entranceIndex != plan.bossIndex, "entrance and boss are the same block", seed);
+
+            // Exactly as many boss rooms as were asked for. The batch asks for
+            // one, which is the case a stored layout can already be in.
+            int bossFound = 0;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                if (b.role == BlockRole::RoomBoss) ++bossFound;
+            }
+            Check(bossFound == cfg.bossRooms, "boss room count does not match the config", seed);
 
             // The manifest must fit the wire budget and round-trip its own CRC.
             std::string const manifest = EmitManifest(plan, 1);
@@ -761,6 +1309,10 @@ int main(int argc, char** argv)
         int const n = (argc >= 3) ? std::atoi(argv[2]) : 100;
         int const rooms = (argc >= 4) ? std::atoi(argv[3]) : 5;
         return RunBatch(n, rooms);
+    }
+    if (argc >= 2 && std::strcmp(argv[1], "--roomcap") == 0)
+    {
+        return RunRoomCap((argc >= 3) ? std::atoi(argv[2]) : 300);
     }
     if (argc >= 4 && std::strcmp(argv[1], "--manifest") == 0)
     {
