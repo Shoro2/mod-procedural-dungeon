@@ -78,7 +78,7 @@ namespace PDungeon
         // Gap between a caster's nukes. Without one, a channelled nuke re-cast
         // the instant its channel ended - an unbroken drain chain with no
         // auto-attacks (operator report 2026-08-09).
-        uint32      casterNukeCooldownMs = 8000;
+        uint32_t    casterNukeCooldownMs = 8000;
 
         // The difficulty curve, per point of the 1..100 dial. Percent of the
         // creature's own numbers, added linearly, exactly like
