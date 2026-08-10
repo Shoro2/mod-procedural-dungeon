@@ -133,6 +133,9 @@ namespace PDungeon
         void Initialize() override { }
         void Update(uint32 diff) override;
         void OnPlayerEnter(Player* player) override;
+        // Disarms unselectable summons (void zones) so they decorate instead of
+        // damaging - see the .cpp for why this is scoped to this map.
+        void OnCreatureCreate(Creature* creature) override;
 
         // The walkable surface of this instance's plan, or nullptr while no
         // plan is bound yet (or its masks are missing). The creature AI paths

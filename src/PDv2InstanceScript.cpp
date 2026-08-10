@@ -180,6 +180,42 @@ namespace PDungeon
         sPDv2UILink->SendCfg(player);
     }
 
+    // Ground-effect carriers must decorate, not fight.
+    //
+    // Several stock kit spells drop a "void zone": a creature with no AI whose
+    // whole job is to carry a persistent area aura, painted where it lands. The
+    // one that surfaced is Swarming Shadows (71264 -> creature 38163, aura
+    // 71267 from creature_template_addon) - the Blood-Queen mechanic, and the
+    // operator wants exactly what it looks like: the fire spawns on the player
+    // and their movement paints a line with it. What is NOT wanted is the
+    // damage. Six of those auras ticking at once read as "invisible things are
+    // attacking me", because the carrier cannot be selected, targeted or seen
+    // as a source - and in melee there is nowhere to step out to anyway.
+    //
+    // Neutralising it HERE and not in the shared rows is the point: entry 38163
+    // and its addon aura belong to Icecrown Citadel, which runs on this same
+    // server. Editing creature_template would defuse the real encounter too.
+    //
+    // The rule is deliberately about the FLAG, not about a list of entries: on
+    // this map a creature the player cannot select is by definition scenery or
+    // a marker, never a fight, so any future kit spell with the same shape is
+    // covered without a code change. Our own spawns are always selectable -
+    // they are what the dungeon is - so they never match.
+    //
+    // Friendly rather than aura-stripped on purpose: the aura IS the visual,
+    // and a persistent area aura re-picks its targets every tick, so a carrier
+    // that is no longer an enemy keeps painting and stops hurting.
+    void PDv2InstanceScript::OnCreatureCreate(Creature* creature)
+    {
+        if (!creature || !creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
+        {
+            return;
+        }
+
+        creature->SetFaction(FACTION_FRIENDLY);
+        creature->SetReactState(REACT_PASSIVE);
+    }
+
     bool PDv2InstanceScript::ConsumeRunDirty()
     {
         bool const dirty = _runDirty;
