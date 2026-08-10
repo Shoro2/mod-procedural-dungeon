@@ -102,11 +102,20 @@ namespace PDungeon
         cfg.rooms = state.loaded ? GameClampRooms(state.cfgRooms, dlvl)
                                  : GameClampRooms(_config.rooms, dlvl);
         cfg.bossRooms = state.loaded ? GameBossRooms(dlvl) : _config.bossRooms;
-        // fieldBlocks is NOT derived from the room count: 8 blocks is exactly
-        // one ADT tile, and a multi-tile plan is untested on the client side.
-        // The room cap (PD_GAME_ROOMS_CAP_MEASURED) is what keeps the layout
-        // inside this field instead - see the measurement in PDv2GameMath.h.
-        cfg.fieldBlocks = _config.fieldBlocks;
+        // fieldBlocks now FOLLOWS the room count downwards, and is still capped
+        // by the configured value on the way up.
+        //
+        // It used to be the config value flat, on the reasoning that 8 blocks
+        // is exactly one ADT tile and a multi-tile plan is untested on the
+        // client. That ceiling is untouched and still load-bearing - what
+        // changed is the floor. Holding the field at 8 for every dlvl scattered
+        // three rooms across 64 cells, and the corridors between them became
+        // the whole run; the operator's verdict after the first live host run
+        // (2026-08-10) was that low levels are mostly walking. Scaling the
+        // field with the room count keeps cells-per-room roughly constant, so a
+        // small dungeon is small instead of sparse. The room cap
+        // (PD_GAME_ROOMS_CAP_MEASURED) still keeps big layouts inside the tile.
+        cfg.fieldBlocks = std::min(_config.fieldBlocks, GameFieldBlocksForRooms(cfg.rooms));
         cfg.loopChancePct = _config.loopChancePct;
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;

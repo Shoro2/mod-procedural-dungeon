@@ -550,24 +550,42 @@ namespace PDungeon
             if (room.isBoss)
             {
                 // Exactly one boss, and it is the room's FIRST pick - the
-                // instance script keys run completion on that slot. It is
-                // never affixed and never rolls for it: mod-dungeon-challenge
-                // excludes bosses from its affix draw outright
-                // (AssignAffixesToCreatures skips isWorldBoss / IsDungeonBoss /
-                // rank >= 3), and a boss that is also Bigger Boy + Hell Touched
-                // on top of the difficulty curve is a wall, not a fight.
-                emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), false,
+                // instance script keys run completion on that slot.
+                //
+                // THE BOSS NOW CARRIES THE ROOM'S AFFIX (operator verdict
+                // 2026-08-10, after the first live run on the host). This
+                // REVERSES the earlier rule, whose reasoning is kept because it
+                // is the thing to re-read if boss fights start feeling like
+                // walls: mod-dungeon-challenge excludes bosses from its own
+                // affix draw outright (AssignAffixesToCreatures skips
+                // isWorldBoss / IsDungeonBoss / rank >= 3), and the worry was
+                // that a boss which is also Bigger Boy + Hell Touched ON TOP of
+                // the difficulty curve stops being a fight. The counter-argument
+                // that won: one affix per platform is the rule players can read,
+                // and the boss platform's affix mob should obviously be the
+                // boss. The difficulty dial remains the knob if it bites.
+                emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), true,
                      spawns.picks);
             }
-            // AT MOST ONE carrier per room (operator verdict, first affix test
-            // 2026-08-09: the independent per-mob roll clustered - a 5-mob room
-            // could carry 0..5 and read as lopsided). The percentage now means
-            // "chance that THIS ROOM has its one carrier"; if it hits, one slot
-            // index is drawn. Both draws happen for every room, hit or miss,
-            // trash or boss - a constant draw count per room keeps the stream
-            // aligned however the knobs move. Boss rooms roll over their ADD
-            // slots only (the boss keeps its own no-affix rule above).
-            bool const roomHasCarrier = rng.Chance(in.affixPct) && trashWanted > 0;
+            // EXACTLY ONE carrier per room, always - no longer a percentage.
+            //
+            // History, because the value moved twice: the first implementation
+            // rolled per mob and clustered (a 5-mob room could carry 0..5 and
+            // read as lopsided), so 2026-08-09 made it "at most one, gated by
+            // V2.Affix.Percentage". The live run on 2026-08-10 showed the gate
+            // itself is the problem - at 40 % most platforms carry nothing and
+            // the affix stops being a thing players learn to look for. Now every
+            // platform has its one carrier: a trash slot in a normal room, and
+            // the BOSS in a boss room (above), which is why boss rooms no longer
+            // draw a carrier among their adds.
+            //
+            // `V2.Affix.Percentage` is consequently DEAD as a gate. The draw is
+            // still consumed so the RNG stream keeps its shape - a constant draw
+            // count per room is what makes a seed reproduce the same spawns
+            // however the knobs move, and skipping it here would silently
+            // re-roll every existing seed.
+            (void)rng.Chance(in.affixPct);
+            bool const roomHasCarrier = !room.isBoss && trashWanted > 0;
             int const carrierSlot = rng.UniformInt(0, trashWanted > 0 ? trashWanted - 1 : 0);
 
             for (int i = 0; i < trashWanted; ++i)

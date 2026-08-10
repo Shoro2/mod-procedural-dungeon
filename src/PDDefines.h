@@ -60,6 +60,17 @@ namespace PDungeon
         VALIDATE_DESPAWN_SECS = 15
     };
 
+    // Opening delay a PDv2 kit spell draws at the start of every fight, so a
+    // pull does not arrive as one synchronised volley (PDv2CreatureAI.cpp
+    // explains why, operator verdict 2026-08-10). Deliberately constants and
+    // not conf keys: the requirement is a feel, not a knob anyone tunes per
+    // realm. If that changes, they become two more V2.* options.
+    enum PDKitOpening : uint32
+    {
+        PD_KIT_OPENING_MIN_MS = 1000,
+        PD_KIT_OPENING_MAX_MS = 2000
+    };
+
     char const* const PD_LOG = "module.pdungeon";
 }
 

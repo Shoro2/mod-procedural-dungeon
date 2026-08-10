@@ -112,19 +112,40 @@ namespace PDungeon
             _haveEntrance = true;
         }
 
-        // A plan can be re-rolled while this instance is alive - the account
-        // keeps the instance, so the old creatures and the old walk grid would
-        // otherwise survive under new terrain. Rebuilding on a seed change is
-        // what makes `.pdungeon v2 gen` mean the same thing inside as outside.
-        if (_spawned && _spawnedSeed != plan->effectiveSeed)
+        // Two reasons to rebuild what is standing here.
+        //
+        // SEED CHANGED: a plan can be re-rolled while this instance is alive -
+        // the account keeps the instance, so the old creatures and the old walk
+        // grid would otherwise survive under new terrain. Rebuilding on a seed
+        // change is what makes `.pdungeon v2 gen` mean the same thing inside as
+        // outside.
+        //
+        // RUN ALREADY FINISHED: walking back into a cleared dungeon used to
+        // hand the player an empty one - the boss dead, the platforms bare, and
+        // no way to start again short of re-rolling the layout (operator,
+        // 2026-08-10: "the instance should be reset first, so players can just
+        // re-enter"). Now the same seed re-populates. Deliberately a REBUILD
+        // and not an instance reset: resetting would kick everyone standing in
+        // here, and on this map a kick means a teleport out of a dungeon that
+        // has no terrain to fall back to.
+        bool const seedChanged = _spawned && _spawnedSeed != plan->effectiveSeed;
+        bool const runFinished = _spawned && _run.complete;
+        if (seedChanged || runFinished)
         {
-            LOG_INFO(PD_LOG, "PDv2: instance {} was built for seed {}, plan is now {} - "
-                             "rebuilding", instance->GetInstanceId(), _spawnedSeed,
-                     plan->effectiveSeed);
+            LOG_INFO(PD_LOG, "PDv2: instance {} rebuilding ({}) - seed {} -> {}",
+                     instance->GetInstanceId(),
+                     seedChanged ? "plan re-rolled" : "previous run was completed",
+                     _spawnedSeed, plan->effectiveSeed);
             DespawnAll();
             _spawned = false;
             _gridReady = false;
             _gridTried = false;
+
+            // A fresh run, not the old one with its boss counter already full.
+            // SpawnFromPlan re-derives difficulty, roomsTotal and bossTotal, and
+            // the `!_run.started` block below re-arms the clock and the leader.
+            _run = PDv2RunState{};
+            MarkRunDirty();
         }
 
         EnsureWalkGrid(*plan);
@@ -147,6 +168,16 @@ namespace PDungeon
             _leaderGuid = player->GetGUID().GetCounter();
             MarkRunDirty();
         }
+
+        // Push the panel state to whoever just walked in.
+        //
+        // It used to be pushed only by `gen` and by the link handshake, so
+        // entering a dungeon that was generated earlier - the ordinary "I am
+        // back, let me run it again" case - left the UI closed with no way to
+        // reopen it (operator, 2026-08-10). Arrival is the right trigger
+        // because it is the one event every entry path shares: the command, the
+        // panel's own Enter button, and a summon all end up here.
+        sPDv2UILink->SendCfg(player);
     }
 
     bool PDv2InstanceScript::ConsumeRunDirty()

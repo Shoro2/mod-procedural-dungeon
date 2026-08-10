@@ -69,6 +69,14 @@ namespace PDungeon
     constexpr int PD_GAME_CASTER_PCT_MAX = 80;
     constexpr int PD_GAME_CASTER_PCT_DEFAULT = 40;
 
+    // Planning-field bounds for GameFieldBlocksForRooms (bottom of this file).
+    // MIN 3 keeps a corridor possible at all with MIN_ROOM_GAP = 2; HARD_MAX 8
+    // is one ADT tile, the same ceiling the caller enforces against the
+    // configured value - stated twice on purpose, because a field wider than a
+    // tile is a client-side unknown, not a tuning choice.
+    constexpr int PD_GAME_FIELD_BLOCKS_MIN = 3;
+    constexpr int PD_GAME_FIELD_BLOCKS_HARD_MAX = 8;
+
     // Room floor. 01 §8's "3 + dlvl" is the CAP, not a floor - the floor was 3
     // until the first in-game test, when the operator asked for 1 (2026-08-07):
     // a 1-room run is entrance + boss room, a legal boss-rush micro-dungeon
@@ -328,6 +336,42 @@ namespace PDungeon
             return 0u;
         }
         return static_cast<uint32_t>(roomsUsed) * static_cast<uint32_t>(xpPerRoom);
+    }
+
+    // How large the planning field should be for a given room count.
+    //
+    // THE PROBLEM THIS SOLVES (operator, first live run 2026-08-10): the field
+    // was a constant 8x8 at every dlvl, so a three-room dungeon put its three
+    // rooms anywhere in 64 cells and the corridors between them became the
+    // whole experience - "the walks between platforms are far too long, above
+    // all at low levels". Density, not room count, is what makes a small
+    // dungeon feel small.
+    //
+    // Target: keep cells-per-room roughly constant at ~4. With the planner's
+    // MIN_ROOM_GAP of 2 (Manhattan, so no two rooms are ever adjacent) about
+    // half the cells of a field can hold a room, which leaves ~2x headroom for
+    // the placement retries - tight enough to shorten the walk, loose enough
+    // that generation does not start failing.
+    //
+    // The CALLER caps this at the configured fieldBlocks and must keep doing
+    // so: 8 blocks is exactly one ADT tile and a multi-tile plan is untested on
+    // the client. This function only ever proposes something SMALLER.
+    constexpr int GameFieldBlocksForRooms(int rooms)
+    {
+        if (rooms <= 1)
+        {
+            return PD_GAME_FIELD_BLOCKS_MIN;
+        }
+
+        // Integer ceil(sqrt(rooms * 4)) without <cmath>, so this stays
+        // constexpr and harness-checkable on every toolchain.
+        int const wantCells = rooms * 4;
+        int side = PD_GAME_FIELD_BLOCKS_MIN;
+        while (side * side < wantCells && side < PD_GAME_FIELD_BLOCKS_HARD_MAX)
+        {
+            ++side;
+        }
+        return side;
     }
 }
 

@@ -100,7 +100,9 @@ namespace PDungeon
         // Reads the creature's rows once and keeps only what this run's
         // difficulty unlocks, so no tick ever looks at minDiff again.
         void BuildKit();
-        void ResetKitCooldowns();
+        // Draws a fresh opening delay for every cooldown spell. Named for what
+        // it does: it does NOT zero the kit, it staggers it (see the .cpp).
+        void ArmKitForNewFight();
         void TickKit(uint32 diff);
         bool CastReadyKitSpell();
         bool CastFiller();
