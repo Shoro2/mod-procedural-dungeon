@@ -51,13 +51,31 @@ namespace PDungeon
     enum PDSpells : uint32
     {
         SPELL_SHADOW_BOLT = 20791,  // generic mob shadow bolt
-        SPELL_WAR_STOMP   = 24375   // boss aoe stomp
+        SPELL_WAR_STOMP   = 24375,  // boss aoe stomp
+
+        // The damage half of the Swarming Shadows void zone: aura 71267 on the
+        // (unselectable) carrier 38163 triggers this every second - school
+        // damage, base 2925 shadow, 4 yd around the carrier (Spell.dbc,
+        // measured 2026-08-10). The instance deals it itself, deduplicated;
+        // the carriers stay friendly and never tick on their own.
+        SPELL_SWARMING_SHADOWS_DMG = 71268
     };
 
     enum PDMisc : uint32
     {
         WAYPOINT_MOVE_ID_BASE = 910000,  // MovePoint ids used by the module AI
         VALIDATE_DESPAWN_SECS = 15
+    };
+
+    // Opening delay a PDv2 kit spell draws at the start of every fight, so a
+    // pull does not arrive as one synchronised volley (PDv2CreatureAI.cpp
+    // explains why, operator verdict 2026-08-10). Deliberately constants and
+    // not conf keys: the requirement is a feel, not a knob anyone tunes per
+    // realm. If that changes, they become two more V2.* options.
+    enum PDKitOpening : uint32
+    {
+        PD_KIT_OPENING_MIN_MS = 1000,
+        PD_KIT_OPENING_MAX_MS = 2000
     };
 
     char const* const PD_LOG = "module.pdungeon";

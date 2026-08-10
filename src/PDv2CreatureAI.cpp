@@ -87,10 +87,11 @@ namespace PDungeon
         _lineOk = false;
         _lineTimer = 0;
 
-        // A fresh fight opens with everything ready. The cooldowns are per
-        // FIGHT, not per creature lifetime, so a pack that was pulled, evaded
-        // and pulled again opens the same way both times.
-        ResetKitCooldowns();
+        // A fresh fight opens STAGGERED, not with everything ready: each
+        // cooldown spell draws its own 1-2 s opening delay. Per FIGHT, not per
+        // creature lifetime, so a pack that was pulled, evaded and pulled again
+        // opens the same way - a fresh draw - both times.
+        ArmKitForNewFight();
 
         // Call for Help (affix 1) is ARMED here and fired on the next tick,
         // not shouted from inside this hook. Two reasons, and the second is the
@@ -351,11 +352,29 @@ namespace PDungeon
         }
     }
 
-    void PDv2MobAI::ResetKitCooldowns()
+    // A fight no longer opens with the whole kit ready.
+    //
+    // Zeroing everything meant every unlocked spell of every pulled mob was
+    // castable on the first tick, so a pack opened with one synchronised
+    // volley - and the higher the difficulty the bigger that volley, because
+    // difficulty is exactly what unlocks the extra spells (`minDiff` in
+    // `pdungeon_member_spells`). Operator verdict from the first live run on
+    // the host, 2026-08-10: stagger the opening.
+    //
+    // Each cooldown spell draws its own delay in [PD_KIT_OPENING_MIN_MS,
+    // PD_KIT_OPENING_MAX_MS], per spell and per fight, so a pack opens
+    // differently on every pull and the casts arrive spread out instead of
+    // together. The FILLER deliberately keeps its zero: it is what the mob
+    // does BETWEEN cooldowns, and delaying it as well would only leave the
+    // creature standing there for the first second doing nothing.
+    //
+    // Still per FIGHT and not per lifetime: a pack that was pulled, evaded and
+    // pulled again re-draws and opens staggered both times.
+    void PDv2MobAI::ArmKitForNewFight()
     {
         for (KitSpell& spell : _kit)
         {
-            spell.remainingMs = 0;
+            spell.remainingMs = urand(PD_KIT_OPENING_MIN_MS, PD_KIT_OPENING_MAX_MS);
         }
         _fillerRemainingMs = 0;
     }

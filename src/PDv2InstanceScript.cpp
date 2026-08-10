@@ -32,6 +32,7 @@
 #include "PDv2UILink.h"
 #include "Player.h"
 #include "Position.h"
+#include "SpellMgr.h"
 #include "TemporarySummon.h"
 #include "WorldSession.h"
 
@@ -112,19 +113,40 @@ namespace PDungeon
             _haveEntrance = true;
         }
 
-        // A plan can be re-rolled while this instance is alive - the account
-        // keeps the instance, so the old creatures and the old walk grid would
-        // otherwise survive under new terrain. Rebuilding on a seed change is
-        // what makes `.pdungeon v2 gen` mean the same thing inside as outside.
-        if (_spawned && _spawnedSeed != plan->effectiveSeed)
+        // Two reasons to rebuild what is standing here.
+        //
+        // SEED CHANGED: a plan can be re-rolled while this instance is alive -
+        // the account keeps the instance, so the old creatures and the old walk
+        // grid would otherwise survive under new terrain. Rebuilding on a seed
+        // change is what makes `.pdungeon v2 gen` mean the same thing inside as
+        // outside.
+        //
+        // RUN ALREADY FINISHED: walking back into a cleared dungeon used to
+        // hand the player an empty one - the boss dead, the platforms bare, and
+        // no way to start again short of re-rolling the layout (operator,
+        // 2026-08-10: "the instance should be reset first, so players can just
+        // re-enter"). Now the same seed re-populates. Deliberately a REBUILD
+        // and not an instance reset: resetting would kick everyone standing in
+        // here, and on this map a kick means a teleport out of a dungeon that
+        // has no terrain to fall back to.
+        bool const seedChanged = _spawned && _spawnedSeed != plan->effectiveSeed;
+        bool const runFinished = _spawned && _run.complete;
+        if (seedChanged || runFinished)
         {
-            LOG_INFO(PD_LOG, "PDv2: instance {} was built for seed {}, plan is now {} - "
-                             "rebuilding", instance->GetInstanceId(), _spawnedSeed,
-                     plan->effectiveSeed);
+            LOG_INFO(PD_LOG, "PDv2: instance {} rebuilding ({}) - seed {} -> {}",
+                     instance->GetInstanceId(),
+                     seedChanged ? "plan re-rolled" : "previous run was completed",
+                     _spawnedSeed, plan->effectiveSeed);
             DespawnAll();
             _spawned = false;
             _gridReady = false;
             _gridTried = false;
+
+            // A fresh run, not the old one with its boss counter already full.
+            // SpawnFromPlan re-derives difficulty, roomsTotal and bossTotal, and
+            // the `!_run.started` block below re-arms the clock and the leader.
+            _run = PDv2RunState{};
+            MarkRunDirty();
         }
 
         EnsureWalkGrid(*plan);
@@ -146,6 +168,147 @@ namespace PDungeon
             _run.startedMs = getMSTime();
             _leaderGuid = player->GetGUID().GetCounter();
             MarkRunDirty();
+        }
+
+        // Push the panel state to whoever just walked in.
+        //
+        // It used to be pushed only by `gen` and by the link handshake, so
+        // entering a dungeon that was generated earlier - the ordinary "I am
+        // back, let me run it again" case - left the UI closed with no way to
+        // reopen it (operator, 2026-08-10). Arrival is the right trigger
+        // because it is the one event every entry path shares: the command, the
+        // panel's own Enter button, and a summon all end up here.
+        sPDv2UILink->SendCfg(player);
+    }
+
+    // Ground-effect carriers must decorate, not fight.
+    //
+    // Several stock kit spells drop a "void zone": a creature with no AI whose
+    // whole job is to carry a persistent area aura, painted where it lands. The
+    // one that surfaced is Swarming Shadows (71264 -> creature 38163, aura
+    // 71267 from creature_template_addon) - the Blood-Queen mechanic, and the
+    // operator wants exactly what it looks like: the fire spawns on the player
+    // and their movement paints a line with it. What is NOT wanted is the
+    // damage. Six of those auras ticking at once read as "invisible things are
+    // attacking me", because the carrier cannot be selected, targeted or seen
+    // as a source - and in melee there is nowhere to step out to anyway.
+    //
+    // Neutralising it HERE and not in the shared rows is the point: entry 38163
+    // and its addon aura belong to Icecrown Citadel, which runs on this same
+    // server. Editing creature_template would defuse the real encounter too.
+    //
+    // The rule is deliberately about the FLAG, not about a list of entries: on
+    // this map a creature the player cannot select is by definition scenery or
+    // a marker, never a fight, so any future kit spell with the same shape is
+    // covered without a code change. Our own spawns are always selectable -
+    // they are what the dungeon is - so they never match.
+    //
+    // Friendly rather than aura-stripped on purpose: the aura IS the visual,
+    // and a persistent area aura re-picks its targets every tick, so a carrier
+    // that is no longer an enemy keeps painting and stops hurting.
+    void PDv2InstanceScript::OnCreatureCreate(Creature* creature)
+    {
+        if (!creature)
+        {
+            return;
+        }
+
+        // Spawn telemetry. Written at INFO during the 2026-08-10 invisible-
+        // attacker hunt, where it settled the case in one session: the only
+        // unselectable spawn was Swarming Shadows (38163), forty of them.
+        // Kept at DEBUG because the next hunt will want it again - flip
+        // Logger.module to 6 and every spawn names itself.
+        LOG_DEBUG(PD_LOG, "PDv2: instance {} spawn: entry {} '{}' faction {} "
+                          "selectable {} visible-model {}",
+                  instance->GetInstanceId(), creature->GetEntry(),
+                  creature->GetName(), creature->GetFaction(),
+                  creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) ? "no" : "yes",
+                  creature->GetDisplayId());
+
+        if (!creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
+        {
+            return;
+        }
+
+        creature->SetFaction(FACTION_FRIENDLY);
+        creature->SetReactState(REACT_PASSIVE);
+
+        // Tracked so TickVoidZones can make the ground under it hurt again -
+        // friendliness took the aura's targets away, not the hazard's job.
+        _voidZones.push_back(creature->GetGUID());
+    }
+
+    void PDv2InstanceScript::TickVoidZones()
+    {
+        if (_voidZones.empty())
+        {
+            return;
+        }
+
+        SpellInfo const* dmgSpell = sSpellMgr->GetSpellInfo(SPELL_SWARMING_SHADOWS_DMG);
+        if (!dmgSpell)
+        {
+            return;
+        }
+
+        // The zone's own numbers, not invented ones: 4 yd radius and the 2925
+        // base roll both come out of Spell.dbc at runtime, so a data edit to
+        // the spell keeps working here without a rebuild.
+        float const radius = dmgSpell->Effects[EFFECT_0].CalcRadius();
+        int32 const base = dmgSpell->Effects[EFFECT_0].CalcValue();
+
+        // Prune despawned carriers first; the survivors are this tick's zones.
+        std::vector<Creature*> zones;
+        zones.reserve(_voidZones.size());
+        for (size_t i = 0; i < _voidZones.size();)
+        {
+            if (Creature* c = instance->GetCreature(_voidZones[i]))
+            {
+                zones.push_back(c);
+                ++i;
+            }
+            else
+            {
+                _voidZones[i] = _voidZones.back();
+                _voidZones.pop_back();
+            }
+        }
+
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+        {
+            Player* player = it->GetSource();
+            if (!player || !player->IsAlive() || player->IsGameMaster())
+            {
+                continue;
+            }
+
+            bool inside = false;
+            Creature* source = nullptr;
+            for (Creature* zone : zones)
+            {
+                if (player->IsWithinDist(zone, radius, true))
+                {
+                    inside = true;
+                    source = zone;
+                    break;
+                }
+            }
+            if (!inside)
+            {
+                continue;
+            }
+
+            // ONE application per player per second, from one named source,
+            // however many pools overlap underfoot. The full spell-damage
+            // path is deliberately skipped - it is what produced forty
+            // parallel ticks - but the school, the log line and the number
+            // are the original's, so absorb-less is the one honest deviation.
+            uint32 const dealt = Unit::DealDamage(source, player, uint32(base), nullptr,
+                                                  SPELL_DIRECT_DAMAGE, SPELL_SCHOOL_MASK_SHADOW,
+                                                  dmgSpell, false);
+            source->SendSpellNonMeleeDamageLog(player, dmgSpell, dealt,
+                                               SPELL_SCHOOL_MASK_SHADOW, 0, 0, false, 0);
         }
     }
 
@@ -829,6 +992,7 @@ namespace PDungeon
             _fallCheckTimer = FALL_CHECK_INTERVAL_MS;
             CatchFallers();
             EvictDisconnected();
+            TickVoidZones();
 
             // The clock rides the same one-second tick. It is not marked dirty:
             // the UI polls at 1 Hz anyway, and a flag that ticks on its own

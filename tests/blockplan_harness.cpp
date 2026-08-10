@@ -930,6 +930,51 @@ namespace
             Check(GameRunDxp(0, 10) == 0u && GameRunDxp(-3, 10) == 0u,
                   "a run that cleared nothing pays nothing", 0);
 
+            // The planning field follows the room count (2026-08-10: three rooms
+            // in a full 8x8 field made the corridors the whole run). Three
+            // properties, and the last one is the load-bearing one.
+            Check(GameFieldBlocksForRooms(1) == PD_GAME_FIELD_BLOCKS_MIN &&
+                  GameFieldBlocksForRooms(0) == PD_GAME_FIELD_BLOCKS_MIN &&
+                  GameFieldBlocksForRooms(-4) == PD_GAME_FIELD_BLOCKS_MIN,
+                  "a degenerate room count must still yield the minimum field", 0);
+
+            bool fieldMono = true;
+            int fieldBadAt = 0;
+            for (int r = 1; r < 64; ++r)
+            {
+                if (GameFieldBlocksForRooms(r + 1) < GameFieldBlocksForRooms(r))
+                {
+                    fieldMono = false;
+                    fieldBadAt = r;
+                    break;
+                }
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "field shrank while rooms grew (at %d rooms)", fieldBadAt);
+            Check(fieldMono, msg, 0);
+
+            // NEVER wider than one ADT tile, whatever the room count: the client
+            // composes a single tile and a multi-tile plan is untested there.
+            bool fieldCapped = true;
+            int fieldCapBadAt = 0;
+            for (int r = 1; r < 512; ++r)
+            {
+                if (GameFieldBlocksForRooms(r) > PD_GAME_FIELD_BLOCKS_HARD_MAX)
+                {
+                    fieldCapped = false;
+                    fieldCapBadAt = r;
+                    break;
+                }
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "field exceeded one ADT tile (at %d rooms)", fieldCapBadAt);
+            Check(fieldCapped, msg, 0);
+
+            // And it must actually be SMALLER for the small dungeons that
+            // prompted the change - otherwise the whole thing is a no-op.
+            Check(GameFieldBlocksForRooms(3) < PD_GAME_FIELD_BLOCKS_HARD_MAX,
+                  "a three-room dungeon must plan in less than a full tile", 0);
+
             // 01 §8: difficulty must NOT be an XP lever. The signature has no
             // difficulty argument, so this holds by construction - the loop is
             // here to make the intent break loudly if someone ever adds one.

@@ -133,6 +133,16 @@ namespace PDungeon
         void Initialize() override { }
         void Update(uint32 diff) override;
         void OnPlayerEnter(Player* player) override;
+        // Disarms unselectable summons (void zones) so they decorate instead of
+        // damaging - see the .cpp for why this is scoped to this map.
+        void OnCreatureCreate(Creature* creature) override;
+
+        // The dungeon's own ground-damage tick: once per second, a player
+        // standing inside ANY tracked void zone takes ONE application of the
+        // zone's damage spell - however many zones overlap. Riding the same
+        // 1 Hz branch as the fall catcher keeps the cadence identical to the
+        // vanilla aura it replaces.
+        void TickVoidZones();
 
         // The walkable surface of this instance's plan, or nullptr while no
         // plan is bound yet (or its masks are missing). The creature AI paths
@@ -217,6 +227,7 @@ namespace PDungeon
         bool     _runDirty = false;
         uint64   _leaderGuid = 0;               // the character that opened this run
         std::vector<uint16> _roomAlive;         // per room, index-aligned with the spawn draw
+        std::vector<ObjectGuid> _voidZones;     // friendly ground-hazard carriers; pruned each tick
         uint32   _fallCheckTimer = 0;
         float    _entranceX = 0.0f;
         float    _entranceY = 0.0f;
