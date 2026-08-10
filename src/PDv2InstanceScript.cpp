@@ -207,7 +207,26 @@ namespace PDungeon
     // that is no longer an enemy keeps painting and stops hurting.
     void PDv2InstanceScript::OnCreatureCreate(Creature* creature)
     {
-        if (!creature || !creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
+        if (!creature)
+        {
+            return;
+        }
+
+        // Spawn telemetry, deliberately chatty for now: the operator reports
+        // being melee-dazed by something invisible FAR from the painted fire,
+        // and dazes only come from melee swings - which the not-selectable
+        // carriers cannot make. So something else is arriving. This line names
+        // every creature the instance ever creates (our packs, split children,
+        // and every spell-summon), which turns the next report from a guess
+        // into an entry id. Drop to LOG_DEBUG once the culprit is confirmed.
+        LOG_INFO(PD_LOG, "PDv2: instance {} spawn: entry {} '{}' faction {} "
+                         "selectable {} visible-model {}",
+                 instance->GetInstanceId(), creature->GetEntry(),
+                 creature->GetName(), creature->GetFaction(),
+                 creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) ? "no" : "yes",
+                 creature->GetDisplayId());
+
+        if (!creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
         {
             return;
         }
