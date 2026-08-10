@@ -32,6 +32,7 @@
 #include "PDv2UILink.h"
 #include "Player.h"
 #include "Position.h"
+#include "SpellMgr.h"
 #include "TemporarySummon.h"
 #include "WorldSession.h"
 
@@ -233,6 +234,84 @@ namespace PDungeon
 
         creature->SetFaction(FACTION_FRIENDLY);
         creature->SetReactState(REACT_PASSIVE);
+
+        // Tracked so TickVoidZones can make the ground under it hurt again -
+        // friendliness took the aura's targets away, not the hazard's job.
+        _voidZones.push_back(creature->GetGUID());
+    }
+
+    void PDv2InstanceScript::TickVoidZones()
+    {
+        if (_voidZones.empty())
+        {
+            return;
+        }
+
+        SpellInfo const* dmgSpell = sSpellMgr->GetSpellInfo(SPELL_SWARMING_SHADOWS_DMG);
+        if (!dmgSpell)
+        {
+            return;
+        }
+
+        // The zone's own numbers, not invented ones: 4 yd radius and the 2925
+        // base roll both come out of Spell.dbc at runtime, so a data edit to
+        // the spell keeps working here without a rebuild.
+        float const radius = dmgSpell->Effects[EFFECT_0].CalcRadius();
+        int32 const base = dmgSpell->Effects[EFFECT_0].CalcValue();
+
+        // Prune despawned carriers first; the survivors are this tick's zones.
+        std::vector<Creature*> zones;
+        zones.reserve(_voidZones.size());
+        for (size_t i = 0; i < _voidZones.size();)
+        {
+            if (Creature* c = instance->GetCreature(_voidZones[i]))
+            {
+                zones.push_back(c);
+                ++i;
+            }
+            else
+            {
+                _voidZones[i] = _voidZones.back();
+                _voidZones.pop_back();
+            }
+        }
+
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+        {
+            Player* player = it->GetSource();
+            if (!player || !player->IsAlive() || player->IsGameMaster())
+            {
+                continue;
+            }
+
+            bool inside = false;
+            Creature* source = nullptr;
+            for (Creature* zone : zones)
+            {
+                if (player->IsWithinDist(zone, radius, true))
+                {
+                    inside = true;
+                    source = zone;
+                    break;
+                }
+            }
+            if (!inside)
+            {
+                continue;
+            }
+
+            // ONE application per player per second, from one named source,
+            // however many pools overlap underfoot. The full spell-damage
+            // path is deliberately skipped - it is what produced forty
+            // parallel ticks - but the school, the log line and the number
+            // are the original's, so absorb-less is the one honest deviation.
+            uint32 const dealt = Unit::DealDamage(source, player, uint32(base), nullptr,
+                                                  SPELL_DIRECT_DAMAGE, SPELL_SCHOOL_MASK_SHADOW,
+                                                  dmgSpell, false);
+            source->SendSpellNonMeleeDamageLog(player, dmgSpell, dealt,
+                                               SPELL_SCHOOL_MASK_SHADOW, 0, 0, false, 0);
+        }
     }
 
     bool PDv2InstanceScript::ConsumeRunDirty()
@@ -915,6 +994,7 @@ namespace PDungeon
             _fallCheckTimer = FALL_CHECK_INTERVAL_MS;
             CatchFallers();
             EvictDisconnected();
+            TickVoidZones();
 
             // The clock rides the same one-second tick. It is not marked dirty:
             // the UI polls at 1 Hz anyway, and a flag that ticks on its own

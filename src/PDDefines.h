@@ -51,7 +51,14 @@ namespace PDungeon
     enum PDSpells : uint32
     {
         SPELL_SHADOW_BOLT = 20791,  // generic mob shadow bolt
-        SPELL_WAR_STOMP   = 24375   // boss aoe stomp
+        SPELL_WAR_STOMP   = 24375,  // boss aoe stomp
+
+        // The damage half of the Swarming Shadows void zone: aura 71267 on the
+        // (unselectable) carrier 38163 triggers this every second - school
+        // damage, base 2925 shadow, 4 yd around the carrier (Spell.dbc,
+        // measured 2026-08-10). The instance deals it itself, deduplicated;
+        // the carriers stay friendly and never tick on their own.
+        SPELL_SWARMING_SHADOWS_DMG = 71268
     };
 
     enum PDMisc : uint32
