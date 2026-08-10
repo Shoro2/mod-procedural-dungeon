@@ -213,19 +213,17 @@ namespace PDungeon
             return;
         }
 
-        // Spawn telemetry, deliberately chatty for now: the operator reports
-        // being melee-dazed by something invisible FAR from the painted fire,
-        // and dazes only come from melee swings - which the not-selectable
-        // carriers cannot make. So something else is arriving. This line names
-        // every creature the instance ever creates (our packs, split children,
-        // and every spell-summon), which turns the next report from a guess
-        // into an entry id. Drop to LOG_DEBUG once the culprit is confirmed.
-        LOG_INFO(PD_LOG, "PDv2: instance {} spawn: entry {} '{}' faction {} "
-                         "selectable {} visible-model {}",
-                 instance->GetInstanceId(), creature->GetEntry(),
-                 creature->GetName(), creature->GetFaction(),
-                 creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) ? "no" : "yes",
-                 creature->GetDisplayId());
+        // Spawn telemetry. Written at INFO during the 2026-08-10 invisible-
+        // attacker hunt, where it settled the case in one session: the only
+        // unselectable spawn was Swarming Shadows (38163), forty of them.
+        // Kept at DEBUG because the next hunt will want it again - flip
+        // Logger.module to 6 and every spawn names itself.
+        LOG_DEBUG(PD_LOG, "PDv2: instance {} spawn: entry {} '{}' faction {} "
+                          "selectable {} visible-model {}",
+                  instance->GetInstanceId(), creature->GetEntry(),
+                  creature->GetName(), creature->GetFaction(),
+                  creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) ? "no" : "yes",
+                  creature->GetDisplayId());
 
         if (!creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
         {
