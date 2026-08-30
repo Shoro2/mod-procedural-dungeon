@@ -165,6 +165,25 @@ namespace PDungeon
     // reader to get wrong, exactly like DecodeWalkMaskRle.
     bool DecodeAnchorList(std::string const& json, std::vector<DecorAnchor>& out);
 
+    // A structural kit prop: a GameObject the kit pins to a fixed block-local
+    // spot (fountain on its pad, cave-in behind a stub chest, columns on the
+    // wall band). Introduced when the first Phase-4 T2 round measured that
+    // MDDF doodads have NO player collision - only server GameObjects do -
+    // so everything massive moved here. `o` is the orientation in radians.
+    struct KitProp
+    {
+        int    goEntry = 0;
+        double u = 0.0;
+        double v = 0.0;
+        double o = 0.0;
+    };
+
+    // Scans the same anchors JSON for its "props" entries, each written by
+    // 48_gen_t1_blockkit.py as {"e":<goEntry>,"u":..,"v":..,"o":..}. The
+    // props' u/v also appear to DecodeAnchorList above - deliberate, so the
+    // torch pass keeps its clearance from them without a second code path.
+    bool DecodePropList(std::string const& json, std::vector<KitProp>& out);
+
     // The props for a layout, in a fixed order: blocks in plan order, rules by
     // ascending id, candidate cells row-major. Never fails - a block with no
     // candidate cells simply gets no props.

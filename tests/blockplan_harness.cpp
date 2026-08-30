@@ -199,6 +199,8 @@ namespace
     {
         std::string classes;
         std::vector<DecorAnchor> anchors;
+        std::vector<KitProp> props;
+        int declaredProps = 0;      // kit_meta's own "goProps" count
     };
 
     std::map<int, KitChunk> g_kit;
@@ -250,7 +252,19 @@ namespace
             size_t const anc = blob.find("\"anchors\"", at);
             if (anc != std::string::npos && anc < end)
             {
-                DecodeAnchorList(blob.substr(anc, end - anc), chunk.anchors);
+                std::string const span = blob.substr(anc, end - anc);
+                DecodeAnchorList(span, chunk.anchors);
+                DecodePropList(span, chunk.props);
+            }
+
+            size_t const gp = blob.find("\"goProps\"", at);
+            if (gp != std::string::npos && gp < end)
+            {
+                size_t const colon = blob.find(':', gp);
+                if (colon != std::string::npos && colon < end)
+                {
+                    chunk.declaredProps = std::atoi(blob.c_str() + colon + 1);
+                }
             }
 
             if (chunkId && !chunk.classes.empty())
@@ -1694,6 +1708,24 @@ namespace
             std::snprintf(msg, sizeof(msg),
                           "chunk %d: derived surface classes differ from the kit's",
                           kv.first);
+            // The prop channel must decode to exactly the count the generator
+            // says it wrote - a props list the server-side scanner cannot read
+            // is a block that silently loses its fountain or cave-in.
+            {
+                char pmsg[160];
+                std::snprintf(pmsg, sizeof(pmsg),
+                              "chunk %d: props decode to %d, kit_meta declares %d",
+                              kv.first, static_cast<int>(kv.second.props.size()),
+                              kv.second.declaredProps);
+                Check(static_cast<int>(kv.second.props.size()) ==
+                          kv.second.declaredProps, pmsg, 0);
+                for (KitProp const& prop : kv.second.props)
+                {
+                    Check(prop.goEntry >= 910040 && prop.goEntry <= 910049,
+                          "a kit prop names an entry outside the reserved "
+                          "910040-910049 block", static_cast<uint32_t>(kv.first));
+                }
+            }
             std::string const derived = PDv2Classify(mask);
             std::string const& kitCls = kv.second.classes;
             bool ok = derived.size() == kitCls.size();

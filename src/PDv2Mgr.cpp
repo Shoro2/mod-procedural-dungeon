@@ -415,6 +415,7 @@ namespace PDungeon
     {
         _walkMasks.clear();
         _chunkAnchors.clear();
+        _chunkProps.clear();
 
         // Highest kit version wins per chunk id: rows are read in ascending
         // kitVersion order and later ones overwrite.
@@ -479,6 +480,21 @@ namespace PDungeon
                 anchors.clear();
             }
             _chunkAnchors[chunkId] = std::move(anchors);
+
+            // The structural props ride the same column. A malformed list is
+            // reported and dropped like a malformed anchor list - the block
+            // simply stands undecorated, nothing else depends on it.
+            std::vector<KitProp> props;
+            if (!DecodePropList(anchorText, props))
+            {
+                LOG_ERROR(PD_LOG, "PDv2: chunk {} has a malformed props field ('{}')",
+                          chunkId, anchorText);
+                props.clear();
+            }
+            if (!props.empty())
+            {
+                _chunkProps[chunkId] = std::move(props);
+            }
         } while (result->NextRow());
 
         LOG_INFO(PD_LOG, "PDv2: loaded {} walk mask(s) from pdungeon_chunk_meta "
@@ -503,6 +519,12 @@ namespace PDungeon
     {
         auto it = _chunkAnchors.find(chunkId);
         return it == _chunkAnchors.end() ? nullptr : &it->second;
+    }
+
+    std::vector<KitProp> const* PDv2Mgr::PropsFor(int chunkId) const
+    {
+        auto it = _chunkProps.find(chunkId);
+        return it == _chunkProps.end() ? nullptr : &it->second;
     }
 
     void PDv2Mgr::LoadDecorRules()

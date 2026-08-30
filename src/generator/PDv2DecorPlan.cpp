@@ -319,6 +319,58 @@ namespace PDungeon
         }
     }
 
+    bool DecodePropList(std::string const& json, std::vector<KitProp>& out)
+    {
+        out.clear();
+
+        size_t at = 0;
+        while (true)
+        {
+            // "e" is the prop entry key and appears nowhere else in the
+            // anchors JSON ("entry"'s quote closes after five letters, so the
+            // three-byte needle cannot match inside it).
+            size_t const eKey = json.find("\"e\"", at);
+            if (eKey == std::string::npos)
+            {
+                return true;
+            }
+
+            double entry = 0.0;
+            size_t after = 0;
+            if (!ReadKeyedNumber(json, eKey, entry, after))
+            {
+                return false;
+            }
+
+            KitProp prop;
+            prop.goEntry = static_cast<int>(entry);
+
+            // u, v and o follow e in the generator's own emission order.
+            char const* keys[3] = { "\"u\"", "\"v\"", "\"o\"" };
+            double vals[3] = { 0.0, 0.0, 0.0 };
+            bool ok = true;
+            for (int k = 0; k < 3; ++k)
+            {
+                size_t const keyAt = json.find(keys[k], after);
+                if (keyAt == std::string::npos ||
+                    !ReadKeyedNumber(json, keyAt, vals[k], after))
+                {
+                    ok = false;
+                    break;
+                }
+            }
+            if (!ok)
+            {
+                return false;
+            }
+            prop.u = vals[0];
+            prop.v = vals[1];
+            prop.o = vals[2];
+            out.push_back(prop);
+            at = after;
+        }
+    }
+
     std::vector<DecorSpot> BuildDecorPlan(BlockPlan const& plan,
                                           DecorMaskProvider const& maskFor,
                                           DecorAnchorProvider const& anchorsFor,

@@ -200,6 +200,12 @@ namespace PDungeon
         // stand where they stood the last time this seed was entered.
         void SpawnDecor(BlockPlan const& plan);
 
+        // The kit's structural props (fountains, cave-ins, columns ...):
+        // GameObjects pinned per variant by the chunk-meta 'props' anchors,
+        // spawned because MDDF doodads never collide with players (measured,
+        // first Phase-4 T2 round). Same guard, same teardown as SpawnDecor.
+        void SpawnKitProps(BlockPlan const& plan);
+
         // One Shifting Cache per dead-end stub, on its junction square. A
         // reward, not a look: deliberately NOT behind Decor.Enable. Shares
         // the decor GUID list so one teardown owns every summoned object.

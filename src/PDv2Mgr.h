@@ -245,6 +245,11 @@ namespace PDungeon
         // different kits. The decor planner keeps its props clear of these.
         std::vector<DecorAnchor> const* AnchorsFor(int chunkId) const;
 
+        // The chunk's structural GameObject props (fountain, cave-in, ...),
+        // or nullptr - most corridors have none. Same lifetime and source as
+        // the anchors: one chunk-meta row, decoded once at load.
+        std::vector<KitProp> const* PropsFor(int chunkId) const;
+
         // Loads `pdungeon_decor_rules`, ascending id. Called once at world
         // startup beside LoadChunkMeta and read-only afterwards, for the same
         // reason: map threads read it without a lock.
@@ -264,6 +269,7 @@ namespace PDungeon
         std::unordered_map<uint32_t, PDv2AccountState> _accounts;
         std::unordered_map<int, std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK>> _walkMasks;
         std::unordered_map<int, std::vector<DecorAnchor>> _chunkAnchors;
+        std::unordered_map<int, std::vector<KitProp>> _chunkProps;
         std::vector<DecorRule> _decorRules;
     };
 }

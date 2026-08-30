@@ -160,6 +160,7 @@ namespace PDungeon
             // cannot double the props while leaving the mobs alone, and the
             // rebuild above tore both down together.
             SpawnDecor(*plan);
+            SpawnKitProps(*plan);
             SpawnDeadEndChests(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
@@ -995,6 +996,49 @@ namespace PDungeon
                          "over a {}-block plan",
                  instance->GetInstanceId(), placed, uint32(rules.size()),
                  uint32(plan.blocks.size()));
+    }
+
+    void PDv2InstanceScript::SpawnKitProps(BlockPlan const& plan)
+    {
+        // Gated like SpawnDecor: props are LOOK, and V2.Decor.Enable is the
+        // one switch for everything optical. (The dead-end chest below stays
+        // ungated - a reward, not a look.)
+        if (!sPDv2Mgr->GetConfig().decorEnable)
+        {
+            return;
+        }
+
+        uint32 placed = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            std::vector<KitProp> const* props = sPDv2Mgr->PropsFor(b.chunkId);
+            if (!props)
+            {
+                continue;
+            }
+            for (KitProp const& prop : *props)
+            {
+                float x = 0.0f, y = 0.0f, z = 0.0f;
+                sPDv2Mgr->BlockToWorld(b.bx, b.by, prop.u, prop.v, x, y, z);
+                GameObject* go = instance->SummonGameObject(
+                    static_cast<uint32>(prop.goEntry), x, y, z,
+                    static_cast<float>(prop.o), 0.0f, 0.0f, 0.0f, 0.0f, 0);
+                if (!go)
+                {
+                    LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon kit prop {} "
+                                      "(mod_pdungeon_prop_displays.sql not applied?)",
+                              instance->GetInstanceId(), prop.goEntry);
+                    continue;
+                }
+                _decorGuids.push_back(go->GetGUID());
+                ++placed;
+            }
+        }
+        if (placed)
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} placed {} kit prop(s) from the "
+                             "chunk-meta anchors", instance->GetInstanceId(), placed);
+        }
     }
 
     void PDv2InstanceScript::SpawnDeadEndChests(BlockPlan const& plan)
