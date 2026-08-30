@@ -200,6 +200,11 @@ namespace PDungeon
         // stand where they stood the last time this seed was entered.
         void SpawnDecor(BlockPlan const& plan);
 
+        // One Shifting Cache per dead-end stub, on its junction square. A
+        // reward, not a look: deliberately NOT behind Decor.Enable. Shares
+        // the decor GUID list so one teardown owns every summoned object.
+        void SpawnDeadEndChests(BlockPlan const& plan);
+
         // Summons ONE dungeon mob: the floor plane, the disabled gravity, the
         // tag copied off `proto`, the run's affix auras and their spawn-time
         // health effects. Every creature this module puts on the map is born

@@ -143,7 +143,12 @@ namespace PDungeon
     // an old seed regenerate a DIFFERENT dungeon (generator logic, kit block
     // ids, field semantics). A mismatch at load means "reroll needed", never
     // "regenerate wrong".
-    constexpr uint32_t PD_LAYOUT_VERSION = 1;
+    //
+    // v2 (2026-08-30, Phase 2): dead-end stubs and visual alternates draw
+    // from the stream, so a v1 seed no longer reproduces its stored layout.
+    // Every stored dungeon rerolls once on first entry; dlvl/dxp are
+    // untouched by design (layout columns update via ON DUPLICATE KEY only).
+    constexpr uint32_t PD_LAYOUT_VERSION = 2;
 
     class PDv2Mgr
     {

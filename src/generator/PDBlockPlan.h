@@ -53,7 +53,8 @@ namespace PDungeon
         SOCKET_W = 8u
     };
 
-    // Index into the kit's role table; chunkId = 2000 + roleIndex * 100 + mask.
+    // Index into the kit's role table;
+    // chunkId = 2000 + alt * 1000 + roleIndex * 100 + mask.
     enum class BlockRole : uint8_t
     {
         Room = 0,
@@ -62,8 +63,17 @@ namespace PDungeon
         CorridorStraight = 3,
         CorridorCorner = 4,
         CorridorT = 5,
-        CorridorCross = 6
+        CorridorCross = 6,
+        // A single-socket stub: walked into for its chest, never fought in
+        // (the kit emits no spawn anchors for it). Phase 2, 2026-08-30.
+        CorridorDeadEnd = 7
     };
+
+    // Visual alternates per role, mirrored from the kit's ALT_COUNT in
+    // 48_gen_t1_blockkit.py. The harness cross-checks every (role, mask, alt)
+    // combination against the shipped chunk-meta SQL, so the two tables
+    // cannot drift silently.
+    int AltCountFor(BlockRole role);
 
     struct BlockCfg
     {
@@ -76,6 +86,7 @@ namespace PDungeon
         int originBY = 256;
         int theme = 1;
         int maxTries = 12;          // seed+n retries before giving up
+        int maxDeadEnds = 2;        // stub corridors attached after the loops
     };
 
     struct PlacedBlock
@@ -87,6 +98,7 @@ namespace PDungeon
         int chunkId = 0;
         int roomId = -1;            // -1 for corridor blocks
         int depth = 0;              // BFS depth from the entrance, rooms only
+        int alt = 0;                // visual alternate, < AltCountFor(role)
     };
 
     struct BlockPlan

@@ -1098,10 +1098,14 @@ namespace
     // regenerates a different dungeon.
     void RunLayoutFreezeCheck()
     {
+        // Re-pinned 2026-08-30 with PD_LAYOUT_VERSION 2 (dead-end stubs and
+        // visual alternates enter the draw stream). The v1 pin was
+        // 551 / E;13df5510; the bump is the documented answer to this check
+        // moving - every stored seed rerolls once, by design.
         uint32_t const PINNED_SEED = 12345u;
         int const PINNED_ROOMS = 5;
-        size_t const PINNED_BYTES = 551;
-        char const* const PINNED_TRAILER = "E;13df5510\n";
+        size_t const PINNED_BYTES = 571;
+        char const* const PINNED_TRAILER = "E;85fc0e4c\n";
 
         BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
         cfg.bossRooms = 1;
@@ -1114,16 +1118,110 @@ namespace
         }
 
         std::string const m = EmitManifest(plan, 1);
-        char msg[160];
+        size_t const trailer = std::strlen(PINNED_TRAILER);
+        std::string const actualTrailer =
+            m.size() >= trailer ? m.substr(m.size() - trailer) : m;
+        char msg[200];
         std::snprintf(msg, sizeof(msg),
-                      "pinned manifest is %d bytes, was %d - the bossRooms=1 layout MOVED",
-                      static_cast<int>(m.size()), static_cast<int>(PINNED_BYTES));
+                      "pinned manifest is %d bytes / %.*s, was %d / %s - the "
+                      "bossRooms=1 layout MOVED",
+                      static_cast<int>(m.size()),
+                      static_cast<int>(actualTrailer.size() ? actualTrailer.size() - 1 : 0),
+                      actualTrailer.c_str(),
+                      static_cast<int>(PINNED_BYTES), "E;13df5510");
         Check(m.size() == PINNED_BYTES, msg, PINNED_SEED);
 
-        size_t const trailer = std::strlen(PINNED_TRAILER);
         bool const same = m.size() >= trailer &&
                           m.compare(m.size() - trailer, trailer, PINNED_TRAILER) == 0;
-        Check(same, "pinned manifest CRC changed - the bossRooms=1 layout MOVED", PINNED_SEED);
+        Check(same, msg, PINNED_SEED);
+    }
+
+    // Phase 2: dead-end stubs and visual alternates.
+    //
+    // Structure first - every (role, mask, alt) the planner can emit must have
+    // a walk mask in the shipped SQL, or a dungeon would generate a chunkId the
+    // server cannot path over (the "0 masks = mobs stand still" failure, but
+    // per block). Then non-vacuity over real seeds: both alternates of a
+    // family and at least one dead end must actually OCCUR, or the draws are
+    // dead code the batch quietly stopped exercising.
+    void RunPhase2Checks(int seeds)
+    {
+        // Rooms ship all 15 masks; straight corridors the two facing pairs;
+        // dead ends exactly the four single bits.
+        for (unsigned m = 1; m <= 15; ++m)
+        {
+            for (int alt = 0; alt < AltCountFor(BlockRole::Room); ++alt)
+            {
+                for (BlockRole role : { BlockRole::Room, BlockRole::RoomEntrance,
+                                        BlockRole::RoomBoss })
+                {
+                    int const id = 2000 + alt * 1000 + static_cast<int>(role) * 100
+                                 + static_cast<int>(m);
+                    Check(MaskFor(id) != nullptr,
+                          "a room (role,mask,alt) combination has no walk mask in the SQL",
+                          static_cast<uint32_t>(id));
+                }
+            }
+        }
+        unsigned const straightMasks[2] = { SOCKET_N | SOCKET_S, SOCKET_E | SOCKET_W };
+        for (unsigned m : straightMasks)
+        {
+            for (int alt = 0; alt < AltCountFor(BlockRole::CorridorStraight); ++alt)
+            {
+                int const id = 2000 + alt * 1000 + 300 + static_cast<int>(m);
+                Check(MaskFor(id) != nullptr,
+                      "a straight-corridor alt has no walk mask in the SQL",
+                      static_cast<uint32_t>(id));
+            }
+        }
+        unsigned const stubMasks[4] = { SOCKET_N, SOCKET_E, SOCKET_S, SOCKET_W };
+        for (unsigned m : stubMasks)
+        {
+            int const id = 2000 + 700 + static_cast<int>(m);
+            Check(MaskFor(id) != nullptr,
+                  "a dead-end mask has no walk mask in the SQL",
+                  static_cast<uint32_t>(id));
+        }
+
+        bool sawAltRoom = false;
+        bool sawAltStraight = false;
+        bool sawDeadEnd = false;
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 3u;
+            BlockCfg const cfg = MakeCfg(seed, 5);
+            BlockPlan plan;
+            if (!GenerateBlockPlan(cfg, &plan))
+            {
+                continue;   // the batch already fails hard on generation
+            }
+            int stubs = 0;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                if (b.role == BlockRole::CorridorDeadEnd)
+                {
+                    ++stubs;
+                    sawDeadEnd = true;
+                    Check(b.chunkId == 2700 + static_cast<int>(b.socketMask),
+                          "dead-end chunkId is not 2700 + mask", seed);
+                }
+                else if (b.alt > 0)
+                {
+                    bool const isRoom = b.role == BlockRole::Room ||
+                                        b.role == BlockRole::RoomEntrance ||
+                                        b.role == BlockRole::RoomBoss;
+                    if (isRoom) sawAltRoom = true;
+                    if (b.role == BlockRole::CorridorStraight) sawAltStraight = true;
+                }
+            }
+            Check(stubs <= cfg.maxDeadEnds,
+                  "more dead ends than the config allows", seed);
+        }
+        Check(sawDeadEnd, "no seed in the sample produced a dead end - the "
+                          "stub pass is dead code", 0);
+        Check(sawAltRoom, "no seed produced an alt-1 room - the alternate draw "
+                          "is dead code", 0);
+        Check(sawAltStraight, "no seed produced an S-curve corridor", 0);
     }
 
     // Exactly `bossRooms` rooms carry the boss role, the entrance never does,
@@ -1688,6 +1786,7 @@ namespace
         // A tenth of the batch is plenty for three boss-room counts: the
         // property is structural, not statistical.
         RunBossRoomChecks(count / 10 + 1);
+        RunPhase2Checks(count / 10 + 1);
 
         // The encoded room cap is a MEASUREMENT, so it has to be re-measured or
         // it rots: a generator change that makes packing harder would otherwise

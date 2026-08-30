@@ -160,6 +160,7 @@ namespace PDungeon
             // cannot double the props while leaving the mobs alone, and the
             // rebuild above tore both down together.
             SpawnDecor(*plan);
+            SpawnDeadEndChests(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -994,6 +995,47 @@ namespace PDungeon
                          "over a {}-block plan",
                  instance->GetInstanceId(), placed, uint32(rules.size()),
                  uint32(plan.blocks.size()));
+    }
+
+    void PDv2InstanceScript::SpawnDeadEndChests(BlockPlan const& plan)
+    {
+        // One Shifting Cache (GO_CHEST, native loot table) on the junction
+        // square of every dead-end stub - the stub's whole reason to exist.
+        // NOT gated on Decor.Enable: the chest is a reward, not a look, and
+        // the dungeon must not lose loot to a cosmetics switch. Torn down by
+        // the same DespawnAll as everything else this instance stands up.
+        uint32 placed = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.role != BlockRole::CorridorDeadEnd)
+            {
+                continue;
+            }
+            // The kit pins the stub's chest anchor to the block centre (the
+            // junction square), so the position is a constant of the format
+            // rather than a lookup that could go stale.
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            sPDv2Mgr->BlockToWorld(b.bx, b.by,
+                                   PD_BLOCK_SIZE_YD / 2.0f, PD_BLOCK_SIZE_YD / 2.0f,
+                                   x, y, z);
+            GameObject* go = instance->SummonGameObject(
+                GO_CHEST, x, y, z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+            if (!go)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the "
+                                  "dead-end chest (missing gameobject_template "
+                                  "{}?)",
+                          instance->GetInstanceId(), uint32(GO_CHEST));
+                continue;
+            }
+            _decorGuids.push_back(go->GetGUID());
+            ++placed;
+        }
+        if (placed)
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} placed {} dead-end chest(s)",
+                     instance->GetInstanceId(), placed);
+        }
     }
 
     void PDv2InstanceScript::CatchFallers()
