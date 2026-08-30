@@ -91,7 +91,8 @@ namespace PDungeon
         }
     }
 
-    bool PDv2Mgr::GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out)
+    bool PDv2Mgr::GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out,
+                               int themeOverride)
     {
         PDv2AccountState const state = GetAccountState(accountId);
         int const dlvl = static_cast<int>(state.dlvl);
@@ -122,7 +123,7 @@ namespace PDungeon
         cfg.loopChancePct = _config.loopChancePct;
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;
-        cfg.theme = _config.theme;
+        cfg.theme = themeOverride ? themeOverride : _config.theme;
 
         if (!GenerateBlockPlan(cfg, &out))
         {
@@ -416,31 +417,41 @@ namespace PDungeon
         _chunkAnchors.clear();
 
         // Highest kit version wins per chunk id: rows are read in ascending
-        // kitVersion order and later ones overwrite. Today there is exactly
-        // one kit, so this is bookkeeping for the day there are two.
+        // kitVersion order and later ones overwrite.
+        //
+        // ALL themes load, not just the configured one: `V2.Theme` steers only
+        // NEW generations, while a stored dungeon regenerates with the theme
+        // frozen into its account row - flipping the config must never leave
+        // an old dungeon without masks (the "0 masks = mobs stand still"
+        // failure, per dungeon). Chunk ids are globally unique across themes
+        // by the kit id scheme, so one map holds them all.
         //
         // The anchors ride along in the same row as the mask on purpose: they
         // describe the same block, and reading them from a second query - or
         // worse, a second file - is how a kit regeneration ends up half
         // applied.
         QueryResult result = WorldDatabase.Query(
-            "SELECT chunkId, kitVersion, walkMask, anchors FROM pdungeon_chunk_meta "
-            "WHERE theme = '{}' ORDER BY kitVersion", _config.theme);
+            "SELECT chunkId, kitVersion, walkMask, anchors, theme "
+            "FROM pdungeon_chunk_meta ORDER BY kitVersion");
         if (!result)
         {
-            LOG_ERROR(PD_LOG, "PDv2: pdungeon_chunk_meta has no rows for theme {} - "
+            LOG_ERROR(PD_LOG, "PDv2: pdungeon_chunk_meta has no rows - "
                               "mod_pdungeon_chunk_meta.sql was not applied, and no "
-                              "walk grid can be built (creatures will not chase)",
-                      _config.theme);
+                              "walk grid can be built (creatures will not chase)");
             return;
         }
 
         uint32 bad = 0;
+        uint32 configThemeRows = 0;
         do
         {
             Field* fields = result->Fetch();
             int const chunkId = static_cast<int>(fields[0].Get<uint32>());
             std::string const rle = fields[2].Get<std::string>();
+            if (static_cast<int>(fields[4].Get<uint8>()) == _config.theme)
+            {
+                ++configThemeRows;
+            }
 
             std::vector<uint8_t> mask;
             if (!DecodeWalkMaskRle(rle, mask) ||
@@ -471,8 +482,15 @@ namespace PDungeon
         } while (result->NextRow());
 
         LOG_INFO(PD_LOG, "PDv2: loaded {} walk mask(s) from pdungeon_chunk_meta "
-                         "(theme {}, {} malformed)",
-                 uint32(_walkMasks.size()), _config.theme, bad);
+                         "across all themes ({} for configured theme {}, {} malformed)",
+                 uint32(_walkMasks.size()), configThemeRows, _config.theme, bad);
+        if (configThemeRows == 0)
+        {
+            LOG_ERROR(PD_LOG, "PDv2: configured theme {} has NO chunk-meta rows - "
+                              "new generations will fail until the kit ships that "
+                              "theme or V2.Theme points at one it has",
+                      _config.theme);
+        }
     }
 
     uint8_t const* PDv2Mgr::WalkMaskFor(int chunkId) const

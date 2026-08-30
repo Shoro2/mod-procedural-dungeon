@@ -28,7 +28,9 @@ namespace PDungeon
 {
     namespace
     {
-        int const CHUNK_ID_BASE = 2000;
+        int const CHUNK_ID_BASE = 2000;         // theme 1 (mine)
+        int const CHUNK_ID_BASE_CITY = 12000;   // theme 2 (city) - kit scheme
+                                                // themeBase + alt*1000 + role*100 + mask
         int const BLOCKS_PER_TILE = 8;
         int const MAX_BLOCK_COORD = 64 * BLOCKS_PER_TILE;   // 512
         int const MIN_ROOM_GAP = 2;                         // Manhattan, so a corridor always fits
@@ -128,9 +130,21 @@ namespace PDungeon
 
         int const ALT_STRIDE = 1000;
 
-        int ChunkIdFor(BlockRole role, unsigned mask, int alt)
+        // 0 = unknown theme; ValidateBlockPlan turns that into a refusal
+        // rather than letting a bogus chunkId reach the client.
+        int ThemeChunkIdBase(int theme)
         {
-            return CHUNK_ID_BASE + alt * ALT_STRIDE
+            switch (theme)
+            {
+                case 1:  return CHUNK_ID_BASE;
+                case 2:  return CHUNK_ID_BASE_CITY;
+                default: return 0;
+            }
+        }
+
+        int ChunkIdFor(int theme, BlockRole role, unsigned mask, int alt)
+        {
+            return ThemeChunkIdBase(theme) + alt * ALT_STRIDE
                  + static_cast<int>(role) * 100 + static_cast<int>(mask);
         }
 
@@ -346,9 +360,13 @@ namespace PDungeon
             {
                 return fail("alt outside the role's alternate count");
             }
-            if (b.chunkId != ChunkIdFor(b.role, b.socketMask, b.alt))
+            if (ThemeChunkIdBase(plan.config.theme) == 0)
             {
-                return fail("chunkId does not match role, mask and alt");
+                return fail("unknown theme - no kit namespace for it");
+            }
+            if (b.chunkId != ChunkIdFor(plan.config.theme, b.role, b.socketMask, b.alt))
+            {
+                return fail("chunkId does not match theme, role, mask and alt");
             }
         }
 
@@ -689,7 +707,10 @@ namespace PDungeon
                 // alt to one role would reshuffle every other block's choice.
                 int const altCount = AltCountFor(b.role);
                 b.alt = altCount > 1 ? rng.UniformInt(0, altCount - 1) : 0;
-                b.chunkId = ChunkIdFor(b.role, b.socketMask, b.alt);
+                // The theme moves only the id BASE, never a draw: the same
+                // seed lays out the same dungeon in every theme, and stored
+                // layouts stay draw-stable across a theme config change.
+                b.chunkId = ChunkIdFor(cfg.theme, b.role, b.socketMask, b.alt);
 
                 if (b.role == BlockRole::RoomEntrance)
                 {

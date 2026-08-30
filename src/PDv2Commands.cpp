@@ -85,16 +85,30 @@ private:
     // button can never diverge into two dungeons. What stays here is what only
     // a GM wants: the ascii map and the manifest file the DLL's dev-only LOAD
     // verb reads.
-    static bool HandleV2GenCommand(ChatHandler* handler, Optional<uint32> seedArg)
+    static bool HandleV2GenCommand(ChatHandler* handler, Optional<uint32> seedArg,
+                                   Optional<uint32> themeArg)
     {
         if (!RequireEnabled(handler))
         {
             return true;
         }
 
+        // The theme argument is the GM TEST path - it overrides V2.Theme for
+        // this one generation and is then frozen into the account row like any
+        // other gen input. Refuse an id the planner has no kit namespace for,
+        // or the refusal would surface later as "generation failed".
+        int const themeOverride = static_cast<int>(themeArg.value_or(0));
+        if (themeOverride != 0 && themeOverride != 1 && themeOverride != 2)
+        {
+            handler->PSendSysMessage("pdungeon v2: theme {} is unknown (1 = mine, "
+                                     "2 = city).", themeOverride);
+            return true;
+        }
+
         BlockPlan plan;
         PDv2GenOutcome const outcome =
-            PDv2DoGenerate(handler->GetPlayer(), seedArg.value_or(0), &plan);
+            PDv2DoGenerate(handler->GetPlayer(), seedArg.value_or(0), &plan,
+                           themeOverride);
         if (!outcome.ok)
         {
             handler->PSendSysMessage("pdungeon v2: {}.", outcome.error);
@@ -108,8 +122,8 @@ private:
             handler->SendSysMessage(line.c_str());
         }
 
-        handler->PSendSysMessage("pdungeon v2: seed {} -> {} blocks ({} rooms, {} corridors).",
-                                 outcome.seed, outcome.blocks, outcome.rooms,
+        handler->PSendSysMessage("pdungeon v2: seed {} theme {} -> {} blocks ({} rooms, {} corridors).",
+                                 outcome.seed, outcome.theme, outcome.blocks, outcome.rooms,
                                  outcome.blocks - outcome.rooms);
 
         if (outcome.pushed)
@@ -216,8 +230,9 @@ private:
 
         float x = 0.0f, y = 0.0f, z = 0.0f;
         sPDv2Mgr->EntranceWorldPos(*plan, x, y, z);
-        handler->PSendSysMessage("pdungeon v2: seed {} | {} blocks | entrance at {:.2f} {:.2f} {:.2f}",
-                                 plan->effectiveSeed, uint32(plan->blocks.size()), x, y, z);
+        handler->PSendSysMessage("pdungeon v2: seed {} theme {} | {} blocks | entrance at {:.2f} {:.2f} {:.2f}",
+                                 plan->effectiveSeed, plan->config.theme,
+                                 uint32(plan->blocks.size()), x, y, z);
         return true;
     }
 };

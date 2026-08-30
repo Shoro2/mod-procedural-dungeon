@@ -162,7 +162,11 @@ namespace PDungeon
         // Builds a plan for `accountId`, replaces any previous one and saves
         // its generation inputs to the characters DB. Returns false when the
         // generator could not produce a valid layout.
-        bool GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out);
+        // themeOverride 0 follows the server config; a nonzero value is the
+        // GM test path (`.pdungeon v2 gen [seed] [theme]`) and is persisted
+        // like any other gen input - the theme is frozen into the layout.
+        bool GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out,
+                          int themeOverride = 0);
 
         // The stored plan, or an empty pointer when the account has none.
         //

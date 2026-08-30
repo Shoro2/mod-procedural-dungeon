@@ -303,10 +303,13 @@ namespace
     // the parsers on both sides reject CR, but stdout on Windows is a text
     // stream that rewrites every \n into \r\n -- so piping this through a shell
     // would corrupt it in a way that only shows up as a parse error much later.
-    void WriteManifest(uint32_t seed, int rooms, char const* path, int obx, int oby)
+    void WriteManifest(uint32_t seed, int rooms, char const* path, int obx, int oby,
+                       int theme)
     {
+        BlockCfg cfg = MakeCfg(seed, rooms, obx, oby);
+        cfg.theme = theme;
         BlockPlan plan;
-        if (!GenerateBlockPlan(MakeCfg(seed, rooms, obx, oby), &plan))
+        if (!GenerateBlockPlan(cfg, &plan))
         {
             std::fprintf(stderr, "generation failed\n");
             std::exit(2);
@@ -1147,7 +1150,11 @@ namespace
     void RunPhase2Checks(int seeds)
     {
         // Rooms ship all 15 masks; straight corridors the two facing pairs;
-        // dead ends exactly the four single bits.
+        // dead ends exactly the four single bits. Both theme namespaces must
+        // be complete - the planner can aim at either, and a missing row is
+        // the per-block "mobs stand still" failure.
+        int const themeBases[2] = { 2000, 12000 };
+        for (int base : themeBases)
         for (unsigned m = 1; m <= 15; ++m)
         {
             for (int alt = 0; alt < AltCountFor(BlockRole::Room); ++alt)
@@ -1155,7 +1162,7 @@ namespace
                 for (BlockRole role : { BlockRole::Room, BlockRole::RoomEntrance,
                                         BlockRole::RoomBoss })
                 {
-                    int const id = 2000 + alt * 1000 + static_cast<int>(role) * 100
+                    int const id = base + alt * 1000 + static_cast<int>(role) * 100
                                  + static_cast<int>(m);
                     Check(MaskFor(id) != nullptr,
                           "a room (role,mask,alt) combination has no walk mask in the SQL",
@@ -1164,20 +1171,22 @@ namespace
             }
         }
         unsigned const straightMasks[2] = { SOCKET_N | SOCKET_S, SOCKET_E | SOCKET_W };
+        for (int base : themeBases)
         for (unsigned m : straightMasks)
         {
             for (int alt = 0; alt < AltCountFor(BlockRole::CorridorStraight); ++alt)
             {
-                int const id = 2000 + alt * 1000 + 300 + static_cast<int>(m);
+                int const id = base + alt * 1000 + 300 + static_cast<int>(m);
                 Check(MaskFor(id) != nullptr,
                       "a straight-corridor alt has no walk mask in the SQL",
                       static_cast<uint32_t>(id));
             }
         }
         unsigned const stubMasks[4] = { SOCKET_N, SOCKET_E, SOCKET_S, SOCKET_W };
+        for (int base : themeBases)
         for (unsigned m : stubMasks)
         {
-            int const id = 2000 + 700 + static_cast<int>(m);
+            int const id = base + 700 + static_cast<int>(m);
             Check(MaskFor(id) != nullptr,
                   "a dead-end mask has no walk mask in the SQL",
                   static_cast<uint32_t>(id));
@@ -1222,6 +1231,62 @@ namespace
         Check(sawAltRoom, "no seed produced an alt-1 room - the alternate draw "
                           "is dead code", 0);
         Check(sawAltStraight, "no seed produced an S-curve corridor", 0);
+    }
+
+    // Theme 2 must be the SAME dungeon under different art: the theme moves
+    // only the chunkId base, never a draw. Same seed -> block-identical
+    // layout, ids offset by exactly the namespace distance, and the walk grid
+    // builds from the theme-2 masks (which may differ per variant - city ring
+    // rooms - without touching the layout structure).
+    void RunThemeParityChecks(int seeds)
+    {
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            BlockCfg cfgMine = MakeCfg(seed, 6);
+            BlockCfg cfgCity = cfgMine;
+            cfgCity.theme = 2;
+
+            BlockPlan mine;
+            BlockPlan city;
+            if (!GenerateBlockPlan(cfgMine, &mine) ||
+                !GenerateBlockPlan(cfgCity, &city))
+            {
+                Check(false, "a theme failed to generate where the other could", seed);
+                continue;
+            }
+            Check(mine.blocks.size() == city.blocks.size(),
+                  "theme 2 laid out a different block count", seed);
+            if (mine.blocks.size() != city.blocks.size())
+            {
+                continue;
+            }
+            bool same = true;
+            for (size_t k = 0; k < mine.blocks.size(); ++k)
+            {
+                PlacedBlock const& a = mine.blocks[k];
+                PlacedBlock const& b = city.blocks[k];
+                if (a.bx != b.bx || a.by != b.by || a.role != b.role ||
+                    a.socketMask != b.socketMask || a.alt != b.alt ||
+                    b.chunkId - a.chunkId != 10000)
+                {
+                    same = false;
+                }
+            }
+            Check(same, "theme 2 is not the same layout with ids moved by the "
+                        "namespace distance", seed);
+
+            WalkGrid grid;
+            std::string why;
+            if (!BuildWalkGrid(city, MaskFor, &grid, &why))
+            {
+                Check(false, "theme-2 walk grid failed to build", seed);
+                continue;
+            }
+            int longest = 0;
+            Check(CheckAllRoomsConnected(city, grid, why, longest),
+                  "a theme-2 dungeon has unreachable rooms", seed);
+        }
     }
 
     // Exactly `bossRooms` rooms carry the boss role, the entrance never does,
@@ -1306,7 +1371,7 @@ namespace
         size_t maxManifest = 0;
     };
 
-    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds)
+    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds, int theme = 1)
     {
         RoomCapRow row;
         row.rooms = rooms;
@@ -1317,6 +1382,7 @@ namespace
             uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 1u;
             BlockCfg cfg = MakeCfg(seed, rooms);
             cfg.bossRooms = bossRooms;
+            cfg.theme = theme;
 
             BlockPlan plan;
             if (!GenerateBlockPlan(cfg, &plan))
@@ -1336,12 +1402,13 @@ namespace
     // Largest room count that generates on EVERY seed and still fits the
     // manifest budget, with the boss-room count a player at that dlvl would
     // actually run (rooms R unlocks at dlvl R - 3, per 01 §8 "3 + dlvl").
-    int MeasureRoomCap(int seeds, bool verbose)
+    int MeasureRoomCap(int seeds, bool verbose, int theme = 1)
     {
         if (verbose)
         {
             std::printf("room-cap measurement: %d seeds per row, field 8x8, "
-                        "manifest budget %d B\n\n", seeds, PD_GAME_MANIFEST_BUDGET_B);
+                        "theme %d, manifest budget %d B\n\n", seeds, theme,
+                        PD_GAME_MANIFEST_BUDGET_B);
             std::printf("  rooms  boss  cells   genfail  maxManifest  verdict\n");
         }
 
@@ -1355,7 +1422,7 @@ namespace
             // floor constant.
             int const unlockDlvl = rooms > 3 ? rooms - 3 : 0;
             int const boss = GameBossRooms(unlockDlvl);
-            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds);
+            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds, theme);
             bool const ok = row.failures == 0 &&
                             row.maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B);
             if (ok)
@@ -1375,13 +1442,20 @@ namespace
     int RunRoomCap(int seeds)
     {
         int const measured = MeasureRoomCap(seeds, true);
-        std::printf("\nlargest room count clean on every seed: %d\n", measured);
+        // Theme 2's five-digit chunk ids are the widest manifest lines, so
+        // the cap has to hold there too - a city dungeon at the cap must not
+        // blow the packet budget theme 1 measured its way under.
+        std::printf("\n");
+        int const measuredCity = MeasureRoomCap(seeds, true, 2);
+        std::printf("\nlargest room count clean on every seed: %d (theme 1), "
+                    "%d (theme 2)\n", measured, measuredCity);
         std::printf("PD_GAME_ROOMS_CAP_MEASURED currently encodes: %d\n",
                     PD_GAME_ROOMS_CAP_MEASURED);
-        std::printf("%s\n", measured >= PD_GAME_ROOMS_CAP_MEASURED
-                                ? "the encoded cap holds"
+        bool const ok = measured >= PD_GAME_ROOMS_CAP_MEASURED &&
+                        measuredCity >= PD_GAME_ROOMS_CAP_MEASURED;
+        std::printf("%s\n", ok ? "the encoded cap holds for both themes"
                                 : "THE ENCODED CAP IS TOO HIGH - update PDv2GameMath.h");
-        return measured >= PD_GAME_ROOMS_CAP_MEASURED ? 0 : 1;
+        return ok ? 0 : 1;
     }
 
     // --- decor -------------------------------------------------------------
@@ -1620,7 +1694,34 @@ namespace
             std::snprintf(msg, sizeof(msg),
                           "chunk %d: derived surface classes differ from the kit's",
                           kv.first);
-            Check(PDv2Classify(mask) == kv.second.classes, msg, 0);
+            std::string const derived = PDv2Classify(mask);
+            std::string const& kitCls = kv.second.classes;
+            bool ok = derived.size() == kitCls.size();
+            if (ok)
+            {
+                for (size_t k = 0; k < derived.size(); ++k)
+                {
+                    if (derived[k] == kitCls[k])
+                    {
+                        continue;
+                    }
+                    // The ONE sanctioned divergence (Phase 4 city ring
+                    // rooms): the kit may promote a derived VOID cell to
+                    // WALL where a building pad keeps terrain-covered floor
+                    // under a centrepiece - script 52 enforces the same rule
+                    // on the actual bytes (no hole there). The server's own
+                    // derivation feeds only the decor planner, which has no
+                    // theme-2 rules; the day city decor rules exist, the
+                    // promotion has to move into PDv2Classify itself.
+                    if (derived[k] == 'V' && kitCls[k] == 'L')
+                    {
+                        continue;
+                    }
+                    ok = false;
+                    break;
+                }
+            }
+            Check(ok, msg, 0);
         }
     }
 
@@ -1787,6 +1888,19 @@ namespace
         // property is structural, not statistical.
         RunBossRoomChecks(count / 10 + 1);
         RunPhase2Checks(count / 10 + 1);
+        RunThemeParityChecks(count / 10 + 1);
+
+        // The city cap must hold like the mine cap - its ids are one digit
+        // wider, which is exactly the kind of erosion the measurement exists
+        // to catch.
+        {
+            int const cityCap = MeasureRoomCap(count / 5 + 1, false, 2);
+            char msg[160];
+            std::snprintf(msg, sizeof(msg),
+                          "theme-2 room cap is %d, below the encoded %d",
+                          cityCap, PD_GAME_ROOMS_CAP_MEASURED);
+            Check(cityCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
+        }
 
         // The encoded room cap is a MEASUREMENT, so it has to be re-measured or
         // it rots: a generator change that makes packing harder would otherwise
@@ -1950,8 +2064,9 @@ int main(int argc, char** argv)
         int const rooms = (argc >= 5) ? std::atoi(argv[4]) : 5;
         int const obx = (argc >= 7) ? std::atoi(argv[5]) : 32 * 8;
         int const oby = (argc >= 7) ? std::atoi(argv[6]) : 32 * 8;
+        int const theme = (argc >= 8) ? std::atoi(argv[7]) : 1;
         WriteManifest(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)),
-                      rooms, argv[3], obx, oby);
+                      rooms, argv[3], obx, oby, theme);
         return 0;
     }
 
