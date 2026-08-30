@@ -345,11 +345,11 @@ namespace PDungeon
             KitProp prop;
             prop.goEntry = static_cast<int>(entry);
 
-            // u, v and o follow e in the generator's own emission order.
-            char const* keys[3] = { "\"u\"", "\"v\"", "\"o\"" };
-            double vals[3] = { 0.0, 0.0, 0.0 };
+            // u, v, z and o follow e in the generator's own emission order.
+            char const* keys[4] = { "\"u\"", "\"v\"", "\"z\"", "\"o\"" };
+            double vals[4] = { 0.0, 0.0, 0.0, 0.0 };
             bool ok = true;
-            for (int k = 0; k < 3; ++k)
+            for (int k = 0; k < 4; ++k)
             {
                 size_t const keyAt = json.find(keys[k], after);
                 if (keyAt == std::string::npos ||
@@ -365,7 +365,8 @@ namespace PDungeon
             }
             prop.u = vals[0];
             prop.v = vals[1];
-            prop.o = vals[2];
+            prop.z = vals[2];
+            prop.o = vals[3];
             out.push_back(prop);
             at = after;
         }

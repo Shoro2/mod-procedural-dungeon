@@ -175,6 +175,10 @@ namespace PDungeon
         int    goEntry = 0;
         double u = 0.0;
         double v = 0.0;
+        double z = 0.0;             // TERRAIN height above the floor plane -
+                                    // the server is file-less, so the kit
+                                    // measures it (a floor-Z spawn buried
+                                    // every wall-band prop whole)
         double o = 0.0;
     };
 

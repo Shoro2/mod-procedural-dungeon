@@ -1020,6 +1020,9 @@ namespace PDungeon
             {
                 float x = 0.0f, y = 0.0f, z = 0.0f;
                 sPDv2Mgr->BlockToWorld(b.bx, b.by, prop.u, prop.v, x, y, z);
+                // The kit measured the terrain under this prop; the floor
+                // plane BlockToWorld answers is only right on WALK cells.
+                z += static_cast<float>(prop.z);
                 GameObject* go = instance->SummonGameObject(
                     static_cast<uint32>(prop.goEntry), x, y, z,
                     static_cast<float>(prop.o), 0.0f, 0.0f, 0.0f, 0.0f, 0);
