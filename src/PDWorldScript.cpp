@@ -56,6 +56,11 @@ public:
             // what lets map threads read it without a lock.
             sPDv2Mgr->LoadChunkMeta();
 
+            // Same startup-only rule once more: the decor rules are read-only
+            // after this point, and a map thread reads them every time an
+            // instance builds its props.
+            sPDv2Mgr->LoadDecorRules();
+
             // Same startup-only rule as the walk masks above: the packs are
             // read-only after this point, which is what lets map threads draw
             // spawns from them without a lock.

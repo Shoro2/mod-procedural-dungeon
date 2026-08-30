@@ -20,6 +20,7 @@
 #include "Chat.h"
 #include "Creature.h"
 #include "DatabaseEnv.h"
+#include "GameObject.h"
 #include "InstanceScript.h"
 #include "Log.h"
 #include "LootMgr.h"
@@ -154,6 +155,11 @@ namespace PDungeon
         if (!_spawned)
         {
             SpawnFromPlan(*plan);
+            // Under the SAME guard as the creatures, deliberately: one flag
+            // decides what this instance has standing in it, so a re-entry
+            // cannot double the props while leaving the mobs alone, and the
+            // rebuild above tore both down together.
+            SpawnDecor(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -523,6 +529,20 @@ namespace PDungeon
             }
         }
         _spawnedGuids.clear();
+
+        // Delete(), not DespawnOrUnsummon(): a GameObject summoned with
+        // respawnTime 0 has no spawn record, and GameObject::DespawnOrUnsummon
+        // only deactivates such an object - it stays on the map, which on a
+        // rebuild means the old dungeon's torches float over the new one.
+        // Delete() is the call that puts it on the removal list.
+        for (ObjectGuid const& guid : _decorGuids)
+        {
+            if (GameObject* go = instance->GetGameObject(guid))
+            {
+                go->Delete();
+            }
+        }
+        _decorGuids.clear();
     }
 
     void PDv2InstanceScript::EnsureWalkGrid(BlockPlan const& plan)
@@ -915,6 +935,65 @@ namespace PDungeon
                  uint32(_run.roomsTotal), uint32(_run.bossTotal),
                  uint32(plan.blocks.size()), uint32(_run.difficulty),
                  uint32(_run.lootMultX100), affixedMobs, uint32(_runAffixes.size()));
+    }
+
+    void PDv2InstanceScript::SpawnDecor(BlockPlan const& plan)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        if (!cfg.decorEnable)
+        {
+            return;
+        }
+
+        std::vector<DecorRule> const& rules = sPDv2Mgr->DecorRules();
+        if (rules.empty())
+        {
+            // Not an error: mod_pdungeon_decor.sql is simply not applied yet,
+            // and an unlit dungeon is still a dungeon. LoadDecorRules said so
+            // once at startup and there is no reason to say it per instance.
+            return;
+        }
+
+        // The PLAN's seed, the same number the terrain and the spawn draw came
+        // from. BuildDecorPlan derives its own stream from it, so the props
+        // follow a re-roll exactly as the walls do and re-entering the same
+        // dungeon finds them where they were.
+        std::vector<DecorSpot> const spots = BuildDecorPlan(
+            plan,
+            [](int chunkId) { return sPDv2Mgr->WalkMaskFor(chunkId); },
+            [](int chunkId) { return sPDv2Mgr->AnchorsFor(chunkId); },
+            rules, plan.effectiveSeed);
+
+        uint32 placed = 0;
+        for (DecorSpot const& spot : spots)
+        {
+            // Z is the kit's floor plane, which BlockToWorld already supplies -
+            // the same plane the creatures stand on, and the only floor the
+            // server knows about on this map.
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            sPDv2Mgr->BlockToWorld(spot.bx, spot.by, spot.u, spot.v, x, y, z);
+
+            // respawnTime 0: no despawn timer. A prop is furniture and lives
+            // exactly as long as the instance does; DespawnAll owns its end.
+            GameObject* go = instance->SummonGameObject(
+                static_cast<uint32>(spot.goEntry), x, y, z,
+                static_cast<float>(spot.orientation), 0.0f, 0.0f, 0.0f, 0.0f, 0);
+            if (!go)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon decor {} "
+                                  "(missing gameobject_template?)",
+                          instance->GetInstanceId(), spot.goEntry);
+                continue;
+            }
+
+            _decorGuids.push_back(go->GetGUID());
+            ++placed;
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} prop(s) from {} decor rule(s) "
+                         "over a {}-block plan",
+                 instance->GetInstanceId(), placed, uint32(rules.size()),
+                 uint32(plan.blocks.size()));
     }
 
     void PDv2InstanceScript::CatchFallers()

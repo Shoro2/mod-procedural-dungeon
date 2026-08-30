@@ -506,3 +506,22 @@ ProceduralDungeon.V2.CastRangeYd = 25.0
 
 ProceduralDungeon.V2.AggroRangeYd = 20.0
 
+#
+#    ProceduralDungeon.V2.Decor.Enable
+#        Description: Place the server-side props (torches, braziers) a layout
+#                     calls for. The kit's terrain carries no light sources at
+#                     all, so 0 leaves the dungeon lit by nothing - it is meant
+#                     for chasing a GameObject budget or a display problem, not
+#                     for play. The rules themselves live in
+#                     pdungeon_decor_rules; this key only decides whether they
+#                     are applied.
+#
+#                     Nothing reads the props: they are decoration, no mechanic
+#                     keys on them, and turning them off changes no other
+#                     number in the run.
+#        Default:     1 - on
+#                     0 - off
+#
+
+ProceduralDungeon.V2.Decor.Enable = 1
+

@@ -19,6 +19,7 @@
 #define MOD_PDUNGEON_V2_MGR_H
 
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
 #include "generator/PDv2WorldMath.h"
 
@@ -28,6 +29,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 class Player;
 
@@ -91,6 +93,13 @@ namespace PDungeon
         // Share of a run's TRASH that wears the affixes, in percent. Default =
         // mod-dungeon-challenge's live DungeonChallenge.AffixPercentage.
         int         affixPct = 40;
+
+        // Server-side props (torches, braziers). On by default: a dungeon
+        // without them is lit by nothing at all, because the kit's terrain
+        // carries no light sources. Off is for an operator hunting a GO budget
+        // or a display problem - it costs nothing else, since the props are
+        // decoration and no mechanic reads them.
+        bool        decorEnable = true;
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the
@@ -220,6 +229,22 @@ namespace PDungeon
 
         size_t WalkMaskCount() const { return _walkMasks.size(); }
 
+        // The kit's anchor points for a chunk (entry, boss, chest, spawns), in
+        // the block-local FLPD-BLOCK-1 frame, or nullptr for a chunk with none
+        // - which every corridor is. Loaded beside the walk masks out of the
+        // same `pdungeon_chunk_meta` row, so the two can never describe
+        // different kits. The decor planner keeps its props clear of these.
+        std::vector<DecorAnchor> const* AnchorsFor(int chunkId) const;
+
+        // Loads `pdungeon_decor_rules`, ascending id. Called once at world
+        // startup beside LoadChunkMeta and read-only afterwards, for the same
+        // reason: map threads read it without a lock.
+        void LoadDecorRules();
+
+        // The decor rules, in the order they were loaded (ascending id).
+        // BuildDecorPlan sorts defensively all the same - see its header.
+        std::vector<DecorRule> const& DecorRules() const { return _decorRules; }
+
     private:
         void StorePlan(uint32_t accountId, BlockPlan const& plan);
         void SavePlanToDB(uint32_t accountId, BlockPlan const& plan);
@@ -229,6 +254,8 @@ namespace PDungeon
         std::unordered_map<uint32_t, std::shared_ptr<BlockPlan const>> _plans;
         std::unordered_map<uint32_t, PDv2AccountState> _accounts;
         std::unordered_map<int, std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK>> _walkMasks;
+        std::unordered_map<int, std::vector<DecorAnchor>> _chunkAnchors;
+        std::vector<DecorRule> _decorRules;
     };
 }
 

@@ -77,6 +77,9 @@ namespace PDungeon
         _config.affixPct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Affix.Percentage", 40)));
 
+        _config.decorEnable = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Decor.Enable", true);
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{})",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,
@@ -410,12 +413,18 @@ namespace PDungeon
     void PDv2Mgr::LoadChunkMeta()
     {
         _walkMasks.clear();
+        _chunkAnchors.clear();
 
         // Highest kit version wins per chunk id: rows are read in ascending
         // kitVersion order and later ones overwrite. Today there is exactly
         // one kit, so this is bookkeeping for the day there are two.
+        //
+        // The anchors ride along in the same row as the mask on purpose: they
+        // describe the same block, and reading them from a second query - or
+        // worse, a second file - is how a kit regeneration ends up half
+        // applied.
         QueryResult result = WorldDatabase.Query(
-            "SELECT chunkId, kitVersion, walkMask FROM pdungeon_chunk_meta "
+            "SELECT chunkId, kitVersion, walkMask, anchors FROM pdungeon_chunk_meta "
             "WHERE theme = '{}' ORDER BY kitVersion", _config.theme);
         if (!result)
         {
@@ -445,6 +454,20 @@ namespace PDungeon
 
             auto& slot = _walkMasks[chunkId];
             std::copy(mask.begin(), mask.end(), slot.begin());
+
+            // A chunk with no anchors is ordinary - every corridor variant has
+            // none - so an empty list is stored rather than nothing, and only
+            // a malformed one is worth a line. It costs the decor planner its
+            // clearance check for that chunk and nothing else.
+            std::string const anchorText = fields[3].Get<std::string>();
+            std::vector<DecorAnchor> anchors;
+            if (!DecodeAnchorList(anchorText, anchors))
+            {
+                LOG_ERROR(PD_LOG, "PDv2: chunk {} has a malformed anchors field ('{}')",
+                          chunkId, anchorText);
+                anchors.clear();
+            }
+            _chunkAnchors[chunkId] = std::move(anchors);
         } while (result->NextRow());
 
         LOG_INFO(PD_LOG, "PDv2: loaded {} walk mask(s) from pdungeon_chunk_meta "
@@ -456,6 +479,61 @@ namespace PDungeon
     {
         auto it = _walkMasks.find(chunkId);
         return it == _walkMasks.end() ? nullptr : it->second.data();
+    }
+
+    std::vector<DecorAnchor> const* PDv2Mgr::AnchorsFor(int chunkId) const
+    {
+        auto it = _chunkAnchors.find(chunkId);
+        return it == _chunkAnchors.end() ? nullptr : &it->second;
+    }
+
+    void PDv2Mgr::LoadDecorRules()
+    {
+        _decorRules.clear();
+
+        // Every theme's rules, ascending id: the planner filters by the plan's
+        // own theme, so an account on a second theme is one config value away
+        // rather than one restart. ORDER BY id is the fixed iteration order the
+        // determinism promise rests on - see PDv2DecorPlan.h.
+        QueryResult result = WorldDatabase.Query(
+            "SELECT id, theme, roleFilter, goEntry, placement, minPerBlock, "
+            "maxPerBlock, weight, minSpacingYd FROM pdungeon_decor_rules ORDER BY id");
+        if (!result)
+        {
+            LOG_INFO(PD_LOG, "PDv2: pdungeon_decor_rules has no rows - dungeons "
+                             "will be built without props");
+            return;
+        }
+
+        do
+        {
+            Field* fields = result->Fetch();
+            DecorRule rule;
+            rule.id = static_cast<int>(fields[0].Get<uint32>());
+            rule.theme = fields[1].Get<uint8>();
+            rule.roleFilter = fields[2].Get<std::string>();
+            rule.goEntry = static_cast<int>(fields[3].Get<uint32>());
+            rule.placement = fields[4].Get<std::string>();
+            rule.minPerBlock = fields[5].Get<uint8>();
+            rule.maxPerBlock = fields[6].Get<uint8>();
+            rule.weight = static_cast<int>(fields[7].Get<uint32>());
+            rule.minSpacingYd = fields[8].Get<float>();
+
+            if (rule.placement != DECOR_PLACEMENT_WALL_FOOT)
+            {
+                // Kept in the list all the same: the planner skips it by the
+                // same test, and dropping it here would hide a typo that the
+                // operator can only find by counting torches.
+                LOG_ERROR(PD_LOG, "PDv2: decor rule {} asks for placement '{}', which "
+                                  "no planner implements - it will place nothing",
+                          rule.id, rule.placement);
+            }
+
+            _decorRules.push_back(std::move(rule));
+        } while (result->NextRow());
+
+        LOG_INFO(PD_LOG, "PDv2: loaded {} decor rule(s) from pdungeon_decor_rules",
+                 uint32(_decorRules.size()));
     }
 
     bool PDv2Mgr::EntranceWorldPos(BlockPlan const& plan, float& x, float& y, float& z) const
