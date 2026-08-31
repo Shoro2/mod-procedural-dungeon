@@ -29,7 +29,12 @@
 
 CREATE TABLE IF NOT EXISTS `pdungeon_decor_rules` (
     `id` INT UNSIGNED NOT NULL,
-    `theme` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+    -- 0 = ANY theme, the same sentinel pdungeon_packs uses. A rule is
+    -- scoped to one theme only if its GameObject would look wrong under
+    -- another; a wall-foot brazier does not. Scoping these to theme 1
+    -- left the city with no server decor at all once it became the
+    -- default look.
+    `theme` TINYINT UNSIGNED NOT NULL DEFAULT 0,
     `roleFilter` VARCHAR(32) NOT NULL DEFAULT '',
     `goEntry` INT UNSIGNED NOT NULL,
     `placement` VARCHAR(16) NOT NULL DEFAULT 'wall_foot',
@@ -63,9 +68,9 @@ DELETE FROM `pdungeon_decor_rules` WHERE `id` BETWEEN 1 AND 3;
 -- nothing.
 INSERT INTO `pdungeon_decor_rules`
     (`id`, `theme`, `roleFilter`, `goEntry`, `placement`, `minPerBlock`, `maxPerBlock`, `weight`, `minSpacingYd`) VALUES
-    (1, 1, 'room',      910020, 'wall_foot', 1, 3, 100, 8),
-    (2, 1, 'room_boss', 910021, 'wall_foot', 1, 2,  40, 8),
-    (3, 1, 'corridor',  910020, 'wall_foot', 0, 1, 100, 8);
+    (1, 0, 'room',      910020, 'wall_foot', 1, 3, 100, 8),
+    (2, 0, 'room_boss', 910021, 'wall_foot', 1, 2,  40, 8),
+    (3, 0, 'corridor',  910020, 'wall_foot', 0, 1, 100, 8);
 
 -- ----------------------------------------------------------------------------
 -- GameObject templates 910020 / 910021, re-declared verbatim from

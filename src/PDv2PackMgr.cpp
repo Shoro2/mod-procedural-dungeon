@@ -105,13 +105,31 @@ namespace PDungeon
             "FROM pdungeon_packs p "
             "LEFT JOIN pdungeon_pack_members m ON m.packId = p.id "
             "LEFT JOIN creature_template ct ON ct.entry = m.entry "
-            "WHERE p.enabled = 1 AND p.theme = {} "
+            // theme 0 = usable under ANY look; see the column comment in
+            // mod_pdungeon_packs.sql. Scoping every pack to one theme meant a
+            // new look shipped with nothing but the placeholder creature.
+            "WHERE p.enabled = 1 AND p.theme IN (0, {}) "
             "ORDER BY p.id, m.entry", theme);
         if (!result)
         {
-            LOG_ERROR(PD_LOG, "PDv2: pdungeon_packs has no enabled rows for theme {} - "
-                              "mod_pdungeon_packs.sql was not applied, and spawns fall "
-                              "back to the placeholder creature", theme);
+            // Say which of the two it actually is. The old message asserted
+            // the SQL had not been applied, which was wrong the first time it
+            // fired: the file was applied, it simply held no row for the
+            // theme that had just become the default.
+            QueryResult any = WorldDatabase.Query(
+                "SELECT COUNT(*), COALESCE(GROUP_CONCAT(DISTINCT theme), '-') "
+                "FROM pdungeon_packs WHERE enabled = 1");
+            uint32 const enabled = any ? (*any)[0].Get<uint32>() : 0;
+            std::string const themes = any ? (*any)[1].Get<std::string>() : "-";
+            if (enabled)
+                LOG_ERROR(PD_LOG, "PDv2: pdungeon_packs holds {} enabled pack(s) but "
+                                  "none usable for theme {} (they carry theme(s) {}; "
+                                  "0 means any) - spawns fall back to the placeholder "
+                                  "creature", enabled, theme, themes);
+            else
+                LOG_ERROR(PD_LOG, "PDv2: pdungeon_packs has no enabled rows at all - "
+                                  "mod_pdungeon_packs.sql was not applied, and spawns "
+                                  "fall back to the placeholder creature");
             return;
         }
 

@@ -436,7 +436,11 @@ namespace PDungeon
             for (size_t const i : byId)
             {
                 DecorRule const& rule = rules[i];
-                if (rule.theme != plan.config.theme) continue;
+                // theme 0 = any look, same sentinel the packs use. A
+                // rule scoped to one theme left the city with no server
+                // decor at all the moment it became the default.
+                if (rule.theme != 0 && rule.theme != plan.config.theme)
+                    continue;
                 if (rule.placement != DECOR_PLACEMENT_WALL_FOOT) continue;
                 if (!DecorRoleMatches(rule.roleFilter, roleName)) continue;
                 matching.push_back(i);
