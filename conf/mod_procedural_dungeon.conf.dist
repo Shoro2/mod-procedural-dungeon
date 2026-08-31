@@ -312,10 +312,11 @@ ProceduralDungeon.V2.LoopChance = 15
 #                     whatever this says (masks for ALL themes stay loaded),
 #                     and `.pdungeon v2 gen [seed] [theme]` overrides it for
 #                     one GM test generation.
-#        Default:     1
+#        Default:     2 - the city is the standard look the UI presents;
+#                     the mine stays reachable with `gen [seed] 1`.
 #
 
-ProceduralDungeon.V2.Theme = 1
+ProceduralDungeon.V2.Theme = 2
 
 #
 #    ProceduralDungeon.V2.RequiredDllVersion
