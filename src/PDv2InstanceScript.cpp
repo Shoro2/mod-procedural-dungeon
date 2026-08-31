@@ -53,7 +53,13 @@ namespace PDungeon
         // Stand-in for a run whose packs could not be drawn (the SQL was not
         // applied, or every pack is disabled). Chosen because it is a stock,
         // level-appropriate humanoid every client already has art for.
-        uint32 const PLACEHOLDER_CREATURE = 29402;   // Anub'ar Skirmisher
+        // 29402 is 'Ironwool Mammoth' (level 77-78, faction 190) in this
+        // world DB, not the Anub'ar Skirmisher this comment used to
+        // claim - and the operator reported exactly that surprise. It
+        // stays as the fallback BECAUSE it is absurd in a dungeon: a
+        // herd of mammoths is an unmistakable "the packs did not load"
+        // signal, which a plausible-looking undead would hide.
+        uint32 const PLACEHOLDER_CREATURE = 29402;   // Ironwool Mammoth
 
         float const SPAWN_SPREAD_YD = 12.0f;
 
