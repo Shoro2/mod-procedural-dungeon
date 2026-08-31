@@ -31,7 +31,7 @@ INSERT INTO `mapdifficulty_dbc` (`ID`, `MapID`, `Difficulty`, `Message_Lang_enUS
 -- DBC exactly or the two sides credit different zones.
 DELETE FROM `areatable_dbc` WHERE `ID` = 5100;
 INSERT INTO `areatable_dbc` (`ID`, `ContinentID`, `ParentAreaID`, `AreaBit`, `Flags`, `SoundProviderPref`, `SoundProviderPrefUnderwater`, `AmbienceID`, `ZoneMusic`, `IntroSound`, `ExplorationLevel`, `AreaName_Lang_enUS`, `AreaName_Lang_enGB`, `AreaName_Lang_koKR`, `AreaName_Lang_frFR`, `AreaName_Lang_deDE`, `AreaName_Lang_enCN`, `AreaName_Lang_zhCN`, `AreaName_Lang_enTW`, `AreaName_Lang_zhTW`, `AreaName_Lang_esES`, `AreaName_Lang_esMX`, `AreaName_Lang_ruRU`, `AreaName_Lang_ptPT`, `AreaName_Lang_ptBR`, `AreaName_Lang_itIT`, `AreaName_Lang_Unk`, `AreaName_Lang_Mask`, `FactionGroupMask`, `LiquidTypeID_1`, `LiquidTypeID_2`, `LiquidTypeID_3`, `LiquidTypeID_4`, `MinElevation`, `Ambient_Multiplier`, `Lightid`) VALUES
-(5100, 760, 0, 4007, 0, 76, 0, 53, 204, 0, 0, 'The Forgotten Depths', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0);
+(5100, 760, 0, 4007, 0, 76, 0, 477, 439, 551, 0, 'The Forgotten Depths', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0);
 
 -- NOT done here: removing v1's map-37 override. mod_pdungeon_base.sql still
 -- INSERTs those rows, so deleting them from this file would only work
