@@ -17,19 +17,21 @@ INSERT INTO `instance_template` (`map`, `parent`, `script`, `allowMount`) VALUES
 (760, 0, '', 1);
 
 DELETE FROM `map_dbc` WHERE `ID` = 760;
-INSERT INTO `map_dbc` (`ID`, `Directory`, `InstanceType`, `Flags`, `PVP`, `MapName_Lang_enUS`, `MapName_Lang_Mask`, `AreaTableID`, `MapDescription0_Lang_Mask`, `MapDescription1_Lang_Mask`, `LoadingScreenID`, `MinimapIconScale`, `CorpseMapID`, `CorpseX`, `CorpseY`, `TimeOfDayOverride`, `ExpansionID`, `RaidOffset`, `MaxPlayers`) VALUES
-(760, 'FLPD', 1, 0, 0, 'The Forgotten Depths', 16712190, 5100, 0, 0, 0, 1, -1, 0, 0, -1, 2, 0, 5);
+INSERT INTO `map_dbc` (`ID`, `Directory`, `InstanceType`, `Flags`, `PVP`, `MapName_Lang_enUS`, `MapName_Lang_enGB`, `MapName_Lang_koKR`, `MapName_Lang_frFR`, `MapName_Lang_deDE`, `MapName_Lang_enCN`, `MapName_Lang_zhCN`, `MapName_Lang_enTW`, `MapName_Lang_zhTW`, `MapName_Lang_esES`, `MapName_Lang_esMX`, `MapName_Lang_ruRU`, `MapName_Lang_ptPT`, `MapName_Lang_ptBR`, `MapName_Lang_itIT`, `MapName_Lang_Unk`, `MapName_Lang_Mask`, `AreaTableID`, `MapDescription0_Lang_enUS`, `MapDescription0_Lang_enGB`, `MapDescription0_Lang_koKR`, `MapDescription0_Lang_frFR`, `MapDescription0_Lang_deDE`, `MapDescription0_Lang_enCN`, `MapDescription0_Lang_zhCN`, `MapDescription0_Lang_enTW`, `MapDescription0_Lang_zhTW`, `MapDescription0_Lang_esES`, `MapDescription0_Lang_esMX`, `MapDescription0_Lang_ruRU`, `MapDescription0_Lang_ptPT`, `MapDescription0_Lang_ptBR`, `MapDescription0_Lang_itIT`, `MapDescription0_Lang_Unk`, `MapDescription0_Lang_Mask`, `MapDescription1_Lang_enUS`, `MapDescription1_Lang_enGB`, `MapDescription1_Lang_koKR`, `MapDescription1_Lang_frFR`, `MapDescription1_Lang_deDE`, `MapDescription1_Lang_enCN`, `MapDescription1_Lang_zhCN`, `MapDescription1_Lang_enTW`, `MapDescription1_Lang_zhTW`, `MapDescription1_Lang_esES`, `MapDescription1_Lang_esMX`, `MapDescription1_Lang_ruRU`, `MapDescription1_Lang_ptPT`, `MapDescription1_Lang_ptBR`, `MapDescription1_Lang_itIT`, `MapDescription1_Lang_Unk`, `MapDescription1_Lang_Mask`, `LoadingScreenID`, `MinimapIconScale`, `CorpseMapID`, `CorpseX`, `CorpseY`, `TimeOfDayOverride`, `ExpansionID`, `RaidOffset`, `MaxPlayers`) VALUES
+(760, 'FLPD', 1, 0, 0, 'The Forgotten Depths', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 5100, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712188, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712188, 142, 1.0, -1, -11207.798828125, 1681.15087890625, 1440, 2, 0, 5);
 
 -- Without a MapDifficulty row the CLIENT refuses entry outright, and the
 -- server's MapMgr::PlayerCannotEnter returns DIFFICULTY_UNAVAILABLE.
 DELETE FROM `mapdifficulty_dbc` WHERE `MapID` = 760;
-INSERT INTO `mapdifficulty_dbc` (`ID`, `MapID`, `Difficulty`, `Message_Lang_Mask`, `RaidDuration`, `MaxPlayers`, `Difficultystring`) VALUES
-(857, 760, 0, 0, 0, 5, '');
+INSERT INTO `mapdifficulty_dbc` (`ID`, `MapID`, `Difficulty`, `Message_Lang_enUS`, `Message_Lang_enGB`, `Message_Lang_koKR`, `Message_Lang_frFR`, `Message_Lang_deDE`, `Message_Lang_enCN`, `Message_Lang_zhCN`, `Message_Lang_enTW`, `Message_Lang_zhTW`, `Message_Lang_esES`, `Message_Lang_esMX`, `Message_Lang_ruRU`, `Message_Lang_ptPT`, `Message_Lang_ptBR`, `Message_Lang_itIT`, `Message_Lang_Unk`, `Message_Lang_Mask`, `RaidDuration`, `MaxPlayers`, `Difficultystring`) VALUES
+(857, 760, 0, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 0, 0, 5, '');
 
--- The area the whole map falls back to; see linked_zone above.
+-- The area the whole map falls back to; see linked_zone above. AreaBit
+-- 4007 is this dungeon's own exploration bit - it must match the client
+-- DBC exactly or the two sides credit different zones.
 DELETE FROM `areatable_dbc` WHERE `ID` = 5100;
-INSERT INTO `areatable_dbc` (`ID`, `ContinentID`, `ParentAreaID`, `AreaBit`, `Flags`, `ExplorationLevel`, `AreaName_Lang_enUS`, `AreaName_Lang_Mask`) VALUES
-(5100, 760, 0, 0, 0, 80, 'The Forgotten Depths', 16712190);
+INSERT INTO `areatable_dbc` (`ID`, `ContinentID`, `ParentAreaID`, `AreaBit`, `Flags`, `SoundProviderPref`, `SoundProviderPrefUnderwater`, `AmbienceID`, `ZoneMusic`, `IntroSound`, `ExplorationLevel`, `AreaName_Lang_enUS`, `AreaName_Lang_enGB`, `AreaName_Lang_koKR`, `AreaName_Lang_frFR`, `AreaName_Lang_deDE`, `AreaName_Lang_enCN`, `AreaName_Lang_zhCN`, `AreaName_Lang_enTW`, `AreaName_Lang_zhTW`, `AreaName_Lang_esES`, `AreaName_Lang_esMX`, `AreaName_Lang_ruRU`, `AreaName_Lang_ptPT`, `AreaName_Lang_ptBR`, `AreaName_Lang_itIT`, `AreaName_Lang_Unk`, `AreaName_Lang_Mask`, `FactionGroupMask`, `LiquidTypeID_1`, `LiquidTypeID_2`, `LiquidTypeID_3`, `LiquidTypeID_4`, `MinElevation`, `Ambient_Multiplier`, `Lightid`) VALUES
+(5100, 760, 0, 4007, 0, 76, 0, 53, 204, 0, 0, 'The Forgotten Depths', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0);
 
 -- NOT done here: removing v1's map-37 override. mod_pdungeon_base.sql still
 -- INSERTs those rows, so deleting them from this file would only work
