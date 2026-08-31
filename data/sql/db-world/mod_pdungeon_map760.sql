@@ -24,7 +24,7 @@ INSERT INTO `map_dbc` (`ID`, `Directory`, `InstanceType`, `Flags`, `PVP`, `MapNa
 -- server's MapMgr::PlayerCannotEnter returns DIFFICULTY_UNAVAILABLE.
 DELETE FROM `mapdifficulty_dbc` WHERE `MapID` = 760;
 INSERT INTO `mapdifficulty_dbc` (`ID`, `MapID`, `Difficulty`, `Message_Lang_Mask`, `RaidDuration`, `MaxPlayers`, `Difficultystring`) VALUES
-(789, 760, 0, 0, 0, 5, '');
+(857, 760, 0, 0, 0, 5, '');
 
 -- The area the whole map falls back to; see linked_zone above.
 DELETE FROM `areatable_dbc` WHERE `ID` = 5100;
