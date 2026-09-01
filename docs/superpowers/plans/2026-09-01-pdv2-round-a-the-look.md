@@ -958,23 +958,20 @@ never decorated the padded theme-2 rooms the live server actually generates.
 
 - [ ] **Step 1: Write the failing test**
 
-**1a.** Give `MakeCfg` a theme parameter, defaulting to today's value so no other caller changes:
+**1a.** Set the theme on the config **after** construction, in `RunDecorBatch`.
+
+**Corrected 2026-09-01 during implementation.** An earlier draft of this step had you rewrite
+`MakeCfg` with a `theme` parameter and a verbatim body — that body was wrong and would have deleted
+the real `MakeCfg`'s `originBX` / `originBY` parameters (`tests/blockplan_harness.cpp:78`), which
+`WriteManifest` genuinely depends on. **Leave `MakeCfg` untouched.** The file already has the right
+pattern at `:323-324`:
 
 ```cpp
-        BlockCfg MakeCfg(uint32_t seed, int rooms, int theme = 1)
-        {
-            BlockCfg cfg;
-            cfg.seed = seed;
-            cfg.rooms = rooms;
-            cfg.bossRooms = 1;
-            cfg.fieldBlocks = 8;
-            cfg.loopChancePct = 15;
-            cfg.originBX = 256;
-            cfg.originBY = 256;
-            cfg.theme = theme;
-            return cfg;
-        }
+        BlockCfg cfg = MakeCfg(seed, rooms, obx, oby);
+        cfg.theme = theme;
 ```
+
+Mirror exactly that in `RunDecorBatch` — one call site changed, no signature moved.
 
 **1b.** In `RunDecorBatch`, run every seed through both themes:
 
@@ -984,8 +981,11 @@ never decorated the padded theme-2 rooms the live server actually generates.
             {
                 for (int const rooms : ROOM_MATRIX)
                 {
+                    BlockCfg cfg = MakeCfg(seed, rooms);
+                    cfg.theme = theme;
+
                     BlockPlan plan;
-                    if (!GenerateBlockPlan(MakeCfg(seed, rooms, theme), &plan))
+                    if (!GenerateBlockPlan(cfg, &plan))
                     {
                         Check(false, "generation failed", seed);
                         continue;
