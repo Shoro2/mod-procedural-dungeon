@@ -52,6 +52,15 @@ cmd /k "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Bui
 A line `Der Befehl "vswhere.exe" ... konnte nicht gefunden werden.` is printed first and is harmless —
 measured; `cl.exe` 19.44 initialises anyway.
 
+**`cmd /k` is the interactive form and does not chain** (measured in Task 3). To compile from a
+non-interactive shell, chain in one `cmd /c` instead, and run the built `pdblock.exe` as its own
+command afterwards — chaining the run into the same invocation has been seen to report the
+freshly-built exe as "not found":
+
+```bash
+cmd /c '"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" && cl /nologo /std:c++17 /EHsc /W4 /O2 /I src /Fo:build_tmp\ /Fe:pdblock.exe tests\blockplan_harness.cpp src\generator\PDBlockPlan.cpp src\generator\PDv2WalkGrid.cpp src\generator\PDv2LinkState.cpp src\generator\PDv2DecorPlan.cpp'
+```
+
 Build `pdblock` with **today's true source set — four generator sources**, not the two the vault
 documents nor the three `CLAUDE.md` documents:
 
