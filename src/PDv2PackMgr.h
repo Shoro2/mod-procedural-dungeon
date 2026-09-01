@@ -18,6 +18,8 @@
 #ifndef MOD_PDUNGEON_V2_PACK_MGR_H
 #define MOD_PDUNGEON_V2_PACK_MGR_H
 
+#include "generator/PDv2PackDraw.h"
+
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -34,23 +36,15 @@
 // Loaded once at world startup and READ-ONLY afterwards, exactly like
 // PDv2Mgr::LoadChunkMeta - that immutability is what lets map threads query it
 // without a lock. Pack changes need a restart, same as a kit change.
+//
+// PackRole, PackMember, SpawnPick and SpawnSelectInputs live in
+// generator/PDv2PackDraw.h, not here: that header is engine-free (no
+// AzerothCore include may appear in it), which is what lets
+// tests/blockplan_harness.cpp link the actual spawn draw. This file keeps the
+// types that stay database-shaped - Pack, MemberSpell, AffixDef - and the
+// manager that loads them.
 namespace PDungeon
 {
-    enum PackRole : uint8_t
-    {
-        PACK_ROLE_MELEE = 0,
-        PACK_ROLE_CASTER = 1,
-        PACK_ROLE_BOSS = 2
-    };
-
-    struct PackMember
-    {
-        uint32_t entry = 0;
-        uint8_t  role = PACK_ROLE_MELEE;
-        uint32_t casterSpellId = 0;     // 0 for anything that is not a caster
-        uint16_t weight = 100;
-    };
-
     enum MemberSpellSlot : uint8_t
     {
         // The range mob's filler: cast back to back for as long as it holds,
@@ -97,40 +91,15 @@ namespace PDungeon
         uint8_t  minDiff = 1;
     };
 
-    struct SpawnPick
-    {
-        uint32_t entry = 0;
-        uint8_t  role = PACK_ROLE_MELEE;
-        uint32_t casterSpellId = 0;
-        // This spawn wears the run's affixes. Rolled inside SelectSpawns so it
-        // rides the seeded stream with every other spawn decision - the same
-        // seed brings back the same affixed mobs after a restart.
-        bool     affixed = false;
-    };
-
-    // One room the caller wants filled. `roomIndex` is opaque here and simply
-    // handed back, so the instance script can key it however it likes.
-    struct RoomRequest
-    {
-        int  roomIndex = 0;
-        bool isBoss = false;
-    };
-
+    // One requested room's worth of picks, keyed back to the RoomRequest that
+    // asked for it. SelectSpawns rebuilds this grouping from the flat stream
+    // PDv2SelectSpawns hands back, using the same per-room slot counts
+    // (spawnsPerRoom / bossRoomAdds) it computed the request with, so the
+    // boundaries are never ambiguous.
     struct RoomSpawns
     {
         int roomIndex = 0;
         std::vector<SpawnPick> picks;
-    };
-
-    struct SpawnSelectInputs
-    {
-        std::vector<RoomRequest> rooms;
-        int spawnsPerRoom = 5;          // trash in a NORMAL room
-        int bossRoomAdds = 2;           // trash BESIDE the boss, boss rooms
-        int casterPct = 60;             // 01 §8 caster ratio, already clamped
-        int bandMin = 76;               // band is [bandMin, bandMin + 4]
-        int unlockedDlvl = 0;
-        int affixPct = 40;              // share of TRASH that wears the affixes
     };
 
     class PDv2PackMgr
@@ -207,6 +176,13 @@ namespace PDungeon
         std::vector<AffixDef> _affixes;     // enabled rows only, by minDiff
         std::unordered_map<uint32_t, std::vector<MemberSpell>> _memberSpells;
         size_t _memberSpellRows = 0;
+
+        // Packs with at least one non-boss member, ascending by id. Computed
+        // once here at load time, not per draw: PackPools::trashPackIds is
+        // band-independent by design (Task 13's per-room pack draw), so
+        // recomputing it on every SelectSpawns call would cost work for a
+        // set that never changes between one restart and the next.
+        std::vector<int> _trashPackIds;
     };
 }
 

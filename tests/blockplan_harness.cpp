@@ -34,6 +34,7 @@
 //   cl /std:c++17 /EHsc /W4 /O2 /I src tests\blockplan_harness.cpp
 //      src\generator\PDBlockPlan.cpp src\generator\PDv2WalkGrid.cpp
 //      src\generator\PDv2LinkState.cpp src\generator\PDv2DecorPlan.cpp
+//      src\generator\PDv2PackDraw.cpp
 //      /Fe:pdblock.exe
 
 // MSVC deprecates std::fopen in favour of fopen_s, which is a Microsoft
@@ -47,6 +48,7 @@
 #include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
 #include "generator/PDv2LinkState.h"
+#include "generator/PDv2PackDraw.h"
 #include "generator/PDv2WalkGrid.h"
 
 #include <cmath>
@@ -2113,6 +2115,72 @@ namespace
         return g_failures == 0 ? 0 : 1;
     }
 
+    // --- pack draw (PDv2SelectSpawns, generator/PDv2PackDraw.cpp) -----------
+    //
+    // A characterisation test: the draw for a fixed seed and a fixed pool
+    // must not move. Captured from the extraction in Task 12 of the PDv2
+    // content-expansion plan, before Task 13 touches the draw order.
+    //
+    // The draw order is a determinism CONTRACT: changing it re-rolls which
+    // creatures every stored seed spawns. This pins it. If this check fails
+    // after a change to PDv2PackDraw, that is the change being noticed, not
+    // the test being wrong - update the pin deliberately, in the same commit
+    // as the draw-order comment.
+    char const* const PD_SPAWN_DRAW_PIN =
+        "84263,84269,84268,84276,84269,84267,84266,84266,84264,84276,84288,84268,84276,";
+
+    // A fixed stand-in for the live pack tables: two packs, one with a
+    // boss, enough members that a 5-trash room and a boss room both have
+    // something to draw. The entries are the shipped stock ones so the pin
+    // is readable by anyone who knows the dungeon.
+    PackPools FixedPackPools()
+    {
+        PackPools pools;
+        pools.melee  = { {1, 84264}, {1, 84265}, {1, 84266},
+                         {2, 84267}, {2, 84268}, {2, 84269} };
+        pools.caster = { {1, 84263}, {2, 84276} };
+        pools.boss   = { {1, 84288}, {2, 84289} };
+        return pools;
+    }
+
+    SpawnSelectInputs FixedSpawnInputs()
+    {
+        SpawnSelectInputs in;
+        in.rooms = { { /*roomIndex*/ 0, /*isBossRoom*/ false },
+                     { 1, false },
+                     { 2, true } };
+        in.spawnsPerRoom = 5;
+        in.bossRoomAdds = 2;
+        in.casterPct = 40;
+        in.bandMin = 76;
+        in.affixPct = 40;
+        return in;
+    }
+
+    bool CheckSpawnDrawPinned(std::string& why)
+    {
+        SpawnSelectInputs in = FixedSpawnInputs();
+        std::vector<SpawnPick> picks;
+        if (!PDv2SelectSpawns(12345u, in, FixedPackPools(), picks))
+        {
+            why = "the pinned spawn draw refused to select";
+            return false;
+        }
+
+        std::string got;
+        for (SpawnPick const& p : picks)
+        {
+            got += std::to_string(p.entry);
+            got += ',';
+        }
+        if (got != PD_SPAWN_DRAW_PIN)
+        {
+            why = "the spawn draw moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
@@ -2120,6 +2188,16 @@ namespace
         RunLinkStateChecks();
         RunGameMathChecks();
         RunLayoutFreezeCheck();
+        {
+            // Two statements, not one call: argument evaluation order is
+            // unspecified, and why.c_str() must not be taken before
+            // CheckSpawnDrawPinned has finished writing into `why` (the same
+            // trap PDv2SelectSpawns's own pickTrash/emit split guards
+            // against, one file over).
+            std::string why;
+            bool const ok = CheckSpawnDrawPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
         // A tenth of the batch is plenty for three boss-room counts: the
         // property is structural, not statistical.
         RunBossRoomChecks(count / 10 + 1);
