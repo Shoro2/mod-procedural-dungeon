@@ -71,6 +71,11 @@ namespace PDungeon
             int row = 0;
             int col = 0;
             int dir = 0;
+            // The SECOND wall side, for a corner candidate; -1 when the cell
+            // has only one. The nudge for a corner is the sum of both sides'
+            // offsets, so the prop sits in the angle rather than against one
+            // face, and the facing bisects them.
+            int dir2 = -1;
         };
 
         // A weight of 0 is read as 1. A rule nobody wants should be deleted
@@ -121,6 +126,74 @@ namespace PDungeon
                     }
                 }
             }
+        }
+
+        // Every WALK cell with WALL cells on two ADJACENT sides, row-major,
+        // socket track excluded. The two sides are recorded in WALL_DIRS order,
+        // so a cell with three walls always resolves to the same pair.
+        void CollectCorners(std::string const& classes,
+                            std::vector<Candidate>& out)
+        {
+            out.clear();
+            for (int row = 0; row < PD_CELLS_PER_BLOCK; ++row)
+            {
+                for (int col = 0; col < PD_CELLS_PER_BLOCK; ++col)
+                {
+                    if (row == SOCKET_TRACK || col == SOCKET_TRACK) continue;
+                    if (classes[Index(row, col)] != DECOR_CLASS_WALK) continue;
+
+                    bool wall[4] = { false, false, false, false };
+                    for (int d = 0; d < 4; ++d)
+                    {
+                        int const r = row + WALL_DIRS[d].drow;
+                        int const c = col + WALL_DIRS[d].dcol;
+                        if (r < 0 || c < 0 ||
+                            r >= PD_CELLS_PER_BLOCK || c >= PD_CELLS_PER_BLOCK)
+                        {
+                            continue;
+                        }
+                        wall[d] = classes[Index(r, c)] == DECOR_CLASS_WALL;
+                    }
+
+                    // N,E,S,W: adjacency is d and (d+1)%4. The first pair in
+                    // this order wins, so a three-walled alcove is stable.
+                    for (int d = 0; d < 4; ++d)
+                    {
+                        int const e = (d + 1) % 4;
+                        if (!wall[d] || !wall[e]) continue;
+
+                        Candidate cand;
+                        cand.row = row;
+                        cand.col = col;
+                        cand.dir = d;
+                        cand.dir2 = e;
+                        out.push_back(cand);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Placement name -> pool index, or -1 for a kind no planner implements.
+        // The order here is the order of the pool arrays and must not change.
+        int PlacementIndex(std::string const& placement)
+        {
+            if (placement == DECOR_PLACEMENT_WALL_FOOT) return 0;
+            if (placement == DECOR_PLACEMENT_CORNER)    return 1;
+            return -1;
+        }
+
+        // The angle halfway between two wall facings, on the short arc. The
+        // pairs are always 90 degrees apart, so this is the corner's diagonal.
+        double BisectFacing(double a, double b)
+        {
+            double diff = b - a;
+            while (diff > DECOR_PI)  diff -= 2.0 * DECOR_PI;
+            while (diff < -DECOR_PI) diff += 2.0 * DECOR_PI;
+            double out = a + diff * 0.5;
+            while (out < 0.0)             out += 2.0 * DECOR_PI;
+            while (out >= 2.0 * DECOR_PI) out -= 2.0 * DECOR_PI;
+            return out;
         }
 
         // Locale-proof fixed-format number reader: optional sign, digits,
@@ -412,7 +485,8 @@ namespace PDungeon
         // mixing constant plus this discard together are the whole recipe.
         rng.NextUInt32();
 
-        std::vector<Candidate> pool;
+        std::vector<Candidate> poolWallFoot;
+        std::vector<Candidate> poolCorner;
         std::vector<size_t> matching;
         std::vector<DecorSpot> placed;
 
@@ -433,16 +507,14 @@ namespace PDungeon
             std::vector<DecorAnchor> const* const anchors =
                 anchorsFor ? anchorsFor(block.chunkId) : nullptr;
 
-            CollectWallFeet(classes, pool);
+            CollectWallFeet(classes, poolWallFoot);
+            CollectCorners(classes, poolCorner);
 
-            // Which rules speak for this block, and what their weights add up
-            // to. A rule's share of the block's candidate cells is its weight
-            // over that total, measured against the pool BEFORE anything was
-            // taken - so the shares do not move with the order they are used
-            // in, and "the brazier is the lighter rule" means the brazier gets
-            // fewer of the room's wall feet than the torch.
+            // Which rules speak for this block, per placement kind. Weights are
+            // a share of THAT kind's candidate cells: a corner rule competes
+            // with corner rules, never with the wall-foot torches.
             matching.clear();
-            int totalWeight = 0;
+            int totalWeight[PD_DECOR_PLACEMENT_COUNT] = { 0, 0 };
             for (size_t const i : byId)
             {
                 DecorRule const& rule = rules[i];
@@ -451,20 +523,27 @@ namespace PDungeon
                 // decor at all the moment it became the default.
                 if (rule.theme != 0 && rule.theme != plan.config.theme)
                     continue;
-                if (rule.placement != DECOR_PLACEMENT_WALL_FOOT) continue;
+                int const kind = PlacementIndex(rule.placement);
+                if (kind < 0) continue;
                 if (!DecorRoleMatches(rule.roleFilter, roleName)) continue;
                 matching.push_back(i);
-                totalWeight += RuleWeight(rule);
+                totalWeight[kind] += RuleWeight(rule);
             }
             if (matching.empty())
             {
                 continue;
             }
 
-            int const poolAtStart = static_cast<int>(pool.size());
+            int const poolAtStart[PD_DECOR_PLACEMENT_COUNT] = {
+                static_cast<int>(poolWallFoot.size()),
+                static_cast<int>(poolCorner.size())
+            };
             for (size_t const i : matching)
             {
                 DecorRule const& rule = rules[i];
+                int const kind = PlacementIndex(rule.placement);
+                std::vector<Candidate>& pool =
+                    (kind == 1) ? poolCorner : poolWallFoot;
 
                 // Drawn for every matching rule, pool or no pool, so the
                 // stream's position follows the RULES and the plan and not how
@@ -474,8 +553,8 @@ namespace PDungeon
                 {
                     want = 0;
                 }
-                int const share = (poolAtStart * RuleWeight(rule) +
-                                   totalWeight - 1) / totalWeight;
+                int const share = (poolAtStart[kind] * RuleWeight(rule) +
+                                   totalWeight[kind] - 1) / totalWeight[kind];
                 int const take = want < share ? want : share;
 
                 placed.clear();
@@ -502,6 +581,17 @@ namespace PDungeon
                     spot.v = (static_cast<double>(cand.col) + 0.5) *
                              PD_CELL_SIZE_YD + dir.dv;
                     spot.orientation = dir.facing;
+
+                    if (cand.dir2 >= 0)
+                    {
+                        // A corner: nudged into the angle of BOTH walls, and
+                        // facing out along their bisector. Derived, never
+                        // drawn, exactly like the single-wall case.
+                        WallDir const& dir2 = WALL_DIRS[cand.dir2];
+                        spot.u += dir2.du;
+                        spot.v += dir2.dv;
+                        spot.orientation = BisectFacing(dir.facing, dir2.facing);
+                    }
 
                     bool clear = true;
                     if (anchors)

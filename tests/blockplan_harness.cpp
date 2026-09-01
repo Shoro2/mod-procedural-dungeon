@@ -1647,10 +1647,19 @@ namespace
                 return false;
             }
 
-            bool touchesWall = false;
+            // Which placement kind put this spot here. The rule vector is
+            // already in hand for `spacingOf`, so this is the same lookup.
+            std::string placement = PDungeon::DECOR_PLACEMENT_WALL_FOOT;
+            for (DecorRule const& r : rules)
+            {
+                if (r.id == spot.ruleId) { placement = r.placement; break; }
+            }
+
+            int wallSides = 0;
             int const drow[4] = { -1, 0, 1, 0 };
             int const dcol[4] = { 0, 1, 0, -1 };
-            for (int d = 0; d < 4 && !touchesWall; ++d)
+            bool wallAt[4] = { false, false, false, false };
+            for (int d = 0; d < 4; ++d)
             {
                 int const r = row + drow[d];
                 int const c = col + dcol[d];
@@ -1659,13 +1668,31 @@ namespace
                 {
                     continue;
                 }
-                touchesWall =
+                wallAt[d] =
                     classes[static_cast<size_t>(r) * PD_CELLS_PER_BLOCK + c] == 'L';
+                if (wallAt[d]) ++wallSides;
             }
-            if (!touchesWall)
+
+            if (placement == PDungeon::DECOR_PLACEMENT_WALL_FOOT)
             {
-                why = "a spot's cell touches no wall cell";
-                return false;
+                if (!wallSides)
+                {
+                    why = "a wall_foot spot's cell touches no wall cell";
+                    return false;
+                }
+            }
+            else if (placement == PDungeon::DECOR_PLACEMENT_CORNER)
+            {
+                // Two ADJACENT walls, i.e. N+E, E+S, S+W or W+N. Two OPPOSITE
+                // walls make a passage, not a corner, and a prop wedged there
+                // would block it.
+                bool adjacent = (wallAt[0] && wallAt[1]) || (wallAt[1] && wallAt[2]) ||
+                                (wallAt[2] && wallAt[3]) || (wallAt[3] && wallAt[0]);
+                if (!adjacent)
+                {
+                    why = "a corner spot's cell has no two adjacent wall sides";
+                    return false;
+                }
             }
 
             for (DecorAnchor const& anchor : kit->second.anchors)

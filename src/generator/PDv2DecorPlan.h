@@ -60,10 +60,17 @@ namespace PDungeon
     char const DECOR_CLASS_WALL = 'L';
     char const DECOR_CLASS_VOID = 'V';
 
-    // The only placement kind implemented so far. A rule naming anything else
+    // The placement kinds the planner implements. A rule naming anything else
     // is skipped rather than guessed at - a prop placed by a rule nobody wrote
     // is worse than a prop that never appears.
     char const* const DECOR_PLACEMENT_WALL_FOOT = "wall_foot";
+    // A walk cell with wall cells on two ADJACENT sides. Two opposite walls
+    // are a passage, not a corner, and are deliberately not candidates.
+    char const* const DECOR_PLACEMENT_CORNER    = "corner";
+
+    // How many placement kinds the planner implements. The pools and the
+    // per-kind weight totals are sized by it.
+    int const PD_DECOR_PLACEMENT_COUNT = 2;
 
     // Mixed into the layout seed to open the decor stream. An arbitrary odd
     // constant, fixed for ever: changing it re-decorates every stored layout.
