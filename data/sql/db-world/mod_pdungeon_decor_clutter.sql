@@ -1,42 +1,27 @@
 -- ----------------------------------------------------------------------------
--- mod-procedural-dungeon: clutter GameObjects and their placement rules
--- (world database)
+-- mod-procedural-dungeon: clutter placement rules (world database)
 --
--- Broken furniture, crates, rubble and bones for PDv2. Data only - no C++ in
--- this round.
+-- This file used to also ship the 22 clutter gameobject_template rows
+-- (910050-910057/910060-910066/910070-910076) it references below. They
+-- have moved to mod_pdungeon_templates_fix.sql: AzerothCore's updater
+-- applies db-world SQL in filename order with each file gated on its own
+-- content hash, no cascading re-apply of siblings, and this file sorts
+-- BEFORE mod_pdungeon_templates.sql - whose `DELETE FROM gameobject_template
+-- WHERE entry BETWEEN 910000 AND 910099` covers this whole id range. A
+-- template INSERT here could never survive a future re-apply of that file;
+-- only mod_pdungeon_templates_fix.sql sorts after it and can actually
+-- restore anything. Full mechanism and the failure mode it prevents are
+-- documented in that file's header - read it before adding a `goEntry` here
+-- for an id that doesn't exist yet.
 --
--- Every entry is type 5 GENERIC: it is the only GameObject class measured to
--- block a player on map 760 (MDDF/MODF doodads do not), which is why decor is
--- GameObjects at all (see mod_pdungeon_decor.sql). `size` is the only scale
--- dial available.
---
--- Every displayId below was checked three ways before being shipped: against
--- `GameObjectDisplayInfo.dbc` (the id resolves to the model path the name/
--- comment claims), against `GameObjectModels.dtree` (proof of an actual
--- collision model and its bounding box - a displayId can exist in the DBC
--- and still have nothing to stand on for LoS/pathing), and against stock
--- `gameobject_template` rows (proof Blizzard already used it as indoor
--- dressing, not e.g. a spell-effect-only model).
---
--- 910066 (display 6926, 'PD Rubble Heap') is the one exception and the
--- weakest-verified id in this file: Blizzard used it only as ADT/WMO terrain
--- dressing, so it has no stock gameobject_template row to check against. It
--- passed the other two checks (DBC model KarazahnRockRubble01.m2; a real
--- bounding box in GameObjectModels.dtree), which is the best confirmation
--- available for it.
---
--- Six of these displayIds (130, 293, 7470 among them) are also used by stock
--- quest objects elsewhere in the world DB. That is visual confusion only,
--- never a functional clash: ours are type 5 GENERIC, not the quest GO's
--- type/ScriptName, so ours are never clickable and never satisfy anyone's
--- objective.
---
--- This file owns gameobject_template 910050-910077, a sub-range of the
--- 910000-910099 block mod_pdungeon_templates.sql claims for itself with one
--- range DELETE too many (see mod_pdungeon_templates_fix.sql for the full
--- story). The DELETE below is a range too, but - unlike that one - it is
--- scoped to exactly the ids this file inserts and nothing else in the shared
--- block, so a re-apply of this file can never take a neighbor's row with it.
+-- What stays here: `pdungeon_decor_rules`, a different table entirely, not
+-- touched by mod_pdungeon_templates.sql's DELETE, so it is safe to own and
+-- restore-in-place from this file regardless of sort order. Every `goEntry`
+-- a rule below names must resolve to a gameobject_template row that lives
+-- in mod_pdungeon_templates.sql (910000-910033) or
+-- mod_pdungeon_templates_fix.sql (910040-910099) - never add a rule whose
+-- goEntry template you shipped only in this file, or it becomes exactly the
+-- kind of orphaned rule this split exists to avoid.
 --
 -- Rule ids start at 4 so the shipped mod_pdungeon_decor.sql's
 -- `DELETE ... WHERE id BETWEEN 1 AND 3` can never touch them.
@@ -44,38 +29,6 @@
 -- theme 0 = any look, the same sentinel the packs use. Scoping a rule to one
 -- theme is what once left the city with no server decor at all.
 -- ----------------------------------------------------------------------------
-
-DELETE FROM `gameobject_template` WHERE `entry` BETWEEN 910050 AND 910077;
-INSERT INTO `gameobject_template` (`entry`,`type`,`displayId`,`name`,`size`,`Data0`,`Data1`,`ScriptName`) VALUES
--- wall feet: things that stand against a wall
-(910050, 5,  288, 'PD Barrel',              1.0,  0, 0, ''),
-(910051, 5,  275, 'PD Crate',               1.0,  0, 0, ''),
-(910052, 5, 7470, 'PD Plague Barrel',       1.0,  0, 0, ''),
-(910053, 5,  130, 'PD Weapon Rack',         1.0,  0, 0, ''),
-(910054, 5,  187, 'PD Bookshelf',           1.0,  0, 0, ''),
-(910055, 5, 4391, 'PD Alchemy Bench',       0.9,  0, 0, ''),
-(910056, 5,  234, 'PD Long Table',          0.8,  0, 0, ''),
-(910057, 5, 5511, 'PD Grain Sack',          1.5,  0, 0, ''),
--- corners: things that wedge into an angle
-(910060, 5, 1868, 'PD Crate Stack',         0.8,  0, 0, ''),
-(910061, 5, 1869, 'PD Crate Stack Alt',     0.8,  0, 0, ''),
-(910062, 5, 7680, 'PD Broken Crate Stack',  0.75, 0, 0, ''),
-(910063, 5, 6036, 'PD Tall Barrel',         1.2,  0, 0, ''),
-(910064, 5, 7526, 'PD Broken Keg',          0.6,  0, 0, ''),
-(910065, 5, 8480, 'PD Cart Wheel',          1.0,  0, 0, ''),
--- 6926 has no stock gameobject_template precedent - see the header note.
-(910066, 5, 6926, 'PD Rubble Heap',         1.0,  0, 0, ''),
--- scatter: flat things you walk over on open floor
-(910070, 5, 7911, 'PD Rubble Low',          1.0,  0, 0, ''),
-(910071, 5, 6736, 'PD Broken Boards',       0.7,  0, 0, ''),
--- Display 9 (BrokenBarrel02), not 8026 (BrokenBarrel01): 8026 has no entry in
--- GameObjectModels.dtree at all, i.e. no collision model, so it would let
--- players walk through it. Do not "fix" this to 8026 - it was checked.
-(910072, 5,    9, 'PD Broken Barrel',       1.0,  0, 0, ''),
-(910073, 5, 7311, 'PD Skeleton',            1.0,  0, 0, ''),
-(910074, 5, 7312, 'PD Skeleton Alt',        1.0,  0, 0, ''),
-(910075, 5,  293, 'PD Bone Pile',           1.0,  0, 0, ''),
-(910076, 5, 7225, 'PD Coffin',              1.0,  0, 0, '');
 
 DELETE FROM `pdungeon_decor_rules` WHERE `id` BETWEEN 4 AND 14;
 INSERT INTO `pdungeon_decor_rules`
