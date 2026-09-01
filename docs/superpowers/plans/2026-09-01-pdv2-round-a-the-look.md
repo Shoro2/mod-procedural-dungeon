@@ -36,6 +36,7 @@ Every task's requirements implicitly include all of these.
 - **Startup-only tables.** Chunk meta, decor rules and packs load once in `PDWorldScript::OnStartup`. Any SQL change needs a **worldserver restart**; `.reload config` silently does nothing.
 - **Never edit `creature_template` 84263–84290** (owned by fl-underground-dungeon's live map 741) or spells 900050–900060 (owned by mod-dungeon-challenge).
 - **Adding a NEW `.cpp` or `.h` to `src/` requires a `cmake` re-configure**, not just a build: AzerothCore globs module sources at configure time and this module ships no `CMakeLists.txt`. An incremental build silently does not ship the new file.
+- **Git Bash mangles the build's `/m` flag into a path** (measured in Task 9: `/m` becomes `M:/` and the build fails for a reason that has nothing to do with the code). Prefix the command with `MSYS2_ARG_CONV_EXCL="*"`, or run it from PowerShell.
 - **Do not add `/WX`.** `tests/blockplan_harness.cpp:263` emits C4456 today (shadowed `colon`); `/WX` would fail the build for a reason unrelated to Round A.
 - **Reserved id ranges:** GameObject `910000-910099` — `910000-910033` allocated, `910040-910049` reserved for kit props by a harness assert (`tests/blockplan_harness.cpp:1724`) with only `910048`/`910049` free, **`910050-910099` free and verified empty in the live DB**. `creature_template` `910500-910549`.
 - **World DB access:** `"/c/Program Files/MySQL/MySQL Server 8.4/bin/mysql.exe" -h127.0.0.1 -uacore -pacore -D acore_world -N -B -e "<QUERY>"`
