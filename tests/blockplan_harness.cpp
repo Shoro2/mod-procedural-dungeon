@@ -1542,6 +1542,19 @@ namespace
         return rules;
     }
 
+    std::vector<CritterRule> CritterFixture()
+    {
+        std::vector<CritterRule> rules;
+        CritterRule r;
+        r.id = 1; r.theme = 0; r.roleFilter = "room";
+        r.creatureEntry = 32428; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 100;
+        rules.push_back(r);
+        r.id = 2; r.theme = 0; r.roleFilter = "corridor";
+        r.creatureEntry = 26525; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 100;
+        rules.push_back(r);
+        return rules;
+    }
+
     bool SameSpots(std::vector<DecorSpot> const& l, std::vector<DecorSpot> const& r)
     {
         if (l.size() != r.size())
@@ -1554,6 +1567,23 @@ namespace
                 l[i].ruleId != r[i].ruleId || l[i].goEntry != r[i].goEntry ||
                 l[i].u != r[i].u || l[i].v != r[i].v ||
                 l[i].orientation != r[i].orientation)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool SameCritters(std::vector<CritterSpot> const& a,
+                      std::vector<CritterSpot> const& b)
+    {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            if (a[i].bx != b[i].bx || a[i].by != b[i].by ||
+                a[i].ruleId != b[i].ruleId ||
+                a[i].creatureEntry != b[i].creatureEntry ||
+                a[i].u != b[i].u || a[i].v != b[i].v)
             {
                 return false;
             }
@@ -1774,6 +1804,57 @@ namespace
         return true;
     }
 
+    // Critters live on open floor, never on the socket track, never on a
+    // wall foot, and never off the walkable set - the same veto SplitOnDeath
+    // applies to affix children, for the same reason: a gravity-less
+    // creature past the platform edge hovers where nobody can reach it.
+    bool CheckCritterSpots(BlockPlan const& plan,
+                           std::vector<CritterSpot> const& spots,
+                           std::string& why)
+    {
+        for (CritterSpot const& spot : spots)
+        {
+            PlacedBlock const* const block = plan.At(spot.bx, spot.by);
+            if (!block)
+            {
+                why = "a critter stands on no block of the plan";
+                return false;
+            }
+            uint8_t const* const mask = MaskFor(block->chunkId);
+            if (!mask)
+            {
+                why = "a critter was planned on a chunk with no walk mask";
+                return false;
+            }
+            std::string const classes = PDv2Classify(mask);
+
+            int const row = static_cast<int>(std::floor(spot.u / PD_CELL_SIZE_YD));
+            int const col = static_cast<int>(std::floor(spot.v / PD_CELL_SIZE_YD));
+            if (row < 0 || col < 0 ||
+                row >= PD_CELLS_PER_BLOCK || col >= PD_CELLS_PER_BLOCK)
+            {
+                why = "a critter is outside its own block";
+                return false;
+            }
+            if (row == PD_CELLS_PER_BLOCK / 2 || col == PD_CELLS_PER_BLOCK / 2)
+            {
+                why = "a critter stands on the socket track";
+                return false;
+            }
+            if (classes[static_cast<size_t>(row) * PD_CELLS_PER_BLOCK + col] != 'W')
+            {
+                why = "a critter is not on a walkable cell";
+                return false;
+            }
+        }
+        if (spots.size() > static_cast<size_t>(PD_CRITTER_MAX_SPOTS))
+        {
+            why = "a layout exceeded the critter budget";
+            return false;
+        }
+        return true;
+    }
+
     // PDv2Classify against the kit's own surfaceClasses, chunk by chunk. This
     // is the check that lets the server DERIVE the classes instead of shipping
     // a second copy of them.
@@ -1941,10 +2022,14 @@ namespace
         RunDecorGateChecks();
 
         std::vector<DecorRule> const rules = DecorFixture();
+        std::vector<CritterRule> const critterRules = CritterFixture();
         int totalSpots = 0;
         int minSpots = 1 << 30;
         int maxSpots = 0;
         int blankLayouts = 0;
+        int totalCritters = 0;
+        int minCritters = 1 << 30;
+        int maxCritters = 0;
 
         // Both themes, not just theme 1: the live DB's rules carry theme = 0
         // (any look), but the fixture used to say theme = 1 for all three,
@@ -1995,6 +2080,20 @@ namespace
                     {
                         ++blankLayouts;
                     }
+
+                    std::vector<CritterSpot> const critters = BuildCritterPlan(
+                        plan, MaskFor, critterRules, plan.effectiveSeed);
+                    std::vector<CritterSpot> const crittersAgain = BuildCritterPlan(
+                        plan, MaskFor, critterRules, plan.effectiveSeed);
+                    Check(SameCritters(critters, crittersAgain),
+                          "two critter builds of the same plan differ", seed);
+                    Check(CheckCritterSpots(plan, critters, why),
+                          why.empty() ? "critter placement broken" : why.c_str(), seed);
+
+                    int const nCritters = static_cast<int>(critters.size());
+                    totalCritters += nCritters;
+                    minCritters = (nCritters < minCritters) ? nCritters : minCritters;
+                    maxCritters = (nCritters > maxCritters) ? nCritters : maxCritters;
                 }
             }
         }
@@ -2007,6 +2106,8 @@ namespace
 
         std::printf("props per layout : %d..%d (%d total)\n",
                     minSpots, maxSpots, totalSpots);
+        std::printf("critters per layout : %d..%d (%d total)\n",
+                    minCritters, maxCritters, totalCritters);
         std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
         std::printf("%s\n", g_failures == 0 ? "ALL CHECKS PASS" : "FAILURES");
         return g_failures == 0 ? 0 : 1;

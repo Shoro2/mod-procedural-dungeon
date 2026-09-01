@@ -694,4 +694,93 @@ namespace PDungeon
         }
         return out;
     }
+
+    std::vector<CritterSpot> BuildCritterPlan(BlockPlan const& plan,
+                                              DecorMaskProvider const& maskFor,
+                                              std::vector<CritterRule> const& rules,
+                                              uint32_t layoutSeed)
+    {
+        std::vector<CritterSpot> out;
+
+        std::vector<size_t> byId(rules.size());
+        for (size_t i = 0; i < rules.size(); ++i) byId[i] = i;
+        std::sort(byId.begin(), byId.end(), [&rules](size_t l, size_t r)
+        {
+            return rules[l].id < rules[r].id;
+        });
+
+        // Its OWN stream, mixed with its own constant: adding or removing a
+        // critter rule must never move a single prop.
+        PDRandom rng(layoutSeed ^ PD_CRITTER_SEED_MIX);
+        rng.NextUInt32();
+
+        std::vector<Candidate> pool;
+        std::vector<size_t> matching;
+
+        for (PlacedBlock const& block : plan.blocks)
+        {
+            uint8_t const* const mask = maskFor ? maskFor(block.chunkId) : nullptr;
+            if (!mask)
+            {
+                continue;
+            }
+
+            std::string const classes = PDv2Classify(mask);
+            char const* const roleName = BlockRoleName(block.role);
+            CollectScatter(classes, pool);
+
+            matching.clear();
+            int totalWeight = 0;
+            for (size_t const i : byId)
+            {
+                CritterRule const& rule = rules[i];
+                if (rule.theme != 0 && rule.theme != plan.config.theme) continue;
+                if (!DecorRoleMatches(rule.roleFilter, roleName)) continue;
+                matching.push_back(i);
+                totalWeight += (rule.weight > 0 ? rule.weight : 1);
+            }
+            if (matching.empty())
+            {
+                continue;
+            }
+
+            int const poolAtStart = static_cast<int>(pool.size());
+            for (size_t const i : matching)
+            {
+                CritterRule const& rule = rules[i];
+                int want = rng.UniformInt(rule.minPerBlock, rule.maxPerBlock);
+                if (want < 0)
+                {
+                    want = 0;
+                }
+                int const w = rule.weight > 0 ? rule.weight : 1;
+                int const share = (poolAtStart * w + totalWeight - 1) / totalWeight;
+                int const take = want < share ? want : share;
+
+                for (int n = 0; n < take && !pool.empty(); ++n)
+                {
+                    int const k =
+                        rng.UniformInt(0, static_cast<int>(pool.size()) - 1);
+                    Candidate const cand = pool[static_cast<size_t>(k)];
+                    pool.erase(pool.begin() + k);
+
+                    CritterSpot spot;
+                    spot.bx = block.bx;
+                    spot.by = block.by;
+                    spot.ruleId = rule.id;
+                    spot.creatureEntry = rule.creatureEntry;
+                    spot.u = (static_cast<double>(cand.row) + 0.5) * PD_CELL_SIZE_YD;
+                    spot.v = (static_cast<double>(cand.col) + 0.5) * PD_CELL_SIZE_YD;
+                    spot.orientation = 0.0;
+                    out.push_back(spot);
+                }
+            }
+        }
+
+        if (out.size() > static_cast<size_t>(PD_CRITTER_MAX_SPOTS))
+        {
+            out.resize(static_cast<size_t>(PD_CRITTER_MAX_SPOTS));
+        }
+        return out;
+    }
 }

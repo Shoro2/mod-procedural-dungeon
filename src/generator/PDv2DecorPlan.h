@@ -214,6 +214,46 @@ namespace PDungeon
                                           DecorAnchorProvider const& anchorsFor,
                                           std::vector<DecorRule> const& rules,
                                           uint32_t layoutSeed);
+
+    // Ambient life. A critter is NOT a pack role: it must never touch the
+    // spawn draw's documented order, and it must never be counted by the run.
+    // Its own stream, its own budget, its own table - the decor shape, applied
+    // to creatures.
+    uint32_t const PD_CRITTER_SEED_MIX = 0xC817E12Bu;
+    int const PD_CRITTER_MAX_SPOTS = 60;
+
+    // One row of `pdungeon_critter_rules`. `roleFilter` is the same prefix
+    // match `DecorRule` uses.
+    struct CritterRule
+    {
+        int         id = 0;
+        int         theme = 0;
+        std::string roleFilter;
+        int         creatureEntry = 0;
+        int         minPerBlock = 0;
+        int         maxPerBlock = 0;
+        int         weight = 1;
+    };
+
+    struct CritterSpot
+    {
+        int    bx = 0;
+        int    by = 0;
+        int    ruleId = 0;
+        int    creatureEntry = 0;
+        double u = 0.0;
+        double v = 0.0;
+        double orientation = 0.0;
+    };
+
+    // Critters for a layout, in the same fixed order BuildDecorPlan uses:
+    // blocks in plan order, rules by ascending id, candidate cells row-major.
+    // Placed on OPEN floor only (the scatter candidate set), so a critter never
+    // stands inside a prop and never on the line every player walks.
+    std::vector<CritterSpot> BuildCritterPlan(BlockPlan const& plan,
+                                              DecorMaskProvider const& maskFor,
+                                              std::vector<CritterRule> const& rules,
+                                              uint32_t layoutSeed);
 }
 
 #endif
