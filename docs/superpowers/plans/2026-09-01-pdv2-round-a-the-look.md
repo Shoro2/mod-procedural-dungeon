@@ -192,6 +192,17 @@ cp "/c/wowstuff/FL2-Client/Data/patch-9.MPQ" "/c/wowstuff/FL2-Client/Data/patch-
 The client must be **closed** — a running client holds `patch-9.MPQ` so hard it cannot even be
 renamed. Verify with `certutil -hashfile` that the copy is `97fc5cd5...`.
 
+**And back up the four pipeline scripts Tasks 14–17 rewrite.** They live in
+`C:\wowstuff\ForgottenLand2.0\scripts`, which is **not a git repo**, so an edit there is not
+revertable by any other means:
+
+```bash
+cd /c/wowstuff/ForgottenLand2.0/scripts && for f in 48_gen_t1_blockkit.py 51_texture_blockkit.py 52_punch_kit_holes.py 30_build_hot_dbc_patch.py; do cp "$f" "$f.pre_roundA_20260901"; done && ls -la *.pre_roundA_20260901
+```
+
+Expected: four `.pre_roundA_20260901` files. Record their sizes in the baseline; they are the only
+rollback the client track has.
+
 - [ ] **Step 5: Record the measured-green baseline**
 
 Rebuild `pdblock` and `pdgen` per the Global Constraints section, run all four gates, and paste the
