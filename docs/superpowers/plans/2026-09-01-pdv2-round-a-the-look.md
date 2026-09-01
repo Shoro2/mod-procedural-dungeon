@@ -1877,6 +1877,16 @@ spawn tag, which a critter never gets.
     }
 ```
 
+**Keep critters out of the props — added 2026-09-01 after the Task 8 review.** A `scatter` decor
+rule and a critter rule draw from the *same* candidate universe: both call `CollectScatter` on the
+same block, on two RNG streams with no awareness of each other, and the critter planner has no
+spacing or anchor gate at all. So a rubble pile and a rat can land on the exact same cell centre —
+and with up to 82 props and 28 critters in one layout, they eventually will.
+
+`SpawnDecor` runs first in the same guard, so `SpawnCritters` can simply skip a spot that collides.
+Collect the decor spots' world positions as they are summoned and pass them in; drop any critter
+within about 2 yd of one. Deterministic either way, because both plans are.
+
 Call it from the `if (!_spawned)` guard, after `SpawnKitProps`, and tear it down in `DespawnAll`
 beside `_decorGuids`:
 
