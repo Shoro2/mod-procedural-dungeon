@@ -39,6 +39,13 @@ Every task's requirements implicitly include all of these.
 - **Do not add `/WX`.** `tests/blockplan_harness.cpp:263` emits C4456 today (shadowed `colon`); `/WX` would fail the build for a reason unrelated to Round A.
 - **Reserved id ranges:** GameObject `910000-910099` — `910000-910033` allocated, `910040-910049` reserved for kit props by a harness assert (`tests/blockplan_harness.cpp:1724`) with only `910048`/`910049` free, **`910050-910099` free and verified empty in the live DB**. `creature_template` `910500-910549`.
 - **World DB access:** `"/c/Program Files/MySQL/MySQL Server 8.4/bin/mysql.exe" -h127.0.0.1 -uacore -pacore -D acore_world -N -B -e "<QUERY>"`
+- **No task restarts the worldserver, and no task writes to the database.** Added 2026-09-01: the
+  local `worldserver.exe` is running and is the operator's. Every SQL file this round ships is
+  applied by the updater on the **next** start, which happens once, in Task 18's deploy. Tasks that
+  ship SQL verify it **read-only** — that every id it references exists, that every id it claims is
+  free really is free, and that its idempotency clause covers only its own range. Verification that
+  genuinely needs a running server (a boot-log line, a row count after the updater ran, an
+  `.pdungeon v2 info` line) is deferred to Task 18 and named there as owed.
 - **Round A deliberately re-rolls every stored layout's decor and spawns.** Accepted in the spec: the server is not public and character progress is expendable. Do not add compatibility shims for it.
 
 ### Building and running the harness (used by almost every task)
