@@ -238,8 +238,17 @@ against, and what Task 18's operator document cites as "Before Round A".
 
 ## Dead rollback entry (found during research)
 
-Every ladder paragraph in `FLStream.ini` from v5 on ends with:
-`Verboten: ein v5+-Kit unter FLStream.dll.pre_phase3_20260830`
+The rollback tables in the operator round documents (`pd_testlauf_runde14.md` through
+`runde16.md`, `pd_t2_checkliste_20260830.md`, `pd_t2_checkliste_20260831_alt.md`) each
+carry a row of this form (verbatim from `runde16.md` line 137):
+`| **Verboten** | ein v5+-Kit unter `FLStream.dll.pre_phase3_20260830` |`
+
+`FLStream.ini` itself carries no such line. Checked directly: `grep -ic verboten
+FLStream.ini` = **0**. The DLL is mentioned exactly once, in the v5 ladder paragraph
+(line 17), as a general note that the DLL and the `KitDir` flip move together — not as
+a standalone prohibition: "NEEDS the Phase-3 FLStream.dll (the value-rewrite composer)
+- DLL and KitDir flip move TOGETHER; the pre-Phase-3 DLL is
+FLStream.dll.pre_phase3_20260830 and belongs to t1b-v4 and older."
 
 **That file does not exist anywhere on this box.** Confirmed: `C:\wowstuff\FL2-Client\`
 contains only the live `FLStream.dll` (built 2026-08-30 14:40, 216,064 bytes) — no
