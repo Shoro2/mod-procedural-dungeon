@@ -74,6 +74,17 @@ Expected: the five source filenames echoed, `Generating Code...`, exit 0, and ex
 **The `pdblock.exe` checked into the module root is stale (2026-08-30).** Rebuild before every gate
 run or you are testing pre-merge code.
 
+**A `cmd /c` build silently no-ops under the Bash tool** (measured in Task 4: bare banner, exit 0,
+nothing built) — run it through PowerShell instead. That failure mode is dangerous precisely because
+it looks like a pass: the previous binary runs and prints `ALL CHECKS PASS`. **Prove the binary is
+newer than the sources before believing any gate:**
+
+```bash
+stat -c '%y %n' pdblock.exe src/generator/*.cpp tests/blockplan_harness.cpp | sort
+```
+
+`pdblock.exe` must sort last. A gate run against a stale binary is not evidence.
+
 ### The four offline gates, and their measured-green baseline (2026-09-01)
 
 | Gate | Command | Baseline |
