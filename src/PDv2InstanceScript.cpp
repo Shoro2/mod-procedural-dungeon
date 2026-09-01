@@ -63,6 +63,16 @@ namespace PDungeon
 
         float const SPAWN_SPREAD_YD = 12.0f;
 
+        // How close a critter may land to a prop before SpawnCritters drops
+        // it rather than summon it. A scatter decor rule and the critter rule
+        // both call CollectScatter on the SAME block, on two independent RNG
+        // streams, and BuildCritterPlan has no spacing gate of its own - so
+        // with up to 82 props and dozens of critters in one layout, a rubble
+        // pile and a rat will eventually land on the same cell centre. 2 yd
+        // is comfortably inside "same spot" and comfortably outside "next
+        // cell over", which is all this needs to be.
+        double const CRITTER_DECOR_CLEAR_YD = 2.0;
+
         // Where a Lil' Bro's two children land relative to the corpse. That
         // module's own offsets, mirrored (DungeonChallengeScripts.cpp:877-878);
         // the second child takes the negatives.
@@ -165,8 +175,12 @@ namespace PDungeon
             // decides what this instance has standing in it, so a re-entry
             // cannot double the props while leaving the mobs alone, and the
             // rebuild above tore both down together.
-            SpawnDecor(*plan);
+            std::vector<Position> decorPositions;
+            SpawnDecor(*plan, decorPositions);
             SpawnKitProps(*plan);
+            // Reads decorPositions, so it must come after SpawnDecor filled
+            // it. Ambient life, same guard, own GUID list and own teardown.
+            SpawnCritters(*plan, decorPositions);
             SpawnDeadEndChests(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
@@ -551,6 +565,18 @@ namespace PDungeon
             }
         }
         _decorGuids.clear();
+
+        // Critters are creatures, not GameObjects: DespawnOrUnsummon is their
+        // teardown path, the same one _spawnedGuids uses above, not the
+        // GameObject Delete() the props get.
+        for (ObjectGuid const& guid : _critterGuids)
+        {
+            if (Creature* c = instance->GetCreature(guid))
+            {
+                c->DespawnOrUnsummon();
+            }
+        }
+        _critterGuids.clear();
     }
 
     void PDv2InstanceScript::EnsureWalkGrid(BlockPlan const& plan)
@@ -945,7 +971,7 @@ namespace PDungeon
                  uint32(_run.lootMultX100), affixedMobs, uint32(_runAffixes.size()));
     }
 
-    void PDv2InstanceScript::SpawnDecor(BlockPlan const& plan)
+    void PDv2InstanceScript::SpawnDecor(BlockPlan const& plan, std::vector<Position>& outPositions)
     {
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
         if (!cfg.decorEnable)
@@ -995,6 +1021,7 @@ namespace PDungeon
             }
 
             _decorGuids.push_back(go->GetGUID());
+            outPositions.emplace_back(x, y, z);
             ++placed;
         }
 
@@ -1048,6 +1075,95 @@ namespace PDungeon
             LOG_INFO(PD_LOG, "PDv2: instance {} placed {} kit prop(s) from the "
                              "chunk-meta anchors", instance->GetInstanceId(), placed);
         }
+    }
+
+    void PDv2InstanceScript::SpawnCritters(BlockPlan const& plan,
+                                            std::vector<Position> const& decorPositions)
+    {
+        // Gated like SpawnDecor and SpawnKitProps: a critter is LOOK, not
+        // content (it fails both the AI-binder and the scaling gate above),
+        // and V2.Decor.Enable is the one switch every optical thing answers to.
+        if (!sPDv2Mgr->GetConfig().decorEnable)
+        {
+            return;
+        }
+
+        std::vector<CritterRule> const& rules = sPDv2Mgr->CritterRules();
+        if (rules.empty())
+        {
+            // Not an error, same reasoning as SpawnDecor's empty-rules return:
+            // mod_pdungeon_critter_rules.sql simply is not applied yet.
+            return;
+        }
+
+        // The PLAN's seed, exactly like SpawnDecor: BuildCritterPlan derives
+        // its own stream from it (PD_CRITTER_SEED_MIX), so critters follow a
+        // re-roll the way the props and the terrain do.
+        std::vector<CritterSpot> const spots = BuildCritterPlan(
+            plan,
+            [](int chunkId) { return sPDv2Mgr->WalkMaskFor(chunkId); },
+            rules, plan.effectiveSeed);
+
+        uint32 placed = 0;
+        uint32 skippedForClearance = 0;
+        for (CritterSpot const& spot : spots)
+        {
+            // Z is the kit's floor plane, the same one every other spawn on
+            // this map stands on - there is no other floor the server knows.
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            sPDv2Mgr->BlockToWorld(spot.bx, spot.by, spot.u, spot.v, x, y, z);
+
+            // A scatter decor rule and this rule draw from the SAME candidate
+            // cells, on two RNG streams that have never heard of each other,
+            // and BuildCritterPlan carries no spacing gate of its own. Skip
+            // rather than summon when a prop already claimed this ground -
+            // both plans are deterministic, so which critters this drops is a
+            // property of the seed, not a coin flip.
+            bool blockedByProp = false;
+            for (Position const& decorPos : decorPositions)
+            {
+                if (decorPos.GetExactDist2d(x, y) < CRITTER_DECOR_CLEAR_YD)
+                {
+                    blockedByProp = true;
+                    break;
+                }
+            }
+            if (blockedByProp)
+            {
+                ++skippedForClearance;
+                continue;
+            }
+
+            Creature* c = instance->SummonCreature(
+                static_cast<uint32>(spot.creatureEntry),
+                Position(x, y, z, static_cast<float>(spot.orientation)));
+            if (!c)
+            {
+                continue;
+            }
+
+            // The same two lines every dungeon spawn gets, and for the same
+            // reason: the server has no terrain on this map, so Map::GetHeight
+            // answers INVALID_HEIGHT and a creature with gravity would fall
+            // through the floor the client draws.
+            c->SetHomePosition(x, y, z, static_cast<float>(spot.orientation));
+            c->SetDisableGravity(true);
+
+            // NO PDv2MobData tag, deliberately. The tag is the module's own
+            // definition of "this is a dungeon mob": without it, OnMobDied
+            // refuses this creature, no room counter moves, no affix touches
+            // it, and the damage hooks leave it alone. IsCritter() above is
+            // the gate that keeps it off the AI binder and the level/HP
+            // scaling in the first place, both of which run before any tag
+            // could exist.
+            _critterGuids.push_back(c->GetGUID());
+            ++placed;
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} critter(s) of {} planned from "
+                         "{} critter rule(s) ({} skipped for prop clearance)",
+                 instance->GetInstanceId(), placed, uint32(spots.size()),
+                 uint32(rules.size()), skippedForClearance);
     }
 
     void PDv2InstanceScript::SpawnDeadEndChests(BlockPlan const& plan)

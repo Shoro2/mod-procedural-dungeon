@@ -75,6 +75,15 @@ namespace
             return false;
         }
 
+        // A critter is decoration, not content: it must not be forced to level
+        // 80 and must not carry the difficulty health multiplier. This gate is
+        // on the TEMPLATE type, which - unlike the spawn tag - is already true
+        // inside SummonCreature, where OnBeforeCreatureSelectLevel runs.
+        if (creature->IsCritter())
+        {
+            return false;
+        }
+
         // A guardian, totem or minion a player brought with them keeps its own
         // level and its own numbers - the same owner check the AI binder uses.
         return !creature->GetCharmerOrOwnerPlayerOrPlayerItself();

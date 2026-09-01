@@ -22,6 +22,7 @@
 #include "InstanceScript.h"
 #include "ObjectGuid.h"
 #include "PDv2PackMgr.h"
+#include "Position.h"
 #include "generator/PDBlockPlan.h"
 #include "generator/PDv2WalkGrid.h"
 
@@ -198,13 +199,28 @@ namespace PDungeon
         // either. Reads the plan and never writes it; the spots come from the
         // decor stream, which is seeded from the layout seed - so the torches
         // stand where they stood the last time this seed was entered.
-        void SpawnDecor(BlockPlan const& plan);
+        //
+        // `outPositions` collects each summoned prop's world position, in the
+        // same order it is placed. SpawnCritters reads it back: a scatter
+        // decor rule and the critter rule draw from the SAME candidate cells
+        // on two RNG streams that know nothing about each other, so this is
+        // the only record either side has of where the other one landed.
+        void SpawnDecor(BlockPlan const& plan, std::vector<Position>& outPositions);
 
         // The kit's structural props (fountains, cave-ins, columns ...):
         // GameObjects pinned per variant by the chunk-meta 'props' anchors,
         // spawned because MDDF doodads never collide with players (measured,
         // first Phase-4 T2 round). Same guard, same teardown as SpawnDecor.
         void SpawnKitProps(BlockPlan const& plan);
+
+        // Ambient life: BuildCritterPlan's spots, summoned as ownerless,
+        // tagless creatures. `decorPositions` is SpawnDecor's output for the
+        // SAME layout - a critter within CRITTER_DECOR_CLEAR_YD of a prop is
+        // dropped rather than summoned, because the two planners can and do
+        // pick the same cell centre. Same guard, same teardown shape as
+        // SpawnDecor, but its own GUID list: critters are creatures torn down
+        // with DespawnOrUnsummon, not the GameObject Delete() the props get.
+        void SpawnCritters(BlockPlan const& plan, std::vector<Position> const& decorPositions);
 
         // One Shifting Cache per dead-end stub, on its junction square. A
         // reward, not a look: deliberately NOT behind Decor.Enable. Shares
@@ -241,6 +257,7 @@ namespace PDungeon
         uint32_t _spawnedSeed = 0;              // plan this instance is built for
         std::vector<ObjectGuid> _spawnedGuids;  // for a rebuild when the plan changes
         std::vector<ObjectGuid> _decorGuids;    // props, torn down by the same rebuild
+        std::vector<ObjectGuid> _critterGuids;  // ambient life, torn down by DespawnOrUnsummon
         PDv2RunState _run;
         std::vector<AffixDef> _runAffixes;      // the rows, for re-casting on a split
         uint16   _runAffixMask = 0;             // the same rows as bits
