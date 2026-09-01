@@ -1562,6 +1562,30 @@ namespace
         return true;
     }
 
+    // A dead-end stub must report its own role name. Until the split it
+    // reported "corridor_cross", which made both filters wrong at once.
+    bool CheckRoleNamesDistinct(BlockPlan const& plan, std::string& why)
+    {
+        bool sawDeadEnd = false;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.role != BlockRole::CorridorDeadEnd) continue;
+            sawDeadEnd = true;
+            if (std::strcmp(BlockRoleName(b.role), "corridor_dead_end") != 0)
+            {
+                why = "a dead-end stub does not report role name corridor_dead_end";
+                return false;
+            }
+        }
+        if (sawDeadEnd && std::strcmp(BlockRoleName(BlockRole::CorridorCross),
+                                      "corridor_cross") != 0)
+        {
+            why = "corridor_cross lost its own name";
+            return false;
+        }
+        return true;
+    }
+
     // Every property a spot has to have, checked against the KIT's own surface
     // classes rather than against the planner's - a placement bug that also
     // lives in PDv2Classify would otherwise agree with itself.
@@ -1882,6 +1906,8 @@ namespace
                       "BuildDecorPlan changed the plan it was given", seed);
 
                 std::string why;
+                Check(CheckRoleNamesDistinct(plan, why),
+                      why.empty() ? "role naming broken" : why.c_str(), seed);
                 Check(CheckDecorSpots(plan, first, rules, why),
                       why.empty() ? "decor placement broken" : why.c_str(), seed);
 

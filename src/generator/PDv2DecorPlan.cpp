@@ -253,8 +253,14 @@ namespace PDungeon
             case BlockRole::CorridorStraight: return "corridor_straight";
             case BlockRole::CorridorCorner:   return "corridor_corner";
             case BlockRole::CorridorT:        return "corridor_t";
-            default:                          return "corridor_cross";
+            case BlockRole::CorridorCross:    return "corridor_cross";
+            // A stub is walked into for its chest and never fought in, so it
+            // wants its own dressing. It reported "corridor_cross" through the
+            // old `default:`, which made a corridor_cross filter fire on stubs
+            // and a corridor_dead_end filter match nothing at all.
+            case BlockRole::CorridorDeadEnd:  return "corridor_dead_end";
         }
+        return "corridor_cross";
     }
 
     bool DecorRoleMatches(std::string const& roleFilter, char const* roleName)
