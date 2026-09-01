@@ -119,8 +119,8 @@ walk-grid checks are skipped rather than faked when the kit metadata is missing
 
 | Path | Responsibility |
 |---|---|
-| `data/sql/db-world/mod_pdungeon_decor_clutter.sql` | The 22 new `gameobject_template` rows (910050-910077) and the `pdungeon_decor_rules` rows (id ≥ 4) that place them. Data only. |
-| `data/sql/db-world/mod_pdungeon_templates_fix.sql` | Re-inserts the kit-prop rows that `mod_pdungeon_templates.sql`'s range `DELETE` would wipe. Exists purely to defuse a landmine; see Task 7. |
+| `data/sql/db-world/mod_pdungeon_decor_clutter.sql` | The `pdungeon_decor_rules` rows (id ≥ 4) that place the new clutter. **Rules only** — see the ordering note below. |
+| `data/sql/db-world/mod_pdungeon_templates_fix.sql` | **Every** `gameobject_template` row in 910040-910099: the 8 kit props *and* the 22 clutter props. It exists because `mod_pdungeon_templates.sql` opens with a range `DELETE` over that whole block, and this is the only module file that sorts **after** it. See Task 7. |
 | `data/sql/db-world/mod_pdungeon_critters.sql` | `pdungeon_critter_rules` schema + rows. |
 | `data/sql/db-world/mod_pdungeon_packs_undead_demon.sql` | Packs 4 and 5 and their 24 members. |
 | `data/sql/db-world/mod_pdungeon_member_spells_undead_demon.sql` | The 72 combat-kit rows for those 24 creatures. |
@@ -1105,7 +1105,33 @@ git commit -m "feat(decor): loader accepts corner and scatter; decor batch cover
 that file silently deletes the kit props 910040-910047 and everything this task adds.**
 
 Do not edit `mod_pdungeon_templates.sql` (the updater would skip it on existing databases). Ship a
-new file that re-inserts what the range delete would take:
+new file that re-inserts what the range delete would take.
+
+**Which file that is, is not a free choice — corrected 2026-09-01 after review.** The updater
+applies files in **filename order**, each gated independently by its own content hash
+(`src/server/database/Updater/UpdateFetcher.h:133` `PathCompare`, which compares
+`filename().string()`). A file whose hash is unchanged is skipped; there is no cascading re-apply of
+siblings. The module's files therefore sort:
+
+```
+mod_pdungeon_decor.sql  <  mod_pdungeon_decor_clutter.sql  <  mod_pdungeon_templates.sql  <  mod_pdungeon_templates_fix.sql
+```
+
+`mod_pdungeon_decor_clutter.sql` sorts **before** the file that wipes the range, so it can never
+restore itself. Only `mod_pdungeon_templates_fix.sql` sorts after it. **So every
+`gameobject_template` row in 910040-910099 — the 8 kit props and all 22 clutter props — lives in
+`mod_pdungeon_templates_fix.sql`, and `mod_pdungeon_decor_clutter.sql` carries only the
+`pdungeon_decor_rules` rows** (a different table, untouched by the range delete, therefore safe
+where it is).
+
+The failure this prevents: a future edit to `mod_pdungeon_templates.sql` re-applies it, its range
+delete takes 910040-910077, and the decor rules survive pointing at `goEntry` values with no
+template. `Map::SummonGameObject` then fails silently per spawn — log spam, no object — which is the
+"dark and bare" outcome this task exists to prevent, just moved to the new range.
+
+**The row values below came from research and were measured wrong for 910040-910043.** Read the
+live rows and copy them verbatim; the live value wins: `PD Fountain` (92040), `PD Rock Column`
+(5073, size 1.7), `PD Stalagmite` (5073), `PD Cave-In` (2230, size 0.4).
 
 ```sql
 -- mod_pdungeon_templates_fix.sql
