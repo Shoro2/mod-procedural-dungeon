@@ -209,10 +209,18 @@ Rebuild `pdblock` and `pdgen` per the Global Constraints section, run all four g
 verbatim output into `pd_roundA_baseline.md` under a heading `Before Round A (2026-09-01)`. This is
 what every later task diffs against, and what Task 18's operator document cites.
 
-Also record the **dead rollback entry** found during research: every ladder paragraph from v5 on
-ends with `Verboten: ein v5+-Kit unter FLStream.dll.pre_phase3_20260830`, and **that file does not
-exist anywhere on this box**. Either recreate it from `fl-stream-client` or note in the baseline
-that the constraint is unenforceable — do not keep citing a rollback target that is not there.
+Also record the **dead rollback entry**. Corrected 2026-09-01 after measurement — the earlier draft
+of this step misattributed it: the prohibition *"Verboten: ein v5+-Kit unter
+`FLStream.dll.pre_phase3_20260830`"* appears in the **operator round documents'** rollback tables
+(`pd_testlauf_runde14/15/16.md`, `pd_t2_checkliste_*.md`), **not** in the `FLStream.ini` ladder,
+which contains no occurrence of "Verboten" at all — it references that DLL once, at line 17, as a
+general note that the DLL and the `KitDir` flip move together.
+
+The substance stands either way: **`FLStream.dll.pre_phase3_20260830` does not exist anywhere on
+this box.** Note in the baseline that the constraint is unenforceable, and attribute it to the
+round documents. Do **not** manufacture a replacement DLL backup — a "backup" that was never
+actually taken from the running system is worse than a documented gap. Verify the attribution
+against the live files before writing it down.
 
 - [ ] **Step 6: Commit**
 
@@ -2732,8 +2740,11 @@ runde14–16 documents share:
    visible-wall figure is 7.9 % by eye-ray. Plus the two economy notes: **native loot now drops**
    from ten of the new trash members, and both new bosses are deliberately loot-free.
 6. **Rollback table** — kit back to `t1b-v28`, worldserver back to `worldserver.exe.pre_roundA_20260901`,
-   SQL rows deletable by their own id ranges. Note that the `FLStream.dll.pre_phase3_20260830` file
-   every older paragraph names as a prohibition **does not exist on this box**.
+   the four pipeline scripts back to their `.pre_roundA_20260901` copies, SQL rows deletable by
+   their own id ranges. Carry the **Verboten** row forward from runde16 (a v5+ kit must never run
+   under the pre-Phase-3 DLL), and add the honest note that
+   `FLStream.dll.pre_phase3_20260830` **does not exist on this box**, so the prohibition is a rule
+   without an enforceable rollback target.
 7. **Rückmeldung** — what to report and how.
 
 - [ ] **Step 7: Sync the vault, in the same commit as the work**
