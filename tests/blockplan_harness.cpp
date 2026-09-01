@@ -1694,6 +1694,17 @@ namespace
                     return false;
                 }
             }
+            else if (placement == PDungeon::DECOR_PLACEMENT_SCATTER)
+            {
+                // The inverse of wall_foot: open floor. A scatter prop that
+                // ends up against a wall duplicates the wall_foot pass and
+                // leaves the middle of the room as empty as it was.
+                if (wallSides)
+                {
+                    why = "a scatter spot's cell touches a wall cell";
+                    return false;
+                }
+            }
 
             for (DecorAnchor const& anchor : kit->second.anchors)
             {

@@ -174,12 +174,50 @@ namespace PDungeon
             }
         }
 
+        // Every WALK cell with no WALL on any side, row-major, socket track
+        // excluded. `dir` stays 0 and is never applied: a scattered prop sits
+        // on its cell centre and faces north, because there is no wall to turn
+        // away from and a drawn angle would cost the stream a draw per prop.
+        void CollectScatter(std::string const& classes,
+                            std::vector<Candidate>& out)
+        {
+            out.clear();
+            for (int row = 0; row < PD_CELLS_PER_BLOCK; ++row)
+            {
+                for (int col = 0; col < PD_CELLS_PER_BLOCK; ++col)
+                {
+                    if (row == SOCKET_TRACK || col == SOCKET_TRACK) continue;
+                    if (classes[Index(row, col)] != DECOR_CLASS_WALK) continue;
+
+                    bool touchesWall = false;
+                    for (int d = 0; d < 4 && !touchesWall; ++d)
+                    {
+                        int const r = row + WALL_DIRS[d].drow;
+                        int const c = col + WALL_DIRS[d].dcol;
+                        if (r < 0 || c < 0 ||
+                            r >= PD_CELLS_PER_BLOCK || c >= PD_CELLS_PER_BLOCK)
+                        {
+                            continue;
+                        }
+                        touchesWall = classes[Index(r, c)] == DECOR_CLASS_WALL;
+                    }
+                    if (touchesWall) continue;
+
+                    Candidate cand;
+                    cand.row = row;
+                    cand.col = col;
+                    out.push_back(cand);
+                }
+            }
+        }
+
         // Placement name -> pool index, or -1 for a kind no planner implements.
         // The order here is the order of the pool arrays and must not change.
         int PlacementIndex(std::string const& placement)
         {
             if (placement == DECOR_PLACEMENT_WALL_FOOT) return 0;
             if (placement == DECOR_PLACEMENT_CORNER)    return 1;
+            if (placement == DECOR_PLACEMENT_SCATTER)   return 2;
             return -1;
         }
 
@@ -487,6 +525,7 @@ namespace PDungeon
 
         std::vector<Candidate> poolWallFoot;
         std::vector<Candidate> poolCorner;
+        std::vector<Candidate> poolScatter;
         std::vector<size_t> matching;
         std::vector<DecorSpot> placed;
 
@@ -509,12 +548,13 @@ namespace PDungeon
 
             CollectWallFeet(classes, poolWallFoot);
             CollectCorners(classes, poolCorner);
+            CollectScatter(classes, poolScatter);
 
             // Which rules speak for this block, per placement kind. Weights are
             // a share of THAT kind's candidate cells: a corner rule competes
             // with corner rules, never with the wall-foot torches.
             matching.clear();
-            int totalWeight[PD_DECOR_PLACEMENT_COUNT] = { 0, 0 };
+            int totalWeight[PD_DECOR_PLACEMENT_COUNT] = { 0, 0, 0 };
             for (size_t const i : byId)
             {
                 DecorRule const& rule = rules[i];
@@ -536,14 +576,16 @@ namespace PDungeon
 
             int const poolAtStart[PD_DECOR_PLACEMENT_COUNT] = {
                 static_cast<int>(poolWallFoot.size()),
-                static_cast<int>(poolCorner.size())
+                static_cast<int>(poolCorner.size()),
+                static_cast<int>(poolScatter.size())
             };
             for (size_t const i : matching)
             {
                 DecorRule const& rule = rules[i];
                 int const kind = PlacementIndex(rule.placement);
                 std::vector<Candidate>& pool =
-                    (kind == 1) ? poolCorner : poolWallFoot;
+                    (kind == 2) ? poolScatter :
+                    (kind == 1) ? poolCorner  : poolWallFoot;
 
                 // Drawn for every matching rule, pool or no pool, so the
                 // stream's position follows the RULES and the plan and not how
@@ -570,27 +612,37 @@ namespace PDungeon
                     // and every prop after it in the block would move.
                     pool.erase(pool.begin() + k);
 
-                    WallDir const& dir = WALL_DIRS[cand.dir];
                     DecorSpot spot;
                     spot.bx = block.bx;
                     spot.by = block.by;
                     spot.ruleId = rule.id;
                     spot.goEntry = rule.goEntry;
-                    spot.u = (static_cast<double>(cand.row) + 0.5) *
-                             PD_CELL_SIZE_YD + dir.du;
-                    spot.v = (static_cast<double>(cand.col) + 0.5) *
-                             PD_CELL_SIZE_YD + dir.dv;
-                    spot.orientation = dir.facing;
+                    spot.u = (static_cast<double>(cand.row) + 0.5) * PD_CELL_SIZE_YD;
+                    spot.v = (static_cast<double>(cand.col) + 0.5) * PD_CELL_SIZE_YD;
+                    spot.orientation = 0.0;
 
-                    if (cand.dir2 >= 0)
+                    // A scatter candidate carries no wall (dir == 0, dir2 ==
+                    // -1, but dir == 0 is the valid "north" index) - so the
+                    // nudge is guarded on the placement KIND, not on the
+                    // candidate's own fields, or every scattered prop would
+                    // silently take a wall_foot's push to the north.
+                    if (kind != 2)
                     {
-                        // A corner: nudged into the angle of BOTH walls, and
-                        // facing out along their bisector. Derived, never
-                        // drawn, exactly like the single-wall case.
-                        WallDir const& dir2 = WALL_DIRS[cand.dir2];
-                        spot.u += dir2.du;
-                        spot.v += dir2.dv;
-                        spot.orientation = BisectFacing(dir.facing, dir2.facing);
+                        WallDir const& dir = WALL_DIRS[cand.dir];
+                        spot.u += dir.du;
+                        spot.v += dir.dv;
+                        spot.orientation = dir.facing;
+
+                        if (cand.dir2 >= 0)
+                        {
+                            // A corner: nudged into the angle of BOTH walls,
+                            // and facing out along their bisector. Derived,
+                            // never drawn, exactly like the single-wall case.
+                            WallDir const& dir2 = WALL_DIRS[cand.dir2];
+                            spot.u += dir2.du;
+                            spot.v += dir2.dv;
+                            spot.orientation = BisectFacing(dir.facing, dir2.facing);
+                        }
                     }
 
                     bool clear = true;
