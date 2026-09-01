@@ -192,6 +192,25 @@ namespace PDungeon
     private:
         void SpawnFromPlan(BlockPlan const& plan);
 
+        // Places the plan's props (torches, braziers). Called from the SAME
+        // guard as SpawnFromPlan, so decor and creatures are built and torn
+        // down together and re-entering a dungeon can never double up on
+        // either. Reads the plan and never writes it; the spots come from the
+        // decor stream, which is seeded from the layout seed - so the torches
+        // stand where they stood the last time this seed was entered.
+        void SpawnDecor(BlockPlan const& plan);
+
+        // The kit's structural props (fountains, cave-ins, columns ...):
+        // GameObjects pinned per variant by the chunk-meta 'props' anchors,
+        // spawned because MDDF doodads never collide with players (measured,
+        // first Phase-4 T2 round). Same guard, same teardown as SpawnDecor.
+        void SpawnKitProps(BlockPlan const& plan);
+
+        // One Shifting Cache per dead-end stub, on its junction square. A
+        // reward, not a look: deliberately NOT behind Decor.Enable. Shares
+        // the decor GUID list so one teardown owns every summoned object.
+        void SpawnDeadEndChests(BlockPlan const& plan);
+
         // Summons ONE dungeon mob: the floor plane, the disabled gravity, the
         // tag copied off `proto`, the run's affix auras and their spawn-time
         // health effects. Every creature this module puts on the map is born
@@ -221,6 +240,7 @@ namespace PDungeon
         bool     _spawned = false;
         uint32_t _spawnedSeed = 0;              // plan this instance is built for
         std::vector<ObjectGuid> _spawnedGuids;  // for a rebuild when the plan changes
+        std::vector<ObjectGuid> _decorGuids;    // props, torn down by the same rebuild
         PDv2RunState _run;
         std::vector<AffixDef> _runAffixes;      // the rows, for re-casting on a split
         uint16   _runAffixMask = 0;             // the same rows as bits

@@ -23,6 +23,9 @@
 //   pdblock --batch <n> [rooms]          invariants + determinism over n seeds
 //   pdblock --roomcap [n]                the 01 §8 room-cap measurement table
 //                                        that decides PD_GAME_ROOMS_CAP_MEASURED
+//   pdblock --decor-batch <n>            decor placement + determinism over n
+//                                        seeds x a room-count matrix, and the
+//                                        surface classes against kit_meta.json
 //   pdblock --manifest <seed> <file> [rooms]
 //                                        writes the manifest as raw bytes, for
 //                                        feeding to 49_pd_compose_blocks.py
@@ -30,6 +33,7 @@
 // Build:
 //   cl /std:c++17 /EHsc /W4 /O2 /I src tests\blockplan_harness.cpp
 //      src\generator\PDBlockPlan.cpp src\generator\PDv2WalkGrid.cpp
+//      src\generator\PDv2LinkState.cpp src\generator\PDv2DecorPlan.cpp
 //      /Fe:pdblock.exe
 
 // MSVC deprecates std::fopen in favour of fopen_s, which is a Microsoft
@@ -40,6 +44,7 @@
 #endif
 
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
 #include "generator/PDv2LinkState.h"
 #include "generator/PDv2WalkGrid.h"
@@ -51,6 +56,7 @@
 #include <map>
 #include <set>
 #include <string>
+#include <vector>
 
 using namespace PDungeon;
 
@@ -183,6 +189,102 @@ namespace
         return it == g_masks.end() ? nullptr : it->second.data();
     }
 
+    // --- kit metadata, for the surface-class oracle -------------------------
+    //
+    // The SQL above carries the walk masks; kit_meta.json carries what the kit
+    // DERIVED from them - the surface classes and the anchors. PDv2Classify
+    // re-derives the classes on the server side, and re-derivation is only
+    // safe while the two agree, so the harness compares them cell for cell.
+    struct KitChunk
+    {
+        std::string classes;
+        std::vector<DecorAnchor> anchors;
+        std::vector<KitProp> props;
+        int declaredProps = 0;      // kit_meta's own "goProps" count
+    };
+
+    std::map<int, KitChunk> g_kit;
+
+    bool LoadKitMeta(char const* path)
+    {
+        FILE* fh = std::fopen(path, "rb");
+        if (!fh)
+        {
+            std::printf("  cannot open %s\n", path);
+            return false;
+        }
+        std::string blob;
+        char buf[8192];
+        size_t got;
+        while ((got = std::fread(buf, 1, sizeof(buf), fh)) > 0)
+        {
+            blob.append(buf, got);
+        }
+        std::fclose(fh);
+
+        // Field scanning rather than a JSON parser: two fields per chunk are
+        // wanted and the file is machine-written by 48_gen_t1_blockkit.py, so
+        // a dependency would cost more than it buys. Each chunk record runs
+        // from its own "chunkId" to the next one.
+        size_t at = blob.find("\"chunkId\"");
+        while (at != std::string::npos)
+        {
+            size_t const next = blob.find("\"chunkId\"", at + 9);
+            size_t const end = (next == std::string::npos) ? blob.size() : next;
+
+            size_t const colon = blob.find(':', at);
+            int const chunkId = (colon == std::string::npos || colon > end)
+                                    ? 0 : std::atoi(blob.c_str() + colon + 1);
+
+            KitChunk chunk;
+            size_t const cls = blob.find("\"surfaceClasses\"", at);
+            if (cls != std::string::npos && cls < end)
+            {
+                size_t const open = blob.find('"', blob.find(':', cls) + 1);
+                size_t const close = (open == std::string::npos)
+                                         ? std::string::npos : blob.find('"', open + 1);
+                if (close != std::string::npos && close < end)
+                {
+                    chunk.classes = blob.substr(open + 1, close - open - 1);
+                }
+            }
+
+            size_t const anc = blob.find("\"anchors\"", at);
+            if (anc != std::string::npos && anc < end)
+            {
+                std::string const span = blob.substr(anc, end - anc);
+                DecodeAnchorList(span, chunk.anchors);
+                DecodePropList(span, chunk.props);
+            }
+
+            size_t const gp = blob.find("\"goProps\"", at);
+            if (gp != std::string::npos && gp < end)
+            {
+                size_t const colon = blob.find(':', gp);
+                if (colon != std::string::npos && colon < end)
+                {
+                    chunk.declaredProps = std::atoi(blob.c_str() + colon + 1);
+                }
+            }
+
+            if (chunkId && !chunk.classes.empty())
+            {
+                g_kit[chunkId] = chunk;
+            }
+            at = next;
+        }
+
+        std::printf("  %u kit chunk(s) from %s\n",
+                    static_cast<unsigned>(g_kit.size()), path);
+        return !g_kit.empty();
+    }
+
+    std::vector<DecorAnchor> const* AnchorsForChunk(int chunkId)
+    {
+        auto it = g_kit.find(chunkId);
+        return it == g_kit.end() ? nullptr : &it->second.anchors;
+    }
+
     void PrintOne(uint32_t seed, int rooms)
     {
         BlockCfg const cfg = MakeCfg(seed, rooms);
@@ -215,10 +317,13 @@ namespace
     // the parsers on both sides reject CR, but stdout on Windows is a text
     // stream that rewrites every \n into \r\n -- so piping this through a shell
     // would corrupt it in a way that only shows up as a parse error much later.
-    void WriteManifest(uint32_t seed, int rooms, char const* path, int obx, int oby)
+    void WriteManifest(uint32_t seed, int rooms, char const* path, int obx, int oby,
+                       int theme)
     {
+        BlockCfg cfg = MakeCfg(seed, rooms, obx, oby);
+        cfg.theme = theme;
         BlockPlan plan;
-        if (!GenerateBlockPlan(MakeCfg(seed, rooms, obx, oby), &plan))
+        if (!GenerateBlockPlan(cfg, &plan))
         {
             std::fprintf(stderr, "generation failed\n");
             std::exit(2);
@@ -1010,10 +1115,14 @@ namespace
     // regenerates a different dungeon.
     void RunLayoutFreezeCheck()
     {
+        // Re-pinned 2026-08-30 with PD_LAYOUT_VERSION 2 (dead-end stubs and
+        // visual alternates enter the draw stream). The v1 pin was
+        // 551 / E;13df5510; the bump is the documented answer to this check
+        // moving - every stored seed rerolls once, by design.
         uint32_t const PINNED_SEED = 12345u;
         int const PINNED_ROOMS = 5;
-        size_t const PINNED_BYTES = 551;
-        char const* const PINNED_TRAILER = "E;13df5510\n";
+        size_t const PINNED_BYTES = 571;
+        char const* const PINNED_TRAILER = "E;85fc0e4c\n";
 
         BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
         cfg.bossRooms = 1;
@@ -1026,16 +1135,172 @@ namespace
         }
 
         std::string const m = EmitManifest(plan, 1);
-        char msg[160];
+        size_t const trailer = std::strlen(PINNED_TRAILER);
+        std::string const actualTrailer =
+            m.size() >= trailer ? m.substr(m.size() - trailer) : m;
+        char msg[200];
         std::snprintf(msg, sizeof(msg),
-                      "pinned manifest is %d bytes, was %d - the bossRooms=1 layout MOVED",
-                      static_cast<int>(m.size()), static_cast<int>(PINNED_BYTES));
+                      "pinned manifest is %d bytes / %.*s, was %d / %s - the "
+                      "bossRooms=1 layout MOVED",
+                      static_cast<int>(m.size()),
+                      static_cast<int>(actualTrailer.size() ? actualTrailer.size() - 1 : 0),
+                      actualTrailer.c_str(),
+                      static_cast<int>(PINNED_BYTES), "E;13df5510");
         Check(m.size() == PINNED_BYTES, msg, PINNED_SEED);
 
-        size_t const trailer = std::strlen(PINNED_TRAILER);
         bool const same = m.size() >= trailer &&
                           m.compare(m.size() - trailer, trailer, PINNED_TRAILER) == 0;
-        Check(same, "pinned manifest CRC changed - the bossRooms=1 layout MOVED", PINNED_SEED);
+        Check(same, msg, PINNED_SEED);
+    }
+
+    // Phase 2: dead-end stubs and visual alternates.
+    //
+    // Structure first - every (role, mask, alt) the planner can emit must have
+    // a walk mask in the shipped SQL, or a dungeon would generate a chunkId the
+    // server cannot path over (the "0 masks = mobs stand still" failure, but
+    // per block). Then non-vacuity over real seeds: both alternates of a
+    // family and at least one dead end must actually OCCUR, or the draws are
+    // dead code the batch quietly stopped exercising.
+    void RunPhase2Checks(int seeds)
+    {
+        // Rooms ship all 15 masks; straight corridors the two facing pairs;
+        // dead ends exactly the four single bits. Both theme namespaces must
+        // be complete - the planner can aim at either, and a missing row is
+        // the per-block "mobs stand still" failure.
+        int const themeBases[2] = { 2000, 12000 };
+        for (int base : themeBases)
+        for (unsigned m = 1; m <= 15; ++m)
+        {
+            for (int alt = 0; alt < AltCountFor(BlockRole::Room); ++alt)
+            {
+                for (BlockRole role : { BlockRole::Room, BlockRole::RoomEntrance,
+                                        BlockRole::RoomBoss })
+                {
+                    int const id = base + alt * 1000 + static_cast<int>(role) * 100
+                                 + static_cast<int>(m);
+                    Check(MaskFor(id) != nullptr,
+                          "a room (role,mask,alt) combination has no walk mask in the SQL",
+                          static_cast<uint32_t>(id));
+                }
+            }
+        }
+        unsigned const straightMasks[2] = { SOCKET_N | SOCKET_S, SOCKET_E | SOCKET_W };
+        for (int base : themeBases)
+        for (unsigned m : straightMasks)
+        {
+            for (int alt = 0; alt < AltCountFor(BlockRole::CorridorStraight); ++alt)
+            {
+                int const id = base + alt * 1000 + 300 + static_cast<int>(m);
+                Check(MaskFor(id) != nullptr,
+                      "a straight-corridor alt has no walk mask in the SQL",
+                      static_cast<uint32_t>(id));
+            }
+        }
+        unsigned const stubMasks[4] = { SOCKET_N, SOCKET_E, SOCKET_S, SOCKET_W };
+        for (int base : themeBases)
+        for (unsigned m : stubMasks)
+        {
+            int const id = base + 700 + static_cast<int>(m);
+            Check(MaskFor(id) != nullptr,
+                  "a dead-end mask has no walk mask in the SQL",
+                  static_cast<uint32_t>(id));
+        }
+
+        bool sawAltRoom = false;
+        bool sawAltStraight = false;
+        bool sawDeadEnd = false;
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 3u;
+            BlockCfg const cfg = MakeCfg(seed, 5);
+            BlockPlan plan;
+            if (!GenerateBlockPlan(cfg, &plan))
+            {
+                continue;   // the batch already fails hard on generation
+            }
+            int stubs = 0;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                if (b.role == BlockRole::CorridorDeadEnd)
+                {
+                    ++stubs;
+                    sawDeadEnd = true;
+                    Check(b.chunkId == 2700 + static_cast<int>(b.socketMask),
+                          "dead-end chunkId is not 2700 + mask", seed);
+                }
+                else if (b.alt > 0)
+                {
+                    bool const isRoom = b.role == BlockRole::Room ||
+                                        b.role == BlockRole::RoomEntrance ||
+                                        b.role == BlockRole::RoomBoss;
+                    if (isRoom) sawAltRoom = true;
+                    if (b.role == BlockRole::CorridorStraight) sawAltStraight = true;
+                }
+            }
+            Check(stubs <= cfg.maxDeadEnds,
+                  "more dead ends than the config allows", seed);
+        }
+        Check(sawDeadEnd, "no seed in the sample produced a dead end - the "
+                          "stub pass is dead code", 0);
+        Check(sawAltRoom, "no seed produced an alt-1 room - the alternate draw "
+                          "is dead code", 0);
+        Check(sawAltStraight, "no seed produced an S-curve corridor", 0);
+    }
+
+    // Theme 2 must be the SAME dungeon under different art: the theme moves
+    // only the chunkId base, never a draw. Same seed -> block-identical
+    // layout, ids offset by exactly the namespace distance, and the walk grid
+    // builds from the theme-2 masks (which may differ per variant - city ring
+    // rooms - without touching the layout structure).
+    void RunThemeParityChecks(int seeds)
+    {
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            BlockCfg cfgMine = MakeCfg(seed, 6);
+            BlockCfg cfgCity = cfgMine;
+            cfgCity.theme = 2;
+
+            BlockPlan mine;
+            BlockPlan city;
+            if (!GenerateBlockPlan(cfgMine, &mine) ||
+                !GenerateBlockPlan(cfgCity, &city))
+            {
+                Check(false, "a theme failed to generate where the other could", seed);
+                continue;
+            }
+            Check(mine.blocks.size() == city.blocks.size(),
+                  "theme 2 laid out a different block count", seed);
+            if (mine.blocks.size() != city.blocks.size())
+            {
+                continue;
+            }
+            bool same = true;
+            for (size_t k = 0; k < mine.blocks.size(); ++k)
+            {
+                PlacedBlock const& a = mine.blocks[k];
+                PlacedBlock const& b = city.blocks[k];
+                if (a.bx != b.bx || a.by != b.by || a.role != b.role ||
+                    a.socketMask != b.socketMask || a.alt != b.alt ||
+                    b.chunkId - a.chunkId != 10000)
+                {
+                    same = false;
+                }
+            }
+            Check(same, "theme 2 is not the same layout with ids moved by the "
+                        "namespace distance", seed);
+
+            WalkGrid grid;
+            std::string why;
+            if (!BuildWalkGrid(city, MaskFor, &grid, &why))
+            {
+                Check(false, "theme-2 walk grid failed to build", seed);
+                continue;
+            }
+            int longest = 0;
+            Check(CheckAllRoomsConnected(city, grid, why, longest),
+                  "a theme-2 dungeon has unreachable rooms", seed);
+        }
     }
 
     // Exactly `bossRooms` rooms carry the boss role, the entrance never does,
@@ -1120,7 +1385,7 @@ namespace
         size_t maxManifest = 0;
     };
 
-    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds)
+    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds, int theme = 1)
     {
         RoomCapRow row;
         row.rooms = rooms;
@@ -1131,6 +1396,7 @@ namespace
             uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 1u;
             BlockCfg cfg = MakeCfg(seed, rooms);
             cfg.bossRooms = bossRooms;
+            cfg.theme = theme;
 
             BlockPlan plan;
             if (!GenerateBlockPlan(cfg, &plan))
@@ -1150,12 +1416,13 @@ namespace
     // Largest room count that generates on EVERY seed and still fits the
     // manifest budget, with the boss-room count a player at that dlvl would
     // actually run (rooms R unlocks at dlvl R - 3, per 01 §8 "3 + dlvl").
-    int MeasureRoomCap(int seeds, bool verbose)
+    int MeasureRoomCap(int seeds, bool verbose, int theme = 1)
     {
         if (verbose)
         {
             std::printf("room-cap measurement: %d seeds per row, field 8x8, "
-                        "manifest budget %d B\n\n", seeds, PD_GAME_MANIFEST_BUDGET_B);
+                        "theme %d, manifest budget %d B\n\n", seeds, theme,
+                        PD_GAME_MANIFEST_BUDGET_B);
             std::printf("  rooms  boss  cells   genfail  maxManifest  verdict\n");
         }
 
@@ -1169,7 +1436,7 @@ namespace
             // floor constant.
             int const unlockDlvl = rooms > 3 ? rooms - 3 : 0;
             int const boss = GameBossRooms(unlockDlvl);
-            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds);
+            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds, theme);
             bool const ok = row.failures == 0 &&
                             row.maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B);
             if (ok)
@@ -1189,13 +1456,457 @@ namespace
     int RunRoomCap(int seeds)
     {
         int const measured = MeasureRoomCap(seeds, true);
-        std::printf("\nlargest room count clean on every seed: %d\n", measured);
+        // Theme 2's five-digit chunk ids are the widest manifest lines, so
+        // the cap has to hold there too - a city dungeon at the cap must not
+        // blow the packet budget theme 1 measured its way under.
+        std::printf("\n");
+        int const measuredCity = MeasureRoomCap(seeds, true, 2);
+        std::printf("\nlargest room count clean on every seed: %d (theme 1), "
+                    "%d (theme 2)\n", measured, measuredCity);
         std::printf("PD_GAME_ROOMS_CAP_MEASURED currently encodes: %d\n",
                     PD_GAME_ROOMS_CAP_MEASURED);
-        std::printf("%s\n", measured >= PD_GAME_ROOMS_CAP_MEASURED
-                                ? "the encoded cap holds"
+        bool const ok = measured >= PD_GAME_ROOMS_CAP_MEASURED &&
+                        measuredCity >= PD_GAME_ROOMS_CAP_MEASURED;
+        std::printf("%s\n", ok ? "the encoded cap holds for both themes"
                                 : "THE ENCODED CAP IS TOO HIGH - update PDv2GameMath.h");
-        return measured >= PD_GAME_ROOMS_CAP_MEASURED ? 0 : 1;
+        return ok ? 0 : 1;
+    }
+
+    // --- decor -------------------------------------------------------------
+    //
+    // The three seed rows of `pdungeon_decor_rules`, mirrored as a fixture.
+    // THE SQL IS THE RUNTIME SOURCE - data/sql/db-world/mod_pdungeon_decor.sql
+    // - and this copy exists only so the placement can be checked without a
+    // database. If one moves, move the other.
+    std::vector<DecorRule> DecorFixture()
+    {
+        std::vector<DecorRule> rules;
+
+        DecorRule torchRoom;
+        torchRoom.id = 1;
+        torchRoom.theme = 1;
+        torchRoom.roleFilter = "room";
+        torchRoom.goEntry = 910020;
+        torchRoom.minPerBlock = 1;
+        torchRoom.maxPerBlock = 3;
+        torchRoom.weight = 100;
+        torchRoom.minSpacingYd = 8.0;
+        rules.push_back(torchRoom);
+
+        DecorRule brazierBoss;
+        brazierBoss.id = 2;
+        brazierBoss.theme = 1;
+        brazierBoss.roleFilter = "room_boss";
+        brazierBoss.goEntry = 910021;
+        brazierBoss.minPerBlock = 1;
+        brazierBoss.maxPerBlock = 2;
+        brazierBoss.weight = 40;
+        brazierBoss.minSpacingYd = 8.0;
+        rules.push_back(brazierBoss);
+
+        DecorRule torchCorridor;
+        torchCorridor.id = 3;
+        torchCorridor.theme = 1;
+        torchCorridor.roleFilter = "corridor";
+        torchCorridor.goEntry = 910020;
+        torchCorridor.minPerBlock = 0;
+        torchCorridor.maxPerBlock = 1;
+        torchCorridor.weight = 100;
+        torchCorridor.minSpacingYd = 8.0;
+        rules.push_back(torchCorridor);
+
+        return rules;
+    }
+
+    bool SameSpots(std::vector<DecorSpot> const& l, std::vector<DecorSpot> const& r)
+    {
+        if (l.size() != r.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < l.size(); ++i)
+        {
+            if (l[i].bx != r[i].bx || l[i].by != r[i].by ||
+                l[i].ruleId != r[i].ruleId || l[i].goEntry != r[i].goEntry ||
+                l[i].u != r[i].u || l[i].v != r[i].v ||
+                l[i].orientation != r[i].orientation)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // BuildDecorPlan takes the plan by const reference, so this can only fail
+    // through a const_cast somebody added - which is exactly the kind of thing
+    // that is cheap to check and expensive to find later.
+    bool SamePlan(BlockPlan const& l, BlockPlan const& r)
+    {
+        if (l.effectiveSeed != r.effectiveSeed ||
+            l.entranceIndex != r.entranceIndex || l.bossIndex != r.bossIndex ||
+            l.blocks.size() != r.blocks.size())
+        {
+            return false;
+        }
+        for (size_t i = 0; i < l.blocks.size(); ++i)
+        {
+            PlacedBlock const& a = l.blocks[i];
+            PlacedBlock const& b = r.blocks[i];
+            if (a.bx != b.bx || a.by != b.by || a.role != b.role ||
+                a.socketMask != b.socketMask || a.chunkId != b.chunkId ||
+                a.roomId != b.roomId || a.depth != b.depth)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Every property a spot has to have, checked against the KIT's own surface
+    // classes rather than against the planner's - a placement bug that also
+    // lives in PDv2Classify would otherwise agree with itself.
+    bool CheckDecorSpots(BlockPlan const& plan, std::vector<DecorSpot> const& spots,
+                         std::vector<DecorRule> const& rules, std::string& why)
+    {
+        std::map<std::pair<int, int>, int> chunkAt;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            chunkAt[std::make_pair(b.bx, b.by)] = b.chunkId;
+        }
+
+        std::map<int, double> spacingOf;
+        for (DecorRule const& rule : rules)
+        {
+            spacingOf[rule.id] = rule.minSpacingYd;
+        }
+
+        std::set<std::string> seen;
+        std::map<std::pair<std::pair<int, int>, int>, std::vector<DecorSpot>> perRule;
+
+        for (DecorSpot const& spot : spots)
+        {
+            auto const block = chunkAt.find(std::make_pair(spot.bx, spot.by));
+            if (block == chunkAt.end())
+            {
+                why = "a spot sits on a block the plan does not contain";
+                return false;
+            }
+            auto const kit = g_kit.find(block->second);
+            if (kit == g_kit.end())
+            {
+                why = "a spot sits on a chunk the kit metadata does not describe";
+                return false;
+            }
+            std::string const& classes = kit->second.classes;
+            if (classes.size() != PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK)
+            {
+                why = "kit surfaceClasses is not 64 characters";
+                return false;
+            }
+
+            int const row = static_cast<int>(std::floor(spot.u / PD_CELL_SIZE_YD));
+            int const col = static_cast<int>(std::floor(spot.v / PD_CELL_SIZE_YD));
+            if (row < 0 || col < 0 ||
+                row >= PD_CELLS_PER_BLOCK || col >= PD_CELLS_PER_BLOCK)
+            {
+                why = "a spot is outside its own block";
+                return false;
+            }
+            if (row == PD_CELLS_PER_BLOCK / 2 || col == PD_CELLS_PER_BLOCK / 2)
+            {
+                why = "a spot stands on the socket track";
+                return false;
+            }
+            if (classes[static_cast<size_t>(row) * PD_CELLS_PER_BLOCK + col] != 'W')
+            {
+                why = "a spot is not on a walkable cell";
+                return false;
+            }
+
+            bool touchesWall = false;
+            int const drow[4] = { -1, 0, 1, 0 };
+            int const dcol[4] = { 0, 1, 0, -1 };
+            for (int d = 0; d < 4 && !touchesWall; ++d)
+            {
+                int const r = row + drow[d];
+                int const c = col + dcol[d];
+                if (r < 0 || c < 0 ||
+                    r >= PD_CELLS_PER_BLOCK || c >= PD_CELLS_PER_BLOCK)
+                {
+                    continue;
+                }
+                touchesWall =
+                    classes[static_cast<size_t>(r) * PD_CELLS_PER_BLOCK + c] == 'L';
+            }
+            if (!touchesWall)
+            {
+                why = "a spot's cell touches no wall cell";
+                return false;
+            }
+
+            for (DecorAnchor const& anchor : kit->second.anchors)
+            {
+                double const du = spot.u - anchor.u;
+                double const dv = spot.v - anchor.v;
+                if (du * du + dv * dv <
+                    DECOR_ANCHOR_CLEAR_YD * DECOR_ANCHOR_CLEAR_YD)
+                {
+                    why = "a spot stands inside an anchor's clearance";
+                    return false;
+                }
+            }
+
+            char key[96];
+            std::snprintf(key, sizeof(key), "%d,%d,%.6f,%.6f",
+                          spot.bx, spot.by, spot.u, spot.v);
+            if (!seen.insert(key).second)
+            {
+                why = "two spots share a position";
+                return false;
+            }
+
+            auto const spacing = spacingOf.find(spot.ruleId);
+            if (spacing == spacingOf.end())
+            {
+                why = "a spot names a rule id the fixture does not have";
+                return false;
+            }
+            auto& siblings =
+                perRule[std::make_pair(std::make_pair(spot.bx, spot.by), spot.ruleId)];
+            for (DecorSpot const& other : siblings)
+            {
+                double const du = spot.u - other.u;
+                double const dv = spot.v - other.v;
+                if (du * du + dv * dv < spacing->second * spacing->second)
+                {
+                    why = "two spots of one rule are closer than its spacing";
+                    return false;
+                }
+            }
+            siblings.push_back(spot);
+        }
+        return true;
+    }
+
+    // PDv2Classify against the kit's own surfaceClasses, chunk by chunk. This
+    // is the check that lets the server DERIVE the classes instead of shipping
+    // a second copy of them.
+    void RunClassifyChecks()
+    {
+        for (auto const& kv : g_kit)
+        {
+            char msg[160];
+            uint8_t const* const mask = MaskFor(kv.first);
+            if (!mask)
+            {
+                std::snprintf(msg, sizeof(msg),
+                              "chunk %d is in kit_meta.json but has no walk mask "
+                              "in the SQL", kv.first);
+                Check(false, msg, 0);
+                continue;
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "chunk %d: derived surface classes differ from the kit's",
+                          kv.first);
+            // The prop channel must decode to exactly the count the generator
+            // says it wrote - a props list the server-side scanner cannot read
+            // is a block that silently loses its fountain or cave-in.
+            {
+                char pmsg[160];
+                std::snprintf(pmsg, sizeof(pmsg),
+                              "chunk %d: props decode to %d, kit_meta declares %d",
+                              kv.first, static_cast<int>(kv.second.props.size()),
+                              kv.second.declaredProps);
+                Check(static_cast<int>(kv.second.props.size()) ==
+                          kv.second.declaredProps, pmsg, 0);
+                for (KitProp const& prop : kv.second.props)
+                {
+                    Check(prop.goEntry >= 910040 && prop.goEntry <= 910049,
+                          "a kit prop names an entry outside the reserved "
+                          "910040-910049 block", static_cast<uint32_t>(kv.first));
+                }
+            }
+            std::string const derived = PDv2Classify(mask);
+            std::string const& kitCls = kv.second.classes;
+            bool ok = derived.size() == kitCls.size();
+            if (ok)
+            {
+                for (size_t k = 0; k < derived.size(); ++k)
+                {
+                    if (derived[k] == kitCls[k])
+                    {
+                        continue;
+                    }
+                    // The ONE sanctioned divergence (Phase 4 city ring
+                    // rooms): the kit may promote a derived VOID cell to
+                    // WALL where a building pad keeps terrain-covered floor
+                    // under a centrepiece - script 52 enforces the same rule
+                    // on the actual bytes (no hole there). The server's own
+                    // derivation feeds only the decor planner, which has no
+                    // theme-2 rules; the day city decor rules exist, the
+                    // promotion has to move into PDv2Classify itself.
+                    if (derived[k] == 'V' && kitCls[k] == 'L')
+                    {
+                        continue;
+                    }
+                    ok = false;
+                    break;
+                }
+            }
+            Check(ok, msg, 0);
+        }
+    }
+
+    // roleFilter is a PREFIX match, which is what makes one 'room' row cover
+    // the entrance and the boss room too. Pinned here because nothing else
+    // would notice it turning into an exact match.
+    void RunRoleFilterChecks()
+    {
+        Check(DecorRoleMatches("room", BlockRoleName(BlockRole::Room)),
+              "'room' does not match a room", 0);
+        Check(DecorRoleMatches("room", BlockRoleName(BlockRole::RoomEntrance)),
+              "'room' does not match the entrance room", 0);
+        Check(DecorRoleMatches("room", BlockRoleName(BlockRole::RoomBoss)),
+              "'room' does not match a boss room", 0);
+        Check(!DecorRoleMatches("room_boss", BlockRoleName(BlockRole::Room)),
+              "'room_boss' matched a plain room", 0);
+        Check(DecorRoleMatches("corridor", BlockRoleName(BlockRole::CorridorCross)),
+              "'corridor' does not match a cross corridor", 0);
+        Check(!DecorRoleMatches("corridor", BlockRoleName(BlockRole::Room)),
+              "'corridor' matched a room", 0);
+        Check(DecorRoleMatches("", BlockRoleName(BlockRole::Room)),
+              "an empty filter did not match everything", 0);
+    }
+
+    // Neither rejection gate ever fires against kit v2: its rooms are wide
+    // enough that a 3 yd anchor clearance and an 8 yd spacing are met by
+    // construction, so the batch's per-spot checks on them pass vacuously. A
+    // guard that is never exercised is a guard that may not work, so both are
+    // forced here against data built to break them.
+    void RunDecorGateChecks()
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(MakeCfg(1u, 5), &plan))
+        {
+            Check(false, "the gate checks could not generate a plan", 0);
+            return;
+        }
+
+        // Anchors on a 4 yd lattice: no point in a block is further than
+        // 2.83 yd from one of them, which is inside the 3 yd clearance, so
+        // nothing may be placed anywhere.
+        std::vector<DecorAnchor> lattice;
+        for (int i = 0; i * 4 <= 68; ++i)
+        {
+            for (int j = 0; j * 4 <= 68; ++j)
+            {
+                DecorAnchor anchor;
+                anchor.u = i * 4.0;
+                anchor.v = j * 4.0;
+                lattice.push_back(anchor);
+            }
+        }
+        std::vector<DecorSpot> const smothered = BuildDecorPlan(
+            plan, MaskFor,
+            [&lattice](int) -> std::vector<DecorAnchor> const* { return &lattice; },
+            DecorFixture(), plan.effectiveSeed);
+        Check(smothered.empty(), "the anchor clearance let a spot through", 0);
+
+        // One rule, asking for three props a block with a spacing wider than
+        // the block: exactly one may land.
+        std::vector<DecorRule> wide = DecorFixture();
+        wide.resize(1);
+        wide[0].minPerBlock = 3;
+        wide[0].maxPerBlock = 3;
+        wide[0].minSpacingYd = 100.0;
+        std::vector<DecorSpot> const spread = BuildDecorPlan(
+            plan, MaskFor, AnchorsForChunk, wide, plan.effectiveSeed);
+        std::map<std::pair<int, int>, int> perBlock;
+        int worst = 0;
+        for (DecorSpot const& spot : spread)
+        {
+            int const n = ++perBlock[std::make_pair(spot.bx, spot.by)];
+            worst = (n > worst) ? n : worst;
+        }
+        Check(!spread.empty(), "the spacing gate check placed nothing at all", 0);
+        Check(worst <= 1, "the spacing rule let two props share a block", 0);
+    }
+
+    int RunDecorBatch(int count)
+    {
+        // Rooms is the one config axis that changes what a plan is made of:
+        // a 3-room layout is nearly all corridor and a 9-room one is nearly
+        // all room, so the matrix covers both ends of the rule set.
+        int const ROOM_MATRIX[3] = { 3, 5, 8 };
+
+        std::printf("decor batch of %d seeds x %d room counts\n\n",
+                    count, static_cast<int>(sizeof(ROOM_MATRIX) / sizeof(int)));
+
+        if (g_kit.empty() || g_masks.empty())
+        {
+            std::printf("kit metadata is missing - nothing to check\n");
+            return 1;
+        }
+
+        RunClassifyChecks();
+        RunRoleFilterChecks();
+        RunDecorGateChecks();
+
+        std::vector<DecorRule> const rules = DecorFixture();
+        int totalSpots = 0;
+        int minSpots = 1 << 30;
+        int maxSpots = 0;
+        int blankLayouts = 0;
+
+        for (int i = 0; i < count; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 1u;
+            for (int const rooms : ROOM_MATRIX)
+            {
+                BlockPlan plan;
+                if (!GenerateBlockPlan(MakeCfg(seed, rooms), &plan))
+                {
+                    Check(false, "generation failed", seed);
+                    continue;
+                }
+
+                BlockPlan const before = plan;
+                std::vector<DecorSpot> const first = BuildDecorPlan(
+                    plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
+                std::vector<DecorSpot> const again = BuildDecorPlan(
+                    plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
+
+                Check(SameSpots(first, again),
+                      "two decor builds of the same plan differ", seed);
+                Check(SamePlan(before, plan),
+                      "BuildDecorPlan changed the plan it was given", seed);
+
+                std::string why;
+                Check(CheckDecorSpots(plan, first, rules, why),
+                      why.empty() ? "decor placement broken" : why.c_str(), seed);
+
+                int const spots = static_cast<int>(first.size());
+                totalSpots += spots;
+                minSpots = (spots < minSpots) ? spots : minSpots;
+                maxSpots = (spots > maxSpots) ? spots : maxSpots;
+                if (!spots)
+                {
+                    ++blankLayouts;
+                }
+            }
+        }
+
+        // Every layout has at least an entrance and a boss room, and rule 1
+        // asks for at least one torch in each - so a layout with no props at
+        // all means the rules stopped matching, which no per-spot check would
+        // catch.
+        Check(blankLayouts == 0, "a layout came back with no props at all", 0);
+
+        std::printf("props per layout : %d..%d (%d total)\n",
+                    minSpots, maxSpots, totalSpots);
+        std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
+        std::printf("%s\n", g_failures == 0 ? "ALL CHECKS PASS" : "FAILURES");
+        return g_failures == 0 ? 0 : 1;
     }
 
     int RunBatch(int count, int rooms)
@@ -1208,6 +1919,20 @@ namespace
         // A tenth of the batch is plenty for three boss-room counts: the
         // property is structural, not statistical.
         RunBossRoomChecks(count / 10 + 1);
+        RunPhase2Checks(count / 10 + 1);
+        RunThemeParityChecks(count / 10 + 1);
+
+        // The city cap must hold like the mine cap - its ids are one digit
+        // wider, which is exactly the kind of erosion the measurement exists
+        // to catch.
+        {
+            int const cityCap = MeasureRoomCap(count / 5 + 1, false, 2);
+            char msg[160];
+            std::snprintf(msg, sizeof(msg),
+                          "theme-2 room cap is %d, below the encoded %d",
+                          cityCap, PD_GAME_ROOMS_CAP_MEASURED);
+            Check(cityCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
+        }
 
         // The encoded room cap is a MEASUREMENT, so it has to be re-measured or
         // it rots: a generator change that makes packing harder would otherwise
@@ -1348,7 +2073,14 @@ int main(int argc, char** argv)
     // Optional: without the kit metadata the planner checks still run, the
     // walk-grid ones are simply skipped rather than faked.
     LoadMasks("C:\\\\wowstuff\\\\ForgottenLand2.0\\\\output\\\\pd_block_kit\\\\FLStream\\\\chunks\\\\t1b\\\\pdungeon_chunk_meta.sql");
+    // Same staging directory, beside the SQL: the surface classes and the
+    // anchors the decor checks need are only in the kit's JSON.
+    LoadKitMeta("C:\\\\wowstuff\\\\ForgottenLand2.0\\\\output\\\\pd_block_kit\\\\FLStream\\\\chunks\\\\t1b\\\\kit_meta.json");
 
+    if (argc >= 2 && std::strcmp(argv[1], "--decor-batch") == 0)
+    {
+        return RunDecorBatch((argc >= 3) ? std::atoi(argv[2]) : 100);
+    }
     if (argc >= 2 && std::strcmp(argv[1], "--batch") == 0)
     {
         int const n = (argc >= 3) ? std::atoi(argv[2]) : 100;
@@ -1364,8 +2096,9 @@ int main(int argc, char** argv)
         int const rooms = (argc >= 5) ? std::atoi(argv[4]) : 5;
         int const obx = (argc >= 7) ? std::atoi(argv[5]) : 32 * 8;
         int const oby = (argc >= 7) ? std::atoi(argv[6]) : 32 * 8;
+        int const theme = (argc >= 8) ? std::atoi(argv[7]) : 1;
         WriteManifest(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)),
-                      rooms, argv[3], obx, oby);
+                      rooms, argv[3], obx, oby, theme);
         return 0;
     }
 

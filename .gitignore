@@ -1,3 +1,5 @@
 /llm-council
 /pdgen.exe
 /build_tmp/
+/pdblock.exe
+*.obj

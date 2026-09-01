@@ -70,7 +70,13 @@
 CREATE TABLE IF NOT EXISTS `pdungeon_packs` (
   `id` INT UNSIGNED NOT NULL,
   `name` VARCHAR(64) NOT NULL,
-  `theme` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  -- 0 = ANY theme. The kit's themes are ART: a pack is tied to one only if
+  -- its creatures would look wrong under another look. The three packs below
+  -- are undead crypt trash, which reads as well in a dark Gilneas street as
+  -- in a mine, so they are theme-agnostic. Scoping them to theme 1 meant the
+  -- city spawned nothing but the placeholder creature the moment it became
+  -- the default look.
+  `theme` TINYINT UNSIGNED NOT NULL DEFAULT 0,
   `level_min` TINYINT UNSIGNED NOT NULL DEFAULT 1,
   `level_max` TINYINT UNSIGNED NOT NULL DEFAULT 80,
   `unlock_dlvl` TINYINT UNSIGNED NOT NULL DEFAULT 0,
@@ -101,9 +107,9 @@ DELETE FROM `pdungeon_packs` WHERE `id` BETWEEN 1 AND 3;
 -- that has sub-80 members.
 INSERT INTO `pdungeon_packs`
   (`id`, `name`, `theme`, `level_min`, `level_max`, `unlock_dlvl`, `enabled`) VALUES
-  (1, 'Crypt Horrors',     1, 80, 80, 0, 1),
-  (2, 'Abyssal Broodpit',  1, 80, 80, 0, 1),
-  (3, 'Lords of the Deep', 1, 80, 80, 0, 1);
+  (1, 'Crypt Horrors',     0, 80, 80, 0, 1),
+  (2, 'Abyssal Broodpit',  0, 80, 80, 0, 1),
+  (3, 'Lords of the Deep', 0, 80, 80, 0, 1);
 
 INSERT INTO `pdungeon_pack_members`
   (`packId`, `entry`, `role`, `casterSpellId`, `weight`) VALUES

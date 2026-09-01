@@ -20,6 +20,7 @@
 #include "Chat.h"
 #include "Creature.h"
 #include "DatabaseEnv.h"
+#include "GameObject.h"
 #include "InstanceScript.h"
 #include "Log.h"
 #include "LootMgr.h"
@@ -52,7 +53,13 @@ namespace PDungeon
         // Stand-in for a run whose packs could not be drawn (the SQL was not
         // applied, or every pack is disabled). Chosen because it is a stock,
         // level-appropriate humanoid every client already has art for.
-        uint32 const PLACEHOLDER_CREATURE = 29402;   // Anub'ar Skirmisher
+        // 29402 is 'Ironwool Mammoth' (level 77-78, faction 190) in this
+        // world DB, not the Anub'ar Skirmisher this comment used to
+        // claim - and the operator reported exactly that surprise. It
+        // stays as the fallback BECAUSE it is absurd in a dungeon: a
+        // herd of mammoths is an unmistakable "the packs did not load"
+        // signal, which a plausible-looking undead would hide.
+        uint32 const PLACEHOLDER_CREATURE = 29402;   // Ironwool Mammoth
 
         float const SPAWN_SPREAD_YD = 12.0f;
 
@@ -154,6 +161,13 @@ namespace PDungeon
         if (!_spawned)
         {
             SpawnFromPlan(*plan);
+            // Under the SAME guard as the creatures, deliberately: one flag
+            // decides what this instance has standing in it, so a re-entry
+            // cannot double the props while leaving the mobs alone, and the
+            // rebuild above tore both down together.
+            SpawnDecor(*plan);
+            SpawnKitProps(*plan);
+            SpawnDeadEndChests(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -523,6 +537,20 @@ namespace PDungeon
             }
         }
         _spawnedGuids.clear();
+
+        // Delete(), not DespawnOrUnsummon(): a GameObject summoned with
+        // respawnTime 0 has no spawn record, and GameObject::DespawnOrUnsummon
+        // only deactivates such an object - it stays on the map, which on a
+        // rebuild means the old dungeon's torches float over the new one.
+        // Delete() is the call that puts it on the removal list.
+        for (ObjectGuid const& guid : _decorGuids)
+        {
+            if (GameObject* go = instance->GetGameObject(guid))
+            {
+                go->Delete();
+            }
+        }
+        _decorGuids.clear();
     }
 
     void PDv2InstanceScript::EnsureWalkGrid(BlockPlan const& plan)
@@ -915,6 +943,152 @@ namespace PDungeon
                  uint32(_run.roomsTotal), uint32(_run.bossTotal),
                  uint32(plan.blocks.size()), uint32(_run.difficulty),
                  uint32(_run.lootMultX100), affixedMobs, uint32(_runAffixes.size()));
+    }
+
+    void PDv2InstanceScript::SpawnDecor(BlockPlan const& plan)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        if (!cfg.decorEnable)
+        {
+            return;
+        }
+
+        std::vector<DecorRule> const& rules = sPDv2Mgr->DecorRules();
+        if (rules.empty())
+        {
+            // Not an error: mod_pdungeon_decor.sql is simply not applied yet,
+            // and an unlit dungeon is still a dungeon. LoadDecorRules said so
+            // once at startup and there is no reason to say it per instance.
+            return;
+        }
+
+        // The PLAN's seed, the same number the terrain and the spawn draw came
+        // from. BuildDecorPlan derives its own stream from it, so the props
+        // follow a re-roll exactly as the walls do and re-entering the same
+        // dungeon finds them where they were.
+        std::vector<DecorSpot> const spots = BuildDecorPlan(
+            plan,
+            [](int chunkId) { return sPDv2Mgr->WalkMaskFor(chunkId); },
+            [](int chunkId) { return sPDv2Mgr->AnchorsFor(chunkId); },
+            rules, plan.effectiveSeed);
+
+        uint32 placed = 0;
+        for (DecorSpot const& spot : spots)
+        {
+            // Z is the kit's floor plane, which BlockToWorld already supplies -
+            // the same plane the creatures stand on, and the only floor the
+            // server knows about on this map.
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            sPDv2Mgr->BlockToWorld(spot.bx, spot.by, spot.u, spot.v, x, y, z);
+
+            // respawnTime 0: no despawn timer. A prop is furniture and lives
+            // exactly as long as the instance does; DespawnAll owns its end.
+            GameObject* go = instance->SummonGameObject(
+                static_cast<uint32>(spot.goEntry), x, y, z,
+                static_cast<float>(spot.orientation), 0.0f, 0.0f, 0.0f, 0.0f, 0);
+            if (!go)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon decor {} "
+                                  "(missing gameobject_template?)",
+                          instance->GetInstanceId(), spot.goEntry);
+                continue;
+            }
+
+            _decorGuids.push_back(go->GetGUID());
+            ++placed;
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} prop(s) from {} decor rule(s) "
+                         "over a {}-block plan",
+                 instance->GetInstanceId(), placed, uint32(rules.size()),
+                 uint32(plan.blocks.size()));
+    }
+
+    void PDv2InstanceScript::SpawnKitProps(BlockPlan const& plan)
+    {
+        // Gated like SpawnDecor: props are LOOK, and V2.Decor.Enable is the
+        // one switch for everything optical. (The dead-end chest below stays
+        // ungated - a reward, not a look.)
+        if (!sPDv2Mgr->GetConfig().decorEnable)
+        {
+            return;
+        }
+
+        uint32 placed = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            std::vector<KitProp> const* props = sPDv2Mgr->PropsFor(b.chunkId);
+            if (!props)
+            {
+                continue;
+            }
+            for (KitProp const& prop : *props)
+            {
+                float x = 0.0f, y = 0.0f, z = 0.0f;
+                sPDv2Mgr->BlockToWorld(b.bx, b.by, prop.u, prop.v, x, y, z);
+                // The kit measured the terrain under this prop; the floor
+                // plane BlockToWorld answers is only right on WALK cells.
+                z += static_cast<float>(prop.z);
+                GameObject* go = instance->SummonGameObject(
+                    static_cast<uint32>(prop.goEntry), x, y, z,
+                    static_cast<float>(prop.o), 0.0f, 0.0f, 0.0f, 0.0f, 0);
+                if (!go)
+                {
+                    LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon kit prop {} "
+                                      "(mod_pdungeon_prop_displays.sql not applied?)",
+                              instance->GetInstanceId(), prop.goEntry);
+                    continue;
+                }
+                _decorGuids.push_back(go->GetGUID());
+                ++placed;
+            }
+        }
+        if (placed)
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} placed {} kit prop(s) from the "
+                             "chunk-meta anchors", instance->GetInstanceId(), placed);
+        }
+    }
+
+    void PDv2InstanceScript::SpawnDeadEndChests(BlockPlan const& plan)
+    {
+        // One Shifting Cache (GO_CHEST, native loot table) on the junction
+        // square of every dead-end stub - the stub's whole reason to exist.
+        // NOT gated on Decor.Enable: the chest is a reward, not a look, and
+        // the dungeon must not lose loot to a cosmetics switch. Torn down by
+        // the same DespawnAll as everything else this instance stands up.
+        uint32 placed = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.role != BlockRole::CorridorDeadEnd)
+            {
+                continue;
+            }
+            // The kit pins the stub's chest anchor to the block centre (the
+            // junction square), so the position is a constant of the format
+            // rather than a lookup that could go stale.
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            sPDv2Mgr->BlockToWorld(b.bx, b.by,
+                                   PD_BLOCK_SIZE_YD / 2.0f, PD_BLOCK_SIZE_YD / 2.0f,
+                                   x, y, z);
+            GameObject* go = instance->SummonGameObject(
+                GO_CHEST, x, y, z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+            if (!go)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the "
+                                  "dead-end chest (missing gameobject_template "
+                                  "{}?)",
+                          instance->GetInstanceId(), uint32(GO_CHEST));
+                continue;
+            }
+            _decorGuids.push_back(go->GetGUID());
+            ++placed;
+        }
+        if (placed)
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} placed {} dead-end chest(s)",
+                     instance->GetInstanceId(), placed);
+        }
     }
 
     void PDv2InstanceScript::CatchFallers()

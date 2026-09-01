@@ -305,12 +305,18 @@ ProceduralDungeon.V2.LoopChance = 15
 
 #
 #    ProceduralDungeon.V2.Theme
-#        Description: 1 = floating platforms. Theme 2 (Stormwind Vault) does not
-#                     exist yet.
-#        Default:     1
+#        Description: The kit theme NEW generations use. 1 = mine (walled
+#                     caverns, timber frames, log tunnels), 2 = city (cobble
+#                     plazas, street lamps, fountain and silo ring rooms).
+#                     A stored dungeon keeps the theme it was generated with
+#                     whatever this says (masks for ALL themes stay loaded),
+#                     and `.pdungeon v2 gen [seed] [theme]` overrides it for
+#                     one GM test generation.
+#        Default:     2 - the city is the standard look the UI presents;
+#                     the mine stays reachable with `gen [seed] 1`.
 #
 
-ProceduralDungeon.V2.Theme = 1
+ProceduralDungeon.V2.Theme = 2
 
 #
 #    ProceduralDungeon.V2.RequiredDllVersion
@@ -505,4 +511,23 @@ ProceduralDungeon.V2.CastRangeYd = 25.0
 #
 
 ProceduralDungeon.V2.AggroRangeYd = 20.0
+
+#
+#    ProceduralDungeon.V2.Decor.Enable
+#        Description: Place the server-side props (torches, braziers) a layout
+#                     calls for. The kit's terrain carries no light sources at
+#                     all, so 0 leaves the dungeon lit by nothing - it is meant
+#                     for chasing a GameObject budget or a display problem, not
+#                     for play. The rules themselves live in
+#                     pdungeon_decor_rules; this key only decides whether they
+#                     are applied.
+#
+#                     Nothing reads the props: they are decoration, no mechanic
+#                     keys on them, and turning them off changes no other
+#                     number in the run.
+#        Default:     1 - on
+#                     0 - off
+#
+
+ProceduralDungeon.V2.Decor.Enable = 1
 

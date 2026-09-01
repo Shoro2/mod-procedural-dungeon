@@ -211,7 +211,8 @@ namespace PDungeon
         }
     }
 
-    PDv2GenOutcome PDv2DoGenerate(Player* player, uint32_t seed, BlockPlan* outPlan)
+    PDv2GenOutcome PDv2DoGenerate(Player* player, uint32_t seed, BlockPlan* outPlan,
+                                  int themeOverride)
     {
         PDv2GenOutcome outcome;
 
@@ -232,7 +233,7 @@ namespace PDungeon
 
         BlockPlan local;
         BlockPlan& plan = outPlan ? *outPlan : local;
-        if (!sPDv2Mgr->GeneratePlan(accountId, wanted, plan))
+        if (!sPDv2Mgr->GeneratePlan(accountId, wanted, plan, themeOverride))
         {
             outcome.error = "generation failed for seed " + std::to_string(wanted);
             return outcome;
@@ -240,6 +241,7 @@ namespace PDungeon
 
         outcome.ok = true;
         outcome.seed = plan.effectiveSeed;
+        outcome.theme = plan.config.theme;
         outcome.blocks = static_cast<uint32_t>(plan.blocks.size());
         for (PlacedBlock const& b : plan.blocks)
         {

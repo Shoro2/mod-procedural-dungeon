@@ -65,6 +65,7 @@ namespace PDungeon
         bool        ok = false;
         bool        pushed = false;     // the manifest reached the client link
         uint32_t    seed = 0;           // the plan's EFFECTIVE seed
+        int         theme = 0;          // the plan's theme (frozen gen input)
         uint32_t    blocks = 0;
         uint32_t    rooms = 0;
         std::string error;              // why it failed; empty when ok
@@ -83,7 +84,10 @@ namespace PDungeon
     // Plans a layout for the player's account, stores it and pushes it to the
     // client link. `seed` 0 rolls one. `outPlan` may be nullptr when the
     // caller does not need the plan itself.
-    PDv2GenOutcome PDv2DoGenerate(Player* player, uint32_t seed, BlockPlan* outPlan);
+    // themeOverride 0 = the server-configured theme (the panel path); the GM
+    // command may pass 1/2 to aim a test generation at a specific kit theme.
+    PDv2GenOutcome PDv2DoGenerate(Player* player, uint32_t seed, BlockPlan* outPlan,
+                                  int themeOverride = 0);
 
     // Runs the entry gate and teleports. `skipGate` is the command's dev-only
     // `force`, and the ONLY caller that may pass true - an unready client does

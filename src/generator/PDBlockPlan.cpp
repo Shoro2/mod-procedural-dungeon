@@ -28,7 +28,9 @@ namespace PDungeon
 {
     namespace
     {
-        int const CHUNK_ID_BASE = 2000;
+        int const CHUNK_ID_BASE = 2000;         // theme 1 (mine)
+        int const CHUNK_ID_BASE_CITY = 12000;   // theme 2 (city) - kit scheme
+                                                // themeBase + alt*1000 + role*100 + mask
         int const BLOCKS_PER_TILE = 8;
         int const MAX_BLOCK_COORD = 64 * BLOCKS_PER_TILE;   // 512
         int const MIN_ROOM_GAP = 2;                         // Manhattan, so a corridor always fits
@@ -115,17 +117,35 @@ namespace PDungeon
                         return BlockRole::CorridorStraight;
                     }
                     return BlockRole::CorridorCorner;
+                case 1:
+                    // The stub role the kit ships since Phase 2. A 0-socket
+                    // corridor still has no variant and ValidateBlockPlan
+                    // rejects it rather than letting a bogus chunkId reach
+                    // the client.
+                    return BlockRole::CorridorDeadEnd;
                 default:
-                    // A 0- or 1-socket corridor is a dead end the kit has no
-                    // variant for; ValidateBlockPlan rejects it rather than
-                    // letting a bogus chunkId reach the client.
                     return BlockRole::CorridorStraight;
             }
         }
 
-        int ChunkIdFor(BlockRole role, unsigned mask)
+        int const ALT_STRIDE = 1000;
+
+        // 0 = unknown theme; ValidateBlockPlan turns that into a refusal
+        // rather than letting a bogus chunkId reach the client.
+        int ThemeChunkIdBase(int theme)
         {
-            return CHUNK_ID_BASE + static_cast<int>(role) * 100 + static_cast<int>(mask);
+            switch (theme)
+            {
+                case 1:  return CHUNK_ID_BASE;
+                case 2:  return CHUNK_ID_BASE_CITY;
+                default: return 0;
+            }
+        }
+
+        int ChunkIdFor(int theme, BlockRole role, unsigned mask, int alt)
+        {
+            return ThemeChunkIdBase(theme) + alt * ALT_STRIDE
+                 + static_cast<int>(role) * 100 + static_cast<int>(mask);
         }
 
         std::string MaskName(unsigned mask)
@@ -250,6 +270,24 @@ namespace PDungeon
         }
     }
 
+    int AltCountFor(BlockRole role)
+    {
+        // Mirrors ALT_COUNT in 48_gen_t1_blockkit.py: rooms and straight
+        // corridors ship a second look (blob outline / S-curve), everything
+        // else has exactly one. The harness proves every combination against
+        // the shipped chunk-meta SQL, which is what keeps this table honest.
+        switch (role)
+        {
+            case BlockRole::Room:
+            case BlockRole::RoomEntrance:
+            case BlockRole::RoomBoss:
+            case BlockRole::CorridorStraight:
+                return 2;
+            default:
+                return 1;
+        }
+    }
+
     uint32_t Crc32(void const* data, size_t len)
     {
         uint8_t const* p = static_cast<uint8_t const*>(data);
@@ -305,13 +343,30 @@ namespace PDungeon
             }
             bool const isRoom = b.role == BlockRole::Room || b.role == BlockRole::RoomEntrance ||
                                 b.role == BlockRole::RoomBoss;
-            if (!isRoom && PopCount(b.socketMask) < 2)
+            if (b.role == BlockRole::CorridorDeadEnd)
+            {
+                // The one corridor allowed a single socket - that is its
+                // whole definition. Anything else stays under the old rule.
+                if (PopCount(b.socketMask) != 1)
+                {
+                    return fail("dead-end block without exactly one socket");
+                }
+            }
+            else if (!isRoom && PopCount(b.socketMask) < 2)
             {
                 return fail("corridor block with fewer than two sockets");
             }
-            if (b.chunkId != ChunkIdFor(b.role, b.socketMask))
+            if (b.alt < 0 || b.alt >= AltCountFor(b.role))
             {
-                return fail("chunkId does not match role and mask");
+                return fail("alt outside the role's alternate count");
+            }
+            if (ThemeChunkIdBase(plan.config.theme) == 0)
+            {
+                return fail("unknown theme - no kit namespace for it");
+            }
+            if (b.chunkId != ChunkIdFor(plan.config.theme, b.role, b.socketMask, b.alt))
+            {
+                return fail("chunkId does not match theme, role, mask and alt");
             }
         }
 
@@ -462,6 +517,62 @@ namespace PDungeon
                 continue;
             }
 
+            // Dead-end stubs, AFTER every routing draw: the whole layout up to
+            // here consumes exactly the draws it consumed before Phase 2, so
+            // the stub pass is additive to the stream, never a reshuffle.
+            // A stub is one extra block hanging off an existing cell through a
+            // socket the host did not have - a side passage worth peeking into
+            // (the kit puts a chest there and no spawns).
+            if (cfg.maxDeadEnds > 0)
+            {
+                int const wantStubs = rng.UniformInt(0, cfg.maxDeadEnds);
+                for (int placedStubs = 0; placedStubs < wantStubs; ++placedStubs)
+                {
+                    // Candidates recomputed per stub over the ordered map, so
+                    // a placed stub both claims its cell and becomes a host
+                    // itself; the order is the map's own (y, x) order.
+                    std::vector<std::pair<Cell, unsigned>> candidates;
+                    for (auto const& kv : masks)
+                    {
+                        for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                        {
+                            if (kv.second & bit)
+                            {
+                                continue;   // that side already leads somewhere
+                            }
+                            int dx = 0, dy = 0;
+                            StepFor(bit, dx, dy);
+                            Cell n;
+                            n.x = kv.first.x + dx;
+                            n.y = kv.first.y + dy;
+                            if (n.x < 0 || n.y < 0 || n.x >= cfg.fieldBlocks ||
+                                n.y >= cfg.fieldBlocks)
+                            {
+                                continue;
+                            }
+                            if (masks.find(n) != masks.end())
+                            {
+                                continue;   // occupied - that would be a loop, not a stub
+                            }
+                            candidates.push_back(std::make_pair(kv.first, bit));
+                        }
+                    }
+                    if (candidates.empty())
+                    {
+                        break;
+                    }
+                    auto const& pick = candidates[static_cast<size_t>(
+                        rng.UniformInt(0, static_cast<int>(candidates.size()) - 1))];
+                    int dx = 0, dy = 0;
+                    StepFor(pick.second, dx, dy);
+                    Cell stub;
+                    stub.x = pick.first.x + dx;
+                    stub.y = pick.first.y + dy;
+                    masks[pick.first] |= pick.second;
+                    masks[stub] = OppositeBit(pick.second);
+                }
+            }
+
             // BFS from the room nearest the field's north-west corner, so the
             // entrance is stable for a given layout rather than a draw.
             int entranceRoom = 0;
@@ -589,7 +700,17 @@ namespace PDungeon
 
                 auto dit = depth.find(c);
                 b.depth = (dit == depth.end()) ? -1 : dit->second;
-                b.chunkId = ChunkIdFor(b.role, b.socketMask);
+
+                // Visual alternate, drawn LAST of all draws (stubs included)
+                // and only where the kit ships more than one look - a
+                // single-variant family must not consume a draw, or adding an
+                // alt to one role would reshuffle every other block's choice.
+                int const altCount = AltCountFor(b.role);
+                b.alt = altCount > 1 ? rng.UniformInt(0, altCount - 1) : 0;
+                // The theme moves only the id BASE, never a draw: the same
+                // seed lays out the same dungeon in every theme, and stored
+                // layouts stay draw-stable across a theme config change.
+                b.chunkId = ChunkIdFor(cfg.theme, b.role, b.socketMask, b.alt);
 
                 if (b.role == BlockRole::RoomEntrance)
                 {
@@ -698,6 +819,7 @@ namespace PDungeon
                     case BlockRole::RoomEntrance: out += 'E'; break;
                     case BlockRole::RoomBoss:     out += 'B'; break;
                     case BlockRole::Room:         out += 'R'; break;
+                    case BlockRole::CorridorDeadEnd: out += 'D'; break;
                     default:
                         // Corridors draw as the shape of their sockets, which
                         // makes a wrong mask visible at a glance.

@@ -77,6 +77,9 @@ namespace PDungeon
         _config.affixPct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Affix.Percentage", 40)));
 
+        _config.decorEnable = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Decor.Enable", true);
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{})",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,
@@ -88,7 +91,8 @@ namespace PDungeon
         }
     }
 
-    bool PDv2Mgr::GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out)
+    bool PDv2Mgr::GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out,
+                               int themeOverride)
     {
         PDv2AccountState const state = GetAccountState(accountId);
         int const dlvl = static_cast<int>(state.dlvl);
@@ -119,7 +123,7 @@ namespace PDungeon
         cfg.loopChancePct = _config.loopChancePct;
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;
-        cfg.theme = _config.theme;
+        cfg.theme = themeOverride ? themeOverride : _config.theme;
 
         if (!GenerateBlockPlan(cfg, &out))
         {
@@ -410,28 +414,45 @@ namespace PDungeon
     void PDv2Mgr::LoadChunkMeta()
     {
         _walkMasks.clear();
+        _chunkAnchors.clear();
+        _chunkProps.clear();
 
         // Highest kit version wins per chunk id: rows are read in ascending
-        // kitVersion order and later ones overwrite. Today there is exactly
-        // one kit, so this is bookkeeping for the day there are two.
+        // kitVersion order and later ones overwrite.
+        //
+        // ALL themes load, not just the configured one: `V2.Theme` steers only
+        // NEW generations, while a stored dungeon regenerates with the theme
+        // frozen into its account row - flipping the config must never leave
+        // an old dungeon without masks (the "0 masks = mobs stand still"
+        // failure, per dungeon). Chunk ids are globally unique across themes
+        // by the kit id scheme, so one map holds them all.
+        //
+        // The anchors ride along in the same row as the mask on purpose: they
+        // describe the same block, and reading them from a second query - or
+        // worse, a second file - is how a kit regeneration ends up half
+        // applied.
         QueryResult result = WorldDatabase.Query(
-            "SELECT chunkId, kitVersion, walkMask FROM pdungeon_chunk_meta "
-            "WHERE theme = '{}' ORDER BY kitVersion", _config.theme);
+            "SELECT chunkId, kitVersion, walkMask, anchors, theme "
+            "FROM pdungeon_chunk_meta ORDER BY kitVersion");
         if (!result)
         {
-            LOG_ERROR(PD_LOG, "PDv2: pdungeon_chunk_meta has no rows for theme {} - "
+            LOG_ERROR(PD_LOG, "PDv2: pdungeon_chunk_meta has no rows - "
                               "mod_pdungeon_chunk_meta.sql was not applied, and no "
-                              "walk grid can be built (creatures will not chase)",
-                      _config.theme);
+                              "walk grid can be built (creatures will not chase)");
             return;
         }
 
         uint32 bad = 0;
+        uint32 configThemeRows = 0;
         do
         {
             Field* fields = result->Fetch();
             int const chunkId = static_cast<int>(fields[0].Get<uint32>());
             std::string const rle = fields[2].Get<std::string>();
+            if (static_cast<int>(fields[4].Get<uint8>()) == _config.theme)
+            {
+                ++configThemeRows;
+            }
 
             std::vector<uint8_t> mask;
             if (!DecodeWalkMaskRle(rle, mask) ||
@@ -445,17 +466,114 @@ namespace PDungeon
 
             auto& slot = _walkMasks[chunkId];
             std::copy(mask.begin(), mask.end(), slot.begin());
+
+            // A chunk with no anchors is ordinary - every corridor variant has
+            // none - so an empty list is stored rather than nothing, and only
+            // a malformed one is worth a line. It costs the decor planner its
+            // clearance check for that chunk and nothing else.
+            std::string const anchorText = fields[3].Get<std::string>();
+            std::vector<DecorAnchor> anchors;
+            if (!DecodeAnchorList(anchorText, anchors))
+            {
+                LOG_ERROR(PD_LOG, "PDv2: chunk {} has a malformed anchors field ('{}')",
+                          chunkId, anchorText);
+                anchors.clear();
+            }
+            _chunkAnchors[chunkId] = std::move(anchors);
+
+            // The structural props ride the same column. A malformed list is
+            // reported and dropped like a malformed anchor list - the block
+            // simply stands undecorated, nothing else depends on it.
+            std::vector<KitProp> props;
+            if (!DecodePropList(anchorText, props))
+            {
+                LOG_ERROR(PD_LOG, "PDv2: chunk {} has a malformed props field ('{}')",
+                          chunkId, anchorText);
+                props.clear();
+            }
+            if (!props.empty())
+            {
+                _chunkProps[chunkId] = std::move(props);
+            }
         } while (result->NextRow());
 
         LOG_INFO(PD_LOG, "PDv2: loaded {} walk mask(s) from pdungeon_chunk_meta "
-                         "(theme {}, {} malformed)",
-                 uint32(_walkMasks.size()), _config.theme, bad);
+                         "across all themes ({} for configured theme {}, {} malformed)",
+                 uint32(_walkMasks.size()), configThemeRows, _config.theme, bad);
+        if (configThemeRows == 0)
+        {
+            LOG_ERROR(PD_LOG, "PDv2: configured theme {} has NO chunk-meta rows - "
+                              "new generations will fail until the kit ships that "
+                              "theme or V2.Theme points at one it has",
+                      _config.theme);
+        }
     }
 
     uint8_t const* PDv2Mgr::WalkMaskFor(int chunkId) const
     {
         auto it = _walkMasks.find(chunkId);
         return it == _walkMasks.end() ? nullptr : it->second.data();
+    }
+
+    std::vector<DecorAnchor> const* PDv2Mgr::AnchorsFor(int chunkId) const
+    {
+        auto it = _chunkAnchors.find(chunkId);
+        return it == _chunkAnchors.end() ? nullptr : &it->second;
+    }
+
+    std::vector<KitProp> const* PDv2Mgr::PropsFor(int chunkId) const
+    {
+        auto it = _chunkProps.find(chunkId);
+        return it == _chunkProps.end() ? nullptr : &it->second;
+    }
+
+    void PDv2Mgr::LoadDecorRules()
+    {
+        _decorRules.clear();
+
+        // Every theme's rules, ascending id: the planner filters by the plan's
+        // own theme, so an account on a second theme is one config value away
+        // rather than one restart. ORDER BY id is the fixed iteration order the
+        // determinism promise rests on - see PDv2DecorPlan.h.
+        QueryResult result = WorldDatabase.Query(
+            "SELECT id, theme, roleFilter, goEntry, placement, minPerBlock, "
+            "maxPerBlock, weight, minSpacingYd FROM pdungeon_decor_rules ORDER BY id");
+        if (!result)
+        {
+            LOG_INFO(PD_LOG, "PDv2: pdungeon_decor_rules has no rows - dungeons "
+                             "will be built without props");
+            return;
+        }
+
+        do
+        {
+            Field* fields = result->Fetch();
+            DecorRule rule;
+            rule.id = static_cast<int>(fields[0].Get<uint32>());
+            rule.theme = fields[1].Get<uint8>();
+            rule.roleFilter = fields[2].Get<std::string>();
+            rule.goEntry = static_cast<int>(fields[3].Get<uint32>());
+            rule.placement = fields[4].Get<std::string>();
+            rule.minPerBlock = fields[5].Get<uint8>();
+            rule.maxPerBlock = fields[6].Get<uint8>();
+            rule.weight = static_cast<int>(fields[7].Get<uint32>());
+            rule.minSpacingYd = fields[8].Get<float>();
+
+            if (rule.placement != DECOR_PLACEMENT_WALL_FOOT)
+            {
+                // Kept in the list all the same: the planner skips it by the
+                // same test, and dropping it here would hide a typo that the
+                // operator can only find by counting torches.
+                LOG_ERROR(PD_LOG, "PDv2: decor rule {} asks for placement '{}', which "
+                                  "no planner implements - it will place nothing",
+                          rule.id, rule.placement);
+            }
+
+            _decorRules.push_back(std::move(rule));
+        } while (result->NextRow());
+
+        LOG_INFO(PD_LOG, "PDv2: loaded {} decor rule(s) from pdungeon_decor_rules",
+                 uint32(_decorRules.size()));
     }
 
     bool PDv2Mgr::EntranceWorldPos(BlockPlan const& plan, float& x, float& y, float& z) const
