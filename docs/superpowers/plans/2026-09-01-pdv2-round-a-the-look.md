@@ -1873,8 +1873,12 @@ spawn tag, which a critter never gets.
             ++placed;
         }
 
-        PD_LOG_DEBUG("PDv2: placed {} critter(s) of {} planned",
-                     placed, uint32(spots.size()));
+        // `PD_LOG_DEBUG` does not exist - corrected 2026-09-01 during
+        // implementation. The file's own convention for a per-layout summary is
+        // LOG_INFO with the PD_LOG category, and the substring "placed N
+        // critter(s)" is what Task 18's boot-log check greps for.
+        LOG_INFO(PD_LOG, "PDv2: placed {} critter(s) of {} planned",
+                 placed, uint32(spots.size()));
     }
 ```
 
