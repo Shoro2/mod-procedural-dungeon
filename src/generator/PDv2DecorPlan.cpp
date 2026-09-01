@@ -260,6 +260,10 @@ namespace PDungeon
             // and a corridor_dead_end filter match nothing at all.
             case BlockRole::CorridorDeadEnd:  return "corridor_dead_end";
         }
+        // The missing `default:` case enables gcc's -Wswitch warning to catch
+        // a future BlockRole enumerator added without a case here. The trailing
+        // return exists only to satisfy MSVC's C4715; the exhaustiveness check
+        // that matters is gcc's -Wswitch on the Ubuntu host.
         return "corridor_cross";
     }
 

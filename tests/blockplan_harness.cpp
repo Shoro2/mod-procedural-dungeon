@@ -1796,6 +1796,8 @@ namespace
               "'room_boss' matched a plain room", 0);
         Check(DecorRoleMatches("corridor", BlockRoleName(BlockRole::CorridorCross)),
               "'corridor' does not match a cross corridor", 0);
+        Check(DecorRoleMatches("corridor", BlockRoleName(BlockRole::CorridorDeadEnd)),
+              "'corridor' does not match a dead-end corridor", 0);
         Check(!DecorRoleMatches("corridor", BlockRoleName(BlockRole::Room)),
               "'corridor' matched a room", 0);
         Check(DecorRoleMatches("", BlockRoleName(BlockRole::Room)),
