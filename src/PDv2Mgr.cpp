@@ -559,11 +559,13 @@ namespace PDungeon
             rule.weight = static_cast<int>(fields[7].Get<uint32>());
             rule.minSpacingYd = fields[8].Get<float>();
 
-            if (rule.placement != DECOR_PLACEMENT_WALL_FOOT)
+            if (rule.placement != DECOR_PLACEMENT_WALL_FOOT &&
+                rule.placement != DECOR_PLACEMENT_CORNER &&
+                rule.placement != DECOR_PLACEMENT_SCATTER)
             {
                 // Kept in the list all the same: the planner skips it by the
                 // same test, and dropping it here would hide a typo that the
-                // operator can only find by counting torches.
+                // operator can only find by counting props.
                 LOG_ERROR(PD_LOG, "PDv2: decor rule {} asks for placement '{}', which "
                                   "no planner implements - it will place nothing",
                           rule.id, rule.placement);

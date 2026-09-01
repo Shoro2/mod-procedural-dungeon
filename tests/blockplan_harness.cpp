@@ -1484,7 +1484,7 @@ namespace
 
         DecorRule torchRoom;
         torchRoom.id = 1;
-        torchRoom.theme = 1;
+        torchRoom.theme = 0;
         torchRoom.roleFilter = "room";
         torchRoom.goEntry = 910020;
         torchRoom.minPerBlock = 1;
@@ -1495,7 +1495,7 @@ namespace
 
         DecorRule brazierBoss;
         brazierBoss.id = 2;
-        brazierBoss.theme = 1;
+        brazierBoss.theme = 0;
         brazierBoss.roleFilter = "room_boss";
         brazierBoss.goEntry = 910021;
         brazierBoss.minPerBlock = 1;
@@ -1506,7 +1506,7 @@ namespace
 
         DecorRule torchCorridor;
         torchCorridor.id = 3;
-        torchCorridor.theme = 1;
+        torchCorridor.theme = 0;
         torchCorridor.roleFilter = "corridor";
         torchCorridor.goEntry = 910020;
         torchCorridor.minPerBlock = 0;
@@ -1514,6 +1514,30 @@ namespace
         torchCorridor.weight = 100;
         torchCorridor.minSpacingYd = 8.0;
         rules.push_back(torchCorridor);
+
+        DecorRule crateCorner;
+        crateCorner.id = 4;
+        crateCorner.theme = 0;
+        crateCorner.roleFilter = "room";
+        crateCorner.goEntry = 910060;
+        crateCorner.placement = DECOR_PLACEMENT_CORNER;
+        crateCorner.minPerBlock = 1;
+        crateCorner.maxPerBlock = 2;
+        crateCorner.weight = 100;
+        crateCorner.minSpacingYd = 8.0;
+        rules.push_back(crateCorner);
+
+        DecorRule rubbleScatter;
+        rubbleScatter.id = 5;
+        rubbleScatter.theme = 0;
+        rubbleScatter.roleFilter = "room";
+        rubbleScatter.goEntry = 910070;
+        rubbleScatter.placement = DECOR_PLACEMENT_SCATTER;
+        rubbleScatter.minPerBlock = 1;
+        rubbleScatter.maxPerBlock = 3;
+        rubbleScatter.weight = 100;
+        rubbleScatter.minSpacingYd = 12.0;
+        rules.push_back(rubbleScatter);
 
         return rules;
     }
@@ -1922,44 +1946,55 @@ namespace
         int maxSpots = 0;
         int blankLayouts = 0;
 
+        // Both themes, not just theme 1: the live DB's rules carry theme = 0
+        // (any look), but the fixture used to say theme = 1 for all three,
+        // which meant this batch never touched the padded theme-2 rooms a
+        // real city dungeon generates. Running both is what makes this the
+        // first real execution of the corner and scatter collectors.
+        int const THEMES[2] = { 1, 2 };
         for (int i = 0; i < count; ++i)
         {
             uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 1u;
-            for (int const rooms : ROOM_MATRIX)
+            for (int const theme : THEMES)
             {
-                BlockPlan plan;
-                if (!GenerateBlockPlan(MakeCfg(seed, rooms), &plan))
+                for (int const rooms : ROOM_MATRIX)
                 {
-                    Check(false, "generation failed", seed);
-                    continue;
-                }
+                    BlockPlan plan;
+                    BlockCfg cfg = MakeCfg(seed, rooms);
+                    cfg.theme = theme;
+                    if (!GenerateBlockPlan(cfg, &plan))
+                    {
+                        Check(false, "generation failed", seed);
+                        continue;
+                    }
 
-                BlockPlan const before = plan;
-                std::vector<DecorSpot> const first = BuildDecorPlan(
-                    plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
-                std::vector<DecorSpot> const again = BuildDecorPlan(
-                    plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
+                    BlockPlan const before = plan;
+                    std::vector<DecorSpot> const first = BuildDecorPlan(
+                        plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
+                    std::vector<DecorSpot> const again = BuildDecorPlan(
+                        plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
 
-                Check(SameSpots(first, again),
-                      "two decor builds of the same plan differ", seed);
-                Check(SamePlan(before, plan),
-                      "BuildDecorPlan changed the plan it was given", seed);
-                Check(first.size() <= static_cast<size_t>(PD_DECOR_MAX_SPOTS),
-                      "a layout exceeded the decor spot budget", seed);
+                    Check(SameSpots(first, again),
+                          "two decor builds of the same plan differ", seed);
+                    Check(SamePlan(before, plan),
+                          "BuildDecorPlan changed the plan it was given", seed);
+                    Check(first.size() <= static_cast<size_t>(PD_DECOR_MAX_SPOTS),
+                          "a layout exceeded the decor spot budget", seed);
 
-                std::string why;
-                Check(CheckRoleNamesDistinct(plan, why),
-                      why.empty() ? "role naming broken" : why.c_str(), seed);
-                Check(CheckDecorSpots(plan, first, rules, why),
-                      why.empty() ? "decor placement broken" : why.c_str(), seed);
+                    std::string why;
+                    Check(CheckRoleNamesDistinct(plan, why),
+                          why.empty() ? "role naming broken" : why.c_str(), seed);
+                    Check(CheckDecorSpots(plan, first, rules, why),
+                          why.empty() ? "decor placement broken" : why.c_str(), seed);
 
-                int const spots = static_cast<int>(first.size());
-                totalSpots += spots;
-                minSpots = (spots < minSpots) ? spots : minSpots;
-                maxSpots = (spots > maxSpots) ? spots : maxSpots;
-                if (!spots)
-                {
-                    ++blankLayouts;
+                    int const spots = static_cast<int>(first.size());
+                    totalSpots += spots;
+                    minSpots = (spots < minSpots) ? spots : minSpots;
+                    maxSpots = (spots > maxSpots) ? spots : maxSpots;
+                    if (!spots)
+                    {
+                        ++blankLayouts;
+                    }
                 }
             }
         }
