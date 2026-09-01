@@ -102,8 +102,14 @@ operator report. **Round A closes that gap before it adds to it.**
 
 ## 2. Round A — the look
 
-Deploy footprint: one kit round, one new `patch-9.MPQ`, one worldserver restart, one cold client
-restart.
+Deploy footprint, corrected 2026-09-01 after measurement: one kit round (new `t1b-vNN` +
+`KitDir` flip + **cold client restart**) and one **worldserver restart** for the decor, critter and
+pack SQL. **No new `patch-9.MPQ`** — A1.3 draws from the 1199 stock TILESET tiles that already ship
+an `_s` specular, and A1.4 reuses stock `GroundEffectTexture` rows, so nothing new goes into the
+archive. If a later tuning pass introduces a custom BLP, patch-9 comes back into the round.
+
+`KIT_VERSION` (currently 23) does **not** move: `pdungeon_chunk_meta`'s columns are chunkId /
+kitVersion / theme / role / socketMask / walkMask / anchors, and nothing in A1 touches any of them.
 
 ### A1 · The floor
 
@@ -148,9 +154,27 @@ the two kits that lacked it. Neither rule has an automated check. Pick tiles by 
 imbalance**, not by eye: terrain UV is axis-aligned to the tile and never to the street, so a
 directional texture reads rotated on half the surfaces (`100_stage_city_wall_texture.py:44`).
 
+Measured 2026-09-01: the client carries **1425 TILESET base tiles, 1199 of them with an `_s`
+sibling**. As long as every new superset entry comes from those 1199, A1.3 needs **no new BLP and
+no patch-9 rebuild** — it only grows MTEX, uniformly, in all 215 ADTs, which is safe because
+nothing pins an absolute ADT size.
+
 **A1.4 — Stock detail doodads, for free.** `MCLY_EFFECT_NONE = -1` at `51:119`. Pointing it at a
 real `GroundEffectTexture.dbc` row makes the client scatter pebbles and tufts across the floor for
-**zero bytes** of ADT growth. Costs one DBC row in `patch-9.MPQ`.
+**zero bytes** of ADT growth.
+
+Measured 2026-09-01, and it costs **no DBC row and no patch-9 rebuild**: suitable stock rows already
+exist — **598** (Deadwind gravel, density 2, TerrainType Stone), **22796** (rubble + Desolace bone,
+density 8) and **1741** (Plaguelands bones, density 2) — all of whose doodad models resolve to real
+files in `common-2.MPQ`.
+
+The real work is elsewhere, and without it none of this renders: the client picks the ground-effect
+row from the **MCNK header's low-quality texture map at offset 0x40**, two bits per 8×8 sub-cell,
+naming the dominant layer. Every kit MCNK has it **all-zero**, inherited from the donor tile — and
+layer 0 is the *wall* texture. So an effectId on layer 1 (the floor) renders nothing, and one on
+layer 0 scatters doodads over floor and wall band alike. Getting doodads on the floor only means
+writing 0x40, which belongs in `52_punch_kit_holes.py` (it already writes header 0x3C and owns the
+same class grid and axis flag), **not** in 51, whose scope check would reject it.
 
 **Explicitly not done: height noise.** The realistic budget without a server-side height channel
 is ±0.3 yd, pinned to 0 on every block edge (or neighbouring blocks step against each other) and
@@ -314,7 +338,8 @@ the chain index, which is what makes the segment arithmetic trivial.
 
 **The one real risk: manifest size.** A chain visits rooms in order; an MST connects neighbours. The
 chain therefore spends **more corridor blocks** for the same room count. The budget is 1900 B and
-the measured maximum at 15 rooms was 1406 B. `pdblock --roomcap 3000` must be re-measured **before**
+the measured maximum at 15 rooms is **1470 B as of 2026-09-01** — 430 B of headroom, not the 494 B
+the earlier figure of 1406 suggested. `pdblock --roomcap 3000` must be re-measured **before**
 any deploy. If 15 rooms no longer fit, the lever is the **room cap**, not the step distance — a
 longer step buys headroom by turning the dungeon into empty corridor maze.
 
