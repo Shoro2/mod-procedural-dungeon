@@ -684,6 +684,14 @@ namespace PDungeon
             }
         }
 
+        // Truncate in plan order: blocks near the entrance keep their dressing
+        // and the tail is what is lost, which is the same bias v1's decor-first
+        // truncation had. Never truncate by drawing - that would make the
+        // survivors depend on the budget.
+        if (out.size() > static_cast<size_t>(PD_DECOR_MAX_SPOTS))
+        {
+            out.resize(static_cast<size_t>(PD_DECOR_MAX_SPOTS));
+        }
         return out;
     }
 }

@@ -79,6 +79,14 @@ namespace PDungeon
     // constant, fixed for ever: changing it re-decorates every stored layout.
     uint32_t const PD_DECOR_SEED_MIX = 0x5EC0DE0Fu;
 
+    // Hard ceiling on the props one layout may plan. v1 had a GameObject cap
+    // and v2 lost it; a 17-room layout can already ask for ~100 spots, and
+    // this round adds three rule families on top. 250 is roughly 2.5x the
+    // measured worst case, so it never bites a normal layout and always bites
+    // a runaway rule. The cut is taken at the END, in plan order, so which
+    // props survive is a property of the plan and not of the draw.
+    int const PD_DECOR_MAX_SPOTS = 250;
+
     // How far into its own cell a wall-foot prop is pushed, towards the wall
     // it belongs to. Under half a cell (4.17 yd) on purpose, so the prop stays
     // on the WALK cell that was drawn for it - which is what makes "every spot

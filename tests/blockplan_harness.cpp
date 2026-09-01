@@ -1944,6 +1944,8 @@ namespace
                       "two decor builds of the same plan differ", seed);
                 Check(SamePlan(before, plan),
                       "BuildDecorPlan changed the plan it was given", seed);
+                Check(first.size() <= static_cast<size_t>(PD_DECOR_MAX_SPOTS),
+                      "a layout exceeded the decor spot budget", seed);
 
                 std::string why;
                 Check(CheckRoleNamesDistinct(plan, why),
