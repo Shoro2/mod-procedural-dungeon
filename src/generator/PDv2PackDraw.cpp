@@ -91,9 +91,14 @@ namespace PDungeon
     }
 
     bool PDv2SelectSpawns(uint32_t seed, SpawnSelectInputs const& in,
-                          PackPools const& pools, std::vector<SpawnPick>& out)
+                          PackPools const& pools, std::vector<SpawnPick>& out,
+                          PackMember const** outBossStandIn)
     {
         out.clear();
+        if (outBossStandIn)
+        {
+            *outBossStandIn = nullptr;
+        }
 
         // Aliases, not copies: `pools` outlives this call, so referencing its
         // three role vectors under the names the draw has always used keeps
@@ -135,12 +140,21 @@ namespace PDungeon
         // startup/config state rather than something a player can nudge.
 
         // A boss room with no boss to put in it is a data problem, not a
-        // reason to leave the room empty: the highest-weight melee or caster
-        // member stands in, once per selection so a full dungeon does not
-        // spam the log.
+        // reason to leave the room empty: the highest-weight member stands
+        // in, once per selection so a full dungeon does not spam the log.
+        // Ties go to whichever member loaded FIRST (strict `>`, so a later
+        // equal weight never displaces the current stand-in) - which is why
+        // this scans pools.trash, the melee/caster INTERLEAVE in loader
+        // order, rather than melee then caster: every shipped pack member
+        // weighs 100 (mod_pdungeon_packs.sql), so this tie-break is not an
+        // edge case, it is the whole rule, and it has to reproduce the
+        // pre-refactor single-pool scan (git 862ace7) bit for bit or a
+        // stored dungeon's spawns silently move. See PackPools::trash's own
+        // comment (PDv2PackDraw.h) for why that order cannot be re-derived
+        // from melee and caster once they are split.
         //
-        // PDv2PackMgr::SelectSpawns runs the same scan before calling through,
-        // purely to LOG_WARN which entry it picked - this file is engine-free
+        // PDv2PackMgr::SelectSpawns reports this pick via outBossStandIn to
+        // LOG_WARN which entry it is about to use - this file is engine-free
         // and cannot log. The pick itself still has to happen HERE, on the
         // seeded stream: if the caller instead substituted a one-element boss
         // pool for the empty case, the boss-room emit below would call
@@ -152,20 +166,17 @@ namespace PDungeon
         PackMember const* bossStandIn = nullptr;
         if (bosses.empty() && !(melee.empty() && casters.empty()))
         {
-            for (PackMember const& m : melee)
+            for (PackMember const& m : pools.trash)
             {
                 if (!bossStandIn || EffectiveWeight(m) > EffectiveWeight(*bossStandIn))
                 {
                     bossStandIn = &m;
                 }
             }
-            for (PackMember const& m : casters)
-            {
-                if (!bossStandIn || EffectiveWeight(m) > EffectiveWeight(*bossStandIn))
-                {
-                    bossStandIn = &m;
-                }
-            }
+        }
+        if (outBossStandIn)
+        {
+            *outBossStandIn = bossStandIn;
         }
 
         auto pickTrash = [&]() -> PackMember const*

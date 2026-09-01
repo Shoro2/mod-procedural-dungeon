@@ -2181,6 +2181,99 @@ namespace
         return true;
     }
 
+    // Review finding (Task 12, PDv2 content-expansion plan): FixedPackPools()
+    // above always includes a boss, so it never exercises the boss-standin
+    // tie-break in PDv2SelectSpawns - which is exactly how a Critical (the
+    // refactor changing which member wins a weight TIE) got past a green
+    // gate. This pin closes that hole: no boss anywhere, every member at the
+    // default weight (a tie is not an edge case here - it is the only case,
+    // since every shipped pack member weighs 100), and a CASTER that loads
+    // before any melee (pack 1's real stock order: creature 84263 sorts
+    // before 84264..84266 under "ORDER BY p.id, m.entry" - see
+    // PDv2PackMgr::LoadFromDB). Under the pre-fix code (scan melee fully,
+    // then caster) the boss room's first pick would have been melee entry
+    // 84264; scanning the loader's real interleave (pools.trash) picks the
+    // caster, 84263, instead, because it was seen first.
+    PackPools NoBossPackPools()
+    {
+        PackMember const caster1{ 1, 84263, PACK_ROLE_CASTER, /*casterSpellId*/ 12345, /*weight*/ 100 };
+        PackMember const melee1{ 1, 84264, PACK_ROLE_MELEE, 0, 100 };
+        PackMember const melee2{ 1, 84265, PACK_ROLE_MELEE, 0, 100 };
+        PackMember const melee3{ 1, 84266, PACK_ROLE_MELEE, 0, 100 };
+
+        PackPools pools;
+        pools.caster = { caster1 };
+        pools.melee = { melee1, melee2, melee3 };
+        // pools.boss is left empty on purpose - the whole point of this
+        // fixture is that the boss-standin fallback fires.
+        //
+        // The real loader order: pack 1's caster (entry 84263) loads before
+        // its melee (84264..84266), because m.entry sorts that way within
+        // the pack. A hand-built fixture has no loader to inherit this from,
+        // so it is spelled out here exactly as PDv2PackMgr::SelectSpawns
+        // would build it - see PackPools::trash's own comment for why this
+        // cannot be reconstructed by concatenating melee and caster above.
+        pools.trash = { caster1, melee1, melee2, melee3 };
+        return pools;
+    }
+
+    // Only one room, and it is the boss room: the trash slots draw from the
+    // same two-member-tie pool as the boss stand-in, which would make the
+    // pin unable to tell "picked the right stand-in" apart from "picked the
+    // right trash filler" if left in. One room keeps the pin reading
+    // entirely off the stand-in pick.
+    SpawnSelectInputs NoBossSpawnInputs()
+    {
+        SpawnSelectInputs in;
+        in.rooms = { { /*roomIndex*/ 0, /*isBossRoom*/ true } };
+        in.spawnsPerRoom = 5;
+        in.bossRoomAdds = 2;
+        in.casterPct = 40;
+        in.bandMin = 76;
+        in.affixPct = 40;
+        return in;
+    }
+
+    // Captured by running the fixed inputs above through the FIXED draw, not
+    // by reasoning about what it should be - a pin that only encodes the
+    // reasoning behind it could pass for the same wrong reason a hand-traced
+    // "should be" value would. The first entry is what matters for Finding
+    // 1: it must be the boss room's stand-in pick, and it must be 84263 (the
+    // caster), never 84264 (the melee member the pre-fix code picked).
+    char const* const PD_SPAWN_DRAW_NOBOSS_PIN =
+        "84263,84263,84266,";
+
+    bool CheckNoBossSpawnDrawPinned(std::string& why)
+    {
+        SpawnSelectInputs in = NoBossSpawnInputs();
+        std::vector<SpawnPick> picks;
+        if (!PDv2SelectSpawns(12345u, in, NoBossPackPools(), picks))
+        {
+            why = "the pinned no-boss spawn draw refused to select";
+            return false;
+        }
+
+        std::string got;
+        for (SpawnPick const& p : picks)
+        {
+            got += std::to_string(p.entry);
+            got += ',';
+        }
+        if (got != PD_SPAWN_DRAW_NOBOSS_PIN)
+        {
+            why = "the no-boss spawn draw moved: " + got;
+            return false;
+        }
+        if (picks.empty() || picks.front().entry != 84263)
+        {
+            why = "the boss-standin tie-break did not pick the first-loaded "
+                  "member (caster 84263) - the melee/caster split order bug "
+                  "is back";
+            return false;
+        }
+        return true;
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
@@ -2196,6 +2289,13 @@ namespace
             // against, one file over).
             std::string why;
             bool const ok = CheckSpawnDrawPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // Same two-statements-not-one-call reasoning as the pin above,
+            // for the same argument-evaluation-order trap.
+            std::string why;
+            bool const ok = CheckNoBossSpawnDrawPinned(why);
             Check(ok, why.c_str(), 12345u);
         }
         // A tenth of the batch is plenty for three boss-room counts: the

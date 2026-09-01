@@ -34,16 +34,6 @@ namespace PDungeon
         // band cannot mean two different things in two files.
         int const BAND_WIDTH = PD_GAME_BAND_STEP - 1;
 
-        // A second copy of PDv2PackDraw.cpp's own EffectiveWeight, kept in
-        // sync by hand rather than shared: this file is not engine-free, that
-        // one is, and the only reason THIS copy exists is so the boss-standin
-        // LOG_WARN below can name the entry the draw is about to pick without
-        // the engine-free file ever calling back into a logger it cannot see.
-        int EffectiveWeight(PackMember const& m)
-        {
-            return m.weight > 0 ? static_cast<int>(m.weight) : 1;
-        }
-
         // Groups a flat, already band-filtered role pool by the packId each
         // member carries, in the pool's own order - what PackPools::meleeOf/
         // casterOf search. A linear build over a linear store: pack counts
@@ -522,45 +512,42 @@ namespace PDungeon
         {
             pools.boss.push_back(*m);
         }
+        // `trash` above is already melee and caster INTERLEAVED in loader
+        // order (built straight off `_packs`, which is itself "ORDER BY
+        // p.id, m.entry" - see LoadFromDB) - the very members pools.melee
+        // and pools.caster hold, just not yet split by role. Carry that
+        // order across as pools.trash instead of re-deriving it from the two
+        // split vectors: PDv2SelectSpawns's boss-standin tie-break needs the
+        // real interleave to reproduce the pre-refactor scan (PDv2PackDraw.h
+        // explains why melee-then-caster is not the same order).
+        pools.trash.reserve(trash.size());
+        for (PackMember const* m : trash)
+        {
+            pools.trash.push_back(*m);
+        }
         pools.trashPackIds = _trashPackIds;
         pools.meleeByPack = GroupByPack(pools.melee);
         pools.casterByPack = GroupByPack(pools.caster);
 
-        // The boss-standin fallback itself now runs inside PDv2SelectSpawns,
-        // on the seeded stream, at the exact point the original ternary did -
-        // that file's own comment says why the pick cannot move here without
-        // shifting every draw after it. This is only the LOG_WARN for that
-        // fallback: PDv2PackDraw.cpp is engine-free and cannot log, so this
-        // function reports what it is about to do while the draw silently
-        // does it. Same scan as PDv2SelectSpawns runs internally, kept in
-        // sync by hand - if the tie-break rule there ever changes, change it
-        // here too.
-        if (pools.boss.empty() && !(pools.melee.empty() && pools.caster.empty()))
-        {
-            PackMember const* standIn = nullptr;
-            for (PackMember const& m : pools.melee)
-            {
-                if (!standIn || EffectiveWeight(m) > EffectiveWeight(*standIn))
-                {
-                    standIn = &m;
-                }
-            }
-            for (PackMember const& m : pools.caster)
-            {
-                if (!standIn || EffectiveWeight(m) > EffectiveWeight(*standIn))
-                {
-                    standIn = &m;
-                }
-            }
-            LOG_WARN(PD_LOG, "PDv2: no boss in the unlocked packs for band {}..{} - "
-                             "creature {} stands in for every boss room",
-                     bandLo, bandHi, standIn ? standIn->entry : 0);
-        }
-
+        // The boss-standin fallback runs inside PDv2SelectSpawns, on the
+        // seeded stream, at the exact point the original ternary did - that
+        // file's own comment says why the pick cannot move here without
+        // shifting every draw after it. PDv2PackDraw.cpp is engine-free and
+        // cannot log, so it hands the pick it made back through
+        // outBossStandIn and THIS function logs it - one scan, one place,
+        // rather than a second copy kept in sync by hand (which had already
+        // drifted from the original once before this fix).
         std::vector<SpawnPick> flat;
-        if (!PDv2SelectSpawns(seed, in, pools, flat))
+        PackMember const* bossStandIn = nullptr;
+        if (!PDv2SelectSpawns(seed, in, pools, flat, &bossStandIn))
         {
             return false;
+        }
+        if (bossStandIn)
+        {
+            LOG_WARN(PD_LOG, "PDv2: no boss in the unlocked packs for band {}..{} - "
+                             "creature {} stands in for every boss room",
+                     bandLo, bandHi, bossStandIn->entry);
         }
 
         // PDv2SelectSpawns hands back one flat stream, room after room in
@@ -572,7 +559,14 @@ namespace PDungeon
         // consumed is computed the same way PDv2SelectSpawns decides whether
         // to draw at all, not assumed to always match the request.
         bool const trashAvailable = !(pools.melee.empty() && pools.caster.empty());
-        bool const bossAvailable = !pools.boss.empty() || trashAvailable;
+        // There used to be a `bossAvailable = !pools.boss.empty() ||
+        // trashAvailable` gating bossGot below, but it is provably always
+        // true here: the guard at the top of this function
+        // (`if (trash.empty() && bosses.empty()) return false;`) already
+        // rules out the one case where neither a real boss (pools.boss) nor
+        // a stand-in (trashAvailable, which PDv2SelectSpawns falls back to -
+        // see PDv2PackDraw.cpp) exists. Every boss room therefore always
+        // gets its one slot filled.
         int const perRoom = in.spawnsPerRoom > 0 ? in.spawnsPerRoom : 1;
         int const bossAdds = in.bossRoomAdds > 0 ? in.bossRoomAdds : 0;
         out.reserve(in.rooms.size());
@@ -581,7 +575,7 @@ namespace PDungeon
         {
             int const trashWanted = room.isBoss ? bossAdds : perRoom;
             size_t const trashGot = trashAvailable ? static_cast<size_t>(trashWanted) : 0;
-            size_t const bossGot = (room.isBoss && bossAvailable) ? 1 : 0;
+            size_t const bossGot = room.isBoss ? 1 : 0;
 
             RoomSpawns spawns;
             spawns.roomIndex = room.roomIndex;

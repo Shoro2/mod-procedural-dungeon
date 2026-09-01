@@ -95,6 +95,26 @@ namespace PDungeon
         std::vector<PackMember> caster;
         std::vector<PackMember> boss;
 
+        // melee and caster, INTERLEAVED in the same loader order instead of
+        // split by role - i.e. exactly the order pdungeon_pack_members
+        // loaded in ("ORDER BY p.id, m.entry"; see PDv2PackMgr::LoadFromDB),
+        // boss members excluded. This exists for one reader only: the boss-
+        // standin tie-break inside PDv2SelectSpawns below. That scan's
+        // comparison is a strict `>`, so on a weight tie the FIRST member
+        // seen wins - and every shipped pack member weighs 100
+        // (mod_pdungeon_packs.sql), which makes every stand-in pick a tie.
+        // Scanning melee fully and then caster (as splitting trash by role
+        // and concatenating the two halves would) hands the tie to melee
+        // even when a caster loaded earlier; scanning THIS vector instead
+        // reproduces the pre-refactor single-pool scan exactly (git
+        // 862ace7, PDv2PackMgr.cpp:512), because it IS that pool, carried
+        // across rather than re-derived. Do not rebuild it by concatenating
+        // melee and caster above - their order against EACH OTHER is lost
+        // the instant they are split by role, and re-merging by any rule
+        // other than "the order the loader actually produced" is just a
+        // different, still-wrong tie-break.
+        std::vector<PackMember> trash;
+
         // Packs holding at least one NON-BOSS member, ascending. The per-room
         // pack draw is uniform over this list; a pack that can fill nothing
         // must not be drawable, or a fifth of all rooms would come out empty.
@@ -129,8 +149,21 @@ namespace PDungeon
     // Returns false when `pools` holds no member of any role - the caller's
     // cue to fall back to its placeholder creature, mirroring what an empty
     // band-filtered pool did before this draw had its own pools parameter.
+    //
+    // `outBossStandIn`, when non-null, is written every call: to the member
+    // the boss-standin tie-break picked if the fallback fired (pools.boss
+    // empty but melee or caster was not), to nullptr otherwise. This file is
+    // engine-free and cannot log (see the file comment above), so
+    // PDv2PackMgr::SelectSpawns reads this back to LOG_WARN which entry it
+    // is about to use for every boss room - and checking it for non-null IS
+    // the caller's gate, rather than a second copy of the condition that
+    // decides whether the fallback fired. There used to be a second,
+    // hand-synced copy of the tie-break scan itself just to feed that log
+    // message; the two copies had already drifted from each other by the
+    // time that was noticed, which is why there is exactly one scan now.
     bool PDv2SelectSpawns(uint32_t seed, SpawnSelectInputs const& in,
-                          PackPools const& pools, std::vector<SpawnPick>& out);
+                          PackPools const& pools, std::vector<SpawnPick>& out,
+                          PackMember const** outBossStandIn = nullptr);
 }
 
 #endif
