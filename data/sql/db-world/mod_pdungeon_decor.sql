@@ -16,15 +16,19 @@
 -- roleFilter is a PREFIX match against `pdungeon_chunk_meta`.`role`:
 --   'room'       matches room, room_entrance AND room_boss
 --   'room_boss'  matches room_boss only
---   'corridor'   matches corridor_straight, corridor_corner, corridor_t and
---                corridor_cross
+--   'corridor'   matches corridor_straight, corridor_corner, corridor_t,
+--                corridor_cross AND corridor_dead_end (the stub block; it
+--                used to report itself as corridor_cross, which made a
+--                corridor_cross filter fire on stubs and left a
+--                corridor_dead_end filter matching nothing at all)
 --   ''           matches every block
 --
--- placement is 'wall_foot' for every row here and is the only kind the
--- planner implements: a WALK cell that touches a WALL cell on one of its four
--- sides, the prop pushed 2.5 yd into that cell towards the wall and turned
--- away from it. A rule naming any other placement is skipped rather than
--- guessed at.
+-- placement is 'wall_foot' for every row in THIS file: a WALK cell that
+-- touches a WALL cell on one of its four sides, the prop pushed 2.5 yd into
+-- that cell towards the wall and turned away from it. The planner also
+-- implements 'corner' and 'scatter' placement, used by
+-- mod_pdungeon_decor_clutter.sql's rules. A rule naming any placement kind
+-- the planner does not implement is skipped rather than guessed at.
 -- ----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS `pdungeon_decor_rules` (
