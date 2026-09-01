@@ -61,6 +61,11 @@ public:
             // instance builds its props.
             sPDv2Mgr->LoadDecorRules();
 
+            // Same startup-only rule as the decor rules: read-only after this
+            // point, so a map thread can build a layout's ambient life without
+            // a lock.
+            sPDv2Mgr->LoadCritterRules();
+
             // Same startup-only rule as the walk masks above: the packs are
             // read-only after this point, which is what lets map threads draw
             // spawns from them without a lock.

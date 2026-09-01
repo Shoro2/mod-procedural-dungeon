@@ -259,6 +259,15 @@ namespace PDungeon
         // BuildDecorPlan sorts defensively all the same - see its header.
         std::vector<DecorRule> const& DecorRules() const { return _decorRules; }
 
+        // Loads `pdungeon_critter_rules`, ascending id. Called once at world
+        // startup beside LoadDecorRules and read-only afterwards, for the same
+        // reason: map threads read it without a lock.
+        void LoadCritterRules();
+
+        // The critter rules, in the order they were loaded (ascending id).
+        // BuildCritterPlan's determinism promise rests on that order.
+        std::vector<CritterRule> const& CritterRules() const { return _critterRules; }
+
     private:
         void StorePlan(uint32_t accountId, BlockPlan const& plan);
         void SavePlanToDB(uint32_t accountId, BlockPlan const& plan);
@@ -271,6 +280,7 @@ namespace PDungeon
         std::unordered_map<int, std::vector<DecorAnchor>> _chunkAnchors;
         std::unordered_map<int, std::vector<KitProp>> _chunkProps;
         std::vector<DecorRule> _decorRules;
+        std::vector<CritterRule> _critterRules;
     };
 }
 

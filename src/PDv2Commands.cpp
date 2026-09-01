@@ -214,6 +214,13 @@ private:
         handler->PSendSysMessage("pdungeon v2: {} pack(s), {} affix(es) loaded",
                                  uint32(sPDv2PackMgr->PackCount()),
                                  uint32(sPDv2PackMgr->AffixCount()));
+        // Same failure class again: 0 decor rules means mod_pdungeon_decor_rules.sql
+        // never landed and dungeons build with no props; 0 critter rules means
+        // mod_pdungeon_critters.sql did not, and dungeons build with no ambient
+        // life. Neither is fatal, so neither is visible without this line.
+        handler->PSendSysMessage("  {} decor rule(s), {} critter rule(s) loaded",
+                                 uint32(sPDv2Mgr->DecorRules().size()),
+                                 uint32(sPDv2Mgr->CritterRules().size()));
         handler->PSendSysMessage("pdungeon v2: {}",
                                  sPDClientLink->DebugLine(AccountOf(handler)));
         // The panel's side of the same conversation: whether this account's
