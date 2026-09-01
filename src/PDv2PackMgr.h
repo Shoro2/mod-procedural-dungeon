@@ -153,13 +153,31 @@ namespace PDungeon
         // Returns false when no pack survives the pool filter, which is the
         // caller's cue to fall back to its placeholder creature.
         //
-        // EVERY TRASH SLOT ROLLS INDEPENDENTLY from the whole band-filtered,
-        // unlocked pool (operator directive 2026-08-08). There used to be a
-        // per-run subset of `creatureTypesCap` distinct entries drawn once and
-        // reused for the entire dungeon; the second live test read exactly what
-        // that does - "only a few of the available mobs get picked and then
-        // only those are used". The boss draw is separate as before: every boss
-        // room gets exactly one role-2 entry, drawn fresh.
+        // EVERY ROOM DRAWS ONE PACK (Task 13) and its trash slots prefer that
+        // pack's members for their role, falling back to the merged, band-
+        // filtered, unlocked pool per SLOT - never per room - only when the
+        // pack has nothing of the wanted role. A room therefore reads as one
+        // faction instead of a jumble of every unlocked pack's trash side by
+        // side. Only packs with at least one non-boss member are ever drawn
+        // as a room's theme (PackPools::trashPackIds): a boss-only pack could
+        // fill nothing and is excluded by construction, not by chance.
+        //
+        // Before Task 13, every trash slot in the WHOLE RUN rolled
+        // independently from that same merged pool (operator directive
+        // 2026-08-08, replacing a per-run subset of `creatureTypesCap`
+        // distinct entries drawn once and reused for the entire dungeon - the
+        // second live test read exactly what that does, "only a few of the
+        // available mobs get picked and then only those are used"). That
+        // merged pool is still exactly what the per-slot fallback above draws
+        // from; only the THEMED preference in front of it is new.
+        //
+        // Inserting the per-room pack draw moved every downstream draw by one
+        // call, which re-rolls WHICH creatures an already-stored seed spawns -
+        // accepted, not a bug: the server is not public and character
+        // progress is expendable. The boss draw is untouched by any of this:
+        // every boss room still gets exactly one role-2 entry, drawn fresh
+        // from the pool across ALL packs, so a room's theme never constrains
+        // which boss can appear.
         bool SelectSpawns(uint32_t seed, SpawnSelectInputs const& in,
                           std::vector<RoomSpawns>& out) const;
 

@@ -877,6 +877,9 @@ namespace PDungeon
 
                 RoomSpawns fallback;
                 fallback.roomIndex = room.roomIndex;
+                // packId left at its default (0): there is no pack table to
+                // theme against on this path, so every placeholder reads as
+                // unthemed, the same way the boss slot does.
                 fallback.picks.assign(static_cast<size_t>(count),
                                       SpawnPick{ PLACEHOLDER_CREATURE, PACK_ROLE_MELEE, 0 });
                 spawns.push_back(fallback);

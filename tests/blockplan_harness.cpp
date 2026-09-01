@@ -2126,13 +2126,27 @@ namespace
     // after a change to PDv2PackDraw, that is the change being noticed, not
     // the test being wrong - update the pin deliberately, in the same commit
     // as the draw-order comment.
+    //
+    // Re-captured for Task 13 (one pack draw inserted at the front of every
+    // room - PDv2PackDraw.cpp's own THE SPAWN STREAM comment says why every
+    // downstream draw had to move). Old value, for anyone diffing history:
+    // "84263,84269,84268,84276,84269,84267,84266,84266,84264,84276,84288,84268,84276,".
+    // Captured by RUNNING `pdblock --batch 500` and reading the "spawn draw
+    // moved" failure message, not by reasoning about what the new sequence
+    // should be.
     char const* const PD_SPAWN_DRAW_PIN =
-        "84263,84269,84268,84276,84269,84267,84266,84266,84264,84276,84288,84268,84276,";
+        "84268,84267,84269,84276,84268,84269,84269,84267,84276,84267,84289,84263,84263,";
 
     // A fixed stand-in for the live pack tables: two packs, one with a
     // boss, enough members that a 5-trash room and a boss room both have
     // something to draw. The entries are the shipped stock ones so the pin
     // is readable by anyone who knows the dungeon.
+    //
+    // trashPackIds/meleeByPack/casterByPack are hand-built the same way
+    // PDv2PackMgr::LoadFromDB and GroupByPack would (PDv2PackMgr.cpp) - both
+    // packs have a melee AND a caster member, so both are eligible for
+    // Task 13's per-room pack draw, and that draw is what makes this pin
+    // worth re-capturing rather than assumed unchanged.
     PackPools FixedPackPools()
     {
         PackPools pools;
@@ -2140,6 +2154,11 @@ namespace
                          {2, 84267}, {2, 84268}, {2, 84269} };
         pools.caster = { {1, 84263}, {2, 84276} };
         pools.boss   = { {1, 84288}, {2, 84289} };
+        pools.trashPackIds = { 1, 2 };
+        pools.meleeByPack = { { 1, { {1, 84264}, {1, 84265}, {1, 84266} } },
+                              { 2, { {2, 84267}, {2, 84268}, {2, 84269} } } };
+        pools.casterByPack = { { 1, { {1, 84263} } },
+                               { 2, { {2, 84276} } } };
         return pools;
     }
 
@@ -2214,6 +2233,14 @@ namespace
         // would build it - see PackPools::trash's own comment for why this
         // cannot be reconstructed by concatenating melee and caster above.
         pools.trash = { caster1, melee1, melee2, melee3 };
+        // Only pack 1 exists here, so it is the only eligible entry in
+        // trashPackIds - Task 13's per-room pack draw has nothing to choose
+        // between and PDRandom::UniformInt(0, 0) answers without drawing
+        // (lo >= hi), so this fixture is not expected to move
+        // PD_SPAWN_DRAW_NOBOSS_PIN even though the draw now runs.
+        pools.trashPackIds = { 1 };
+        pools.meleeByPack = { { 1, { melee1, melee2, melee3 } } };
+        pools.casterByPack = { { 1, { caster1 } } };
         return pools;
     }
 
@@ -2240,6 +2267,13 @@ namespace
     // "should be" value would. The first entry is what matters for Finding
     // 1: it must be the boss room's stand-in pick, and it must be 84263 (the
     // caster), never 84264 (the melee member the pre-fix code picked).
+    //
+    // Checked against Task 13's pack draw and left AS IS: `pdblock --batch
+    // 500` still reports this pin clean. NoBossPackPools() below only ever
+    // loads pack 1, so the new per-room draw has exactly one eligible pack
+    // (trashPackIds = {1}) and PDRandom::UniformInt(0, 0) answers that
+    // without drawing (lo >= hi) - the draw runs, but it costs the stream
+    // nothing, so this pin was not expected to move and did not.
     char const* const PD_SPAWN_DRAW_NOBOSS_PIN =
         "84263,84263,84266,";
 
@@ -2274,6 +2308,142 @@ namespace
         return true;
     }
 
+    // --- one pack per room (Task 13, PDv2 content-expansion plan) ----------
+    //
+    // Every trash pick of a room comes from ONE pack. The boss slot is
+    // exempt: it draws from the role-2 pool across all packs, so a room's
+    // theme never constrains which boss can appear.
+    //
+    // `flat` is PDv2SelectSpawns's whole output for the run and `[begin,
+    // end)` is one room's slice of it - the same slicing
+    // PDv2PackMgr::SelectSpawns does with trashWanted/bossAdds
+    // (PDv2PackMgr.cpp:570-588), reproduced here because that file includes
+    // DatabaseEnv.h and cannot link into this harness. `hasBoss` skips slot 0
+    // (the boss, always the room's first pick when present) so the boss's
+    // packId 0 is never mistaken for "the room's pack is 0".
+    bool CheckRoomThemeCoherent(std::vector<SpawnPick> const& flat, size_t begin,
+                                size_t end, bool hasBoss, std::string& why)
+    {
+        int packId = 0;
+        bool have = false;
+        for (size_t i = hasBoss ? begin + 1 : begin; i < end; ++i)
+        {
+            if (!have)
+            {
+                packId = flat[i].packId;
+                have = true;
+                continue;
+            }
+            if (flat[i].packId != packId)
+            {
+                why = "a room mixes two packs";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Real stock (mod_pdungeon_packs.sql), in full: packs 1 and 2 both carry
+    // melee, pack 1 alone also carries the five RANGE entries, and pack 3 is
+    // the boss draw with no trash member at all. This is not a synthetic
+    // fixture - it is exactly what Rule 1 and Rule 3 of Task 13's brief are
+    // about: pack 3 must never be drawable as a room's theme (it has nothing
+    // to fill a trash slot with), and a room themed to pack 2 must still get
+    // caster picks - from the merged pool, since pack 2 has none of its own -
+    // while its melee slots stay pack 2.
+    PackPools ThemeCoherencePackPools()
+    {
+        PackPools pools;
+        pools.melee = {
+            {1, 84264}, {1, 84265}, {1, 84266}, {1, 84268}, {1, 84272},
+            {1, 84274}, {1, 84280}, {1, 84284},
+            {2, 84267}, {2, 84269}, {2, 84270}, {2, 84271}, {2, 84273},
+            {2, 84275}, {2, 84277}, {2, 84278}, {2, 84279}, {2, 84282},
+            {2, 84283}, {2, 84286},
+        };
+        pools.caster = {
+            {1, 84263, PACK_ROLE_CASTER, 47809}, {1, 84276, PACK_ROLE_CASTER, 47857},
+            {1, 84281, PACK_ROLE_CASTER, 62129}, {1, 84285, PACK_ROLE_CASTER, 42842},
+            {1, 84287, PACK_ROLE_CASTER, 47809},
+        };
+        pools.boss = { {3, 84288}, {3, 84289}, {3, 84290} };
+        // Pack 3 excluded: it has zero non-boss members (Rule 1).
+        pools.trashPackIds = { 1, 2 };
+        pools.meleeByPack = {
+            { 1, { {1, 84264}, {1, 84265}, {1, 84266}, {1, 84268}, {1, 84272},
+                   {1, 84274}, {1, 84280}, {1, 84284} } },
+            { 2, { {2, 84267}, {2, 84269}, {2, 84270}, {2, 84271}, {2, 84273},
+                   {2, 84275}, {2, 84277}, {2, 84278}, {2, 84279}, {2, 84282},
+                   {2, 84283}, {2, 84286} } },
+        };
+        pools.casterByPack = {
+            // Pack 2 deliberately absent here (Rule 3): it has no caster
+            // group, so casterOf(2) must answer empty and send those slots
+            // to the merged pool above.
+            { 1, { {1, 84263, PACK_ROLE_CASTER, 47809}, {1, 84276, PACK_ROLE_CASTER, 47857},
+                   {1, 84281, PACK_ROLE_CASTER, 62129}, {1, 84285, PACK_ROLE_CASTER, 42842},
+                   {1, 84287, PACK_ROLE_CASTER, 47809} } },
+        };
+        return pools;
+    }
+
+    void RunPackThemeChecks(int seeds)
+    {
+        PackPools const pools = ThemeCoherencePackPools();
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 41u;
+
+            SpawnSelectInputs in;
+            // Five normal rooms and one boss room - enough per seed that a
+            // themed pack with no caster (pack 2) is exercised, without a
+            // room count so large the failure log stops being readable.
+            in.rooms = { {0, false}, {1, false}, {2, false},
+                         {3, false}, {4, false}, {5, true} };
+            in.spawnsPerRoom = 5;
+            in.bossRoomAdds = 2;
+            in.casterPct = 40;
+            in.bandMin = 76;
+            in.affixPct = 40;
+
+            std::vector<SpawnPick> flat;
+            if (!PDv2SelectSpawns(seed, in, pools, flat))
+            {
+                Check(false, "the theme-coherence draw refused to select", seed);
+                continue;
+            }
+
+            // Every pool above is rich enough for every slot to fill, so the
+            // slice sizes below always match what was actually consumed -
+            // the same assumption PDv2PackMgr::SelectSpawns's own slicing
+            // documents (PDv2PackMgr.cpp:553-560).
+            size_t cursor = 0;
+            for (RoomRequest const& room : in.rooms)
+            {
+                int const trashWanted = room.isBoss ? in.bossRoomAdds : in.spawnsPerRoom;
+                size_t const got = static_cast<size_t>(trashWanted + (room.isBoss ? 1 : 0));
+                size_t const end = (cursor + got <= flat.size()) ? cursor + got : flat.size();
+
+                std::string why;
+                Check(CheckRoomThemeCoherent(flat, cursor, end, room.isBoss, why),
+                      why.empty() ? "room theme check failed" : why.c_str(), seed);
+
+                // Rule 1: pack 3 (boss-only in the real stock) has no
+                // non-boss member and must never surface as a trash pick's
+                // packId - if it did, the eligibility filter let a pack with
+                // nothing to fill through.
+                for (size_t k = room.isBoss ? cursor + 1 : cursor; k < end; ++k)
+                {
+                    Check(flat[k].packId != 3,
+                          "a trash pick carries the boss-only pack's id - the "
+                          "eligibility filter let it through", seed);
+                }
+
+                cursor = end;
+            }
+        }
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
@@ -2303,6 +2473,9 @@ namespace
         RunBossRoomChecks(count / 10 + 1);
         RunPhase2Checks(count / 10 + 1);
         RunThemeParityChecks(count / 10 + 1);
+        // Same tenth-of-the-batch reasoning: one pack per room is structural
+        // too, and a real seed only ever gets a handful of rooms per run.
+        RunPackThemeChecks(count / 10 + 1);
 
         // The city cap must hold like the mine cap - its ids are one digit
         // wider, which is exactly the kind of erosion the measurement exists

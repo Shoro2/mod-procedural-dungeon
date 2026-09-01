@@ -64,6 +64,13 @@ namespace PDungeon
         // rides the seeded stream with every other spawn decision - the same
         // seed brings back the same affixed mobs after a restart.
         bool     affixed = false;
+        // The pack this pick's room was themed to (Task 13's per-room pack
+        // draw), or 0 for the boss slot - the boss is exempt from theming and
+        // keeps drawing from the role-2 pool across every pack, so a room's
+        // theme never constrains which boss can appear. Real pack ids start
+        // at 1 (PackPools::trashPackIds is built from an auto-increment
+        // primary key), so 0 is never ambiguous with an actual theme.
+        int      packId = 0;
     };
 
     // One room the caller wants filled. `roomIndex` is opaque here and simply

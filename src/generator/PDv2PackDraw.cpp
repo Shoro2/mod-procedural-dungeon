@@ -122,12 +122,23 @@ namespace PDungeon
         // determinism contract, because every draw below shifts every draw
         // after it:
         //
-        //   per room        one carrier Chance + one slot draw (the at-most-
-        //                   one-affix-per-room rule, drawn hit or miss so the
-        //                   stream stays aligned)
+        //   per room        one PACK draw (Task 13: which pack themes the
+        //                   room, uniform over pools.trashPackIds - see the
+        //                   draw itself below for why only packs with a
+        //                   non-boss member are eligible), THEN one carrier
+        //                   Chance + one slot draw (the at-most-one-affix-
+        //                   per-room rule, drawn hit or miss so the stream
+        //                   stays aligned)
         //   per boss room   additionally one weighted boss pick (no affix -
-        //                   bosses are never carriers, see the emit below)
+        //                   bosses are never carriers, see the emit below).
+        //                   The boss pick ignores the room's pack: it always
+        //                   draws from the role-2 pool across ALL packs, so
+        //                   a room's theme never constrains which boss can
+        //                   appear
         //   per trash slot  one caster/melee Chance, one weighted entry pick
+        //                   - from the room's pack if it has a member of the
+        //                   wanted role, from the merged pool otherwise (the
+        //                   fallback is per SLOT, never per room)
         //
         // Same seed and same inputs therefore rebuild the identical dungeon,
         // affixed mobs included, across restarts and compilers. The INPUTS are
@@ -135,9 +146,21 @@ namespace PDungeon
         // steer the sequence, so changing one re-rolls WHICH creatures a stored
         // seed spawns (the layout itself is untouched - it comes from a
         // different stream). PDRandom::Chance also short-circuits at 0 and 100
-        // without drawing, so those two values move the sequence as well.
-        // Nothing here is a bug; it is why the pack tables and these knobs are
-        // startup/config state rather than something a player can nudge.
+        // without drawing, and PDRandom::UniformInt short-circuits the same way
+        // whenever lo >= hi - the pack draw hits exactly that case when zero or
+        // one pack is eligible, so the pack table's own shape moves the
+        // sequence too. Nothing here is a bug; it is why the pack tables and
+        // these knobs are startup/config state rather than something a player
+        // can nudge.
+        //
+        // TASK 13 moved this list by inserting the pack draw at the front of
+        // every room: every downstream draw now sits one call later than it
+        // used to, which re-rolls WHICH creatures an ALREADY-STORED seed
+        // spawns. That is accepted, not a bug to work around - the server is
+        // not public and character progress is expendable - which is why
+        // PD_SPAWN_DRAW_PIN was re-captured by running the draw, not by
+        // reasoning about what it should say, in the same commit as this
+        // comment.
 
         // A boss room with no boss to put in it is a data problem, not a
         // reason to leave the room empty: the highest-weight member stands
@@ -179,20 +202,27 @@ namespace PDungeon
             *outBossStandIn = bossStandIn;
         }
 
-        auto pickTrash = [&]() -> PackMember const*
+        auto pickTrash = [&](int roomPackId) -> PackMember const*
         {
             // Caster or melee by the 01 §8 ratio, then a weighted draw from
-            // that role's FULL pool; when the pool for the wanted role is empty
-            // the other one answers, because a room short of spawns is worse
-            // than a room off-ratio.
+            // that role's pool.
             bool const wantCaster = rng.Chance(in.casterPct);
-            std::vector<PackMember> const& first = wantCaster ? casters : melee;
+            // Themed if the room's pack can fill this role, merged if it
+            // cannot. Falling back per SLOT keeps the rest of the room
+            // themed when a pack happens to have no caster.
+            std::vector<PackMember> const& themed =
+                wantCaster ? pools.casterOf(roomPackId) : pools.meleeOf(roomPackId);
+            std::vector<PackMember> const& pool =
+                themed.empty() ? (wantCaster ? pools.caster : pools.melee) : themed;
+            // Last resort, unrelated to theming: when even the merged pool for
+            // the wanted role is empty, the OTHER role answers, because a room
+            // short of spawns is worse than a room off-ratio.
             std::vector<PackMember> const& second = wantCaster ? melee : casters;
-            PackMember const* m = WeightedPick(first, rng);
+            PackMember const* m = WeightedPick(pool, rng);
             return m ? m : WeightedPick(second, rng);
         };
 
-        auto emit = [](PackMember const* m, bool affixed, std::vector<SpawnPick>& picks)
+        auto emit = [](PackMember const* m, bool affixed, int packId, std::vector<SpawnPick>& picks)
         {
             if (!m)
             {
@@ -203,6 +233,7 @@ namespace PDungeon
             pick.role = m->role;
             pick.casterSpellId = m->casterSpellId;
             pick.affixed = affixed;
+            pick.packId = packId;
             picks.push_back(pick);
         };
 
@@ -228,6 +259,30 @@ namespace PDungeon
         {
             int const trashWanted = room.isBoss ? bossAdds : perRoom;
 
+            // ---- draw 1 of the room: its pack -------------------------------
+            // One theme per room. Drawn FIRST, before the boss pick and before
+            // the affix roll, so a room's faction is decided before anything
+            // that depends on it.
+            //
+            // Only packs with at least one NON-BOSS member are eligible, and
+            // that filter is part of the contract, not an optimisation: with
+            // the live tables a uniform draw would send a fifth of all rooms
+            // to a pack that has no trash at all and could fill nothing.
+            //
+            // The draw is consumed UNCONDITIONALLY, hit or miss, exactly like
+            // the dead affix chance below it - a room that falls back to the
+            // merged pool must move the stream by as much as one that does
+            // not, or the two desynchronise.
+            int roomPackId = 0;
+            {
+                int const eligible = static_cast<int>(pools.trashPackIds.size());
+                int const k = rng.UniformInt(0, eligible > 0 ? eligible - 1 : 0);
+                if (eligible > 0)
+                {
+                    roomPackId = pools.trashPackIds[static_cast<size_t>(k)];
+                }
+            }
+
             if (room.isBoss)
             {
                 // Exactly one boss, and it is the room's FIRST pick - the
@@ -245,7 +300,11 @@ namespace PDungeon
                 // that won: one affix per platform is the rule players can read,
                 // and the boss platform's affix mob should obviously be the
                 // boss. The difficulty dial remains the knob if it bites.
-                emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), true, out);
+                //
+                // packId 0, not roomPackId: the boss slot is exempt from
+                // theming (see this task's own comment above the pack draw),
+                // so it never carries the room's pack id.
+                emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), true, 0, out);
             }
             // EXACTLY ONE carrier per room, always - no longer a percentage.
             //
@@ -277,9 +336,9 @@ namespace PDungeon
                 // stream whose order depends on the compiler is not
                 // deterministic, which is the one property this whole file
                 // exists to keep.
-                PackMember const* m = pickTrash();
+                PackMember const* m = pickTrash(roomPackId);
                 bool const affixed = roomHasCarrier && i == carrierSlot;
-                emit(m, affixed, out);
+                emit(m, affixed, roomPackId, out);
             }
         }
         return true;
