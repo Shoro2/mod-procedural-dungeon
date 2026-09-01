@@ -189,13 +189,20 @@ namespace PDungeon
             }
         }
 
-        // PackPools::trashPackIds (Task 13's per-room pack draw): every pack
-        // with at least one non-boss member, ascending. Built here rather
-        // than per SelectSpawns call because it is band- and unlock-
-        // independent - only the FLAT role pools SelectSpawns hands to
-        // PDv2SelectSpawns change per draw. _packs is already ascending by
-        // id (the loader's own "ORDER BY p.id, m.entry"), so no sort is
-        // needed to keep this list ascending too.
+        // _trashPackIds: every pack with at least one non-boss member,
+        // ascending, for the WHOLE THEME - band- and unlock-INDEPENDENT.
+        // This is the load-time CANDIDATE list only, not PackPools::
+        // trashPackIds itself: SelectSpawns filters it down, per run,
+        // against that run's actual band/unlock-filtered melee/caster
+        // groups before handing it to the draw (FilterEligibleTrashPacks,
+        // generator/PDv2PackDraw.cpp - Task 13 fix-pass review finding: a
+        // pack can sit in this list and still have nothing left once the
+        // band/unlock filter runs). Built here rather than per SelectSpawns
+        // call because computing the theme-wide shape does not need to
+        // repeat on every draw - only the per-run FILTER does, and that part
+        // lives with the draw it feeds. _packs is already ascending by id
+        // (the loader's own "ORDER BY p.id, m.entry"), so no sort is needed
+        // to keep this list ascending too.
         _trashPackIds.clear();
         for (Pack const& p : _packs)
         {
@@ -525,9 +532,23 @@ namespace PDungeon
         {
             pools.trash.push_back(*m);
         }
-        pools.trashPackIds = _trashPackIds;
         pools.meleeByPack = GroupByPack(pools.melee);
         pools.casterByPack = GroupByPack(pools.caster);
+
+        // Review finding (Task 13 fix pass): _trashPackIds is the theme-wide
+        // candidate list from LoadFromDB, independent of the band/unlock
+        // filter fillPool just applied above - handing it through as-is
+        // could draw a pack absent from meleeByPack/casterByPack, and every
+        // trash slot in that room would then fall back to the merged pool,
+        // silently re-creating the jumble Task 13 removes. Filter it down to
+        // this run's actually-fillable packs, from the SAME groups the draw
+        // itself reads via meleeOf/casterOf - not a second, hand-rolled
+        // filter that could drift from them. It does not bite today (every
+        // shipped pack is level_min = level_max = 80, unlock_dlvl = 0, so
+        // the filtered and unfiltered lists are identical), but level_min/
+        // level_max/unlock_dlvl are real columns the content design intends
+        // to use (mod_pdungeon_packs.sql).
+        pools.trashPackIds = FilterEligibleTrashPacks(_trashPackIds, pools);
 
         // The boss-standin fallback runs inside PDv2SelectSpawns, on the
         // seeded stream, at the exact point the original ternary did - that

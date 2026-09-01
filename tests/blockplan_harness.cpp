@@ -2387,6 +2387,45 @@ namespace
         return pools;
     }
 
+    // Review finding (Task 13 fix pass): PDv2PackMgr::SelectSpawns used to
+    // hand `pools.trashPackIds` through straight from a load-time list that
+    // was theme-wide, not run-filtered, so it could disagree with
+    // meleeByPack/casterByPack and offer a pack with nothing to draw. The
+    // fix moved the filtering itself (FilterEligibleTrashPacks,
+    // generator/PDv2PackDraw.cpp) into this engine-free file specifically so
+    // it is testable here - CheckRoomThemeCoherent below cannot catch this
+    // failure mode no matter how it is strengthened, because
+    // SpawnPick::packId records the room's DRAWN theme, not where a member
+    // actually came from: every pick in a fully-fallen-back room still
+    // carries the same (wrong) theme, so it still "coheres" by that
+    // measure. Testing the filter directly, rather than its downstream
+    // symptom, is what actually closes the gap.
+    bool CheckEligibleTrashPackFilter(std::string& why)
+    {
+        // ThemeCoherencePackPools() only ever builds meleeByPack/casterByPack
+        // groups for packs 1 and 2 (pack 3 is boss-only, per its own
+        // comment). Pack 4 is not in this fixture at all - the same shape a
+        // stale/theme-wide load-time list would produce: a candidate the
+        // filtered groups know nothing about.
+        PackPools const pools = ThemeCoherencePackPools();
+        std::vector<int> const loaded = { 1, 2, 3, 4 };
+        std::vector<int> const want = { 1, 2 };
+        std::vector<int> const got = FilterEligibleTrashPacks(loaded, pools);
+        if (got != want)
+        {
+            std::string gotStr;
+            for (int id : got)
+            {
+                gotStr += std::to_string(id);
+                gotStr += ',';
+            }
+            why = "FilterEligibleTrashPacks let an ineligible pack through, dropped an "
+                  "eligible one, or lost the ascending order: got " + gotStr;
+            return false;
+        }
+        return true;
+    }
+
     void RunPackThemeChecks(int seeds)
     {
         PackPools const pools = ThemeCoherencePackPools();
@@ -2476,6 +2515,13 @@ namespace
         // Same tenth-of-the-batch reasoning: one pack per room is structural
         // too, and a real seed only ever gets a handful of rooms per run.
         RunPackThemeChecks(count / 10 + 1);
+        {
+            // Not seed-dependent - FilterEligibleTrashPacks is pure over its
+            // two arguments - so one Check is enough (Task 13 fix pass).
+            std::string why;
+            bool const ok = CheckEligibleTrashPackFilter(why);
+            Check(ok, why.empty() ? "eligible trash pack filter failed" : why.c_str(), 0);
+        }
 
         // The city cap must hold like the mine cap - its ids are one digit
         // wider, which is exactly the kind of erosion the measurement exists

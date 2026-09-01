@@ -90,6 +90,20 @@ namespace PDungeon
         return empty;
     }
 
+    std::vector<int> FilterEligibleTrashPacks(std::vector<int> const& loaded, PackPools const& pools)
+    {
+        std::vector<int> eligible;
+        eligible.reserve(loaded.size());
+        for (int packId : loaded)
+        {
+            if (!pools.meleeOf(packId).empty() || !pools.casterOf(packId).empty())
+            {
+                eligible.push_back(packId);
+            }
+        }
+        return eligible;
+    }
+
     bool PDv2SelectSpawns(uint32_t seed, SpawnSelectInputs const& in,
                           PackPools const& pools, std::vector<SpawnPick>& out,
                           PackMember const** outBossStandIn)

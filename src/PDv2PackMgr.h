@@ -158,9 +158,12 @@ namespace PDungeon
         // filtered, unlocked pool per SLOT - never per room - only when the
         // pack has nothing of the wanted role. A room therefore reads as one
         // faction instead of a jumble of every unlocked pack's trash side by
-        // side. Only packs with at least one non-boss member are ever drawn
-        // as a room's theme (PackPools::trashPackIds): a boss-only pack could
-        // fill nothing and is excluded by construction, not by chance.
+        // side. Only packs with at least one non-boss member that survives
+        // THIS RUN'S band/unlock filter are ever drawn as a room's theme
+        // (PackPools::trashPackIds, re-derived per run from _trashPackIds -
+        // see that field's own comment): a boss-only pack, or one this run's
+        // band/unlock excludes entirely, could fill nothing and is excluded
+        // by construction, not by chance.
         //
         // Before Task 13, every trash slot in the WHOLE RUN rolled
         // independently from that same merged pool (operator directive
@@ -195,11 +198,19 @@ namespace PDungeon
         std::unordered_map<uint32_t, std::vector<MemberSpell>> _memberSpells;
         size_t _memberSpellRows = 0;
 
-        // Packs with at least one non-boss member, ascending by id. Computed
-        // once here at load time, not per draw: PackPools::trashPackIds is
-        // band-independent by design (Task 13's per-room pack draw), so
-        // recomputing it on every SelectSpawns call would cost work for a
-        // set that never changes between one restart and the next.
+        // Packs with at least one non-boss member for the WHOLE THEME,
+        // ascending by id - independent of any run's level band or unlock
+        // level. This is the CANDIDATE list only, computed once here because
+        // the theme-wide shape never changes between one restart and the
+        // next; it is not what SelectSpawns hands the draw. A pack can sit
+        // here and still have nothing left to fill a trash slot with once a
+        // run's band/unlock filter runs, so SelectSpawns re-derives
+        // PackPools::trashPackIds from THIS list filtered against that run's
+        // actual meleeByPack/casterByPack groups (FilterEligibleTrashPacks,
+        // generator/PDv2PackDraw.cpp) - fixed in the Task 13 fix pass after
+        // a review finding: the unfiltered list let a room draw a pack with
+        // nothing available, silently falling every slot back to the merged
+        // pool.
         std::vector<int> _trashPackIds;
     };
 }

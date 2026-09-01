@@ -122,9 +122,23 @@ namespace PDungeon
         // different, still-wrong tie-break.
         std::vector<PackMember> trash;
 
-        // Packs holding at least one NON-BOSS member, ascending. The per-room
-        // pack draw is uniform over this list; a pack that can fill nothing
-        // must not be drawable, or a fifth of all rooms would come out empty.
+        // Packs eligible to theme a room THIS RUN, ascending: at least one
+        // NON-BOSS member survives the band/unlock filter the caller applied
+        // before building melee/caster above - equivalently, present in
+        // meleeByPack or casterByPack below. The per-room pack draw is
+        // uniform over this list; a pack that can fill nothing must not be
+        // drawable, or a fifth of all rooms would come out empty.
+        //
+        // Review finding (Task 13 fix pass): this MUST be derived from the
+        // same filtered groups meleeByPack/casterByPack are built from, not
+        // from a theme-wide, band/unlock-independent candidate list - a
+        // pack absent from those groups but present here would still get
+        // drawn as a room's theme, and every trash slot in that room would
+        // then fall back to the merged pool, silently re-creating the exact
+        // jumble Task 13 exists to remove. FilterEligibleTrashPacks below is
+        // the one place that derivation happens; PDv2PackMgr::SelectSpawns
+        // calls it after populating meleeByPack/casterByPack, rather than
+        // assigning its own load-time candidate list here directly.
         std::vector<int> trashPackIds;
 
         // The members of ONE pack, or an empty vector if it has none of that
@@ -148,6 +162,27 @@ namespace PDungeon
         std::vector<PackGroup> meleeByPack;
         std::vector<PackGroup> casterByPack;
     };
+
+    // Filters `loaded` - a candidate pack-id list in any order - down to the
+    // ids that can actually fill a trash slot in THIS RUN: present in
+    // `pools.meleeByPack` or `pools.casterByPack`, the exact groups
+    // meleeOf/casterOf search. Order is preserved from `loaded` rather than
+    // re-derived, so handing in an already-ascending list (as
+    // PDv2PackMgr::_trashPackIds is) yields an ascending result with no sort
+    // in here.
+    //
+    // This is Task 13's review-finding fix, factored out to this engine-free
+    // file specifically so it can be pinned by the harness:
+    // PDv2PackMgr::_trashPackIds is computed once at load time from every
+    // loaded pack for the theme, independent of the band and unlock filter a
+    // run applies before building meleeByPack/casterByPack
+    // (PDv2PackMgr::SelectSpawns). Handed through unfiltered, the per-room
+    // pack draw could pick a pack absent from those groups, and every trash
+    // slot in that room would then fall back to the merged pool, silently
+    // re-creating the jumble Task 13 removes. PDv2PackMgr::SelectSpawns calls
+    // this AFTER populating meleeByPack/casterByPack, and assigns the result
+    // - not `loaded` itself - to `pools.trashPackIds`.
+    std::vector<int> FilterEligibleTrashPacks(std::vector<int> const& loaded, PackPools const& pools);
 
     // The whole spawn draw. Deterministic for a given (seed, inputs, pools):
     // same three on any compiler yields the same picks, which is why it lives
