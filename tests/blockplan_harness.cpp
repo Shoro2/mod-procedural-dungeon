@@ -320,10 +320,16 @@ namespace
     // stream that rewrites every \n into \r\n -- so piping this through a shell
     // would corrupt it in a way that only shows up as a parse error much later.
     void WriteManifest(uint32_t seed, int rooms, char const* path, int obx, int oby,
-                       int theme)
+                       int theme, int bossRooms)
     {
         BlockCfg cfg = MakeCfg(seed, rooms, obx, oby);
         cfg.theme = theme;
+        // The boss-room count is a generation INPUT, not a decoration: it
+        // changes how many cells the scatter wants, so a stored layout with
+        // gen_boss_rooms 2 cannot be reproduced with the fixture's 1. Added
+        // 2026-09-02 to audit an operator's live layout from its
+        // pdungeon_account row; 1 keeps every earlier call byte-identical.
+        cfg.bossRooms = bossRooms;
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))
         {
@@ -2957,8 +2963,9 @@ int main(int argc, char** argv)
         int const obx = (argc >= 7) ? std::atoi(argv[5]) : 32 * 8;
         int const oby = (argc >= 7) ? std::atoi(argv[6]) : 32 * 8;
         int const theme = (argc >= 8) ? std::atoi(argv[7]) : 1;
+        int const bossRooms = (argc >= 9) ? std::atoi(argv[8]) : 1;
         WriteManifest(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)),
-                      rooms, argv[3], obx, oby, theme);
+                      rooms, argv[3], obx, oby, theme, bossRooms);
         return 0;
     }
 
