@@ -841,6 +841,7 @@ namespace
     // chainLen = total - pockets, boss k at round(k * (L - 1) / N).
     void RunChainMathChecks()
     {
+        char msg[200];
         struct Row { int rooms; int boss; int branches; int pockets; int chainLen; int b1; int b2; };
         Row const rows[] = {
             {  1, 1, 2, 0,  2, 1, -1 },
@@ -858,7 +859,6 @@ namespace
         };
         for (Row const& r : rows)
         {
-            char msg[160];
             int const pockets = PocketCountFor(r.rooms, r.boss, r.branches);
             std::snprintf(msg, sizeof(msg), "PocketCountFor(%d,%d,%d) = %d, want %d",
                           r.rooms, r.boss, r.branches, pockets, r.pockets);
@@ -884,22 +884,34 @@ namespace
         }
 
         // Every legal engine request seats N distinct bosses at index >= 1:
-        // chainLen - 1 >= N is what the host clamp guarantees.
+        // chainLen - 1 >= N is what the host clamp guarantees. The boss loop
+        // runs to 4 because GameBossRooms(30) is 4 and the conf's DlvlCap is
+        // 30 - stopping at 3 left the top of the engine's band unmeasured.
         for (int rooms = 1; rooms <= 15; ++rooms)
         {
-            for (int boss = 1; boss <= 3; ++boss)
+            for (int boss = 1; boss <= 4; ++boss)
             {
                 int const total = std::max(2, rooms + boss);
                 int const chainLen = total - PocketCountFor(rooms, boss, 2);
-                Check(chainLen - 1 >= boss, "the pocket clamp left no room for the bosses", 0);
+                std::snprintf(msg, sizeof(msg),
+                              "the pocket clamp left no room for the bosses at (%d rooms, %d boss)",
+                              rooms, boss);
+                Check(chainLen - 1 >= boss, msg, 0);
                 int last = 0;
                 for (int k = 1; k <= boss; ++k)
                 {
                     int const idx = BossChainIndex(chainLen, boss, k);
-                    Check(idx > last && idx <= chainLen - 1, "boss positions not strictly increasing", 0);
+                    std::snprintf(msg, sizeof(msg),
+                                  "boss positions not strictly increasing at (%d rooms, %d boss): "
+                                  "boss %d at %d, previous at %d",
+                                  rooms, boss, k, idx, last);
+                    Check(idx > last && idx <= chainLen - 1, msg, 0);
                     last = idx;
                 }
-                Check(last == chainLen - 1, "the last boss is not the last chain room", 0);
+                std::snprintf(msg, sizeof(msg),
+                              "the last boss is not the last chain room at (%d rooms, %d boss)",
+                              rooms, boss);
+                Check(last == chainLen - 1, msg, 0);
             }
         }
 
@@ -1287,6 +1299,13 @@ namespace
         int const PINNED_ROOMS = 5;
         size_t const PINNED_BYTES = 363;
         char const* const PINNED_TRAILER = "E;a5019024\n";
+        // The failure message names the pin this one REPLACED, so whoever
+        // reads it can tell a fresh move from the Round B re-roll. Kept as
+        // constants beside the live pin: the message used to pair the current
+        // byte count with the previous trailer, which read as a third value
+        // that never existed.
+        size_t const PREVIOUS_BYTES = 571;
+        char const* const PREVIOUS_TRAILER = "E;85fc0e4c";
 
         BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
         cfg.bossRooms = 1;
@@ -1302,14 +1321,17 @@ namespace
         size_t const trailer = std::strlen(PINNED_TRAILER);
         std::string const actualTrailer =
             m.size() >= trailer ? m.substr(m.size() - trailer) : m;
-        char msg[200];
+        char msg[256];
         std::snprintf(msg, sizeof(msg),
-                      "pinned manifest is %d bytes / %.*s, was %d / %s - the "
-                      "bossRooms=1 layout MOVED",
+                      "pinned manifest is %d bytes / %.*s, the pin says %d / %.*s "
+                      "(the pin before Round B was %d / %s) - the bossRooms=1 "
+                      "layout MOVED",
                       static_cast<int>(m.size()),
                       static_cast<int>(actualTrailer.size() ? actualTrailer.size() - 1 : 0),
                       actualTrailer.c_str(),
-                      static_cast<int>(PINNED_BYTES), "E;85fc0e4c");
+                      static_cast<int>(PINNED_BYTES),
+                      static_cast<int>(trailer ? trailer - 1 : 0), PINNED_TRAILER,
+                      static_cast<int>(PREVIOUS_BYTES), PREVIOUS_TRAILER);
         Check(m.size() == PINNED_BYTES, msg, PINNED_SEED);
 
         bool const same = m.size() >= trailer &&
@@ -1511,32 +1533,110 @@ namespace
         }
     }
 
+    // Walk the corridor run behind one socket of block `from` and report the
+    // first ROOM it reaches: -1 when the run ends in a chest stub or in
+    // nothing. Deliberately the harness's own walk rather than a call into
+    // ValidateBlockPlan - the validator grew the same rule in this wave and
+    // the point of these checks is that a bug in it cannot hide here.
+    int RoomAtEndOf(BlockPlan const& plan, size_t from, unsigned bit)
+    {
+        struct Dir { unsigned bit; int dx; int dy; unsigned opp; };
+        Dir const dirs[4] = {
+            { SOCKET_N,  0, -1, SOCKET_S },
+            { SOCKET_E,  1,  0, SOCKET_W },
+            { SOCKET_S,  0,  1, SOCKET_N },
+            { SOCKET_W, -1,  0, SOCKET_E },
+        };
+        std::map<std::pair<int, int>, size_t> index;
+        for (size_t i = 0; i < plan.blocks.size(); ++i)
+        {
+            index[std::make_pair(plan.blocks[i].bx, plan.blocks[i].by)] = i;
+        }
+        size_t prev = from;
+        unsigned entry = bit;
+        for (size_t steps = 0; steps <= plan.blocks.size(); ++steps)
+        {
+            Dir const* in = nullptr;
+            for (Dir const& d : dirs) if (d.bit == entry) in = &d;
+            if (!in) return -1;
+            auto it = index.find(std::make_pair(plan.blocks[prev].bx + in->dx,
+                                                plan.blocks[prev].by + in->dy));
+            if (it == index.end()) return -1;
+            size_t const at = it->second;
+            PlacedBlock const& b = plan.blocks[at];
+            if (b.roomId >= 0) return static_cast<int>(at);
+            if (b.role == BlockRole::CorridorDeadEnd) return -1;
+            unsigned next = 0;
+            int outs = 0;
+            for (Dir const& d : dirs)
+            {
+                if (!(b.socketMask & d.bit) || d.bit == in->opp) continue;
+                auto n = index.find(std::make_pair(b.bx + d.dx, b.by + d.dy));
+                if (n != index.end() &&
+                    plan.blocks[n->second].role == BlockRole::CorridorDeadEnd) continue;
+                ++outs;
+                next = d.bit;
+            }
+            if (outs != 1) return -1;       // a junction - the junction rule catches it
+            prev = at;
+            entry = next;
+        }
+        return -1;
+    }
+
     void RunChainChecks(int seeds, bool& sawPocket, bool& sawShortcut)
     {
-        char msg[200];
-        struct Combo { int rooms; int bossRooms; };
-        Combo const combos[] = { { 8, 1 }, { 8, 2 }, { 8, 3 }, { 15, 2 }, { 3, 1 }, { 1, 1 } };
+        char msg[224];
+        // The engine's real configuration space, not a diagonal of it:
+        // bossRooms reaches 4 at the conf's DlvlCap 30, branches and
+        // loopChancePct are both operator keys whose extremes sit on their
+        // own draw streams (PDRandom's no-draw contract at a single candidate
+        // and at Chance 0/100), and bossRooms 0 is reachable from the server
+        // config for an account with no row.
+        struct Combo
+        {
+            int rooms;
+            int bossRooms;
+            int branches = 2;
+            int loopPct = 15;
+        };
+        Combo const combos[] = {
+            { 8, 1 }, { 8, 2 }, { 8, 3 }, { 15, 2 }, { 3, 1 }, { 1, 1 },
+            { 4, 4 }, { 2, 4 }, { 1, 4 },                   // dlvl 30's boss count
+            { 8, 1, 0, 15 },                                // V2.Branches 0: no pockets at all
+            { 8, 1, 2, 0 },                                 // V2.LoopChance 0: Chance draws nothing
+            { 8, 1, 2, 100 },                               // V2.LoopChance 100: same, other way
+            { 5, 0, 2, 15 },                                // bossRooms 0 still means one boss
+        };
         for (Combo const& combo : combos)
         {
+            int shortcutsHere = 0;
             for (int i = 0; i < seeds; ++i)
             {
                 uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
                 BlockCfg cfg = MakeCfg(seed, combo.rooms);
                 cfg.bossRooms = combo.bossRooms;
+                cfg.branches = combo.branches;
+                cfg.loopChancePct = combo.loopPct;
 
                 BlockPlan plan;
                 if (!GenerateBlockPlan(cfg, &plan))
                 {
-                    std::snprintf(msg, sizeof(msg), "generation failed with %d rooms + %d boss",
-                                  combo.rooms, combo.bossRooms);
+                    std::snprintf(msg, sizeof(msg),
+                                  "generation failed with %d rooms + %d boss, branches %d, loop %d%%",
+                                  combo.rooms, combo.bossRooms, combo.branches, combo.loopPct);
                     Check(false, msg, seed);
                     continue;
                 }
 
-                // Own arithmetic, deliberately not PocketCountFor.
+                // Own arithmetic, deliberately not PocketCountFor. N is the
+                // boss count the PLANNER seats - one even when the config says
+                // zero - and the pocket ceiling is cfg.branches, not the 2 this
+                // used to hardcode.
+                int const N = std::max(1, combo.bossRooms);
                 int const total = std::max(2, combo.rooms + combo.bossRooms);
-                int wantPockets = std::min(2, total / 3);
-                wantPockets = std::min(wantPockets, std::max(0, (total - 1 - combo.bossRooms) / 2));
+                int wantPockets = std::min(std::max(0, cfg.branches), total / 3);
+                wantPockets = std::min(wantPockets, std::max(0, (total - 1 - N) / 2));
                 int const wantChain = total - wantPockets;
 
                 std::vector<int> chainBlock(static_cast<size_t>(wantChain), -1);
@@ -1576,7 +1676,7 @@ namespace
                 Check(strays == 0, "a room is neither on the chain nor a pocket (or a chain index repeats)", seed);
                 std::snprintf(msg, sizeof(msg), "%d pocket(s), want %d", pockets, wantPockets);
                 Check(pockets == wantPockets, msg, seed);
-                Check(bosses == combo.bossRooms, "boss room count does not match the config", seed);
+                Check(bosses == N, "boss room count does not match the config", seed);
                 bool chainComplete = true;
                 for (int idx : chainBlock) if (idx < 0) chainComplete = false;
                 Check(chainComplete, "a chain index is missing", seed);
@@ -1591,9 +1691,9 @@ namespace
                       plan.blocks[static_cast<size_t>(plan.bossIndex)].role == BlockRole::RoomBoss,
                       "bossIndex is not the last chain room, or it is not a boss", seed);
                 std::vector<bool> isBossIdx(static_cast<size_t>(wantChain), false);
-                for (int k = 1; k <= combo.bossRooms; ++k)
+                for (int k = 1; k <= N; ++k)
                 {
-                    int const want = (2 * k * (wantChain - 1) + combo.bossRooms) / (2 * combo.bossRooms);
+                    int const want = (2 * k * (wantChain - 1) + N) / (2 * N);
                     isBossIdx[static_cast<size_t>(want)] = true;
                     std::snprintf(msg, sizeof(msg), "boss %d is not at chain index %d", k, want);
                     Check(plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(want)])].role == BlockRole::RoomBoss,
@@ -1604,16 +1704,43 @@ namespace
                     PlacedBlock const& b = plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(idx)])];
                     Check(isBossIdx[static_cast<size_t>(idx)] == (b.role == BlockRole::RoomBoss),
                           "a boss sits off its formula position", seed);
-                    // SegmentOf agrees with the formula.
-                    int wantSeg = combo.bossRooms;
-                    for (int k = 1; k <= combo.bossRooms; ++k)
+                    // Every spine room that is not a boss is a plain Room: the
+                    // entrance role belongs to chain 0 alone (final review, M1).
+                    if (!isBossIdx[static_cast<size_t>(idx)])
                     {
-                        if (idx <= (2 * k * (wantChain - 1) + combo.bossRooms) / (2 * combo.bossRooms)) { wantSeg = k; break; }
+                        Check(b.role == BlockRole::Room, "a spine room carries the wrong role", seed);
+                    }
+                    // SegmentOf agrees with the formula.
+                    int wantSeg = N;
+                    for (int k = 1; k <= N; ++k)
+                    {
+                        if (idx <= (2 * k * (wantChain - 1) + N) / (2 * N)) { wantSeg = k; break; }
                     }
                     Check(SegmentOf(plan, b) == wantSeg, "SegmentOf disagrees with the boss positions", seed);
                 }
                 Check(SegmentOf(plan, plan.blocks[static_cast<size_t>(chainBlock[0])]) == 0,
                       "the entrance is not segment 0", seed);
+
+                // Spine adjacency (spec 7.1 invariant 3, final review M2):
+                // consecutive chain rooms are joined by EXACTLY one corridor
+                // run. Construction guarantees it today and one pinned seed
+                // notices a move, but B1's altar cadence and B5's patrol key
+                // off the physical order, so it is asserted per seed here -
+                // with the harness's own corridor walk, not the validator's.
+                for (int idx = 1; idx < wantChain; ++idx)
+                {
+                    size_t const from = static_cast<size_t>(chainBlock[static_cast<size_t>(idx - 1)]);
+                    int hits = 0;
+                    for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                    {
+                        if (!(plan.blocks[from].socketMask & bit)) continue;
+                        if (RoomAtEndOf(plan, from, bit) == chainBlock[static_cast<size_t>(idx)]) ++hits;
+                    }
+                    std::snprintf(msg, sizeof(msg),
+                                  "chain %d and %d are joined by %d corridor run(s), want 1",
+                                  idx - 1, idx, hits);
+                    Check(hits == 1, msg, seed);
+                }
 
                 // Pockets: host is an ordinary spine room, one pocket per host,
                 // shortcut forward, inside the segment, never onto a boss - and
@@ -1641,7 +1768,12 @@ namespace
                     FloodFrom(plan, static_cast<int>(at), chainBlock[static_cast<size_t>(b.branchOf)], seen);
                     if (b.shortcutTo >= 0)
                     {
-                        sawShortcut = true;
+                        ++shortcutsHere;
+                        // Non-vacuity only counts where a shortcut CAN happen:
+                        // at V2.LoopChance 0 the Chance short-circuits without
+                        // drawing, so a combo with loopPct 0 producing none is
+                        // the contract, not dead code.
+                        if (combo.loopPct > 0) sawShortcut = true;
                         bool ok = b.shortcutTo > b.branchOf && b.shortcutTo < wantChain;
                         for (int j = b.branchOf + 1; ok && j <= b.shortcutTo; ++j)
                         {
@@ -1702,6 +1834,23 @@ namespace
                         }
                     }
                 }
+            }
+
+            // V2.LoopChance 100 means the Chance never draws and always hits,
+            // so every pocket that has a feasible target gets a shortcut.
+            // Whether a given pocket HAS one is not derivable from the plan
+            // alone (the target list is a routing question inside the search),
+            // so what is asserted is the weaker, still-falsifiable statement:
+            // over the loopPct-100 seeds at least one shortcut occurs. If the
+            // Chance short-circuit ever stopped hitting, this row goes red
+            // while the loopPct-15 rows would only get statistically thinner.
+            if (combo.loopPct >= 100 && combo.branches > 0)
+            {
+                std::snprintf(msg, sizeof(msg),
+                              "no shortcut at all over %d seeds with LoopChance 100 "
+                              "(%d rooms + %d boss, branches %d)",
+                              seeds, combo.rooms, combo.bossRooms, combo.branches);
+                Check(shortcutsHere > 0, msg, 0);
             }
         }
     }
@@ -2506,14 +2655,15 @@ namespace
     //
     // If either of these fails after a deliberate decor/critter rule
     // change, that is the change being noticed, not the pin being wrong -
-    // update it in the same commit as the draw-order comment. Captured by
-    // RUNNING `pdblock --decor-batch` and reading the "plan moved" failure
-    // message, not by reasoning about what it should be - and only after
-    // items 1, 2 and 5 had landed, since all three can move these streams.
-    // Re-captured 2026-09-02 for the Round B chain layout (the seed-12345 plan moved).
-    // Captured by running `pdblock --decor-batch` (seed 12345, 5 rooms, the
-    // shipped fixtures) and reading the "plan moved" failure message, after
-    // items 1, 2 and 5 had landed.
+    // update it in the same commit as the draw-order comment.
+    //
+    // Re-captured 2026-09-02 for the Round B chain layout: the chain generator
+    // replaced scatter + MST, so the seed-12345 plan moved and both pins with it.
+    //
+    // CAPTURE PROCEDURE, both times: run `pdblock --decor-batch` (seed 12345,
+    // 5 rooms, the shipped fixtures) and paste the value out of the "plan
+    // moved" failure message - never by reasoning about what it should be -
+    // and only once every change that can move these streams has landed.
     char const* const PD_DECOR_PLAN_PIN =
         "256,257,1,910020,18.333333,12.500000,3.141593;256,257,4,910050,56.666666,20.833333,0.000000;256,257,5,910051,10.000000,20.833333,3.141593;256,257,5,910051,56.666666,29.166666,0.000000;256,257,6,910054,29.166666,10.000000,4.712389;256,257,7,910055,10.000000,45.833333,3.141593;256,257,10,910060,18.333333,10.000000,3.926991;256,257,10,910060,48.333333,56.666666,0.785398;256,257,11,910062,10.000000,56.666666,2.356194;256,257,11,910062,56.666666,10.000000,5.497787;258,257,9,910052,54.166666,26.666666,4.712389;256,258,9,910052,26.666666,45.833333,3.141593;256,258,12,910063,26.666666,26.666666,3.926991;257,258,3,910020,26.666666,54.166666,3.141593;257,258,9,910052,26.666666,12.500000,3.141593;258,258,1,910020,45.833333,10.000000,4.712389;258,258,5,910051,56.666666,20.833333,0.000000;258,258,5,910051,4.166667,26.666666,4.712389;258,258,6,910054,10.000000,20.833333,3.141593;258,258,13,910070,20.833333,29.166666,0.000000;258,258,13,910070,29.166666,45.833333,0.000000;258,258,13,910070,45.833333,20.833333,0.000000;259,258,9,910052,26.666666,4.166667,3.141593;261,258,1,910020,29.166666,56.666666,1.570796;261,258,1,910020,10.000000,20.833333,3.141593;261,258,1,910020,10.000000,45.833333,3.141593;261,258,4,910050,10.000000,29.166666,3.141593;261,258,4,910050,45.833333,10.000000,4.712389;261,258,5,910051,45.833333,56.666666,1.570796;261,258,5,910051,62.500000,26.666666,4.712389;261,258,8,910056,10.000000,54.166666,3.141593;261,258,11,910062,48.333333,56.666666,0.785398;261,258,11,910062,10.000000,56.666666,2.356194;256,259,1,910020,56.666666,29.166666,0.000000;256,259,1,910020,20.833333,56.666666,1.570796;256,259,2,910021,29.166666,10.000000,4.712389;256,259,2,910021,56.666666,20.833333,0.000000;256,259,7,910055,56.666666,12.500000,0.000000;256,259,10,910060,56.666666,10.000000,5.497787;256,259,10,910060,10.000000,56.666666,2.356194;256,259,11,910062,18.333333,10.000000,3.926991;256,259,11,910062,48.333333,56.666666,0.785398;256,259,14,910073,45.833333,20.833333,0.000000;256,259,14,910073,12.500000,29.166666,0.000000;258,259,12,910063,26.666666,26.666666,3.926991;259,259,1,910020,62.500000,26.666666,4.712389;259,259,1,910020,56.666666,20.833333,0.000000;259,259,1,910020,20.833333,10.000000,4.712389;259,259,4,910050,56.666666,12.500000,0.000000;259,259,5,910051,26.666666,62.500000,3.141593;259,259,5,910051,4.166667,26.666666,4.712389;259,259,6,910054,45.833333,56.666666,1.570796;259,259,10,910060,10.000000,56.666666,2.356194;259,259,10,910060,56.666666,10.000000,5.497787;259,259,13,910070,12.500000,29.166666,0.000000;259,259,13,910070,20.833333,45.833333,0.000000;259,259,13,910070,54.166666,29.166666,0.000000;260,259,3,910020,26.666666,12.500000,3.141593;261,259,3,910020,26.666666,4.166667,3.141593;258,260,3,910020,62.500000,26.666666,4.712389;259,260,9,910052,12.500000,26.666666,4.712389;258,261,1,910020,29.166666,56.666666,1.570796;258,261,4,910050,10.000000,20.833333,3.141593;258,261,4,910050,10.000000,54.166666,3.141593;258,261,5,910051,56.666666,29.166666,0.000000;258,261,5,910051,45.833333,10.000000,4.712389;258,261,8,910056,45.833333,56.666666,1.570796;258,261,11,910062,48.333333,56.666666,0.785398;258,261,11,910062,56.666666,10.000000,5.497787;258,261,13,910070,45.833333,20.833333,0.000000;258,261,13,910070,45.833333,45.833333,0.000000;258,261,13,910070,20.833333,29.166666,0.000000";
     char const* const PD_CRITTER_PLAN_PIN =
@@ -3128,52 +3278,85 @@ namespace
         }
     }
 
-    // Round B: the field the ENGINE runs. PDv2Mgr::GeneratePlan shrinks the
-    // field to GameFieldBlocksForRooms(rooms) (capped at the configured 8),
-    // which the fixed 8x8 batch never exercised. A chain packs tighter than
-    // an MST, so every (rooms, field, bossRooms) row the engine can ask for
-    // must generate on every seed, validate, and fit the manifest budget.
+    // Round B: the field the ENGINE runs, over the engine's real configuration
+    // space rather than a diagonal of it. The fixed 8x8 batch never exercised
+    // a shrunken field at all, and the first version of this sweep walked
+    // `rooms = 1..15` with `bossRooms = GameBossRooms(rooms - 3)` - the player
+    // who always picks the maximum, one line through a two-dimensional space.
+    //
+    // The two axes are independent in the engine: dlvl decides the boss count
+    // (GameBossRooms) and the room CAP, the player's slider decides the rooms
+    // inside that cap, so a dlvl-30 account may run four boss rooms with one
+    // room or with fifteen. This mirrors PDv2Mgr::GeneratePlan exactly, with
+    // the configured V2.FieldBlocks at its default 8:
+    //
+    //     cfg.rooms       = GameClampRooms(<the player's choice>, dlvl)
+    //     cfg.bossRooms   = GameBossRooms(dlvl)
+    //     cfg.fieldBlocks = min(V2.FieldBlocks, GameFieldBlocksForRooms(rooms + bossRooms))
+    //
+    // Every row must generate on every seed, validate, and fit the manifest
+    // budget. `retries` is printed per row because it, not the failure count,
+    // is what would show the free-route rule starting to strain.
     void RunEngineFieldSweep(int seeds)
     {
-        std::printf("engine-field sweep, %d seeds per row (branches 2)\n", seeds);
-        std::printf("  rooms  field  boss  genfail  retries  maxManifest\n");
-        for (int rooms = PD_GAME_ROOMS_MIN; rooms <= PD_GAME_ROOMS_CAP_MEASURED; ++rooms)
+        int const confFieldBlocks = 8;      // V2.FieldBlocks, the shipped default
+        std::printf("engine-field sweep, %d seeds per row (branches 2, V2.FieldBlocks %d)\n",
+                    seeds, confFieldBlocks);
+        std::printf("   dlvl  rooms  boss  field  genfail  retries  maxManifest\n");
+        int const dlvls[4] = { 0, 10, 20, 30 };
+        for (int dlvl : dlvls)
         {
-            int const field = std::min(PD_GAME_FIELD_BLOCKS_HARD_MAX, GameFieldBlocksForRooms(rooms));
-            int const boss = GameBossRooms(rooms > 3 ? rooms - 3 : 0);
-            int failures = 0;
-            int retries = 0;
-            size_t maxManifest = 0;
-            for (int i = 0; i < seeds; ++i)
+            int const boss = GameBossRooms(dlvl);
+            std::set<int> done;
+            int const choices[5] = { 1, 2, 3, 4, GameRoomsCap(dlvl) };
+            for (int choice : choices)
             {
-                uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 5u;
-                BlockCfg cfg = MakeCfg(seed, rooms);
-                cfg.bossRooms = boss;
-                cfg.fieldBlocks = field;
-                BlockPlan plan;
-                if (!GenerateBlockPlan(cfg, &plan))
+                int const rooms = GameClampRooms(choice, dlvl);
+                if (!done.insert(rooms).second)
                 {
-                    ++failures;
-                    continue;
+                    continue;               // the clamp folded two choices onto one row
                 }
-                if (plan.effectiveSeed != cfg.seed)
+                int const field = std::min(confFieldBlocks,
+                                           GameFieldBlocksForRooms(rooms + boss));
+                int failures = 0;
+                int retries = 0;
+                size_t maxManifest = 0;
+                for (int i = 0; i < seeds; ++i)
                 {
-                    ++retries;
+                    uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 5u;
+                    BlockCfg cfg = MakeCfg(seed, rooms);
+                    cfg.bossRooms = boss;
+                    cfg.fieldBlocks = field;
+                    BlockPlan plan;
+                    if (!GenerateBlockPlan(cfg, &plan))
+                    {
+                        ++failures;
+                        continue;
+                    }
+                    if (plan.effectiveSeed != cfg.seed)
+                    {
+                        ++retries;
+                    }
+                    std::string err;
+                    Check(ValidateBlockPlan(plan, &err),
+                          err.empty() ? "sweep layout failed validation" : err.c_str(), seed);
+                    std::string const m = EmitManifest(plan, 99);
+                    maxManifest = (m.size() > maxManifest) ? m.size() : maxManifest;
                 }
-                std::string err;
-                Check(ValidateBlockPlan(plan, &err), err.empty() ? "sweep layout failed validation" : err.c_str(), seed);
-                std::string const m = EmitManifest(plan, 99);
-                maxManifest = (m.size() > maxManifest) ? m.size() : maxManifest;
+                std::printf("  %5d  %5d  %4d  %5d  %7d  %7d  %11d\n", dlvl, rooms, boss,
+                            field, failures, retries, static_cast<int>(maxManifest));
+                char msg[200];
+                std::snprintf(msg, sizeof(msg),
+                              "engine field %dx%d cannot seat %d room(s) + %d boss "
+                              "(dlvl %d) on %d of %d seeds",
+                              field, field, rooms, boss, dlvl, failures, seeds);
+                Check(failures == 0, msg, 0);
+                std::snprintf(msg, sizeof(msg),
+                              "an engine-field layout is over the manifest budget: "
+                              "%d B at dlvl %d, %d room(s) + %d boss",
+                              static_cast<int>(maxManifest), dlvl, rooms, boss);
+                Check(maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B), msg, 0);
             }
-            std::printf("  %5d  %5d  %4d  %7d  %7d  %11d\n", rooms, field, boss, failures,
-                        retries, static_cast<int>(maxManifest));
-            char msg[200];
-            std::snprintf(msg, sizeof(msg),
-                          "engine field %dx%d cannot seat %d room(s) + %d boss on %d of %d seeds",
-                          field, field, rooms, boss, failures, seeds);
-            Check(failures == 0, msg, 0);
-            Check(maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B),
-                  "an engine-field layout is over the manifest budget", 0);
         }
         std::printf("\n");
     }
@@ -3208,8 +3391,19 @@ namespace
             bool const ok = CheckChainPinned(why);
             Check(ok, why.c_str(), 12345u);
         }
-        // A tenth of the batch is plenty for three boss-room counts: the
-        // property is structural, not statistical.
+        // A tenth of the batch, over thirteen (rooms, bossRooms, branches,
+        // loopChancePct) combos: the spine properties are STRUCTURAL and hold
+        // per seed, so the sample size only decides how much of the draw space
+        // gets walked, never whether a rule is true.
+        //
+        // sawPocket and sawShortcut are the two STATISTICAL ones - non-vacuity
+        // over the sample, not a property of any single layout. Both are safe
+        // at the mandated 500 (a tenth of it is 51 seeds per combo, and the
+        // seeds are fixed, so the answer is deterministic per generator
+        // version); sawShortcut additionally has the LoopChance-100 combo
+        // behind it, which cannot go quiet without the Chance contract
+        // breaking. At a much smaller --batch they could in principle both go
+        // red without anything being wrong.
         bool sawPocket = false;
         bool sawShortcut = false;
         RunChainChecks(count / 10 + 1, sawPocket, sawShortcut);
@@ -3259,7 +3453,11 @@ namespace
         int longestPath = 0;
         int minBlocks = 1 << 30;
         int maxBlocks = 0;
-        int minPockets = 1 << 30, maxPockets = 0, shortcutLayouts = 0;
+        // minPockets starts at 0, not at a sentinel: `--batch 0` runs no seed
+        // at all, and a summary line reading "pockets per layout: 1073741824..0"
+        // is a worse answer than "0..0".
+        int minPockets = 0, maxPockets = 0, shortcutLayouts = 0;
+        bool sawLayout = false;
 
         for (int i = 0; i < count; ++i)
         {
@@ -3374,9 +3572,10 @@ namespace
                 if (b.branchOf >= 0) ++pocketsHere;
                 if (b.shortcutTo >= 0) ++shortcutsHere;
             }
-            minPockets = (pocketsHere < minPockets) ? pocketsHere : minPockets;
+            minPockets = (!sawLayout || pocketsHere < minPockets) ? pocketsHere : minPockets;
             maxPockets = (pocketsHere > maxPockets) ? pocketsHere : maxPockets;
             shortcutLayouts += shortcutsHere ? 1 : 0;
+            sawLayout = true;
         }
 
         if (longestPath) std::printf("longest room-to-room path: %d cells\n", longestPath);
