@@ -288,6 +288,58 @@ namespace PDungeon
         }
     }
 
+    int PocketCountFor(int rooms, int bossRooms, int branches)
+    {
+        int const total = std::max(2, rooms + bossRooms);
+        int const bosses = bossRooms > 0 ? bossRooms : 1;
+        int pockets = std::max(0, branches);
+        pockets = std::min(pockets, total / 3);
+        // Host clamp: one pocket per spine room that is neither the entrance
+        // nor a boss, so pockets <= (total - pockets) - 1 - bosses.
+        pockets = std::min(pockets, std::max(0, (total - 1 - bosses) / 2));
+        return pockets;
+    }
+
+    int BossChainIndex(int chainLen, int bossRooms, int k)
+    {
+        int const bosses = bossRooms > 0 ? bossRooms : 1;
+        // round(k * (L - 1) / N) in integers, half up.
+        return (2 * k * (chainLen - 1) + bosses) / (2 * bosses);
+    }
+
+    int ChainLength(BlockPlan const& plan)
+    {
+        int len = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            len = std::max(len, b.chainIndex + 1);
+        }
+        return len;
+    }
+
+    int SegmentOf(BlockPlan const& plan, PlacedBlock const& block)
+    {
+        int const idx = block.chainIndex >= 0 ? block.chainIndex : block.branchOf;
+        if (idx < 0)
+        {
+            return -1;
+        }
+        if (idx == 0)
+        {
+            return 0;
+        }
+        int const len = ChainLength(plan);
+        int const bosses = plan.config.bossRooms > 0 ? plan.config.bossRooms : 1;
+        for (int k = 1; k <= bosses; ++k)
+        {
+            if (idx <= BossChainIndex(len, plan.config.bossRooms, k))
+            {
+                return k;
+            }
+        }
+        return bosses;
+    }
+
     uint32_t Crc32(void const* data, size_t len)
     {
         uint8_t const* p = static_cast<uint8_t const*>(data);

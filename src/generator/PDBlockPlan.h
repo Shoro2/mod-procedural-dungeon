@@ -75,18 +75,28 @@ namespace PDungeon
     // cannot drift silently.
     int AltCountFor(BlockRole role);
 
+    // Round B chain arithmetic (spec 2026-09-02 §2), pure and draw-free so the
+    // engine, the planner and the harness agree by construction.
+    //   total    = max(2, rooms + bossRooms)
+    //   pockets  = min(branches, total / 3, (total - 1 - N) / 2)   N = max(1, bossRooms)
+    //   chainLen = total - pockets
+    //   boss k   = round(k * (chainLen - 1) / N), k = 1..N
+    int PocketCountFor(int rooms, int bossRooms, int branches);
+    int BossChainIndex(int chainLen, int bossRooms, int k);
+
     struct BlockCfg
     {
         uint32_t seed = 0;
         int rooms = 3;              // ROOM blocks, before boss rooms are added
         int bossRooms = 1;
         int fieldBlocks = 8;        // planning field is fieldBlocks square
-        int loopChancePct = 15;     // chance to keep a non-MST edge
+        int loopChancePct = 15;     // Round B: chance that a pocket carries a shortcut
         int originBX = 256;         // global block coord of the field origin
         int originBY = 256;
         int theme = 1;
         int maxTries = 12;          // seed+n retries before giving up
         int maxDeadEnds = 2;        // stub corridors attached after the loops
+        int branches = 2;           // Round B: pocket rooms hanging off the spine (V2.Branches)
     };
 
     struct PlacedBlock
@@ -99,6 +109,14 @@ namespace PDungeon
         int roomId = -1;            // -1 for corridor blocks
         int depth = 0;              // BFS depth from the entrance, rooms only
         int alt = 0;                // visual alternate, < AltCountFor(role)
+
+        // Round B (spec 2026-09-02 §5). Spine rooms carry their chain index;
+        // pocket rooms carry the chain index of the room they hang off and,
+        // if they have one, the chain index their shortcut lands on. -1 means
+        // "not that kind of block". B1/B3/B4 read nothing else.
+        int chainIndex = -1;
+        int branchOf = -1;
+        int shortcutTo = -1;
     };
 
     struct BlockPlan
@@ -111,6 +129,12 @@ namespace PDungeon
 
         PlacedBlock const* At(int bx, int by) const;
     };
+
+    // Reads of a generated plan. ChainLength is 0 for a plan without chain
+    // fields. SegmentOf: 0 for the entrance, k for a spine room in boss k's
+    // segment (boss k included), a pocket's host segment, -1 for corridors.
+    int ChainLength(BlockPlan const& plan);
+    int SegmentOf(BlockPlan const& plan, PlacedBlock const& block);
 
     // Deterministic: the same cfg always yields the same plan on any compiler,
     // because every draw goes through PDRandom's hand-rolled helpers.

@@ -51,6 +51,7 @@
 #include "generator/PDv2PackDraw.h"
 #include "generator/PDv2WalkGrid.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -754,6 +755,83 @@ namespace
     // input range rather than sampled. Each sweep reports ONE check per dlvl so
     // the failure counter stays readable; the message carries the exact input
     // that broke, which is the part a reader needs.
+
+    // --- Round B chain arithmetic (spec 2026-09-02 §2) ----------------------
+    //
+    // Pure functions, so they are checked against a table rather than against
+    // themselves: pockets = min(branches, total / 3, (total - 1 - N) / 2),
+    // chainLen = total - pockets, boss k at round(k * (L - 1) / N).
+    void RunChainMathChecks()
+    {
+        struct Row { int rooms; int boss; int branches; int pockets; int chainLen; int b1; int b2; };
+        Row const rows[] = {
+            {  1, 1, 2, 0,  2, 1, -1 },
+            {  2, 1, 2, 0,  3, 2, -1 },
+            {  3, 1, 2, 1,  3, 2, -1 },
+            {  5, 1, 2, 2,  4, 3, -1 },
+            {  8, 1, 2, 2,  7, 6, -1 },
+            { 12, 2, 2, 2, 12, 6, 11 },
+            { 15, 2, 2, 2, 15, 7, 14 },
+            {  5, 1, 0, 0,  6, 5, -1 },
+            {  1, 2, 2, 0,  3, 1,  2 },
+            {  5, 1, 9, 2,  4, 3, -1 },
+            { 15, 2, 9, 5, 12, 6, 11 },
+            {  5, 0, 2, 1,  4, 3, -1 },     // bossRooms 0 still means one boss
+        };
+        for (Row const& r : rows)
+        {
+            char msg[160];
+            int const pockets = PocketCountFor(r.rooms, r.boss, r.branches);
+            std::snprintf(msg, sizeof(msg), "PocketCountFor(%d,%d,%d) = %d, want %d",
+                          r.rooms, r.boss, r.branches, pockets, r.pockets);
+            Check(pockets == r.pockets, msg, 0);
+
+            int const total = std::max(2, r.rooms + r.boss);
+            int const chainLen = total - pockets;
+            std::snprintf(msg, sizeof(msg), "chainLen for (%d,%d,%d) = %d, want %d",
+                          r.rooms, r.boss, r.branches, chainLen, r.chainLen);
+            Check(chainLen == r.chainLen, msg, 0);
+
+            int const b1 = BossChainIndex(chainLen, r.boss, 1);
+            std::snprintf(msg, sizeof(msg), "boss 1 for (%d,%d,%d) at %d, want %d",
+                          r.rooms, r.boss, r.branches, b1, r.b1);
+            Check(b1 == r.b1, msg, 0);
+            if (r.b2 >= 0)
+            {
+                int const b2 = BossChainIndex(chainLen, r.boss, 2);
+                std::snprintf(msg, sizeof(msg), "boss 2 for (%d,%d,%d) at %d, want %d",
+                              r.rooms, r.boss, r.branches, b2, r.b2);
+                Check(b2 == r.b2, msg, 0);
+            }
+        }
+
+        // Every legal engine request seats N distinct bosses at index >= 1:
+        // chainLen - 1 >= N is what the host clamp guarantees.
+        for (int rooms = 1; rooms <= 15; ++rooms)
+        {
+            for (int boss = 1; boss <= 3; ++boss)
+            {
+                int const total = std::max(2, rooms + boss);
+                int const chainLen = total - PocketCountFor(rooms, boss, 2);
+                Check(chainLen - 1 >= boss, "the pocket clamp left no room for the bosses", 0);
+                int last = 0;
+                for (int k = 1; k <= boss; ++k)
+                {
+                    int const idx = BossChainIndex(chainLen, boss, k);
+                    Check(idx > last && idx <= chainLen - 1, "boss positions not strictly increasing", 0);
+                    last = idx;
+                }
+                Check(last == chainLen - 1, "the last boss is not the last chain room", 0);
+            }
+        }
+
+        // The struct defaults the later tasks rely on.
+        PlacedBlock const fresh;
+        Check(fresh.chainIndex == -1 && fresh.branchOf == -1 && fresh.shortcutTo == -1,
+              "PlacedBlock chain fields must default to -1", 0);
+        BlockCfg const cfg;
+        Check(cfg.branches == 2, "BlockCfg::branches must default to 2", 0);
+    }
 
     void RunGameMathChecks()
     {
@@ -2754,6 +2832,7 @@ namespace
 
         RunLinkStateChecks();
         RunGameMathChecks();
+        RunChainMathChecks();
         RunLayoutFreezeCheck();
         {
             // Two statements, not one call: argument evaluation order is
