@@ -46,11 +46,19 @@ namespace PDungeon
         _config.fieldBlocks = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.FieldBlocks", 8);
         _config.originBX = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBX", 256);
         _config.originBY = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBY", 256);
-        _config.loopChancePct = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.LoopChance", 15);
+        // Clamped into [0, 100] because it is a percentage AND because it is
+        // persisted: pdungeon_account.gen_loop_pct is TINYINT UNSIGNED, so an
+        // operator typo above 255 makes SavePlanToDB fail under strict
+        // sql_mode and the layout that was just generated is never stored.
+        _config.loopChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.LoopChance", 15)));
 
-        // Round B: pocket rooms hanging off the spine. Clamped at 0 on the way
-        // in; the planner's own arithmetic bounds it from above.
-        _config.branches = std::max(0, sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.Branches", 2));
+        // Round B: pocket rooms hanging off the spine. Clamped into [0, 255]
+        // for the same persistence reason - pdungeon_account.gen_branches is
+        // TINYINT UNSIGNED. The planner's own arithmetic bounds the effective
+        // value far lower; the ceiling here only keeps the column writable.
+        _config.branches = std::min(255, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Branches", 2)));
 
         _config.theme = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.Theme", 1);
         _config.manifestPath = sConfigMgr->GetOption<std::string>(
