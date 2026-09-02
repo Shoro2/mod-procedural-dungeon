@@ -71,6 +71,34 @@
 -- gameobjectdisplayinfo_dbc override row mod_pdungeon_prop_displays.sql
 -- ships alongside its own copy of these templates.
 --
+-- *** DUPLICATE OWNERSHIP WARNING: kit props 910040-910047 ***
+-- The eight rows below are hand-copied from mod_pdungeon_prop_displays.sql,
+-- which GENERATES the same eight rows (scripts/57_pd_prop_displays.py in the
+-- ForgottenLand2.0 workspace) and must never be hand-edited. Both copies are
+-- identical today. The duplication is structurally necessary, not an
+-- oversight: this file must own the WHOLE 910040-910099 block (see above)
+-- because it is the only module file sorting after
+-- mod_pdungeon_templates.sql's range DELETE, and mod_pdungeon_prop_displays.sql
+-- cannot be that file - it sorts BEFORE mod_pdungeon_templates.sql, so
+-- anything it inserts is wiped by that file's DELETE on any re-apply, the
+-- same trap the clutter rows above were moved out of.
+--
+-- Nothing enforces that the two copies stay in step. If script 57 ever
+-- changes these eight rows, THIS FILE MUST CHANGE IN THE SAME COMMIT, or the
+-- two copies diverge and which one is live depends on the database's
+-- history, not on which file is "correct":
+--   - an EXISTING database (already carries this file with its old,
+--     unchanged hash, so it will NOT re-apply and re-delete): a regenerated
+--     mod_pdungeon_prop_displays.sql's fresh INSERT wins, because nothing
+--     that runs after it removes what it just inserted.
+--   - a FRESH database (every file applies once, in filename order):
+--     mod_pdungeon_templates.sql's range DELETE runs after
+--     mod_pdungeon_prop_displays.sql and wipes what it inserted, then THIS
+--     file's own copy re-inserts last and wins instead.
+-- The only safe state is both copies identical, always. Do NOT edit
+-- mod_pdungeon_prop_displays.sql to fix a divergence - it is generated and
+-- hand edits there are lost on the next script 57 run.
+--
 -- Clutter props (910050-910076): broken furniture, crates, rubble and bones
 -- for PDv2, moved here verbatim from mod_pdungeon_decor_clutter.sql (that
 -- file now keeps only its `pdungeon_decor_rules` rows, which sit in a
