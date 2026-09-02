@@ -1,0 +1,919 @@
+=== 51_texture_blockkit.py (cumulative vs pre-round backup) ===
+--- 51_texture_blockkit.py.pre_roundA_20260901	2026-09-01 16:52:39.686350100 +0200
++++ 51_texture_blockkit.py	2026-09-02 00:08:56.398050100 +0200
+@@ -113,11 +113,36 @@
+ )
+ 
+ MAX_LAYERS = 4                               # 3.3.5a renders at most 4 per MCNK
++# Task 16: MTEX is a plain NUL-terminated string table (mtex_blob below) - the
++# client caps LAYERS PER MCNK at MAX_LAYERS (MCLY entries actually painted,
++# checked against layers_per_mcnk further down), never the number of PATHS
++# that table may list. Since the Phase-4 kit shares one MTEX superset across
++# every file and each file's MCLY picks 2 of its entries by index (tex_ids),
++# the superset legitimately outgrows MAX_LAYERS - this is a sanity ceiling
++# against a typo'd meta file, not the real engine limit.
++MAX_SUPERSET = 32
+ MCLY_ENTRY = 16                              # texId, flags, ofsInMCAL, effectId
+ MCLY_FLAG_USE_ALPHA = 0x100                  # "this layer reads MCAL"
+ MCLY_FLAG_COMPRESSED = 0x200                 # never set here: we write raw 4-bit
+ MCLY_EFFECT_NONE = -1                        # no GroundEffectTexture.dbc row
+ 
++# Task 17: three stock GroundEffectTexture.dbc rows, reused verbatim - no DBC
++# edit, no patch-9. Verified directly against the extracted client DBC rather
++# than trusted from the brief: row 598 carries density 2 / TerrainType 2, row
++# 22796 density 8, row 1741 density 2 - all three match. Every doodad id each
++# row references was chased into GroundEffectDoodad.dbc and then into the
++# client archives: the .mdx/.mdl name GroundEffectDoodad stores is the file's
++# OWN name, not the one on disk - the client silently maps
++# "World\\NoDXT3\\Detail\\<Name>.mdx" to the real WotLK model at
++# "World\\NoDXT\\Detail\\<Name>.m2", and it is the .m2 that was confirmed
++# present in common-2.MPQ (DwpRoc01-03, DslBon07, EplBon01/03/04/05 - the
++# specific ids rows 598/22796/1741 list). This is a Ground-effect-only
++# constant: it means nothing to MCLY's texId field (that is still an MTEX
++# superset index, unrelated), only to the effectId word.
++EFFECT_ID_CORRIDOR = 598                     # sparse grey gravel (Deadwind)
++EFFECT_ID_ROOM = 22796                       # rubble + Desolace bone
++EFFECT_ID_BOSS_ROOM = 1741                   # Plaguelands bone scatter
++
+ ALPHA_ROWS = 64                              # a 4-bit alpha map is 64 x 64 ...
+ ALPHA_ROW_BYTES = 32                         # ... at 2 pixels per byte
+ ALPHA_BYTES = ALPHA_ROWS * ALPHA_ROW_BYTES   # 2048 - THE size that must not vary
+@@ -196,11 +221,19 @@
+ # --------------------------------------------------------------------------- #
+ # Texture table
+ # --------------------------------------------------------------------------- #
+-def parse_textures(text):
++def parse_textures(text, max_n=MAX_LAYERS):
++    """Split, then validate, a comma separated MTEX path list.
++
++    `max_n` defaults to MAX_LAYERS because the historical caller (--textures,
++    or a pre-superset kit) passes exactly the per-file layer list, where that
++    IS the real engine cap. The meta-driven superset caller passes
++    MAX_SUPERSET instead - see the note above MAX_SUPERSET for why a bigger
++    MTEX table is not the same claim as more layers per MCNK.
++    """
+     names = [t.strip() for t in text.split(",") if t.strip()]
+-    if not (2 <= len(names) <= MAX_LAYERS):
++    if not (2 <= len(names) <= max_n):
+         raise SystemExit("--textures needs 2..%d paths, got %d"
+-                         % (MAX_LAYERS, len(names)))
++                         % (max_n, len(names)))
+     for n in names:
+         if "/" in n:
+             raise SystemExit("texture %r uses '/'; MTEX paths are backslashed "
+@@ -347,17 +380,51 @@
+     return tag.encode("ascii")[::-1] + struct.pack("<I", len(payload)) + payload
+ 
+ 
+-def build_mcly(tex_ids):
++def floor_effect_id(role):
++    """Task 17: which GroundEffectTexture.dbc row layer 1 (the floor) points
++    at, by the chunk's kit_meta role. Three buckets only, matching the
++    brief's table exactly:
++
++        corridor_* (straight/corner/cross/t/dead_end) -> EFFECT_ID_CORRIDOR
++        room_boss                                      -> EFFECT_ID_BOSS_ROOM
++        room, room_entrance, anything else              -> EFFECT_ID_ROOM
++
++    `role.startswith("corridor")` is the SAME test paint_block_alpha already
++    uses to decide the worn-track stripe - one convention, not a second one
++    invented for doodads. `role_boss` has to be checked before the fallback,
++    since "room_boss" would otherwise fall into the generic room bucket."""
++    role = role or ""
++    if role.startswith("corridor"):
++        return EFFECT_ID_CORRIDOR
++    if role == "room_boss":
++        return EFFECT_ID_BOSS_ROOM
++    return EFFECT_ID_ROOM
++
++
++def build_mcly(tex_ids, role=None):
+     """MCLY: layer 0 opaque, every later layer reading its own 2048-byte map.
+ 
+     tex_ids are indices into the (possibly superset) MTEX table: since the
+     Phase-4 two-theme kit, every file carries ONE shared 4-entry MTEX and a
+-    theme paints with its own pair - the ids move, the sizes never do."""
++    theme paints with its own pair - the ids move, the sizes never do.
++
++    Task 17: layer 1 - the floor blend, per this file's own "layer 0 is now
++    the WALL texture and layer 1 the floor" inversion (see paint_block_alpha)
++    - carries a stock GroundEffectTexture.dbc row chosen by `role`. Setting
++    it here is only half of what makes doodads appear: the client picks
++    which layer's effect id to honour in a given sub-cell from the MCNK
++    header's 0x40 field, which 52_punch_kit_holes.py writes, not this
++    script - an effect id with 0x40 still all-zero (every donor-inherited
++    MCNK's starting state) renders on the WALL layer, not the floor. `role`
++    is None for a file this kit build carries no role for (the void base) -
++    that file gets no effect id anywhere, same as before this task."""
+     out = bytearray()
++    effect_for_floor = floor_effect_id(role) if role is not None else MCLY_EFFECT_NONE
+     for k, tex_id in enumerate(tex_ids):
+         flags = 0 if k == 0 else MCLY_FLAG_USE_ALPHA
+         ofs_in_mcal = 0 if k == 0 else (k - 1) * ALPHA_BYTES
+-        out += struct.pack("<3Ii", tex_id, flags, ofs_in_mcal, MCLY_EFFECT_NONE)
++        effect_id = effect_for_floor if k == 1 else MCLY_EFFECT_NONE
++        out += struct.pack("<3Ii", tex_id, flags, ofs_in_mcal, effect_id)
+     return bytes(out)
+ 
+ 
+@@ -398,6 +465,44 @@
+ PIXELS_PER_CELL = 16                         # 8.33 yd cell / 0.52 yd pixel
+ WALK_CELLS_PER_BLOCK = 8
+ 
++# Task 14: the walkable->wall alpha used to STEP straight from the floor's
++# 2..10 band to ALPHA_WALL at the class boundary, which the operator read as
++# a hard line and "monotonous". FEATHER_TEXELS ramps the walkable side only
++# (see paint_block_alpha) over this many texels. One texel is 8.3333/16 =
++# 0.5208 yd, so 4 texels is a 2.08 yd ramp - narrow enough to still read as a
++# floor, wide enough to remove the step.
++FEATHER_TEXELS = 4                           # ~2.08 yd ramp
++
++
++def _is_wall_class(cls):
++    return cls == CLASS_WALL_L or cls == CLASS_VOID_L
++
++
++def _class_at(classes, gu, gv):
++    """Surface class of the block-global alpha pixel (gu, gv).
++
++    Clamped at the block edge, which is deliberate: a block is authored with no
++    knowledge of its neighbours, so 'outside' has to read as more of the same
++    class or two blocks would disagree at their join.
++    """
++    cell_r = min(max(gu // PIXELS_PER_CELL, 0), WALK_CELLS_PER_BLOCK - 1)
++    cell_c = min(max(gv // PIXELS_PER_CELL, 0), WALK_CELLS_PER_BLOCK - 1)
++    return classes[cell_r * WALK_CELLS_PER_BLOCK + cell_c]
++
++
++def _wall_distance(classes, gu, gv):
++    """Chebyshev distance in texels from a WALKABLE pixel to the nearest
++    wall/void pixel, capped at FEATHER_TEXELS (which means 'far enough').
++    """
++    for d in range(1, FEATHER_TEXELS + 1):
++        for du in range(-d, d + 1):
++            for dv in range(-d, d + 1):
++                if max(abs(du), abs(dv)) != d:
++                    continue
++                if _is_wall_class(_class_at(classes, gu + du, gv + dv)):
++                    return d
++    return FEATHER_TEXELS
++
+ 
+ def _mottle(gu, gv):
+     """Deterministic pseudo-noise from block-global pixel coords (no RNG)."""
+@@ -422,24 +527,53 @@
+             cell_r = min(gu // PIXELS_PER_CELL, WALK_CELLS_PER_BLOCK - 1)
+             cell_c = min(gv // PIXELS_PER_CELL, WALK_CELLS_PER_BLOCK - 1)
+             cls = classes[cell_r * WALK_CELLS_PER_BLOCK + cell_c]
+-            if cls == CLASS_WALL_L or cls == CLASS_VOID_L:
++            if _is_wall_class(cls):
+                 value = ALPHA_WALL
+             else:
+-                edge_pass = cell_r in (0, WALK_CELLS_PER_BLOCK - 1) or \
+-                    cell_c in (0, WALK_CELLS_PER_BLOCK - 1)
+-                if is_corridor or edge_pass:
+-                    # Worn track. Direction-agnostic on purpose - an S-curve's
+-                    # sideways cells are as much track as the straight run -
+-                    # each walkable cell paints a cross through its own centre;
+-                    # chained cells join into a continuous line with a short
+-                    # cross-tie per cell, which on a mine floor reads as rail
+-                    # sleepers rather than as an artifact.
+-                    cu = cell_r * PIXELS_PER_CELL + PIXELS_PER_CELL // 2
+-                    cv = cell_c * PIXELS_PER_CELL + PIXELS_PER_CELL // 2
+-                    d = min(abs(gu - cu), abs(gv - cv))
+-                    value = ALPHA_STRIPE_CORE if d <= 2 else ALPHA_STRIPE_RIM
++                # `is_corridor` alone decides the track now. edge_pass painted a
++                # stripe patch into the two socket-throat cells of every ROOM,
++                # which is a doorway, not a worn path - measured on the live kit,
++                # those are the only walkable cells a block boundary has.
++                if is_corridor:
++                    # ONE continuous band per axis, measured to the BLOCK
++                    # centre. The old form measured to the CELL centre, which
++                    # is what drew a plus sign in every cell and therefore a
++                    # ladder of cross-ties at cell pitch.
++                    #
++                    # This is continuous by construction: a north/south corridor
++                    # is walkable on columns 3 and 4, i.e. gv in 48..79, so
++                    # |gv - 64| is the band across the lane and |gu - 64| never
++                    # wins - the result is one longitudinal stripe. A cross
++                    # corridor gets both arms and they meet in the middle,
++                    # which is a real crossing rather than an artifact.
++                    centre = PIXELS_PER_MCNK      # 64 = the block centre
++                    d = min(abs(gu - centre), abs(gv - centre))
++                    base = ALPHA_STRIPE_CORE if d <= 2 else ALPHA_STRIPE_RIM
++                else:
++                    base = _mottle(gu, gv)
++                # Feather (task 14). ONLY walkable pixels move: the wall's
++                # constant region is never made thinner, because a thin
++                # filtered alpha band was measured to lose the rock on the
++                # inner wall face (48:1410-1430) - that is the failure a ramp
++                # eating into the wall would reproduce.
++                #
++                # The outermost pixel row/column of this MCNK is pinned to its
++                # unramped class value. MCNK flag 0x8000 (do_not_fix_alpha_map)
++                # is not set on these chunks, so the client DUPLICATES the last
++                # alpha row and column; a gradient there would show up as a
++                # 0.52 yd discontinuity every 33.33 yd, and it is also what
++                # lets two independently authored blocks agree at a join.
++                # Setting the flag is the cleaner long-term fix - it changes a
++                # header field the composer and the client DLL have never seen
++                # set, so it is recorded for later rather than done this round.
++                on_mcnk_edge = (pr == PIXELS_PER_MCNK - 1 or
++                                pc == PIXELS_PER_MCNK - 1)
++                d_wall = _wall_distance(classes, gu, gv)
++                if d_wall < FEATHER_TEXELS and not on_mcnk_edge:
++                    t = d_wall / float(FEATHER_TEXELS)     # 0 at the wall, 1 far
++                    value = int(round(ALPHA_WALL + (base - ALPHA_WALL) * t))
+                 else:
+-                    value = _mottle(gu, gv)
++                    value = base
+             # INVERTED, because layer 0 is now the WALL texture and
+             # layer 1 the floor: `value` is still "how much rock", so
+             # the blended layer gets its complement. The rendered mix is
+@@ -551,7 +685,7 @@
+     if tex_ids is None:
+         tex_ids = list(range(len(textures)))
+     n_layers = len(tex_ids)
+-    mcly = build_mcly(tex_ids)
++    mcly = build_mcly(tex_ids, role)
+     mcal = build_mcal(alpha_values)
+     new_mtex = mtex_blob(textures)
+ 
+@@ -612,6 +746,69 @@
+     return fields
+ 
+ 
++def _gate_wall_distance(classes, gu, gv):
++    """Verify-gate-only re-derivation of paint_block_alpha's wall distance.
++
++    Deliberately NOT a call into _wall_distance (or the _class_at it reads
++    through). A gate that asks the code under test what it produced will
++    agree with any bug the two of them happen to share, and this project
++    has already paid for exactly that shape of mistake twice: this file's
++    own specular-texture check used to pass while shipping a solid-green
++    dungeon floor because it asked "does the path resolve" instead of
++    re-deriving "will the layer bind" (see the "[2] Textures" section
++    below), and 48_gen_t1_blockkit.py's anchor-only walkability check
++    passed while 8 of 15 masks still had a floor cell marked unwalkable,
++    because it trusted the same computation it was meant to be checking
++    (48:3045-3046). A verify gate only earns its keep if it is capable of
++    disagreeing with the thing it guards, which requires its own,
++    independently written implementation - not a shared helper the two
++    call into.
++
++    Same Chebyshev-ring definition as _wall_distance (nearest wall/void
++    pixel, capped at FEATHER_TEXELS), but built differently on purpose: the
++    ring at each radius is walked as four explicit edges (top row, bottom
++    row, then the left/right columns with the two corners already covered
++    by the rows left out) rather than filtering a full (2d+1)x(2d+1)
++    square, and the cell-class lookup is inlined here instead of shared -
++    matching how the invariant that calls this already inlines its own
++    cell_r/cell_c/cls rather than calling _class_at.
++    """
++    for d in range(1, FEATHER_TEXELS + 1):
++        edge = []
++        for dv in range(-d, d + 1):
++            edge.append((-d, dv))
++            edge.append((d, dv))
++        for du in range(-d + 1, d):
++            edge.append((du, -d))
++            edge.append((du, d))
++        for du, dv in edge:
++            pu, pv = gu + du, gv + dv
++            cell_r = min(max(pu // PIXELS_PER_CELL, 0), WALK_CELLS_PER_BLOCK - 1)
++            cell_c = min(max(pv // PIXELS_PER_CELL, 0), WALK_CELLS_PER_BLOCK - 1)
++            if classes[cell_r * WALK_CELLS_PER_BLOCK + cell_c] in (CLASS_WALL_L, CLASS_VOID_L):
++                return d
++    return FEATHER_TEXELS
++
++
++def _gate_floor_effect_id(role, k):
++    """Verify-gate-only restatement of floor_effect_id (Task 17).
++
++    Deliberately its own if/elif chain rather than a call into
++    floor_effect_id, for the same reason _gate_wall_distance above does not
++    call _wall_distance: a gate that asks the function under test what it
++    decided will agree with any bug that function has. Only k == 1 (the
++    floor blend) may carry an effect id at all; every other layer, and a
++    file with no role (the void base), stays MCLY_EFFECT_NONE.
++    """
++    if k != 1 or role is None:
++        return MCLY_EFFECT_NONE
++    if role.startswith("corridor"):
++        return EFFECT_ID_CORRIDOR
++    if role == "room_boss":
++        return EFFECT_ID_BOSS_ROOM
++    return EFFECT_ID_ROOM
++
++
+ def verify_file(name, before, after, textures, alpha_values, problems,
+                 classes=None, role=None, tex_ids=None):
+     if tex_ids is None:
+@@ -713,10 +910,12 @@
+     # builders: a verifier that asks build_mcly / build_mcal what they produced
+     # would agree with any bug the two of them happen to share. (adt.py lowercases
+     # and backslashes texture names as it parses, so the expectation matches that
+-    # rather than the raw MTEX string, which [6]'s MTEX round trip covers.)
++    # rather than the raw MTEX string, which [6]'s MTEX round trip covers.) The
++    # effectId word (Task 17) goes through _gate_floor_effect_id, its own
++    # independently written copy of the role -> row rule - not floor_effect_id.
+     want_layers = [(textures[tex_id].lower().replace("/", "\\"),
+                     0 if k == 0 else MCLY_FLAG_USE_ALPHA,
+-                    MCLY_EFFECT_NONE & 0xFFFFFFFF)
++                    _gate_floor_effect_id(role, k) & 0xFFFFFFFF)
+                    for k, tex_id in enumerate(tex_ids)]
+     layer_bad = 0
+     alpha_bad = 0
+@@ -740,22 +939,67 @@
+                 # complement of "how much rock": a WALL/VOID cell carries 0
+                 # floor, and a walkable cell carries the complement of the
+                 # mottle band and still has to vary.
++                #
++                # Task 14 rewrote the walkable half of this invariant (never
++                # the WALL/VOID half - the wall's own region is still exactly
++                # ALPHA_WALL everywhere, unchanged, per the "feather inward
++                # from the wall only" rule). The old rule was: a walkable
++                # pixel's rock value is always in [ALPHA_MOTTLE[0],
++                # ALPHA_STRIPE_CORE]. The new rule:
++                #
++                #   A walkable pixel farther than FEATHER_TEXELS texels
++                #   (Chebyshev) from the nearest wall/void pixel, OR sitting
++                #   on the outermost pixel row/column of the MCNK (pinned -
++                #   see paint_block_alpha), obeys the OLD rule unchanged.
++                #
++                #   A walkable pixel inside the feather band must lie between
++                #   the two class values - i.e. between the walkable class's
++                #   own range and ALPHA_WALL - and must get monotonically
++                #   closer to ALPHA_WALL as its distance to the boundary
++                #   shrinks. Concretely: at Chebyshev distance d < FEATHER_
++                #   TEXELS, its rock value must fall inside the envelope the
++                #   ramp formula produces at that exact d for the walkable
++                #   class's own extremes (ALPHA_MOTTLE[0] and
++                #   ALPHA_STRIPE_CORE); that envelope narrows monotonically
++                #   from ALPHA_WALL at d=0 down to the old 2..10 band at
++                #   d == FEATHER_TEXELS, where it reduces to the old rule
++                #   exactly (continuous, no seam in the invariant itself).
++                #
++                # This is still stated independently of the painter: it
++                # re-derives distance-to-boundary from `classes`, the same
++                # input the painter reads, through _gate_wall_distance - a
++                # separately written implementation, not paint_block_alpha's
++                # own _wall_distance (see that function's docstring for why
++                # the duplication is deliberate) - rather than asking
++                # paint_block_alpha, or the function it calls, what they
++                # produced.
+                 walk_pixels = set()
+                 for pr in range(PIXELS_PER_MCNK):
+                     for pc in range(PIXELS_PER_MCNK):
+                         byte = span[(pr * PIXELS_PER_MCNK + pc) // 2]
+                         pix = (byte >> 4) & ALPHA_MAX if pc % 2 else byte & ALPHA_MAX
+-                        cell_r = min((biy * PIXELS_PER_MCNK + pr) // PIXELS_PER_CELL,
+-                                     WALK_CELLS_PER_BLOCK - 1)
+-                        cell_c = min((bix * PIXELS_PER_MCNK + pc) // PIXELS_PER_CELL,
+-                                     WALK_CELLS_PER_BLOCK - 1)
++                        gu = biy * PIXELS_PER_MCNK + pr
++                        gv = bix * PIXELS_PER_MCNK + pc
++                        cell_r = min(gu // PIXELS_PER_CELL, WALK_CELLS_PER_BLOCK - 1)
++                        cell_c = min(gv // PIXELS_PER_CELL, WALK_CELLS_PER_BLOCK - 1)
+                         cls = classes[cell_r * WALK_CELLS_PER_BLOCK + cell_c]
+                         rock = ALPHA_MAX - pix        # back to "how much rock"
+                         if cls in (CLASS_WALL_L, CLASS_VOID_L):
+                             if rock != ALPHA_WALL:
+                                 painted_bad += 1
+                         else:
+-                            if not (ALPHA_MOTTLE[0] <= rock <= ALPHA_STRIPE_CORE):
++                            on_mcnk_edge = (pr == PIXELS_PER_MCNK - 1 or
++                                            pc == PIXELS_PER_MCNK - 1)
++                            d_wall = _gate_wall_distance(classes, gu, gv)
++                            if on_mcnk_edge or d_wall >= FEATHER_TEXELS:
++                                lo, hi = ALPHA_MOTTLE[0], ALPHA_STRIPE_CORE
++                            else:
++                                t = d_wall / float(FEATHER_TEXELS)
++                                lo = int(round(ALPHA_WALL -
++                                               (ALPHA_WALL - ALPHA_MOTTLE[0]) * t))
++                                hi = int(round(ALPHA_WALL -
++                                               (ALPHA_WALL - ALPHA_STRIPE_CORE) * t))
++                            if not (lo <= rock <= hi):
+                                 painted_bad += 1
+                             walk_pixels.add(pix)
+                 # The variety floor applies only where the mottle paints: a
+@@ -857,9 +1101,18 @@
+     # Phase 4: the kit's own meta names the MTEX superset and which layer pair
+     # each theme paints with - one source of truth, exported by script 48. A
+     # pre-Phase-4 kit has no such section and the CLI/default behaviour stays.
++    #
++    # Task 16: script 48 now resolves [wallIdx, floorIdx] PER CHUNK (room,
++    # corridor and boss floors differ within a theme; the wall index never
++    # does) and carries the answer on each 'chunks' entry as textureLayers -
++    # so this file stays a pure consumer of kit_meta.json and never
++    # re-derives the role->floor bucket rule itself. theme_layers (the old
++    # theme-wide pair) is kept only as the fallback for a kit built before
++    # this field existed, and to size layers_per_mcnk.
+     meta_textures = None
+     theme_layers = {}
+     theme_by_chunk_file = {}
++    layers_by_chunk_file = {}
+     meta_early = os.path.join(kit_dir, META_NAME)
+     if os.path.isfile(meta_early):
+         with open(meta_early, "rb") as fh:
+@@ -871,13 +1124,30 @@
+                 theme_layers[int(tkey)] = list(tinfo["textureLayers"])
+             for entry in early_doc.get("chunks", []):
+                 theme_by_chunk_file[entry["file"]] = int(entry.get("theme", 1))
++                if entry.get("textureLayers"):
++                    layers_by_chunk_file[entry["file"]] = list(entry["textureLayers"])
+ 
+     if meta_textures is not None:
+         if args.textures != ",".join(DEFAULT_TEXTURES):
+             raise SystemExit("this kit's MTEX superset comes from kit_meta.json "
+                              "(script 48 owns it) - drop --textures")
+-        textures = parse_textures(",".join(meta_textures))
++        # MAX_SUPERSET, not MAX_LAYERS: this is the whole kit-wide MTEX table,
++        # not the layer list of any one MCNK - see the note above MAX_SUPERSET.
++        textures = parse_textures(",".join(meta_textures), max_n=MAX_SUPERSET)
+         layers_per_mcnk = len(theme_layers.get(1, [0, 1]))
++        # The real engine cap DOES apply here and to every per-chunk override:
++        # each is the literal tex_ids list build_mcly writes into one file's
++        # MCLY, so however many entries the superset grows to, no chunk may
++        # ask for more than MAX_LAYERS of them at once.
++        if layers_per_mcnk > MAX_LAYERS:
++            raise SystemExit("theme layer pair has %d entries, MAX_LAYERS is %d"
++                             % (layers_per_mcnk, MAX_LAYERS))
++        bad_chunks = [f for f, ids in layers_by_chunk_file.items()
++                     if len(ids) > MAX_LAYERS]
++        if bad_chunks:
++            raise SystemExit("%d chunk(s) resolve to more than MAX_LAYERS (%d) "
++                             "texture layers, e.g. %s"
++                             % (len(bad_chunks), MAX_LAYERS, bad_chunks[0]))
+     else:
+         textures = parse_textures(args.textures)
+         layers_per_mcnk = len(textures)
+@@ -886,6 +1156,10 @@
+     def tex_ids_for(file_name):
+         if meta_textures is None:
+             return None
++        if file_name in layers_by_chunk_file:
++            return layers_by_chunk_file[file_name]
++        # Pre-Task-16 kit_meta.json: no per-chunk textureLayers, fall back to
++        # the theme-wide room pair (the only pair that used to exist).
+         theme = theme_by_chunk_file.get(file_name, 1)
+         return theme_layers.get(theme, theme_layers.get(1, [0, 1]))
+ 
+@@ -956,7 +1230,10 @@
+         len(mcal), len(alpha_values), ALPHA_BYTES)
+     say("    compression      : off - flag 0x%04X is never set, so MCAL stays a "
+         "fixed size", MCLY_FLAG_COMPRESSED)
+-    say("    effectId         : %d (no ground effect doodads)", MCLY_EFFECT_NONE)
++    say("    effectId         : layer 1 (floor) -> per role, corridor %d / "
++        "room %d / room_boss %d (Task 17); every other layer stays %d - and "
++        "needs 52's 0x40 write to be visible at all, see build_mcly",
++        EFFECT_ID_CORRIDOR, EFFECT_ID_ROOM, EFFECT_ID_BOSS_ROOM, MCLY_EFFECT_NONE)
+     say("    note             : %s", ALPHA_FIX_NOTE)
+ 
+     say("\n[4] Read and re-assert the input structure")
+@@ -1168,7 +1445,15 @@
+         "textures": list(textures),
+         "layers": len(textures),
+         "layerFlags": [0] + [MCLY_FLAG_USE_ALPHA] * (len(textures) - 1),
+-        "effectId": MCLY_EFFECT_NONE,
++        "effectId": {
++            "layer": 1,
++            "byRole": {"corridor": EFFECT_ID_CORRIDOR, "room": EFFECT_ID_ROOM,
++                      "room_boss": EFFECT_ID_BOSS_ROOM},
++            "otherLayers": MCLY_EFFECT_NONE,
++            "note": "Task 17 - inert without 52_punch_kit_holes.py's 0x40 "
++                    "write; see that script's kit_meta 'lowQualityTextureMap' "
++                    "section",
++        },
+         "alphaEncoding": "uncompressed 4-bit, %d bytes per blended layer" % ALPHA_BYTES,
+         "alphaValues": list(alpha_values),
+         "alphaPainting": {
+=== 52_punch_kit_holes.py (cumulative vs pre-round backup) ===
+--- 52_punch_kit_holes.py.pre_roundA_20260901	2026-09-01 16:52:39.714109800 +0200
++++ 52_punch_kit_holes.py	2026-09-02 00:11:09.756569900 +0200
+@@ -262,18 +262,47 @@
+ 
+ def paint_wall_shadow(data, chunk_ofs, payload_ofs, classes, ix, iy,
+                       transposed):
+-    """Shadow the wall band, so a gap between two houses reads as shadow.
++    """Wall-band shadow (MCSH) - DISABLED by task 14, on purpose.
+ 
+-    Placement is saturated: an eye-ray sweep of the live tile puts 90 % of view
+-    directions on a facade already, and the remaining 8 % is 619 separate
+-    patches with NOT ONE over 20 yd2 - thin slots between adjacent buildings, at
+-    a granularity no model reaches (the narrowest house in the client is 8.1 yd
+-    wide). Those slots cannot be filled. They can be made to read as what they
+-    physically are: the shaded gap between two buildings.
+-
+-    The axis convention is inherited from the hole packer rather than derived
+-    again - `transposed` is the same empirically-settled flag, and getting it
+-    wrong here would shade the wrong half of every block.
++    This used to shade every wall-classified sample solid black, so a gap
++    between two buildings reads as shadow rather than as empty space
++    (placement was saturated: an eye-ray sweep of the live tile put 90 % of
++    view directions on a facade already, and the remaining 8 % is 619
++    separate patches, NOT ONE over 20 yd2 - thin slots between adjacent
++    buildings, at a granularity no model reaches, the narrowest house in the
++    client being 8.1 yd wide). MCSH samples the SAME 16-samples-per-walk-cell
++    grid as 51's alpha map (MCSH_SIDE / HOLE_CELLS_PER_SIDE == PIXELS_PER_CELL
++    in 51) and steps on the IDENTICAL class boundary: `cls != CELL_WALL` was a
++    hard, un-feathered edge at that boundary, same as the alpha map's old step
++    from the walkable band straight to ALPHA_WALL.
++
++    Task 14 feathered that boundary in the alpha map so the floor stops
++    reading as a hard line at the wall. If this function kept painting a hard
++    binary edge at the same coordinates, the shadow would redraw exactly the
++    line the ramp just removed - a sudden onset of shading sitting right where
++    the texture is now a smooth ~2.08 yd blend. MCSH is 1 bit per sample: it
++    has no value between "shadowed" and "not shadowed", so matching the ramp
++    would need a dithered density gradient across the same band - a second,
++    separate visual technique. This pipeline has no way to verify that
++    technique: the alpha gate can check an exact per-pixel envelope
++    (51:~797+), but nobody here has a renderer to confirm a dither pattern
++    reads as a gradient rather than as noise, or as a second, differently
++    shaped hard edge. This exact boundary has already cost four rounds (see
++    51's WHY block); an unverifiable technique on it is the wrong trade for
++    this round.
++
++    Dropping the paint is the only option that PROVABLY cannot disagree with
++    the ramp - with no shadow bit set anywhere, there is nothing left to
++    contradict it. The cost: the wall band loses this depth cue everywhere,
++    not just at the boundary, until a future round re-adds it properly -
++    ideally together with the MCNK 0x8000 (do_not_fix_alpha_map) fix that the
++    alpha side deferred too, once the pinned-ring coordinates this round used
++    are gone and a shared distance-to-boundary metric is simpler to reconcile
++    between the two chunks.
++
++    The axis convention (`transposed`) and the byte layout above are kept
++    exactly as measured, unused for now, so a future round that re-enables
++    this does not have to re-derive them.
+     """
+     ofs = struct.unpack_from("<I", bytes(data), payload_ofs + MCNK_OFS_MCSH)[0]
+     size = struct.unpack_from("<I", bytes(data), payload_ofs + MCNK_OFS_MCSH + 4)[0]
+@@ -282,21 +311,15 @@
+     base = chunk_ofs + ofs + 8
+     if bytes(data[base - 8:base - 4])[::-1] != b"MCSH":
+         raise SystemExit("MCSH is not where the header says it is")
+-    per = MCSH_SIDE // HOLE_CELLS_PER_SIDE          # 16 samples per walk cell
+-    bits = bytearray(MCSH_BYTES)
+-    set_count = 0
+-    for sr in range(MCSH_SIDE):
+-        for sc in range(MCSH_SIDE):
+-            hr, hc = sr // per, sc // per
+-            if transposed:
+-                hr, hc = hc, hr
+-            cls = classes[iy * HOLE_CELLS_PER_SIDE + hr][ix * HOLE_CELLS_PER_SIDE + hc]
+-            if cls != CELL_WALL:
+-                continue
+-            bits[sr * (MCSH_SIDE // 8) + sc // 8] |= 1 << (sc % 8)
+-            set_count += 1
+-    data[base:base + MCSH_BYTES] = bits
+-    return set_count
++    # Actively CLEAR rather than simply skip the write: a kit reaching this
++    # point has already been through 48/51/52 at least once, so its MCSH may
++    # still carry the hard-edged shadow an earlier run painted. Skipping the
++    # write would silently leave that stale, un-feathered shadow in place -
++    # reproducing exactly the "shadow redraws the hard border" failure this
++    # round exists to avoid. All-zero is also the documented default state of
++    # an unshaded MCNK (see the MCSH block comment above MCNK_OFS_MCSH).
++    data[base:base + MCSH_BYTES] = bytes(MCSH_BYTES)
++    return 0
+ QUAD_YD = 33.0 + 1.0 / 3.0
+ QUAD_STEP = QUAD_YD / 8.0                    # 4.1667 yd between outer vertices
+ CANON_NORMAL = (0, 0, 127)
+@@ -479,6 +502,164 @@
+                     struct.pack_into("<3b", data, base + idx * 3, nx, ny, nz)
+ 
+ 
++# --------------------------------------------------------------------------- #
++# Low-quality texture map (Task 17)
++#
++# WHY THIS SCRIPT, NOT 51
++#   51_texture_blockkit.py points layer 1 - the floor, in this kit's inverted
++#   layer order - at a stock GroundEffectTexture.dbc row (its own Step 1),
++#   but that alone renders nothing. The client decides which of a MCNK's up
++#   to 4 MCLY layers gets to scatter ground-effect doodads over a given
++#   sub-cell from THIS field: the MCNK header's low-quality texture map at
++#   payload offset 0x40, 16 bytes, 2 bits per 8x8 sub-cell (the SAME 4.1667 yd
++#   quad grid the final-surface normals above already walk - QUADS_PER_
++#   HOLE_CELL=2 sub-quads per 8.33 yd hole cell, both axes). Every kit MCNK
++#   inherits this field all-zero from the donor tile, and 0 names layer 0 -
++#   the WALL texture now - so leaving it alone would scatter 51's doodads
++#   across the wall band instead of the floor, and writing it wrong (layer 1
++#   named where the wall is) would scatter them over floor AND wall alike.
++#   This belongs here rather than in 51 because writing 0x40 needs exactly
++#   the `classes` grid and the `transposed` axis convention 52 already
++#   measured for holes - one surface, one consumer, no second derivation of
++#   either to drift out of step with the first.
++#
++# THE BIT ORDER IS MEASURED, NOT ASSUMED
++#   Same discipline the hole bit order above already follows, for the same
++#   reason: this project has already paid for guessing an axis convention
++#   once. measure_low_qual_bit_order() decodes the 16 raw 0x40 bytes of a
++#   real, client-rendered Blizzard MCNK (PVPZone02_30_32.adt MCNK[0] - the
++#   same reference tile 51's docstring and this script's normal validation
++#   already lean on) under BOTH candidate sub-cell orders, the same
++#   row-major/transposed ambiguity `transposed` resolves for holes (both
++#   fields pack a small 2D grid into a fixed-width run, low bits first), and
++#   checks each against that MCNK's own MCAL: a sub-cell the field names as
++#   layer 1 must sit over HIGH layer-1 alpha, one naming layer 0 over LOW
++#   layer-1 alpha. Whichever order gives a clean, non-overlapping split is
++#   kept; if both or neither do, this refuses to write anything rather than
++#   guess.
++# --------------------------------------------------------------------------- #
++MCNK_OFS_LOW_QUAL = 0x40
++LOW_QUAL_SIDE = 8                # 8x8 sub-cells per MCNK, 2 bits each
++LOW_QUAL_BYTES = 16              # 8*8*2 bits / 8 = 16
++LOW_QUAL_LAYER_WALL = 0          # MCLY layer 0 - opaque wall/base (51's build_mcly)
++LOW_QUAL_LAYER_FLOOR = 1         # MCLY layer 1 - the floor blend, carries the effect id
++ALPHA_BYTES = 2048               # one 4-bit alpha map, measured in 51 and re-used as-is
++
++MCNK_OFS_MCLY = 0x1C
++MCNK_OFS_MCAL = 0x24
++
++
++def _resolve_sub_chunk(data, payload_ofs, field_ofs, expect_tag):
++    """Chunk-start-relative sub-chunk lookup (payload offset + 8), the same
++    convention 51 measures and asserts per MCNK. Used only to read the ONE
++    reference MCNK the bit-order measurement below needs - the kit's own
++    MCLY/MCAL stay 51's to rebuild, never parsed here."""
++    ofs = struct.unpack_from("<I", data, payload_ofs + field_ofs)[0]
++    at = payload_ofs - 8 + ofs
++    tag = data[at:at + 4][::-1].decode("ascii", "replace")
++    if tag != expect_tag:
++        raise SystemExit("%s not where the header says (found %r)" % (expect_tag, tag))
++    return at + 8
++
++
++def _mcly_layer_count(data, payload_ofs):
++    return struct.unpack_from("<I", data, payload_ofs + 0x0C)[0]
++
++
++def _mcal_layer1(data, payload_ofs):
++    """Reference MCNK's layer-1 alpha as 4096 nibble values (0..15), row-major
++    over the 64x64 map - low nibble is the even pixel, matching 51's
++    pack_alpha_values encoding, which this project already measured against
++    this very file."""
++    base = _resolve_sub_chunk(data, payload_ofs, MCNK_OFS_MCAL, "MCAL")
++    out = []
++    for i in range(ALPHA_BYTES):
++        byte = data[base + i]
++        out.append(byte & 0x0F)
++        out.append((byte >> 4) & 0x0F)
++    return out
++
++
++def _low_qual_decode(raw16, transposed):
++    """16 raw 0x40 bytes -> 8x8 grid of 2-bit values, one hypothesis."""
++    grid = [[0] * LOW_QUAL_SIDE for _ in range(LOW_QUAL_SIDE)]
++    for hr in range(LOW_QUAL_SIDE):
++        for hc in range(LOW_QUAL_SIDE):
++            idx = (hc * LOW_QUAL_SIDE + hr) if transposed else (hr * LOW_QUAL_SIDE + hc)
++            byte = raw16[idx // 4]
++            grid[hr][hc] = (byte >> ((idx % 4) * 2)) & 0x3
++    return grid
++
++
++def pack_low_qual(grid, transposed):
++    """8x8 grid of 2-bit layer indices -> the 16-byte 0x40 field, in whichever
++    order measure_low_qual_bit_order() found clean. Same LSB-first, one-
++    sub-cell-per-2-bits packing pack_holes already uses for the 4x4 hole
++    mask, just twice the side and half as many bits per cell."""
++    out = bytearray(LOW_QUAL_BYTES)
++    for hr in range(LOW_QUAL_SIDE):
++        for hc in range(LOW_QUAL_SIDE):
++            idx = (hc * LOW_QUAL_SIDE + hr) if transposed else (hr * LOW_QUAL_SIDE + hc)
++            out[idx // 4] |= (grid[hr][hc] & 0x3) << ((idx % 4) * 2)
++    return bytes(out)
++
++
++def measure_low_qual_bit_order():
++    """Decide row-major vs transposed for the 0x40 field by measurement
++    against PVPZone02_30_32.adt MCNK[0], exactly as described in the section
++    docstring above. Returns (transposed, stats) where stats holds the mean
++    alpha of each predicted population under each hypothesis, for the report.
++    """
++    arc = r"World\Maps\PVPZone02\PVPZone02_30_32.adt"
++    data, _archive = pdl.extract_adt(arc)
++    offsets = mcnk_offsets(data)
++    if not offsets:
++        raise SystemExit("0x40 bit-order measurement: reference tile has no MCNKs")
++    payload_ofs, _size = offsets[0]
++
++    if _mcly_layer_count(data, payload_ofs) < 2:
++        raise SystemExit("0x40 bit-order measurement: reference MCNK[0] has "
++                         "no layer 1 to measure alpha against")
++    alpha1 = _mcal_layer1(data, payload_ofs)
++    raw16 = bytes(data[payload_ofs + MCNK_OFS_LOW_QUAL:
++                       payload_ofs + MCNK_OFS_LOW_QUAL + LOW_QUAL_BYTES])
++    if len(raw16) != LOW_QUAL_BYTES:
++        raise SystemExit("0x40 bit-order measurement: short read on the reference tile")
++
++    stats = {}
++    for transposed in (False, True):
++        grid = _low_qual_decode(raw16, transposed)
++        layer1_means, layer0_means = [], []
++        for hr in range(LOW_QUAL_SIDE):
++            for hc in range(LOW_QUAL_SIDE):
++                pixels = [alpha1[pr * 64 + pc]
++                         for pr in range(hr * 8, hr * 8 + 8)
++                         for pc in range(hc * 8, hc * 8 + 8)]
++                mean = sum(pixels) / float(len(pixels))
++                target = grid[hr][hc]
++                if target == LOW_QUAL_LAYER_FLOOR:
++                    layer1_means.append(mean)
++                elif target == LOW_QUAL_LAYER_WALL:
++                    layer0_means.append(mean)
++        stats[transposed] = (layer1_means, layer0_means)
++        l1_avg = sum(layer1_means) / len(layer1_means) if layer1_means else float("nan")
++        l0_avg = sum(layer0_means) / len(layer0_means) if layer0_means else float("nan")
++        say("    %-12s %2d layer-1 sub-cell(s) mean %.2f/15, "
++            "%2d layer-0 sub-cell(s) mean %.2f/15",
++            "transposed" if transposed else "row-major",
++            len(layer1_means), l1_avg, len(layer0_means), l0_avg)
++
++    # Clean = the two predicted populations do not overlap at all - the same
++    # cleanliness bar the hole bit order applies ("no hole lands on a
++    # walkable cell"). A wrong axis mixes predicted-floor and predicted-wall
++    # sub-cells into overlapping alpha ranges; the real one does not.
++    clean = [t for t, (l1, l0) in stats.items() if l1 and l0 and min(l1) > max(l0)]
++    if len(clean) != 1:
++        raise SystemExit("cannot decide the 0x40 bit order from the reference "
++                         "tile (clean orders: %s) - refusing to guess" % clean)
++    return clean[0], stats
++
++
+ def rle_decode(text):
+     if not text.startswith("RLE1:"):
+         raise SystemExit("walkMask is not RLE1")
+@@ -633,9 +814,16 @@
+                          "MCNR on the reference tile - the axis mapping would "
+                          "be a guess; refusing to write normals" % (100.0 * ratio))
+ 
++    say("\n[3c] Decide the 0x40 (low-quality texture map) bit order against a stock tile")
++    low_qual_transposed, low_qual_stats = measure_low_qual_bit_order()
++    say("    -> %s (predicted-layer-1 and predicted-layer-0 sub-cells do not "
++        "overlap in mean alpha)",
++        "transposed" if low_qual_transposed else "row-major")
++
+     say("\n[4] Write the mask into every MCNK header")
+     written = 0
+     total_holes = 0
++    total_lowqual_floor = 0
+     shaded = 0
+     for name in files:
+         data, offsets = parsed[name]
+@@ -661,20 +849,48 @@
+             if in_block:
+                 # WALL cells are neither holed nor reshaped: 48 authors their
+                 # geometry (crest / slope / rim) directly. Holes are VOID only.
++                #
++                # Task 17: the SAME cell classification also decides the
++                # 0x40 low-quality texture map, at twice the grid density
++                # (LOW_QUAL_SIDE=8 vs HOLE_CELLS_PER_SIDE=4 - QUADS_PER_
++                # HOLE_CELL=2 sub-cells per hole cell, both axes, exactly
++                # the factor recompute_block_normals already uses between
++                # hole cells and its own quad grid). A FLOOR cell's four
++                # sub-cells name layer 1 (the doodads render); a WALL or
++                # HOLE cell's stay layer 0 - explicitly, not by omission,
++                # so a kit that already carries a stale non-zero 0x40 from
++                # an earlier run does not keep it (grid starts at all
++                # LOW_QUAL_LAYER_WALL == 0, the same "actively clear" rule
++                # paint_wall_shadow follows for MCSH).
+                 grid = []
++                lowqual_grid = [[LOW_QUAL_LAYER_WALL] * LOW_QUAL_SIDE
++                               for _ in range(LOW_QUAL_SIDE)]
+                 for hr in range(HOLE_CELLS_PER_SIDE):
+                     row_flags = []
+                     for hc in range(HOLE_CELLS_PER_SIDE):
+                         cls = classes[iy * HOLE_CELLS_PER_SIDE + hr][ix * HOLE_CELLS_PER_SIDE + hc]
+                         row_flags.append(cls == CELL_HOLE)
++                        if cls == CELL_FLOOR:
++                            for dr in range(QUADS_PER_HOLE_CELL):
++                                for dc in range(QUADS_PER_HOLE_CELL):
++                                    lowqual_grid[hr * QUADS_PER_HOLE_CELL + dr][
++                                        hc * QUADS_PER_HOLE_CELL + dc] = LOW_QUAL_LAYER_FLOOR
+                     grid.append(row_flags)
+             else:
+                 grid = holes_for_mcnk(mcvt_heights(before, payload_ofs))
++                lowqual_grid = None
+ 
+             mask = pack_holes(grid, transposed)
+             total_holes += bin(mask).count("1")
+             struct.pack_into("<I", data, payload_ofs + MCNK_OFS_HOLES, mask)
+ 
++            if lowqual_grid is not None:
++                lowqual_bytes = pack_low_qual(lowqual_grid, low_qual_transposed)
++                data[payload_ofs + MCNK_OFS_LOW_QUAL:
++                    payload_ofs + MCNK_OFS_LOW_QUAL + LOW_QUAL_BYTES] = lowqual_bytes
++                total_lowqual_floor += sum(row.count(LOW_QUAL_LAYER_FLOOR)
++                                           for row in lowqual_grid)
++
+             if in_block and not args.dry_run:
+                 shaded += paint_wall_shadow(
+                     data, payload_ofs - 8, payload_ofs, classes, ix, iy,
+@@ -692,6 +908,8 @@
+     say("    %d shadow sample(s) painted over the wall band", shaded)
+     say("    %d hole cell(s) across the kit, %d file(s) newly written",
+         total_holes, written)
++    say("    %d 0x40 sub-cell(s) named layer 1 (floor, Task 17 doodads)",
++        total_lowqual_floor)
+ 
+     # kit_meta.json pins a sha256 per chunk and 49_pd_compose_blocks.py refuses
+     # to run when a file disagrees with it. Punching holes changes those bytes,
+@@ -733,6 +951,37 @@
+                           "PVPZone02_30_32.adt MCNR within +-12/127 per "
+                           "component" % (n_good, n_checked),
+         }
++        l1_row, l0_row = low_qual_stats[False]
++        l1_tr, l0_tr = low_qual_stats[True]
++        meta_doc["lowQualityTextureMap"] = {
++            "source": "52_punch_kit_holes.py",
++            "field": "MCNK header 0x40 (16 bytes, 2 bits per 8x8 sub-cell, "
++                    "names which MCLY layer 0..3 is dominant there)",
++            "bitOrder": "transposed" if low_qual_transposed else "row-major",
++            "rule": "a FLOOR-class walk cell's four 0x40 sub-cells (Task 17's "
++                    "QUADS_PER_HOLE_CELL=2 factor, both axes) name MCLY layer "
++                    "1 - the floor blend 51_texture_blockkit.py points at a "
++                    "stock GroundEffectTexture.dbc row per role; WALL and "
++                    "HOLE cells stay layer 0",
++            "why": "51's effect id alone renders nothing - the client reads "
++                   "THIS field to decide which layer's ground-effect doodads "
++                   "show in a sub-cell, and every donor-inherited MCNK starts "
++                   "all-zero, i.e. layer 0 (the wall texture)",
++            "measuredAgainst": "World\\Maps\\PVPZone02\\PVPZone02_30_32.adt "
++                               "MCNK[0]: row-major %d layer-1 sub-cell(s) mean "
++                               "%.2f/15 vs %d layer-0 mean %.2f/15; transposed "
++                               "%d layer-1 mean %.2f/15 vs %d layer-0 mean "
++                               "%.2f/15 - only the %s order separates cleanly"
++                               % (len(l1_row),
++                                  sum(l1_row) / len(l1_row) if l1_row else float("nan"),
++                                  len(l0_row),
++                                  sum(l0_row) / len(l0_row) if l0_row else float("nan"),
++                                  len(l1_tr),
++                                  sum(l1_tr) / len(l1_tr) if l1_tr else float("nan"),
++                                  len(l0_tr),
++                                  sum(l0_tr) / len(l0_tr) if l0_tr else float("nan"),
++                                  "transposed" if low_qual_transposed else "row-major"),
++        }
+         blob = (json.dumps(meta_doc, indent=2) + "\n").encode("utf-8")
+         pdl.write_if_changed(meta_path, blob)
+         say("    hashes refreshed for %d chunk(s)", len(meta_doc.get("chunks", [])))
+@@ -777,6 +1026,8 @@
+     bad_wall_heights = 0
+     wall_cells_seen = 0
+     shaded_normals = 0
++    lowqual_mismatches = 0
++    lowqual_floor_seen = 0
+     for chunk_id in hole_pictures:
+         entry = meta.get(chunk_id)
+         if not entry:
+@@ -792,6 +1043,8 @@
+                 payload_ofs, _size = offsets[iy * MCNKS_PER_SIDE + ix]
+                 written_mask = struct.unpack_from(
+                     "<I", data, payload_ofs + MCNK_OFS_HOLES)[0]
++                lowqual_raw = data[payload_ofs + MCNK_OFS_LOW_QUAL:
++                                   payload_ofs + MCNK_OFS_LOW_QUAL + LOW_QUAL_BYTES]
+                 heights = mcvt_heights(data, payload_ofs)
+                 nbase = mcnr_base(data, payload_ofs)
+                 for hr in range(HOLE_CELLS_PER_SIDE):
+@@ -818,6 +1071,26 @@
+                                     "<3b", data, nbase + idx * 3)
+                                 if triple != CANON_NORMAL:
+                                     shaded_normals += 1
++                        # Task 17: the 0x40 sub-cells this hole cell covers -
++                        # inline-decoded here, not via pack_low_qual/
++                        # _low_qual_decode, on the same "don't ask the writer
++                        # what it wrote" principle the rest of this block
++                        # already follows for holes.
++                        if not args.dry_run:
++                            want = LOW_QUAL_LAYER_FLOOR if cls == CELL_FLOOR \
++                                else LOW_QUAL_LAYER_WALL
++                            for dr in range(QUADS_PER_HOLE_CELL):
++                                for dc in range(QUADS_PER_HOLE_CELL):
++                                    sr = hr * QUADS_PER_HOLE_CELL + dr
++                                    sc = hc * QUADS_PER_HOLE_CELL + dc
++                                    sidx = (sc * LOW_QUAL_SIDE + sr) if low_qual_transposed \
++                                        else (sr * LOW_QUAL_SIDE + sc)
++                                    byte = lowqual_raw[sidx // 4]
++                                    value = (byte >> ((sidx % 4) * 2)) & 0x3
++                                    if value != want:
++                                        lowqual_mismatches += 1
++                                    if value == LOW_QUAL_LAYER_FLOOR:
++                                        lowqual_floor_seen += 1
+     check("no hole punched over a walkable cell", holes_on_walkable == 0)
+     check("written holes match the cell classes", args.dry_run or class_mismatches == 0)
+     check("wall cells exist inside the authored height band",
+@@ -826,6 +1099,12 @@
+           args.dry_run or shaded_normals > 0)
+     say("    (%d wall cell(s), band %.1f .. %.1f, %d shaded normal(s))",
+         wall_cells_seen, wall_lo + 0.01, wall_hi - 0.01, shaded_normals)
++    check("0x40 names layer 1 on FLOOR sub-cells and layer 0 elsewhere",
++          args.dry_run or lowqual_mismatches == 0)
++    check("0x40 is non-zero somewhere (doodads have a sub-cell to render on)",
++          args.dry_run or lowqual_floor_seen > 0)
++    say("    (%d 0x40 sub-cell(s) read back as layer 1, %d mismatch(es))",
++        lowqual_floor_seen, lowqual_mismatches)
+ 
+     say("\n%s", "ALL CHECKS PASS" if ok else "FAILURES")
+     say("T1/offline only - whether the abyss now reads as empty space, and "

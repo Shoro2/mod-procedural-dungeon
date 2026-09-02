@@ -34,6 +34,7 @@
 //   cl /std:c++17 /EHsc /W4 /O2 /I src tests\blockplan_harness.cpp
 //      src\generator\PDBlockPlan.cpp src\generator\PDv2WalkGrid.cpp
 //      src\generator\PDv2LinkState.cpp src\generator\PDv2DecorPlan.cpp
+//      src\generator\PDv2PackDraw.cpp
 //      /Fe:pdblock.exe
 
 // MSVC deprecates std::fopen in favour of fopen_s, which is a Microsoft
@@ -47,6 +48,7 @@
 #include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
 #include "generator/PDv2LinkState.h"
+#include "generator/PDv2PackDraw.h"
 #include "generator/PDv2WalkGrid.h"
 
 #include <cmath>
@@ -318,10 +320,16 @@ namespace
     // stream that rewrites every \n into \r\n -- so piping this through a shell
     // would corrupt it in a way that only shows up as a parse error much later.
     void WriteManifest(uint32_t seed, int rooms, char const* path, int obx, int oby,
-                       int theme)
+                       int theme, int bossRooms)
     {
         BlockCfg cfg = MakeCfg(seed, rooms, obx, oby);
         cfg.theme = theme;
+        // The boss-room count is a generation INPUT, not a decoration: it
+        // changes how many cells the scatter wants, so a stored layout with
+        // gen_boss_rooms 2 cannot be reproduced with the fixture's 1. Added
+        // 2026-09-02 to audit an operator's live layout from its
+        // pdungeon_account row; 1 keeps every earlier call byte-identical.
+        cfg.bossRooms = bossRooms;
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))
         {
@@ -1474,17 +1482,27 @@ namespace
 
     // --- decor -------------------------------------------------------------
     //
-    // The three seed rows of `pdungeon_decor_rules`, mirrored as a fixture.
-    // THE SQL IS THE RUNTIME SOURCE - data/sql/db-world/mod_pdungeon_decor.sql
-    // - and this copy exists only so the placement can be checked without a
+    // The full 14 shipped rows of `pdungeon_decor_rules`, mirrored exactly
+    // (id, entry, placement, min/max, weight, spacing): ids 1-3 from
+    // mod_pdungeon_decor.sql, ids 4-14 from mod_pdungeon_decor_clutter.sql.
+    // THE SQL IS THE RUNTIME SOURCE - both files under data/sql/db-world/ -
+    // and this copy exists only so the placement can be checked without a
     // database. If one moves, move the other.
+    //
+    // Final whole-branch review, item 5: the fixture used to carry only the
+    // first 5 rules (roughly half the shipped density) and the room-count
+    // matrix topped out at 8, well under the measured room cap of 15 - so
+    // PD_DECOR_MAX_SPOTS/PD_CRITTER_MAX_SPOTS were declared inert on data
+    // thinner than what actually ships. This mirror plus the 15-room row
+    // added to RunDecorBatch's ROOM_MATRIX below is what makes that
+    // measurement real.
     std::vector<DecorRule> DecorFixture()
     {
         std::vector<DecorRule> rules;
 
         DecorRule torchRoom;
         torchRoom.id = 1;
-        torchRoom.theme = 1;
+        torchRoom.theme = 0;
         torchRoom.roleFilter = "room";
         torchRoom.goEntry = 910020;
         torchRoom.minPerBlock = 1;
@@ -1495,7 +1513,7 @@ namespace
 
         DecorRule brazierBoss;
         brazierBoss.id = 2;
-        brazierBoss.theme = 1;
+        brazierBoss.theme = 0;
         brazierBoss.roleFilter = "room_boss";
         brazierBoss.goEntry = 910021;
         brazierBoss.minPerBlock = 1;
@@ -1506,7 +1524,7 @@ namespace
 
         DecorRule torchCorridor;
         torchCorridor.id = 3;
-        torchCorridor.theme = 1;
+        torchCorridor.theme = 0;
         torchCorridor.roleFilter = "corridor";
         torchCorridor.goEntry = 910020;
         torchCorridor.minPerBlock = 0;
@@ -1515,6 +1533,159 @@ namespace
         torchCorridor.minSpacingYd = 8.0;
         rules.push_back(torchCorridor);
 
+        DecorRule barrelWallFoot;
+        barrelWallFoot.id = 4;
+        barrelWallFoot.theme = 0;
+        barrelWallFoot.roleFilter = "room";
+        barrelWallFoot.goEntry = 910050;
+        barrelWallFoot.minPerBlock = 0;
+        barrelWallFoot.maxPerBlock = 2;
+        barrelWallFoot.weight = 30;
+        barrelWallFoot.minSpacingYd = 8.0;
+        rules.push_back(barrelWallFoot);
+
+        DecorRule crateWallFoot;
+        crateWallFoot.id = 5;
+        crateWallFoot.theme = 0;
+        crateWallFoot.roleFilter = "room";
+        crateWallFoot.goEntry = 910051;
+        crateWallFoot.minPerBlock = 0;
+        crateWallFoot.maxPerBlock = 2;
+        crateWallFoot.weight = 30;
+        crateWallFoot.minSpacingYd = 8.0;
+        rules.push_back(crateWallFoot);
+
+        DecorRule bookshelfWallFoot;
+        bookshelfWallFoot.id = 6;
+        bookshelfWallFoot.theme = 0;
+        bookshelfWallFoot.roleFilter = "room";
+        bookshelfWallFoot.goEntry = 910054;
+        bookshelfWallFoot.minPerBlock = 0;
+        bookshelfWallFoot.maxPerBlock = 1;
+        bookshelfWallFoot.weight = 20;
+        bookshelfWallFoot.minSpacingYd = 8.0;
+        rules.push_back(bookshelfWallFoot);
+
+        DecorRule alchemyBenchWallFoot;
+        alchemyBenchWallFoot.id = 7;
+        alchemyBenchWallFoot.theme = 0;
+        alchemyBenchWallFoot.roleFilter = "room";
+        alchemyBenchWallFoot.goEntry = 910055;
+        alchemyBenchWallFoot.minPerBlock = 0;
+        alchemyBenchWallFoot.maxPerBlock = 1;
+        alchemyBenchWallFoot.weight = 15;
+        alchemyBenchWallFoot.minSpacingYd = 8.0;
+        rules.push_back(alchemyBenchWallFoot);
+
+        DecorRule longTableWallFoot;
+        longTableWallFoot.id = 8;
+        longTableWallFoot.theme = 0;
+        longTableWallFoot.roleFilter = "room";
+        longTableWallFoot.goEntry = 910056;
+        longTableWallFoot.minPerBlock = 0;
+        longTableWallFoot.maxPerBlock = 1;
+        longTableWallFoot.weight = 15;
+        longTableWallFoot.minSpacingYd = 8.0;
+        rules.push_back(longTableWallFoot);
+
+        DecorRule plagueBarrelCorridor;
+        plagueBarrelCorridor.id = 9;
+        plagueBarrelCorridor.theme = 0;
+        plagueBarrelCorridor.roleFilter = "corridor";
+        plagueBarrelCorridor.goEntry = 910052;
+        plagueBarrelCorridor.minPerBlock = 0;
+        plagueBarrelCorridor.maxPerBlock = 1;
+        plagueBarrelCorridor.weight = 40;
+        plagueBarrelCorridor.minSpacingYd = 8.0;
+        rules.push_back(plagueBarrelCorridor);
+
+        DecorRule crateStackCorner;
+        crateStackCorner.id = 10;
+        crateStackCorner.theme = 0;
+        crateStackCorner.roleFilter = "room";
+        crateStackCorner.goEntry = 910060;
+        crateStackCorner.placement = DECOR_PLACEMENT_CORNER;
+        crateStackCorner.minPerBlock = 0;
+        crateStackCorner.maxPerBlock = 2;
+        crateStackCorner.weight = 50;
+        crateStackCorner.minSpacingYd = 8.0;
+        rules.push_back(crateStackCorner);
+
+        DecorRule brokenCrateStackCorner;
+        brokenCrateStackCorner.id = 11;
+        brokenCrateStackCorner.theme = 0;
+        brokenCrateStackCorner.roleFilter = "room";
+        brokenCrateStackCorner.goEntry = 910062;
+        brokenCrateStackCorner.placement = DECOR_PLACEMENT_CORNER;
+        brokenCrateStackCorner.minPerBlock = 0;
+        brokenCrateStackCorner.maxPerBlock = 2;
+        brokenCrateStackCorner.weight = 50;
+        brokenCrateStackCorner.minSpacingYd = 8.0;
+        rules.push_back(brokenCrateStackCorner);
+
+        DecorRule tallBarrelCorridorCorner;
+        tallBarrelCorridorCorner.id = 12;
+        tallBarrelCorridorCorner.theme = 0;
+        tallBarrelCorridorCorner.roleFilter = "corridor_corner";
+        tallBarrelCorridorCorner.goEntry = 910063;
+        tallBarrelCorridorCorner.placement = DECOR_PLACEMENT_CORNER;
+        tallBarrelCorridorCorner.minPerBlock = 0;
+        tallBarrelCorridorCorner.maxPerBlock = 1;
+        tallBarrelCorridorCorner.weight = 60;
+        tallBarrelCorridorCorner.minSpacingYd = 8.0;
+        rules.push_back(tallBarrelCorridorCorner);
+
+        DecorRule rubbleLowScatter;
+        rubbleLowScatter.id = 13;
+        rubbleLowScatter.theme = 0;
+        rubbleLowScatter.roleFilter = "room";
+        rubbleLowScatter.goEntry = 910070;
+        rubbleLowScatter.placement = DECOR_PLACEMENT_SCATTER;
+        rubbleLowScatter.minPerBlock = 0;
+        rubbleLowScatter.maxPerBlock = 3;
+        rubbleLowScatter.weight = 60;
+        rubbleLowScatter.minSpacingYd = 12.0;
+        rules.push_back(rubbleLowScatter);
+
+        DecorRule skeletonBossScatter;
+        skeletonBossScatter.id = 14;
+        skeletonBossScatter.theme = 0;
+        skeletonBossScatter.roleFilter = "room_boss";
+        skeletonBossScatter.goEntry = 910073;
+        skeletonBossScatter.placement = DECOR_PLACEMENT_SCATTER;
+        skeletonBossScatter.minPerBlock = 1;
+        skeletonBossScatter.maxPerBlock = 3;
+        skeletonBossScatter.weight = 80;
+        skeletonBossScatter.minSpacingYd = 12.0;
+        rules.push_back(skeletonBossScatter);
+
+        return rules;
+    }
+
+    // The full 5 shipped rows of `pdungeon_critter_rules`, mirrored exactly
+    // (id, entry, min/max, weight): mod_pdungeon_critters.sql ids 1-4 and 6.
+    // Id 5 does not exist any more - final whole-branch review, item 2
+    // removed it as a geometric dead zone (a corridor_dead_end block can
+    // never carry a critter, whichever rule matches it).
+    std::vector<CritterRule> CritterFixture()
+    {
+        std::vector<CritterRule> rules;
+        CritterRule r;
+        r.id = 1; r.theme = 0; r.roleFilter = "room";
+        r.creatureEntry = 32428; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 100;
+        rules.push_back(r);
+        r.id = 2; r.theme = 0; r.roleFilter = "room";
+        r.creatureEntry = 23086; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 80;
+        rules.push_back(r);
+        r.id = 3; r.theme = 0; r.roleFilter = "room";
+        r.creatureEntry = 2110; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 60;
+        rules.push_back(r);
+        r.id = 4; r.theme = 0; r.roleFilter = "corridor";
+        r.creatureEntry = 26525; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 100;
+        rules.push_back(r);
+        r.id = 6; r.theme = 0; r.roleFilter = "room_boss";
+        r.creatureEntry = 26525; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 60;
+        rules.push_back(r);
         return rules;
     }
 
@@ -1530,6 +1701,23 @@ namespace
                 l[i].ruleId != r[i].ruleId || l[i].goEntry != r[i].goEntry ||
                 l[i].u != r[i].u || l[i].v != r[i].v ||
                 l[i].orientation != r[i].orientation)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool SameCritters(std::vector<CritterSpot> const& a,
+                      std::vector<CritterSpot> const& b)
+    {
+        if (a.size() != b.size()) return false;
+        for (size_t i = 0; i < a.size(); ++i)
+        {
+            if (a[i].bx != b[i].bx || a[i].by != b[i].by ||
+                a[i].ruleId != b[i].ruleId ||
+                a[i].creatureEntry != b[i].creatureEntry ||
+                a[i].u != b[i].u || a[i].v != b[i].v)
             {
                 return false;
             }
@@ -1558,6 +1746,30 @@ namespace
             {
                 return false;
             }
+        }
+        return true;
+    }
+
+    // A dead-end stub must report its own role name. Until the split it
+    // reported "corridor_cross", which made both filters wrong at once.
+    bool CheckRoleNamesDistinct(BlockPlan const& plan, std::string& why)
+    {
+        bool sawDeadEnd = false;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.role != BlockRole::CorridorDeadEnd) continue;
+            sawDeadEnd = true;
+            if (std::strcmp(BlockRoleName(b.role), "corridor_dead_end") != 0)
+            {
+                why = "a dead-end stub does not report role name corridor_dead_end";
+                return false;
+            }
+        }
+        if (sawDeadEnd && std::strcmp(BlockRoleName(BlockRole::CorridorCross),
+                                      "corridor_cross") != 0)
+        {
+            why = "corridor_cross lost its own name";
+            return false;
         }
         return true;
     }
@@ -1623,10 +1835,19 @@ namespace
                 return false;
             }
 
-            bool touchesWall = false;
+            // Which placement kind put this spot here. The rule vector is
+            // already in hand for `spacingOf`, so this is the same lookup.
+            std::string placement = PDungeon::DECOR_PLACEMENT_WALL_FOOT;
+            for (DecorRule const& r : rules)
+            {
+                if (r.id == spot.ruleId) { placement = r.placement; break; }
+            }
+
+            int wallSides = 0;
             int const drow[4] = { -1, 0, 1, 0 };
             int const dcol[4] = { 0, 1, 0, -1 };
-            for (int d = 0; d < 4 && !touchesWall; ++d)
+            bool wallAt[4] = { false, false, false, false };
+            for (int d = 0; d < 4; ++d)
             {
                 int const r = row + drow[d];
                 int const c = col + dcol[d];
@@ -1635,13 +1856,42 @@ namespace
                 {
                     continue;
                 }
-                touchesWall =
+                wallAt[d] =
                     classes[static_cast<size_t>(r) * PD_CELLS_PER_BLOCK + c] == 'L';
+                if (wallAt[d]) ++wallSides;
             }
-            if (!touchesWall)
+
+            if (placement == PDungeon::DECOR_PLACEMENT_WALL_FOOT)
             {
-                why = "a spot's cell touches no wall cell";
-                return false;
+                if (!wallSides)
+                {
+                    why = "a wall_foot spot's cell touches no wall cell";
+                    return false;
+                }
+            }
+            else if (placement == PDungeon::DECOR_PLACEMENT_CORNER)
+            {
+                // Two ADJACENT walls, i.e. N+E, E+S, S+W or W+N. Two OPPOSITE
+                // walls make a passage, not a corner, and a prop wedged there
+                // would block it.
+                bool adjacent = (wallAt[0] && wallAt[1]) || (wallAt[1] && wallAt[2]) ||
+                                (wallAt[2] && wallAt[3]) || (wallAt[3] && wallAt[0]);
+                if (!adjacent)
+                {
+                    why = "a corner spot's cell has no two adjacent wall sides";
+                    return false;
+                }
+            }
+            else if (placement == PDungeon::DECOR_PLACEMENT_SCATTER)
+            {
+                // The inverse of wall_foot: open floor. A scatter prop that
+                // ends up against a wall duplicates the wall_foot pass and
+                // leaves the middle of the room as empty as it was.
+                if (wallSides)
+                {
+                    why = "a scatter spot's cell touches a wall cell";
+                    return false;
+                }
             }
 
             for (DecorAnchor const& anchor : kit->second.anchors)
@@ -1684,6 +1934,87 @@ namespace
                 }
             }
             siblings.push_back(spot);
+        }
+        return true;
+    }
+
+    // Critters live on open floor, never on the socket track, never on a
+    // wall foot, and never off the walkable set - the same veto SplitOnDeath
+    // applies to affix children, for the same reason: a gravity-less
+    // creature past the platform edge hovers where nobody can reach it.
+    bool CheckCritterSpots(BlockPlan const& plan,
+                           std::vector<CritterSpot> const& spots,
+                           std::string& why)
+    {
+        for (CritterSpot const& spot : spots)
+        {
+            PlacedBlock const* const block = plan.At(spot.bx, spot.by);
+            if (!block)
+            {
+                why = "a critter stands on no block of the plan";
+                return false;
+            }
+            uint8_t const* const mask = MaskFor(block->chunkId);
+            if (!mask)
+            {
+                why = "a critter was planned on a chunk with no walk mask";
+                return false;
+            }
+            std::string const classes = PDv2Classify(mask);
+
+            int const row = static_cast<int>(std::floor(spot.u / PD_CELL_SIZE_YD));
+            int const col = static_cast<int>(std::floor(spot.v / PD_CELL_SIZE_YD));
+            if (row < 0 || col < 0 ||
+                row >= PD_CELLS_PER_BLOCK || col >= PD_CELLS_PER_BLOCK)
+            {
+                why = "a critter is outside its own block";
+                return false;
+            }
+            if (row == PD_CELLS_PER_BLOCK / 2 || col == PD_CELLS_PER_BLOCK / 2)
+            {
+                why = "a critter stands on the socket track";
+                return false;
+            }
+            if (classes[static_cast<size_t>(row) * PD_CELLS_PER_BLOCK + col] != 'W')
+            {
+                why = "a critter is not on a walkable cell";
+                return false;
+            }
+
+            // "never on a wall foot": the same four-side wall test
+            // CheckDecorSpots applies to a scatter placement, asserted here
+            // too rather than just trusted from the collector's name -
+            // critters draw from CollectScatter (see BuildCritterPlan),
+            // and this is what would turn this gate red if that collector
+            // were ever swapped for CollectWallFeet in the planner (final
+            // whole-branch review, item 5).
+            int const drow[4] = { -1, 0, 1, 0 };
+            int const dcol[4] = { 0, 1, 0, -1 };
+            int wallSides = 0;
+            for (int d = 0; d < 4; ++d)
+            {
+                int const r = row + drow[d];
+                int const c = col + dcol[d];
+                if (r < 0 || c < 0 ||
+                    r >= PD_CELLS_PER_BLOCK || c >= PD_CELLS_PER_BLOCK)
+                {
+                    continue;
+                }
+                if (classes[static_cast<size_t>(r) * PD_CELLS_PER_BLOCK + c] == 'L')
+                {
+                    ++wallSides;
+                }
+            }
+            if (wallSides)
+            {
+                why = "a critter's cell touches a wall cell";
+                return false;
+            }
+        }
+        if (spots.size() > static_cast<size_t>(PD_CRITTER_MAX_SPOTS))
+        {
+            why = "a layout exceeded the critter budget";
+            return false;
         }
         return true;
     }
@@ -1772,6 +2103,8 @@ namespace
               "'room_boss' matched a plain room", 0);
         Check(DecorRoleMatches("corridor", BlockRoleName(BlockRole::CorridorCross)),
               "'corridor' does not match a cross corridor", 0);
+        Check(DecorRoleMatches("corridor", BlockRoleName(BlockRole::CorridorDeadEnd)),
+              "'corridor' does not match a dead-end corridor", 0);
         Check(!DecorRoleMatches("corridor", BlockRoleName(BlockRole::Room)),
               "'corridor' matched a room", 0);
         Check(DecorRoleMatches("", BlockRoleName(BlockRole::Room)),
@@ -1832,12 +2165,103 @@ namespace
         Check(worst <= 1, "the spacing rule let two props share a block", 0);
     }
 
+    // --- decor / critter plan pins (final whole-branch review, item 6) -----
+    //
+    // The decor and critter streams were both changed deliberately this
+    // round - item 2 removed critter rule 5, item 1 made the critter rule
+    // sort stable - and neither had a pin that would go red on an
+    // ACCIDENTAL stream move: RunDecorBatch's own two-build compare
+    // (SameSpots/SameCritters) only catches nondeterminism, not a change
+    // that moves the stream on purpose or by accident alike. Same shape as
+    // PD_SPAWN_DRAW_PIN below: a fixed seed, the shipped fixture, the
+    // emitted spots serialised and compared to a string constant.
+    //
+    // If either of these fails after a deliberate decor/critter rule
+    // change, that is the change being noticed, not the pin being wrong -
+    // update it in the same commit as the draw-order comment. Captured by
+    // RUNNING `pdblock --decor-batch` and reading the "plan moved" failure
+    // message, not by reasoning about what it should be - and only after
+    // items 1, 2 and 5 had landed, since all three can move these streams.
+    // Captured by running `pdblock --decor-batch` (seed 12345, 5 rooms, the
+    // shipped fixtures) and reading the "plan moved" failure message, after
+    // items 1, 2 and 5 had landed.
+    char const* const PD_DECOR_PLAN_PIN =
+        "261,257,1,910020,56.666666,20.833333,0.000000;261,257,4,910050,10.000000,54.166666,3.141593;261,257,5,910051,20.833333,10.000000,4.712389;261,257,5,910051,10.000000,20.833333,3.141593;261,257,6,910054,10.000000,45.833333,3.141593;261,257,7,910055,45.833333,56.666666,1.570796;261,257,10,910060,56.666666,10.000000,5.497787;261,257,10,910060,10.000000,56.666666,2.356194;261,257,13,910070,20.833333,20.833333,0.000000;256,258,1,910020,29.166666,10.000000,4.712389;256,258,1,910020,26.666666,62.500000,3.141593;256,258,1,910020,45.833333,10.000000,4.712389;256,258,4,910050,10.000000,54.166666,3.141593;256,258,5,910051,45.833333,56.666666,1.570796;256,258,5,910051,20.833333,56.666666,1.570796;256,258,6,910054,10.000000,20.833333,3.141593;256,258,8,910056,10.000000,45.833333,3.141593;256,258,13,910070,29.166666,20.833333,0.000000;256,258,13,910070,45.833333,20.833333,0.000000;257,258,9,910052,31.666666,45.833333,0.000000;261,258,9,910052,54.166666,26.666666,4.712389;256,259,3,910020,62.500000,26.666666,4.712389;257,259,1,910020,10.000000,20.833333,3.141593;257,259,1,910020,10.000000,12.500000,3.141593;257,259,1,910020,10.000000,54.166666,3.141593;257,259,4,910050,10.000000,45.833333,3.141593;257,259,4,910050,56.666666,45.833333,0.000000;257,259,5,910051,45.833333,56.666666,1.570796;257,259,6,910054,26.666666,62.500000,3.141593;257,259,7,910055,45.833333,10.000000,4.712389;257,259,8,910056,20.833333,56.666666,1.570796;257,259,10,910060,10.000000,56.666666,2.356194;257,259,13,910070,45.833333,20.833333,0.000000;257,259,13,910070,29.166666,45.833333,0.000000;257,259,13,910070,20.833333,29.166666,0.000000;258,259,9,910052,62.500000,26.666666,4.712389;259,259,9,910052,26.666666,20.833333,3.141593;260,259,3,910020,26.666666,62.500000,3.141593;260,259,9,910052,31.666666,45.833333,0.000000;261,259,9,910052,26.666666,62.500000,3.141593;262,259,9,910052,26.666666,12.500000,3.141593;256,260,9,910052,20.833333,26.666666,4.712389;257,260,3,910020,45.833333,31.666666,1.570796;258,260,3,910020,4.166667,26.666666,4.712389;258,260,9,910052,54.166666,26.666666,4.712389;256,261,9,910052,45.833333,18.333333,4.712389;257,261,3,910020,20.833333,26.666666,4.712389;257,261,9,910052,26.666666,54.166666,3.141593;258,261,1,910020,56.666666,12.500000,0.000000;258,261,1,910020,56.666666,29.166666,0.000000;258,261,6,910054,10.000000,20.833333,3.141593;258,261,10,910060,48.333333,56.666666,0.785398;258,261,10,910060,18.333333,10.000000,3.926991;258,261,13,910070,20.833333,45.833333,0.000000;259,261,3,910020,26.666666,20.833333,3.141593;259,261,9,910052,62.500000,26.666666,4.712389;256,262,3,910020,26.666666,62.500000,3.141593;256,262,9,910052,4.166667,26.666666,4.712389;257,262,3,910020,26.666666,20.833333,3.141593;258,262,9,910052,31.666666,45.833333,0.000000;259,262,1,910020,10.000000,54.166666,3.141593;259,262,1,910020,4.166667,26.666666,4.712389;259,262,4,910050,56.666666,29.166666,0.000000;259,262,4,910050,56.666666,20.833333,0.000000;259,262,5,910051,26.666666,4.166667,3.141593;259,262,5,910051,45.833333,56.666666,1.570796;259,262,8,910056,45.833333,10.000000,4.712389;259,262,11,910062,48.333333,56.666666,0.785398;259,262,11,910062,56.666666,10.000000,5.497787;259,262,13,910070,20.833333,45.833333,0.000000;259,262,13,910070,20.833333,29.166666,0.000000;259,262,13,910070,45.833333,29.166666,0.000000;260,262,3,910020,26.666666,4.166667,3.141593;260,262,9,910052,26.666666,62.500000,3.141593;261,262,3,910020,31.666666,45.833333,0.000000;262,262,1,910020,18.333333,12.500000,3.141593;262,262,2,910021,56.666666,20.833333,0.000000;262,262,2,910021,29.166666,56.666666,1.570796;262,262,4,910050,10.000000,20.833333,3.141593;262,262,4,910050,45.833333,56.666666,1.570796;262,262,5,910051,10.000000,45.833333,3.141593;262,262,7,910055,56.666666,12.500000,0.000000;262,262,8,910056,56.666666,29.166666,0.000000;262,262,10,910060,48.333333,56.666666,0.785398;262,262,11,910062,56.666666,10.000000,5.497787;262,262,13,910070,20.833333,29.166666,0.000000;262,262,13,910070,45.833333,29.166666,0.000000;262,262,14,910073,29.166666,12.500000,0.000000;262,262,14,910073,45.833333,20.833333,0.000000";
+    char const* const PD_CRITTER_PLAN_PIN =
+        "257,258,4,26525,29.166666,54.166666;257,258,4,26525,29.166666,29.166666;257,259,1,32428,29.166666,12.500000;257,259,1,32428,45.833333,20.833333;257,259,3,2110,29.166666,54.166666;258,259,4,26525,29.166666,29.166666;259,259,4,26525,29.166666,29.166666;256,260,4,26525,54.166666,29.166666;256,260,4,26525,29.166666,29.166666;257,260,4,26525,54.166666,29.166666;257,260,4,26525,29.166666,29.166666;256,261,4,26525,29.166666,29.166666;256,261,4,26525,54.166666,29.166666;258,261,1,32428,20.833333,29.166666;258,261,1,32428,29.166666,45.833333;258,261,2,23086,45.833333,29.166666;258,261,2,23086,29.166666,12.500000;258,262,4,26525,29.166666,54.166666;258,262,4,26525,29.166666,29.166666;259,262,1,32428,29.166666,29.166666;259,262,1,32428,20.833333,45.833333;259,262,2,23086,45.833333,20.833333;262,262,1,32428,29.166666,12.500000;262,262,2,23086,20.833333,20.833333;262,262,6,26525,29.166666,20.833333";
+
+    bool CheckDecorPlanPinned(std::string& why)
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(MakeCfg(12345u, 5), &plan))
+        {
+            why = "the pinned decor plan could not generate a layout";
+            return false;
+        }
+        std::vector<DecorSpot> const spots = BuildDecorPlan(
+            plan, MaskFor, AnchorsForChunk, DecorFixture(), plan.effectiveSeed);
+
+        std::string got;
+        for (DecorSpot const& s : spots)
+        {
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "%d,%d,%d,%d,%.6f,%.6f,%.6f;",
+                          s.bx, s.by, s.ruleId, s.goEntry, s.u, s.v, s.orientation);
+            got += buf;
+        }
+        if (!got.empty())
+        {
+            got.pop_back();
+        }
+        if (got != PD_DECOR_PLAN_PIN)
+        {
+            why = "the decor plan moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    bool CheckCritterPlanPinned(std::string& why)
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(MakeCfg(12345u, 5), &plan))
+        {
+            why = "the pinned critter plan could not generate a layout";
+            return false;
+        }
+        std::vector<CritterSpot> const spots = BuildCritterPlan(
+            plan, MaskFor, CritterFixture(), plan.effectiveSeed);
+
+        std::string got;
+        for (CritterSpot const& s : spots)
+        {
+            char buf[96];
+            std::snprintf(buf, sizeof(buf), "%d,%d,%d,%d,%.6f,%.6f;",
+                          s.bx, s.by, s.ruleId, s.creatureEntry, s.u, s.v);
+            got += buf;
+        }
+        if (!got.empty())
+        {
+            got.pop_back();
+        }
+        if (got != PD_CRITTER_PLAN_PIN)
+        {
+            why = "the critter plan moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
     int RunDecorBatch(int count)
     {
         // Rooms is the one config axis that changes what a plan is made of:
         // a 3-room layout is nearly all corridor and a 9-room one is nearly
-        // all room, so the matrix covers both ends of the rule set.
-        int const ROOM_MATRIX[3] = { 3, 5, 8 };
+        // all room, so the matrix covers both ends of the rule set. 15 is
+        // added (final whole-branch review, item 5) because that is the
+        // measured room cap (PD_GAME_ROOMS_CAP_MEASURED / `pdblock
+        // --roomcap`) - without it the budget checks below never saw a
+        // layout anywhere near what a real account can reach.
+        int const ROOM_MATRIX[4] = { 3, 5, 8, 15 };
 
         std::printf("decor batch of %d seeds x %d room counts\n\n",
                     count, static_cast<int>(sizeof(ROOM_MATRIX) / sizeof(int)));
@@ -1851,47 +2275,92 @@ namespace
         RunClassifyChecks();
         RunRoleFilterChecks();
         RunDecorGateChecks();
+        {
+            // Two statements, not one call - same argument-evaluation-order
+            // trap CheckSpawnDrawPinned's own call site guards against.
+            std::string why;
+            bool const ok = CheckDecorPlanPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
+        {
+            std::string why;
+            bool const ok = CheckCritterPlanPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
 
         std::vector<DecorRule> const rules = DecorFixture();
+        std::vector<CritterRule> const critterRules = CritterFixture();
         int totalSpots = 0;
         int minSpots = 1 << 30;
         int maxSpots = 0;
         int blankLayouts = 0;
+        int totalCritters = 0;
+        int minCritters = 1 << 30;
+        int maxCritters = 0;
 
+        // Both themes, not just theme 1: the live DB's rules carry theme = 0
+        // (any look), but the fixture used to say theme = 1 for all three,
+        // which meant this batch never touched the padded theme-2 rooms a
+        // real city dungeon generates. Running both is what makes this the
+        // first real execution of the corner and scatter collectors.
+        int const THEMES[2] = { 1, 2 };
         for (int i = 0; i < count; ++i)
         {
             uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 1u;
-            for (int const rooms : ROOM_MATRIX)
+            for (int const theme : THEMES)
             {
-                BlockPlan plan;
-                if (!GenerateBlockPlan(MakeCfg(seed, rooms), &plan))
+                for (int const rooms : ROOM_MATRIX)
                 {
-                    Check(false, "generation failed", seed);
-                    continue;
-                }
+                    BlockPlan plan;
+                    BlockCfg cfg = MakeCfg(seed, rooms);
+                    cfg.theme = theme;
+                    if (!GenerateBlockPlan(cfg, &plan))
+                    {
+                        Check(false, "generation failed", seed);
+                        continue;
+                    }
 
-                BlockPlan const before = plan;
-                std::vector<DecorSpot> const first = BuildDecorPlan(
-                    plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
-                std::vector<DecorSpot> const again = BuildDecorPlan(
-                    plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
+                    BlockPlan const before = plan;
+                    std::vector<DecorSpot> const first = BuildDecorPlan(
+                        plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
+                    std::vector<DecorSpot> const again = BuildDecorPlan(
+                        plan, MaskFor, AnchorsForChunk, rules, plan.effectiveSeed);
 
-                Check(SameSpots(first, again),
-                      "two decor builds of the same plan differ", seed);
-                Check(SamePlan(before, plan),
-                      "BuildDecorPlan changed the plan it was given", seed);
+                    Check(SameSpots(first, again),
+                          "two decor builds of the same plan differ", seed);
+                    Check(SamePlan(before, plan),
+                          "BuildDecorPlan changed the plan it was given", seed);
+                    Check(first.size() <= static_cast<size_t>(PD_DECOR_MAX_SPOTS),
+                          "a layout exceeded the decor spot budget", seed);
 
-                std::string why;
-                Check(CheckDecorSpots(plan, first, rules, why),
-                      why.empty() ? "decor placement broken" : why.c_str(), seed);
+                    std::string why;
+                    Check(CheckRoleNamesDistinct(plan, why),
+                          why.empty() ? "role naming broken" : why.c_str(), seed);
+                    Check(CheckDecorSpots(plan, first, rules, why),
+                          why.empty() ? "decor placement broken" : why.c_str(), seed);
 
-                int const spots = static_cast<int>(first.size());
-                totalSpots += spots;
-                minSpots = (spots < minSpots) ? spots : minSpots;
-                maxSpots = (spots > maxSpots) ? spots : maxSpots;
-                if (!spots)
-                {
-                    ++blankLayouts;
+                    int const spots = static_cast<int>(first.size());
+                    totalSpots += spots;
+                    minSpots = (spots < minSpots) ? spots : minSpots;
+                    maxSpots = (spots > maxSpots) ? spots : maxSpots;
+                    if (!spots)
+                    {
+                        ++blankLayouts;
+                    }
+
+                    std::vector<CritterSpot> const critters = BuildCritterPlan(
+                        plan, MaskFor, critterRules, plan.effectiveSeed);
+                    std::vector<CritterSpot> const crittersAgain = BuildCritterPlan(
+                        plan, MaskFor, critterRules, plan.effectiveSeed);
+                    Check(SameCritters(critters, crittersAgain),
+                          "two critter builds of the same plan differ", seed);
+                    Check(CheckCritterSpots(plan, critters, why),
+                          why.empty() ? "critter placement broken" : why.c_str(), seed);
+
+                    int const nCritters = static_cast<int>(critters.size());
+                    totalCritters += nCritters;
+                    minCritters = (nCritters < minCritters) ? nCritters : minCritters;
+                    maxCritters = (nCritters > maxCritters) ? nCritters : maxCritters;
                 }
             }
         }
@@ -1904,9 +2373,379 @@ namespace
 
         std::printf("props per layout : %d..%d (%d total)\n",
                     minSpots, maxSpots, totalSpots);
+        std::printf("critters per layout : %d..%d (%d total)\n",
+                    minCritters, maxCritters, totalCritters);
         std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
         std::printf("%s\n", g_failures == 0 ? "ALL CHECKS PASS" : "FAILURES");
         return g_failures == 0 ? 0 : 1;
+    }
+
+    // --- pack draw (PDv2SelectSpawns, generator/PDv2PackDraw.cpp) -----------
+    //
+    // A characterisation test: the draw for a fixed seed and a fixed pool
+    // must not move. Captured from the extraction in Task 12 of the PDv2
+    // content-expansion plan, before Task 13 touches the draw order.
+    //
+    // The draw order is a determinism CONTRACT: changing it re-rolls which
+    // creatures every stored seed spawns. This pins it. If this check fails
+    // after a change to PDv2PackDraw, that is the change being noticed, not
+    // the test being wrong - update the pin deliberately, in the same commit
+    // as the draw-order comment.
+    //
+    // Re-captured for Task 13 (one pack draw inserted at the front of every
+    // room - PDv2PackDraw.cpp's own THE SPAWN STREAM comment says why every
+    // downstream draw had to move). Old value, for anyone diffing history:
+    // "84263,84269,84268,84276,84269,84267,84266,84266,84264,84276,84288,84268,84276,".
+    // Captured by RUNNING `pdblock --batch 500` and reading the "spawn draw
+    // moved" failure message, not by reasoning about what the new sequence
+    // should be.
+    char const* const PD_SPAWN_DRAW_PIN =
+        "84268,84267,84269,84276,84268,84269,84269,84267,84276,84267,84289,84263,84263,";
+
+    // A fixed stand-in for the live pack tables: two packs, one with a
+    // boss, enough members that a 5-trash room and a boss room both have
+    // something to draw. The entries are the shipped stock ones so the pin
+    // is readable by anyone who knows the dungeon.
+    //
+    // trashPackIds/meleeByPack/casterByPack are hand-built the same way
+    // PDv2PackMgr::LoadFromDB and GroupByPack would (PDv2PackMgr.cpp) - both
+    // packs have a melee AND a caster member, so both are eligible for
+    // Task 13's per-room pack draw, and that draw is what makes this pin
+    // worth re-capturing rather than assumed unchanged.
+    PackPools FixedPackPools()
+    {
+        PackPools pools;
+        pools.melee  = { {1, 84264}, {1, 84265}, {1, 84266},
+                         {2, 84267}, {2, 84268}, {2, 84269} };
+        pools.caster = { {1, 84263}, {2, 84276} };
+        pools.boss   = { {1, 84288}, {2, 84289} };
+        pools.trashPackIds = { 1, 2 };
+        pools.meleeByPack = { { 1, { {1, 84264}, {1, 84265}, {1, 84266} } },
+                              { 2, { {2, 84267}, {2, 84268}, {2, 84269} } } };
+        pools.casterByPack = { { 1, { {1, 84263} } },
+                               { 2, { {2, 84276} } } };
+        return pools;
+    }
+
+    SpawnSelectInputs FixedSpawnInputs()
+    {
+        SpawnSelectInputs in;
+        in.rooms = { { /*roomIndex*/ 0, /*isBossRoom*/ false },
+                     { 1, false },
+                     { 2, true } };
+        in.spawnsPerRoom = 5;
+        in.bossRoomAdds = 2;
+        in.casterPct = 40;
+        in.bandMin = 76;
+        in.affixPct = 40;
+        return in;
+    }
+
+    bool CheckSpawnDrawPinned(std::string& why)
+    {
+        SpawnSelectInputs in = FixedSpawnInputs();
+        std::vector<SpawnPick> picks;
+        if (!PDv2SelectSpawns(12345u, in, FixedPackPools(), picks))
+        {
+            why = "the pinned spawn draw refused to select";
+            return false;
+        }
+
+        std::string got;
+        for (SpawnPick const& p : picks)
+        {
+            got += std::to_string(p.entry);
+            got += ',';
+        }
+        if (got != PD_SPAWN_DRAW_PIN)
+        {
+            why = "the spawn draw moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    // Review finding (Task 12, PDv2 content-expansion plan): FixedPackPools()
+    // above always includes a boss, so it never exercises the boss-standin
+    // tie-break in PDv2SelectSpawns - which is exactly how a Critical (the
+    // refactor changing which member wins a weight TIE) got past a green
+    // gate. This pin closes that hole: no boss anywhere, every member at the
+    // default weight (a tie is not an edge case here - it is the only case,
+    // since every shipped pack member weighs 100), and a CASTER that loads
+    // before any melee (pack 1's real stock order: creature 84263 sorts
+    // before 84264..84266 under "ORDER BY p.id, m.entry" - see
+    // PDv2PackMgr::LoadFromDB). Under the pre-fix code (scan melee fully,
+    // then caster) the boss room's first pick would have been melee entry
+    // 84264; scanning the loader's real interleave (pools.trash) picks the
+    // caster, 84263, instead, because it was seen first.
+    PackPools NoBossPackPools()
+    {
+        PackMember const caster1{ 1, 84263, PACK_ROLE_CASTER, /*casterSpellId*/ 12345, /*weight*/ 100 };
+        PackMember const melee1{ 1, 84264, PACK_ROLE_MELEE, 0, 100 };
+        PackMember const melee2{ 1, 84265, PACK_ROLE_MELEE, 0, 100 };
+        PackMember const melee3{ 1, 84266, PACK_ROLE_MELEE, 0, 100 };
+
+        PackPools pools;
+        pools.caster = { caster1 };
+        pools.melee = { melee1, melee2, melee3 };
+        // pools.boss is left empty on purpose - the whole point of this
+        // fixture is that the boss-standin fallback fires.
+        //
+        // The real loader order: pack 1's caster (entry 84263) loads before
+        // its melee (84264..84266), because m.entry sorts that way within
+        // the pack. A hand-built fixture has no loader to inherit this from,
+        // so it is spelled out here exactly as PDv2PackMgr::SelectSpawns
+        // would build it - see PackPools::trash's own comment for why this
+        // cannot be reconstructed by concatenating melee and caster above.
+        pools.trash = { caster1, melee1, melee2, melee3 };
+        // Only pack 1 exists here, so it is the only eligible entry in
+        // trashPackIds - Task 13's per-room pack draw has nothing to choose
+        // between and PDRandom::UniformInt(0, 0) answers without drawing
+        // (lo >= hi), so this fixture is not expected to move
+        // PD_SPAWN_DRAW_NOBOSS_PIN even though the draw now runs.
+        pools.trashPackIds = { 1 };
+        pools.meleeByPack = { { 1, { melee1, melee2, melee3 } } };
+        pools.casterByPack = { { 1, { caster1 } } };
+        return pools;
+    }
+
+    // Only one room, and it is the boss room: the trash slots draw from the
+    // same two-member-tie pool as the boss stand-in, which would make the
+    // pin unable to tell "picked the right stand-in" apart from "picked the
+    // right trash filler" if left in. One room keeps the pin reading
+    // entirely off the stand-in pick.
+    SpawnSelectInputs NoBossSpawnInputs()
+    {
+        SpawnSelectInputs in;
+        in.rooms = { { /*roomIndex*/ 0, /*isBossRoom*/ true } };
+        in.spawnsPerRoom = 5;
+        in.bossRoomAdds = 2;
+        in.casterPct = 40;
+        in.bandMin = 76;
+        in.affixPct = 40;
+        return in;
+    }
+
+    // Captured by running the fixed inputs above through the FIXED draw, not
+    // by reasoning about what it should be - a pin that only encodes the
+    // reasoning behind it could pass for the same wrong reason a hand-traced
+    // "should be" value would. The first entry is what matters for Finding
+    // 1: it must be the boss room's stand-in pick, and it must be 84263 (the
+    // caster), never 84264 (the melee member the pre-fix code picked).
+    //
+    // Checked against Task 13's pack draw and left AS IS: `pdblock --batch
+    // 500` still reports this pin clean. NoBossPackPools() below only ever
+    // loads pack 1, so the new per-room draw has exactly one eligible pack
+    // (trashPackIds = {1}) and PDRandom::UniformInt(0, 0) answers that
+    // without drawing (lo >= hi) - the draw runs, but it costs the stream
+    // nothing, so this pin was not expected to move and did not.
+    char const* const PD_SPAWN_DRAW_NOBOSS_PIN =
+        "84263,84263,84266,";
+
+    bool CheckNoBossSpawnDrawPinned(std::string& why)
+    {
+        SpawnSelectInputs in = NoBossSpawnInputs();
+        std::vector<SpawnPick> picks;
+        if (!PDv2SelectSpawns(12345u, in, NoBossPackPools(), picks))
+        {
+            why = "the pinned no-boss spawn draw refused to select";
+            return false;
+        }
+
+        std::string got;
+        for (SpawnPick const& p : picks)
+        {
+            got += std::to_string(p.entry);
+            got += ',';
+        }
+        if (got != PD_SPAWN_DRAW_NOBOSS_PIN)
+        {
+            why = "the no-boss spawn draw moved: " + got;
+            return false;
+        }
+        if (picks.empty() || picks.front().entry != 84263)
+        {
+            why = "the boss-standin tie-break did not pick the first-loaded "
+                  "member (caster 84263) - the melee/caster split order bug "
+                  "is back";
+            return false;
+        }
+        return true;
+    }
+
+    // --- one pack per room (Task 13, PDv2 content-expansion plan) ----------
+    //
+    // Every trash pick of a room comes from ONE pack. The boss slot is
+    // exempt: it draws from the role-2 pool across all packs, so a room's
+    // theme never constrains which boss can appear.
+    //
+    // `flat` is PDv2SelectSpawns's whole output for the run and `[begin,
+    // end)` is one room's slice of it - the same slicing
+    // PDv2PackMgr::SelectSpawns does with trashWanted/bossAdds
+    // (PDv2PackMgr.cpp:570-588), reproduced here because that file includes
+    // DatabaseEnv.h and cannot link into this harness. `hasBoss` skips slot 0
+    // (the boss, always the room's first pick when present) so the boss's
+    // packId 0 is never mistaken for "the room's pack is 0".
+    bool CheckRoomThemeCoherent(std::vector<SpawnPick> const& flat, size_t begin,
+                                size_t end, bool hasBoss, std::string& why)
+    {
+        int packId = 0;
+        bool have = false;
+        for (size_t i = hasBoss ? begin + 1 : begin; i < end; ++i)
+        {
+            if (!have)
+            {
+                packId = flat[i].packId;
+                have = true;
+                continue;
+            }
+            if (flat[i].packId != packId)
+            {
+                why = "a room mixes two packs";
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Real stock (mod_pdungeon_packs.sql), in full: packs 1 and 2 both carry
+    // melee, pack 1 alone also carries the five RANGE entries, and pack 3 is
+    // the boss draw with no trash member at all. This is not a synthetic
+    // fixture - it is exactly what Rule 1 and Rule 3 of Task 13's brief are
+    // about: pack 3 must never be drawable as a room's theme (it has nothing
+    // to fill a trash slot with), and a room themed to pack 2 must still get
+    // caster picks - from the merged pool, since pack 2 has none of its own -
+    // while its melee slots stay pack 2.
+    PackPools ThemeCoherencePackPools()
+    {
+        PackPools pools;
+        pools.melee = {
+            {1, 84264}, {1, 84265}, {1, 84266}, {1, 84268}, {1, 84272},
+            {1, 84274}, {1, 84280}, {1, 84284},
+            {2, 84267}, {2, 84269}, {2, 84270}, {2, 84271}, {2, 84273},
+            {2, 84275}, {2, 84277}, {2, 84278}, {2, 84279}, {2, 84282},
+            {2, 84283}, {2, 84286},
+        };
+        pools.caster = {
+            {1, 84263, PACK_ROLE_CASTER, 47809}, {1, 84276, PACK_ROLE_CASTER, 47857},
+            {1, 84281, PACK_ROLE_CASTER, 62129}, {1, 84285, PACK_ROLE_CASTER, 42842},
+            {1, 84287, PACK_ROLE_CASTER, 47809},
+        };
+        pools.boss = { {3, 84288}, {3, 84289}, {3, 84290} };
+        // Pack 3 excluded: it has zero non-boss members (Rule 1).
+        pools.trashPackIds = { 1, 2 };
+        pools.meleeByPack = {
+            { 1, { {1, 84264}, {1, 84265}, {1, 84266}, {1, 84268}, {1, 84272},
+                   {1, 84274}, {1, 84280}, {1, 84284} } },
+            { 2, { {2, 84267}, {2, 84269}, {2, 84270}, {2, 84271}, {2, 84273},
+                   {2, 84275}, {2, 84277}, {2, 84278}, {2, 84279}, {2, 84282},
+                   {2, 84283}, {2, 84286} } },
+        };
+        pools.casterByPack = {
+            // Pack 2 deliberately absent here (Rule 3): it has no caster
+            // group, so casterOf(2) must answer empty and send those slots
+            // to the merged pool above.
+            { 1, { {1, 84263, PACK_ROLE_CASTER, 47809}, {1, 84276, PACK_ROLE_CASTER, 47857},
+                   {1, 84281, PACK_ROLE_CASTER, 62129}, {1, 84285, PACK_ROLE_CASTER, 42842},
+                   {1, 84287, PACK_ROLE_CASTER, 47809} } },
+        };
+        return pools;
+    }
+
+    // Review finding (Task 13 fix pass): PDv2PackMgr::SelectSpawns used to
+    // hand `pools.trashPackIds` through straight from a load-time list that
+    // was theme-wide, not run-filtered, so it could disagree with
+    // meleeByPack/casterByPack and offer a pack with nothing to draw. The
+    // fix moved the filtering itself (FilterEligibleTrashPacks,
+    // generator/PDv2PackDraw.cpp) into this engine-free file specifically so
+    // it is testable here - CheckRoomThemeCoherent below cannot catch this
+    // failure mode no matter how it is strengthened, because
+    // SpawnPick::packId records the room's DRAWN theme, not where a member
+    // actually came from: every pick in a fully-fallen-back room still
+    // carries the same (wrong) theme, so it still "coheres" by that
+    // measure. Testing the filter directly, rather than its downstream
+    // symptom, is what actually closes the gap.
+    bool CheckEligibleTrashPackFilter(std::string& why)
+    {
+        // ThemeCoherencePackPools() only ever builds meleeByPack/casterByPack
+        // groups for packs 1 and 2 (pack 3 is boss-only, per its own
+        // comment). Pack 4 is not in this fixture at all - the same shape a
+        // stale/theme-wide load-time list would produce: a candidate the
+        // filtered groups know nothing about.
+        PackPools const pools = ThemeCoherencePackPools();
+        std::vector<int> const loaded = { 1, 2, 3, 4 };
+        std::vector<int> const want = { 1, 2 };
+        std::vector<int> const got = FilterEligibleTrashPacks(loaded, pools);
+        if (got != want)
+        {
+            std::string gotStr;
+            for (int id : got)
+            {
+                gotStr += std::to_string(id);
+                gotStr += ',';
+            }
+            why = "FilterEligibleTrashPacks let an ineligible pack through, dropped an "
+                  "eligible one, or lost the ascending order: got " + gotStr;
+            return false;
+        }
+        return true;
+    }
+
+    void RunPackThemeChecks(int seeds)
+    {
+        PackPools const pools = ThemeCoherencePackPools();
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 41u;
+
+            SpawnSelectInputs in;
+            // Five normal rooms and one boss room - enough per seed that a
+            // themed pack with no caster (pack 2) is exercised, without a
+            // room count so large the failure log stops being readable.
+            in.rooms = { {0, false}, {1, false}, {2, false},
+                         {3, false}, {4, false}, {5, true} };
+            in.spawnsPerRoom = 5;
+            in.bossRoomAdds = 2;
+            in.casterPct = 40;
+            in.bandMin = 76;
+            in.affixPct = 40;
+
+            std::vector<SpawnPick> flat;
+            if (!PDv2SelectSpawns(seed, in, pools, flat))
+            {
+                Check(false, "the theme-coherence draw refused to select", seed);
+                continue;
+            }
+
+            // Every pool above is rich enough for every slot to fill, so the
+            // slice sizes below always match what was actually consumed -
+            // the same assumption PDv2PackMgr::SelectSpawns's own slicing
+            // documents (PDv2PackMgr.cpp:553-560).
+            size_t cursor = 0;
+            for (RoomRequest const& room : in.rooms)
+            {
+                int const trashWanted = room.isBoss ? in.bossRoomAdds : in.spawnsPerRoom;
+                size_t const got = static_cast<size_t>(trashWanted + (room.isBoss ? 1 : 0));
+                size_t const end = (cursor + got <= flat.size()) ? cursor + got : flat.size();
+
+                std::string why;
+                Check(CheckRoomThemeCoherent(flat, cursor, end, room.isBoss, why),
+                      why.empty() ? "room theme check failed" : why.c_str(), seed);
+
+                // Rule 1: pack 3 (boss-only in the real stock) has no
+                // non-boss member and must never surface as a trash pick's
+                // packId - if it did, the eligibility filter let a pack with
+                // nothing to fill through.
+                for (size_t k = room.isBoss ? cursor + 1 : cursor; k < end; ++k)
+                {
+                    Check(flat[k].packId != 3,
+                          "a trash pick carries the boss-only pack's id - the "
+                          "eligibility filter let it through", seed);
+                }
+
+                cursor = end;
+            }
+        }
     }
 
     int RunBatch(int count, int rooms)
@@ -1916,11 +2755,38 @@ namespace
         RunLinkStateChecks();
         RunGameMathChecks();
         RunLayoutFreezeCheck();
+        {
+            // Two statements, not one call: argument evaluation order is
+            // unspecified, and why.c_str() must not be taken before
+            // CheckSpawnDrawPinned has finished writing into `why` (the same
+            // trap PDv2SelectSpawns's own pickTrash/emit split guards
+            // against, one file over).
+            std::string why;
+            bool const ok = CheckSpawnDrawPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // Same two-statements-not-one-call reasoning as the pin above,
+            // for the same argument-evaluation-order trap.
+            std::string why;
+            bool const ok = CheckNoBossSpawnDrawPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
         // A tenth of the batch is plenty for three boss-room counts: the
         // property is structural, not statistical.
         RunBossRoomChecks(count / 10 + 1);
         RunPhase2Checks(count / 10 + 1);
         RunThemeParityChecks(count / 10 + 1);
+        // Same tenth-of-the-batch reasoning: one pack per room is structural
+        // too, and a real seed only ever gets a handful of rooms per run.
+        RunPackThemeChecks(count / 10 + 1);
+        {
+            // Not seed-dependent - FilterEligibleTrashPacks is pure over its
+            // two arguments - so one Check is enough (Task 13 fix pass).
+            std::string why;
+            bool const ok = CheckEligibleTrashPackFilter(why);
+            Check(ok, why.empty() ? "eligible trash pack filter failed" : why.c_str(), 0);
+        }
 
         // The city cap must hold like the mine cap - its ids are one digit
         // wider, which is exactly the kind of erosion the measurement exists
@@ -2097,8 +2963,9 @@ int main(int argc, char** argv)
         int const obx = (argc >= 7) ? std::atoi(argv[5]) : 32 * 8;
         int const oby = (argc >= 7) ? std::atoi(argv[6]) : 32 * 8;
         int const theme = (argc >= 8) ? std::atoi(argv[7]) : 1;
+        int const bossRooms = (argc >= 9) ? std::atoi(argv[8]) : 1;
         WriteManifest(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)),
-                      rooms, argv[3], obx, oby, theme);
+                      rooms, argv[3], obx, oby, theme, bossRooms);
         return 0;
     }
 

@@ -785,6 +785,17 @@ public:
             return nullptr;
         }
 
+        // Ambient life keeps its own AI. This binder hands PDv2MobAI to every
+        // ownerless creature on the map, and PDv2MobAI::UpdateProximityAggro
+        // calls AttackStart - which UnitAI::AttackStart (UnitAI.cpp:29-33)
+        // does NOT gate on REACT_PASSIVE. So the passive react state every
+        // critter gets from Creature::InitializeReactState would not protect
+        // it: without this, a rat would hunt the player.
+        if (creature->IsCritter())
+        {
+            return nullptr;
+        }
+
         return new PDungeon::PDv2MobAI(creature);
     }
 };

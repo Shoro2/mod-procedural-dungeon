@@ -71,6 +71,11 @@ namespace PDungeon
             int row = 0;
             int col = 0;
             int dir = 0;
+            // The SECOND wall side, for a corner candidate; -1 when the cell
+            // has only one. The nudge for a corner is the sum of both sides'
+            // offsets, so the prop sits in the angle rather than against one
+            // face, and the facing bisects them.
+            int dir2 = -1;
         };
 
         // A weight of 0 is read as 1. A rule nobody wants should be deleted
@@ -121,6 +126,112 @@ namespace PDungeon
                     }
                 }
             }
+        }
+
+        // Every WALK cell with WALL cells on two ADJACENT sides, row-major,
+        // socket track excluded. The two sides are recorded in WALL_DIRS order,
+        // so a cell with three walls always resolves to the same pair.
+        void CollectCorners(std::string const& classes,
+                            std::vector<Candidate>& out)
+        {
+            out.clear();
+            for (int row = 0; row < PD_CELLS_PER_BLOCK; ++row)
+            {
+                for (int col = 0; col < PD_CELLS_PER_BLOCK; ++col)
+                {
+                    if (row == SOCKET_TRACK || col == SOCKET_TRACK) continue;
+                    if (classes[Index(row, col)] != DECOR_CLASS_WALK) continue;
+
+                    bool wall[4] = { false, false, false, false };
+                    for (int d = 0; d < 4; ++d)
+                    {
+                        int const r = row + WALL_DIRS[d].drow;
+                        int const c = col + WALL_DIRS[d].dcol;
+                        if (r < 0 || c < 0 ||
+                            r >= PD_CELLS_PER_BLOCK || c >= PD_CELLS_PER_BLOCK)
+                        {
+                            continue;
+                        }
+                        wall[d] = classes[Index(r, c)] == DECOR_CLASS_WALL;
+                    }
+
+                    // N,E,S,W: adjacency is d and (d+1)%4. The first pair in
+                    // this order wins, so a three-walled alcove is stable.
+                    for (int d = 0; d < 4; ++d)
+                    {
+                        int const e = (d + 1) % 4;
+                        if (!wall[d] || !wall[e]) continue;
+
+                        Candidate cand;
+                        cand.row = row;
+                        cand.col = col;
+                        cand.dir = d;
+                        cand.dir2 = e;
+                        out.push_back(cand);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Every WALK cell with no WALL on any side, row-major, socket track
+        // excluded. `dir` stays 0 and is never applied: a scattered prop sits
+        // on its cell centre and faces north, because there is no wall to turn
+        // away from and a drawn angle would cost the stream a draw per prop.
+        void CollectScatter(std::string const& classes,
+                            std::vector<Candidate>& out)
+        {
+            out.clear();
+            for (int row = 0; row < PD_CELLS_PER_BLOCK; ++row)
+            {
+                for (int col = 0; col < PD_CELLS_PER_BLOCK; ++col)
+                {
+                    if (row == SOCKET_TRACK || col == SOCKET_TRACK) continue;
+                    if (classes[Index(row, col)] != DECOR_CLASS_WALK) continue;
+
+                    bool touchesWall = false;
+                    for (int d = 0; d < 4 && !touchesWall; ++d)
+                    {
+                        int const r = row + WALL_DIRS[d].drow;
+                        int const c = col + WALL_DIRS[d].dcol;
+                        if (r < 0 || c < 0 ||
+                            r >= PD_CELLS_PER_BLOCK || c >= PD_CELLS_PER_BLOCK)
+                        {
+                            continue;
+                        }
+                        touchesWall = classes[Index(r, c)] == DECOR_CLASS_WALL;
+                    }
+                    if (touchesWall) continue;
+
+                    Candidate cand;
+                    cand.row = row;
+                    cand.col = col;
+                    out.push_back(cand);
+                }
+            }
+        }
+
+        // Placement name -> pool index, or -1 for a kind no planner implements.
+        // The order here is the order of the pool arrays and must not change.
+        int PlacementIndex(std::string const& placement)
+        {
+            if (placement == DECOR_PLACEMENT_WALL_FOOT) return 0;
+            if (placement == DECOR_PLACEMENT_CORNER)    return 1;
+            if (placement == DECOR_PLACEMENT_SCATTER)   return 2;
+            return -1;
+        }
+
+        // The angle halfway between two wall facings, on the short arc. The
+        // pairs are always 90 degrees apart, so this is the corner's diagonal.
+        double BisectFacing(double a, double b)
+        {
+            double diff = b - a;
+            while (diff > DECOR_PI)  diff -= 2.0 * DECOR_PI;
+            while (diff < -DECOR_PI) diff += 2.0 * DECOR_PI;
+            double out = a + diff * 0.5;
+            while (out < 0.0)             out += 2.0 * DECOR_PI;
+            while (out >= 2.0 * DECOR_PI) out -= 2.0 * DECOR_PI;
+            return out;
         }
 
         // Locale-proof fixed-format number reader: optional sign, digits,
@@ -253,8 +364,18 @@ namespace PDungeon
             case BlockRole::CorridorStraight: return "corridor_straight";
             case BlockRole::CorridorCorner:   return "corridor_corner";
             case BlockRole::CorridorT:        return "corridor_t";
-            default:                          return "corridor_cross";
+            case BlockRole::CorridorCross:    return "corridor_cross";
+            // A stub is walked into for its chest and never fought in, so it
+            // wants its own dressing. It reported "corridor_cross" through the
+            // old `default:`, which made a corridor_cross filter fire on stubs
+            // and a corridor_dead_end filter match nothing at all.
+            case BlockRole::CorridorDeadEnd:  return "corridor_dead_end";
         }
+        // The missing `default:` case enables gcc's -Wswitch warning to catch
+        // a future BlockRole enumerator added without a case here. The trailing
+        // return exists only to satisfy MSVC's C4715; the exhaustiveness check
+        // that matters is gcc's -Wswitch on the Ubuntu host.
+        return "corridor_cross";
     }
 
     bool DecorRoleMatches(std::string const& roleFilter, char const* roleName)
@@ -402,7 +523,9 @@ namespace PDungeon
         // mixing constant plus this discard together are the whole recipe.
         rng.NextUInt32();
 
-        std::vector<Candidate> pool;
+        std::vector<Candidate> poolWallFoot;
+        std::vector<Candidate> poolCorner;
+        std::vector<Candidate> poolScatter;
         std::vector<size_t> matching;
         std::vector<DecorSpot> placed;
 
@@ -423,16 +546,15 @@ namespace PDungeon
             std::vector<DecorAnchor> const* const anchors =
                 anchorsFor ? anchorsFor(block.chunkId) : nullptr;
 
-            CollectWallFeet(classes, pool);
+            CollectWallFeet(classes, poolWallFoot);
+            CollectCorners(classes, poolCorner);
+            CollectScatter(classes, poolScatter);
 
-            // Which rules speak for this block, and what their weights add up
-            // to. A rule's share of the block's candidate cells is its weight
-            // over that total, measured against the pool BEFORE anything was
-            // taken - so the shares do not move with the order they are used
-            // in, and "the brazier is the lighter rule" means the brazier gets
-            // fewer of the room's wall feet than the torch.
+            // Which rules speak for this block, per placement kind. Weights are
+            // a share of THAT kind's candidate cells: a corner rule competes
+            // with corner rules, never with the wall-foot torches.
             matching.clear();
-            int totalWeight = 0;
+            int totalWeight[PD_DECOR_PLACEMENT_COUNT] = { 0, 0, 0 };
             for (size_t const i : byId)
             {
                 DecorRule const& rule = rules[i];
@@ -441,20 +563,29 @@ namespace PDungeon
                 // decor at all the moment it became the default.
                 if (rule.theme != 0 && rule.theme != plan.config.theme)
                     continue;
-                if (rule.placement != DECOR_PLACEMENT_WALL_FOOT) continue;
+                int const kind = PlacementIndex(rule.placement);
+                if (kind < 0) continue;
                 if (!DecorRoleMatches(rule.roleFilter, roleName)) continue;
                 matching.push_back(i);
-                totalWeight += RuleWeight(rule);
+                totalWeight[kind] += RuleWeight(rule);
             }
             if (matching.empty())
             {
                 continue;
             }
 
-            int const poolAtStart = static_cast<int>(pool.size());
+            int const poolAtStart[PD_DECOR_PLACEMENT_COUNT] = {
+                static_cast<int>(poolWallFoot.size()),
+                static_cast<int>(poolCorner.size()),
+                static_cast<int>(poolScatter.size())
+            };
             for (size_t const i : matching)
             {
                 DecorRule const& rule = rules[i];
+                int const kind = PlacementIndex(rule.placement);
+                std::vector<Candidate>& pool =
+                    (kind == 2) ? poolScatter :
+                    (kind == 1) ? poolCorner  : poolWallFoot;
 
                 // Drawn for every matching rule, pool or no pool, so the
                 // stream's position follows the RULES and the plan and not how
@@ -464,8 +595,8 @@ namespace PDungeon
                 {
                     want = 0;
                 }
-                int const share = (poolAtStart * RuleWeight(rule) +
-                                   totalWeight - 1) / totalWeight;
+                int const share = (poolAtStart[kind] * RuleWeight(rule) +
+                                   totalWeight[kind] - 1) / totalWeight[kind];
                 int const take = want < share ? want : share;
 
                 placed.clear();
@@ -481,17 +612,38 @@ namespace PDungeon
                     // and every prop after it in the block would move.
                     pool.erase(pool.begin() + k);
 
-                    WallDir const& dir = WALL_DIRS[cand.dir];
                     DecorSpot spot;
                     spot.bx = block.bx;
                     spot.by = block.by;
                     spot.ruleId = rule.id;
                     spot.goEntry = rule.goEntry;
-                    spot.u = (static_cast<double>(cand.row) + 0.5) *
-                             PD_CELL_SIZE_YD + dir.du;
-                    spot.v = (static_cast<double>(cand.col) + 0.5) *
-                             PD_CELL_SIZE_YD + dir.dv;
-                    spot.orientation = dir.facing;
+                    spot.u = (static_cast<double>(cand.row) + 0.5) * PD_CELL_SIZE_YD;
+                    spot.v = (static_cast<double>(cand.col) + 0.5) * PD_CELL_SIZE_YD;
+                    spot.orientation = 0.0;
+
+                    // A scatter candidate carries no wall (dir == 0, dir2 ==
+                    // -1, but dir == 0 is the valid "north" index) - so the
+                    // nudge is guarded on the placement KIND, not on the
+                    // candidate's own fields, or every scattered prop would
+                    // silently take a wall_foot's push to the north.
+                    if (kind != 2)
+                    {
+                        WallDir const& dir = WALL_DIRS[cand.dir];
+                        spot.u += dir.du;
+                        spot.v += dir.dv;
+                        spot.orientation = dir.facing;
+
+                        if (cand.dir2 >= 0)
+                        {
+                            // A corner: nudged into the angle of BOTH walls,
+                            // and facing out along their bisector. Derived,
+                            // never drawn, exactly like the single-wall case.
+                            WallDir const& dir2 = WALL_DIRS[cand.dir2];
+                            spot.u += dir2.du;
+                            spot.v += dir2.dv;
+                            spot.orientation = BisectFacing(dir.facing, dir2.facing);
+                        }
+                    }
 
                     bool clear = true;
                     if (anchors)
@@ -532,6 +684,110 @@ namespace PDungeon
             }
         }
 
+        // Truncate in plan order: blocks near the entrance keep their dressing
+        // and the tail is what is lost, which is the same bias v1's decor-first
+        // truncation had. Never truncate by drawing - that would make the
+        // survivors depend on the budget.
+        if (out.size() > static_cast<size_t>(PD_DECOR_MAX_SPOTS))
+        {
+            out.resize(static_cast<size_t>(PD_DECOR_MAX_SPOTS));
+        }
+        return out;
+    }
+
+    std::vector<CritterSpot> BuildCritterPlan(BlockPlan const& plan,
+                                              DecorMaskProvider const& maskFor,
+                                              std::vector<CritterRule> const& rules,
+                                              uint32_t layoutSeed)
+    {
+        std::vector<CritterSpot> out;
+
+        std::vector<size_t> byId(rules.size());
+        for (size_t i = 0; i < rules.size(); ++i) byId[i] = i;
+        // stable_sort, not sort: the sibling BuildDecorPlan uses stable_sort for
+        // the same ascending-id ordering, and std::sort's tie order is
+        // implementation-defined - MSVC's STL and libstdc++ are free to break
+        // ties differently, which is exactly the divergence class this
+        // project's determinism discipline forbids. Unreachable today
+        // (`pdungeon_critter_rules` has PRIMARY KEY(id), so no two rules ever
+        // tie), but free to fix and cheaper to fix now than to re-discover.
+        std::stable_sort(byId.begin(), byId.end(), [&rules](size_t l, size_t r)
+        {
+            return rules[l].id < rules[r].id;
+        });
+
+        // Its OWN stream, mixed with its own constant: adding or removing a
+        // critter rule must never move a single prop.
+        PDRandom rng(layoutSeed ^ PD_CRITTER_SEED_MIX);
+        rng.NextUInt32();
+
+        std::vector<Candidate> pool;
+        std::vector<size_t> matching;
+
+        for (PlacedBlock const& block : plan.blocks)
+        {
+            uint8_t const* const mask = maskFor ? maskFor(block.chunkId) : nullptr;
+            if (!mask)
+            {
+                continue;
+            }
+
+            std::string const classes = PDv2Classify(mask);
+            char const* const roleName = BlockRoleName(block.role);
+            CollectScatter(classes, pool);
+
+            matching.clear();
+            int totalWeight = 0;
+            for (size_t const i : byId)
+            {
+                CritterRule const& rule = rules[i];
+                if (rule.theme != 0 && rule.theme != plan.config.theme) continue;
+                if (!DecorRoleMatches(rule.roleFilter, roleName)) continue;
+                matching.push_back(i);
+                totalWeight += (rule.weight > 0 ? rule.weight : 1);
+            }
+            if (matching.empty())
+            {
+                continue;
+            }
+
+            int const poolAtStart = static_cast<int>(pool.size());
+            for (size_t const i : matching)
+            {
+                CritterRule const& rule = rules[i];
+                int want = rng.UniformInt(rule.minPerBlock, rule.maxPerBlock);
+                if (want < 0)
+                {
+                    want = 0;
+                }
+                int const w = rule.weight > 0 ? rule.weight : 1;
+                int const share = (poolAtStart * w + totalWeight - 1) / totalWeight;
+                int const take = want < share ? want : share;
+
+                for (int n = 0; n < take && !pool.empty(); ++n)
+                {
+                    int const k =
+                        rng.UniformInt(0, static_cast<int>(pool.size()) - 1);
+                    Candidate const cand = pool[static_cast<size_t>(k)];
+                    pool.erase(pool.begin() + k);
+
+                    CritterSpot spot;
+                    spot.bx = block.bx;
+                    spot.by = block.by;
+                    spot.ruleId = rule.id;
+                    spot.creatureEntry = rule.creatureEntry;
+                    spot.u = (static_cast<double>(cand.row) + 0.5) * PD_CELL_SIZE_YD;
+                    spot.v = (static_cast<double>(cand.col) + 0.5) * PD_CELL_SIZE_YD;
+                    spot.orientation = 0.0;
+                    out.push_back(spot);
+                }
+            }
+        }
+
+        if (out.size() > static_cast<size_t>(PD_CRITTER_MAX_SPOTS))
+        {
+            out.resize(static_cast<size_t>(PD_CRITTER_MAX_SPOTS));
+        }
         return out;
     }
 }

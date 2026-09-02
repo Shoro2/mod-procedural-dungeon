@@ -60,14 +60,32 @@ namespace PDungeon
     char const DECOR_CLASS_WALL = 'L';
     char const DECOR_CLASS_VOID = 'V';
 
-    // The only placement kind implemented so far. A rule naming anything else
+    // The placement kinds the planner implements. A rule naming anything else
     // is skipped rather than guessed at - a prop placed by a rule nobody wrote
     // is worse than a prop that never appears.
     char const* const DECOR_PLACEMENT_WALL_FOOT = "wall_foot";
+    // A walk cell with wall cells on two ADJACENT sides. Two opposite walls
+    // are a passage, not a corner, and are deliberately not candidates.
+    char const* const DECOR_PLACEMENT_CORNER    = "corner";
+    // Open floor: a walk cell with NO wall on any of its four sides. The
+    // inverse of wall_foot, so the two kinds can never fight over a cell.
+    char const* const DECOR_PLACEMENT_SCATTER   = "scatter";
+
+    // How many placement kinds the planner implements. The pools and the
+    // per-kind weight totals are sized by it.
+    int const PD_DECOR_PLACEMENT_COUNT = 3;
 
     // Mixed into the layout seed to open the decor stream. An arbitrary odd
     // constant, fixed for ever: changing it re-decorates every stored layout.
     uint32_t const PD_DECOR_SEED_MIX = 0x5EC0DE0Fu;
+
+    // Hard ceiling on the props one layout may plan. v1 had a GameObject cap
+    // and v2 lost it; a 17-room layout can already ask for ~100 spots, and
+    // this round adds three rule families on top. 250 is roughly 2.5x the
+    // measured worst case, so it never bites a normal layout and always bites
+    // a runaway rule. The cut is taken at the END, in plan order, so which
+    // props survive is a property of the plan and not of the draw.
+    int const PD_DECOR_MAX_SPOTS = 250;
 
     // How far into its own cell a wall-foot prop is pushed, towards the wall
     // it belongs to. Under half a cell (4.17 yd) on purpose, so the prop stays
@@ -196,6 +214,57 @@ namespace PDungeon
                                           DecorAnchorProvider const& anchorsFor,
                                           std::vector<DecorRule> const& rules,
                                           uint32_t layoutSeed);
+
+    // Ambient life. A critter is NOT a pack role: it must never touch the
+    // spawn draw's documented order, and it must never be counted by the run.
+    // Its own stream, its own budget, its own table - the decor shape, applied
+    // to creatures.
+    uint32_t const PD_CRITTER_SEED_MIX = 0xC817E12Bu;
+
+    // Hard ceiling on the critters one layout may plan - the same role
+    // PD_DECOR_MAX_SPOTS plays for props. Measured at the 15-room cap
+    // against the shipped rule set: true pre-truncation mean 56.47, true
+    // max 82, and 3398 of 12000 fifteen-room layouts (28.3%) were being
+    // truncated by the old ceiling of 60. A budget that fires on ordinary
+    // content is tuning by accident - density is the rules' min/max to set,
+    // and this constant's only job is to catch a rule set that runs away.
+    // 100 clears the measured max with room to spare, so it stays inert on
+    // everything the shipped rules produce. Same as the decor budget, the
+    // cut is taken at the END, in plan order.
+    int const PD_CRITTER_MAX_SPOTS = 100;
+
+    // One row of `pdungeon_critter_rules`. `roleFilter` is the same prefix
+    // match `DecorRule` uses.
+    struct CritterRule
+    {
+        int         id = 0;
+        int         theme = 0;
+        std::string roleFilter;
+        int         creatureEntry = 0;
+        int         minPerBlock = 0;
+        int         maxPerBlock = 0;
+        int         weight = 1;
+    };
+
+    struct CritterSpot
+    {
+        int    bx = 0;
+        int    by = 0;
+        int    ruleId = 0;
+        int    creatureEntry = 0;
+        double u = 0.0;
+        double v = 0.0;
+        double orientation = 0.0;
+    };
+
+    // Critters for a layout, in the same fixed order BuildDecorPlan uses:
+    // blocks in plan order, rules by ascending id, candidate cells row-major.
+    // Placed on OPEN floor only (the scatter candidate set), so a critter never
+    // stands inside a prop and never on the line every player walks.
+    std::vector<CritterSpot> BuildCritterPlan(BlockPlan const& plan,
+                                              DecorMaskProvider const& maskFor,
+                                              std::vector<CritterRule> const& rules,
+                                              uint32_t layoutSeed);
 }
 
 #endif

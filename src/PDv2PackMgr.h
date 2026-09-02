@@ -18,6 +18,8 @@
 #ifndef MOD_PDUNGEON_V2_PACK_MGR_H
 #define MOD_PDUNGEON_V2_PACK_MGR_H
 
+#include "generator/PDv2PackDraw.h"
+
 #include <cstdint>
 #include <string>
 #include <unordered_map>
@@ -34,23 +36,15 @@
 // Loaded once at world startup and READ-ONLY afterwards, exactly like
 // PDv2Mgr::LoadChunkMeta - that immutability is what lets map threads query it
 // without a lock. Pack changes need a restart, same as a kit change.
+//
+// PackRole, PackMember, SpawnPick and SpawnSelectInputs live in
+// generator/PDv2PackDraw.h, not here: that header is engine-free (no
+// AzerothCore include may appear in it), which is what lets
+// tests/blockplan_harness.cpp link the actual spawn draw. This file keeps the
+// types that stay database-shaped - Pack, MemberSpell, AffixDef - and the
+// manager that loads them.
 namespace PDungeon
 {
-    enum PackRole : uint8_t
-    {
-        PACK_ROLE_MELEE = 0,
-        PACK_ROLE_CASTER = 1,
-        PACK_ROLE_BOSS = 2
-    };
-
-    struct PackMember
-    {
-        uint32_t entry = 0;
-        uint8_t  role = PACK_ROLE_MELEE;
-        uint32_t casterSpellId = 0;     // 0 for anything that is not a caster
-        uint16_t weight = 100;
-    };
-
     enum MemberSpellSlot : uint8_t
     {
         // The range mob's filler: cast back to back for as long as it holds,
@@ -97,40 +91,15 @@ namespace PDungeon
         uint8_t  minDiff = 1;
     };
 
-    struct SpawnPick
-    {
-        uint32_t entry = 0;
-        uint8_t  role = PACK_ROLE_MELEE;
-        uint32_t casterSpellId = 0;
-        // This spawn wears the run's affixes. Rolled inside SelectSpawns so it
-        // rides the seeded stream with every other spawn decision - the same
-        // seed brings back the same affixed mobs after a restart.
-        bool     affixed = false;
-    };
-
-    // One room the caller wants filled. `roomIndex` is opaque here and simply
-    // handed back, so the instance script can key it however it likes.
-    struct RoomRequest
-    {
-        int  roomIndex = 0;
-        bool isBoss = false;
-    };
-
+    // One requested room's worth of picks, keyed back to the RoomRequest that
+    // asked for it. SelectSpawns rebuilds this grouping from the flat stream
+    // PDv2SelectSpawns hands back, using the same per-room slot counts
+    // (spawnsPerRoom / bossRoomAdds) it computed the request with, so the
+    // boundaries are never ambiguous.
     struct RoomSpawns
     {
         int roomIndex = 0;
         std::vector<SpawnPick> picks;
-    };
-
-    struct SpawnSelectInputs
-    {
-        std::vector<RoomRequest> rooms;
-        int spawnsPerRoom = 5;          // trash in a NORMAL room
-        int bossRoomAdds = 2;           // trash BESIDE the boss, boss rooms
-        int casterPct = 60;             // 01 §8 caster ratio, already clamped
-        int bandMin = 76;               // band is [bandMin, bandMin + 4]
-        int unlockedDlvl = 0;
-        int affixPct = 40;              // share of TRASH that wears the affixes
     };
 
     class PDv2PackMgr
@@ -184,13 +153,34 @@ namespace PDungeon
         // Returns false when no pack survives the pool filter, which is the
         // caller's cue to fall back to its placeholder creature.
         //
-        // EVERY TRASH SLOT ROLLS INDEPENDENTLY from the whole band-filtered,
-        // unlocked pool (operator directive 2026-08-08). There used to be a
-        // per-run subset of `creatureTypesCap` distinct entries drawn once and
-        // reused for the entire dungeon; the second live test read exactly what
-        // that does - "only a few of the available mobs get picked and then
-        // only those are used". The boss draw is separate as before: every boss
-        // room gets exactly one role-2 entry, drawn fresh.
+        // EVERY ROOM DRAWS ONE PACK (Task 13) and its trash slots prefer that
+        // pack's members for their role, falling back to the merged, band-
+        // filtered, unlocked pool per SLOT - never per room - only when the
+        // pack has nothing of the wanted role. A room therefore reads as one
+        // faction instead of a jumble of every unlocked pack's trash side by
+        // side. Only packs with at least one non-boss member that survives
+        // THIS RUN'S band/unlock filter are ever drawn as a room's theme
+        // (PackPools::trashPackIds, re-derived per run from _trashPackIds -
+        // see that field's own comment): a boss-only pack, or one this run's
+        // band/unlock excludes entirely, could fill nothing and is excluded
+        // by construction, not by chance.
+        //
+        // Before Task 13, every trash slot in the WHOLE RUN rolled
+        // independently from that same merged pool (operator directive
+        // 2026-08-08, replacing a per-run subset of `creatureTypesCap`
+        // distinct entries drawn once and reused for the entire dungeon - the
+        // second live test read exactly what that does, "only a few of the
+        // available mobs get picked and then only those are used"). That
+        // merged pool is still exactly what the per-slot fallback above draws
+        // from; only the THEMED preference in front of it is new.
+        //
+        // Inserting the per-room pack draw moved every downstream draw by one
+        // call, which re-rolls WHICH creatures an already-stored seed spawns -
+        // accepted, not a bug: the server is not public and character
+        // progress is expendable. The boss draw is untouched by any of this:
+        // every boss room still gets exactly one role-2 entry, drawn fresh
+        // from the pool across ALL packs, so a room's theme never constrains
+        // which boss can appear.
         bool SelectSpawns(uint32_t seed, SpawnSelectInputs const& in,
                           std::vector<RoomSpawns>& out) const;
 
@@ -207,6 +197,21 @@ namespace PDungeon
         std::vector<AffixDef> _affixes;     // enabled rows only, by minDiff
         std::unordered_map<uint32_t, std::vector<MemberSpell>> _memberSpells;
         size_t _memberSpellRows = 0;
+
+        // Packs with at least one non-boss member for the WHOLE THEME,
+        // ascending by id - independent of any run's level band or unlock
+        // level. This is the CANDIDATE list only, computed once here because
+        // the theme-wide shape never changes between one restart and the
+        // next; it is not what SelectSpawns hands the draw. A pack can sit
+        // here and still have nothing left to fill a trash slot with once a
+        // run's band/unlock filter runs, so SelectSpawns re-derives
+        // PackPools::trashPackIds from THIS list filtered against that run's
+        // actual meleeByPack/casterByPack groups (FilterEligibleTrashPacks,
+        // generator/PDv2PackDraw.cpp) - fixed in the Task 13 fix pass after
+        // a review finding: the unfiltered list let a room draw a pack with
+        // nothing available, silently falling every slot back to the merged
+        // pool.
+        std::vector<int> _trashPackIds;
     };
 }
 

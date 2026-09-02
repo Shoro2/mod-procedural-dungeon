@@ -16,15 +16,19 @@
 -- roleFilter is a PREFIX match against `pdungeon_chunk_meta`.`role`:
 --   'room'       matches room, room_entrance AND room_boss
 --   'room_boss'  matches room_boss only
---   'corridor'   matches corridor_straight, corridor_corner, corridor_t and
---                corridor_cross
+--   'corridor'   matches corridor_straight, corridor_corner, corridor_t,
+--                corridor_cross AND corridor_dead_end (the stub block; it
+--                used to report itself as corridor_cross, which made a
+--                corridor_cross filter fire on stubs and left a
+--                corridor_dead_end filter matching nothing at all)
 --   ''           matches every block
 --
--- placement is 'wall_foot' for every row here and is the only kind the
--- planner implements: a WALK cell that touches a WALL cell on one of its four
--- sides, the prop pushed 2.5 yd into that cell towards the wall and turned
--- away from it. A rule naming any other placement is skipped rather than
--- guessed at.
+-- placement is 'wall_foot' for every row in THIS file: a WALK cell that
+-- touches a WALL cell on one of its four sides, the prop pushed 2.5 yd into
+-- that cell towards the wall and turned away from it. The planner also
+-- implements 'corner' and 'scatter' placement, used by
+-- mod_pdungeon_decor_clutter.sql's rules. A rule naming any placement kind
+-- the planner does not implement is skipped rather than guessed at.
 -- ----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS `pdungeon_decor_rules` (
@@ -59,13 +63,14 @@ DELETE FROM `pdungeon_decor_rules` WHERE `id` BETWEEN 1 AND 3;
 -- minSpacingYd of 8 is one cell (8.33 yd) rounded down, so two props of the
 -- same rule never end up in cells that touch.
 --
--- Rule 3 is DORMANT against kit v2 and is shipped all the same. Every corridor
--- variant the kit ships is exactly its socket track - the walkable cells of
--- corridor_straight are column 4 and nothing else - and the planner never
--- places on the track, because that is the one line every player has to walk.
--- The rule becomes live with the first corridor variant that is wider than
--- one cell; until then it costs one draw per corridor block and places
--- nothing.
+-- Rule 3 is LIVE against kit v23 (previously documented here as DORMANT -
+-- false since kit v23 widened every corridor to two cells). The walkable
+-- cells of corridor_straight are columns 3 AND 4, not column 4 alone; only
+-- index 4 (the socket track itself, the one line every player has to walk)
+-- is excluded, leaving column 3 as a real wall-foot candidate. The four
+-- corridor_straight variants yield 30 wall-foot candidates between them, and
+-- rule 3 measures out to fire on roughly half of all corridor blocks -
+-- planting a torch in the lane beside the track, not on it.
 INSERT INTO `pdungeon_decor_rules`
     (`id`, `theme`, `roleFilter`, `goEntry`, `placement`, `minPerBlock`, `maxPerBlock`, `weight`, `minSpacingYd`) VALUES
     (1, 0, 'room',      910020, 'wall_foot', 1, 3, 100, 8),

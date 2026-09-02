@@ -1,0 +1,539 @@
+=== 48_gen_t1_blockkit.py (cumulative vs pre-round backup) ===
+--- 48_gen_t1_blockkit.py.pre_roundA_20260901	2026-09-01 16:52:39.663404900 +0200
++++ 48_gen_t1_blockkit.py	2026-09-01 23:30:28.284032700 +0200
+@@ -231,6 +231,10 @@
+                         "sockets": kitv1.mask_name(mask),
+                         "hasPlatform": platform,
+                         "alt": alt,
++                        # Task 16: resolved here, once, from THEME_TEXTURE_LAYERS +
++                        # THEME_ROLE_FLOOR, so kit_meta.json carries the answer and
++                        # script 51 never has to know the role->bucket rule itself.
++                        "textureLayers": tex_layers_for(theme, role),
+                     })
+     out.sort(key=lambda v: v["chunkId"])
+     return out
+@@ -1368,17 +1372,50 @@
+ LAMP_SINK_DZ = -8.0                          # bury the pole; ~13 yd stays visible
+ 
+ # The kit-wide MTEX superset: theme 1 paints with layers (0, 1), theme 2 with
+-# (2, 3). nLayers stays 2 per MCNK and MCAL one blended layer, so every size
+-# that must be uniform stays uniform. Script 51 reads this from kit_meta.
++# (2, 3), for the ROOM role. nLayers stays 2 per MCNK and MCAL one blended
++# layer, so every size that must be uniform stays uniform. Script 51 reads
++# this from kit_meta.
+ # Round-3 texture lessons (screenshots): (a) a texture outside TILESET\ is
+ # NOT loadable by the terrain renderer - the TANARIS masonry rendered as
+ # solid placeholder GREEN wherever its layer had weight; terrain layers must
+ # come from TILESET. (b) DuskwoodRockBase reads as laid slate TILES when the
+ # top-down projection stretches it up a wall ("Fliesen an der Wand verkehrt"
+ # was the MINE wall) - a wall texture must be structureless rock.
++#
++# Task 16 (round A): entries 4-7 give corridor and boss rooms their OWN floor,
++# instead of every role in the dungeon tiling the same street/mud texture -
++# "monoton" was the operator's word for the whole kit wearing one floor and
++# one wall per theme. Layer 0 stays the WALL in every role (see the "WALL
++# FIRST" note below the table) - only the floor half of THEME_TEXTURE_LAYERS
++# moves, per role, via THEME_ROLE_FLOOR underneath this table.
++#
++# Existence and the _s specular were checked against the client archives
++# before adding any of 4-7 (missing either renders solid GREEN - the same
++# round-3 lesson, re-measured for these four). Axis imbalance was measured
++# fresh: neither this file's own comment above nor
++# scripts/100_stage_city_wall_texture.py:44-50 (which narrates the 43 %/2.4pt
++# vs 50 %/12.1pt HWALL_03-vs-WALL_04 story used as the acceptance bar) ships
++# the code that produced those figures, only the prose conclusion - so the
++# measurement was rebuilt from the same concept (Sobel gradient orientation,
++# top-quartile-magnitude "strong" edges, wrap-around border since a terrain
++# tile repeats edge to edge, 15 deg axis window) and calibrated against a
++# synthetic isotropic field (31.0 %, wants ~33.3 %) and against this file's
++# own four already-recorded tiles before being trusted: DuskwoodCobblestone2
++# reads 33.3 %/3.4pt against a documented 29.7 %, ICB_CobbleStone_A reads
++# 72.6 %/5.0pt against a documented 63.0 %, HWALL_03 reads 50.3 %/3.6pt
++# against 43 %/2.4pt, WALL_04 reads 62.5 %/15.0pt against 50 %/12.1pt - the
++# absolute numbers run a few points high (different threshold, unrecoverable
++# exactly) but the RANK ORDER and the imbalance story match exactly: HWALL_03
++# stays single-digit imbalance, WALL_04 alone jumps into double digits. All
++# four new candidates measure single-digit imbalance, inside the accepted
++# band and nowhere near WALL_04's rejected 15 pt:
++#   AeriePeaksRockRoadBase      26.5 % axis-aligned, imbalance  0.6 pt
++#   AeriePeaksGravelNeedlesBase 35.7 % axis-aligned, imbalance  0.6 pt
++#   ICB_CobbleStone_B           37.7 % axis-aligned, imbalance  1.4 pt
++#   DuskwoodCobblestone         36.4 % axis-aligned, imbalance  5.1 pt
+ TEXTURE_SUPERSET = (
+-    r"TILESET\Aerie Peaks\AeriePeaksRockyMudBase.blp",   # 0: mine floor
+-    r"TILESET\Deadwind Pass\DeadwindPassRockBase.blp",   # 1: mine rock
++    r"TILESET\Aerie Peaks\AeriePeaksRockyMudBase.blp",   # 0: mine floor (room)
++    r"TILESET\Deadwind Pass\DeadwindPassRockBase.blp",   # 1: mine rock (wall)
+     # 2: city street. Was ICB_CobbleStone_A, and the operator's "die wand soll
+     # nicht so aussehen wie der boden" is measurable: that texture is a regular
+     # brick lattice with 63.0 %% of its strong gradients within 15 deg of an
+@@ -1390,7 +1427,7 @@
+     # to the wall's courses. It is also the least saturated candidate measured
+     # (0.142), so it darkens rather than colours under the night palette, and
+     # it ships its own _s - without which terrain renders solid green.
+-    r"TILESET\DUSKWOOD\DuskwoodCobblestone2.blp",
++    r"TILESET\DUSKWOOD\DuskwoodCobblestone2.blp",         # 2: city floor (room)
+     # Round 16: the city wall is now the HOUSES' OWN STONE. The operator
+     # asked for it in those words - "die waende sollen so eine textur wie die
+     # haeuser bekommen um weniger aufzufallen" - and Deadwind rock, whatever
+@@ -1405,7 +1442,34 @@
+     # the wall, so anything with a reading direction shows up rotated on half
+     # the walls; that projection law is what three rounds of "die
+     # pflastersteine sind um 90 grad verdreht" were about.
+-    r"TILESET\FLPD\FLPD_CityWall.blp",                    # 3: city stone
++    r"TILESET\FLPD\FLPD_CityWall.blp",                    # 3: city stone (wall)
++    # 4: mine corridor floor. Aerie Peaks' own rock-road cobble, so the theme
++    # stays coherent (still Aerie Peaks stone, just the road cut of it) while
++    # reading as a distinct, narrower track than the room's mud. Measured
++    # 26.5 %% axis-aligned, imbalance 0.6pt - the flattest imbalance of every
++    # tile in this table, including the two live room floors.
++    r"TILESET\Aerie Peaks\AeriePeaksRockRoadBase.blp",    # 4: mine floor (corridor)
++    # 5: mine boss floor. Aerie Peaks' gravel-and-needles ground - visually
++    # rougher than the room's mud, which is the point: the boss room should
++    # read as a different, harder floor when a player steps into it. Measured
++    # 35.7 %% axis-aligned, imbalance 0.6pt.
++    r"TILESET\Aerie Peaks\AeriePeaksGravelNeedlesBase.blp",  # 5: mine floor (boss)
++    # 6: city corridor floor. The stock ICB cobblestone (already on record as
++    # this project's own fallback choice for masonry, see
++    # scripts/100_stage_city_wall_texture.py's "Stock fallback" note) reads as
++    # plain paving next to Duskwood's arced cobbles, which is exactly the
++    # differentiation a corridor needs from the room it connects. Measured
++    # 37.7 %% axis-aligned, imbalance 1.4pt - lower imbalance than the live
++    # DuskwoodCobblestone2 room floor (3.4pt).
++    r"TILESET\Generic\ICB_CobbleStone_B.blp",             # 6: city floor (corridor)
++    # 7: city boss floor. DuskwoodCobblestone (no "2") is the same cobble
++    # family and grammar as the room floor, one tone rougher, so the boss room
++    # reads as a variant of the street rather than a foreign material dropped
++    # into the city theme. Measured 36.4 %% axis-aligned, imbalance 5.1pt -
++    # inside the accepted band (HWALL_03's chosen 2.4-3.6pt reading is the
++    # low bar, WALL_04's rejected 12.1-15.0pt reading is the high bar; 5.1pt
++    # sits well clear of the reject side).
++    r"TILESET\DUSKWOOD\DuskwoodCobblestone.blp",          # 7: city floor (boss)
+ )
+ # WALL FIRST, floor second - and that order is the fix, not a preference.
+ #
+@@ -1430,6 +1494,42 @@
+ # rendered blend is identical to what was intended all along.
+ THEME_TEXTURE_LAYERS = {1: [1, 0], 2: [3, 2]}
+ 
++# Per-role floor override: {theme: {bucket: superset index}}. THEME_TEXTURE_
++# LAYERS above stays the ROOM default (it is also what a role missing from
++# this table falls back to) - this table only lists what a corridor or a
++# boss room paints DIFFERENTLY. Wall index never appears here: rule 1 of
++# Task 16 is layer 0 stays the wall in every role, so tex_layers_for below
++# only ever substitutes theme_layers[theme][1], never [0].
++THEME_ROLE_FLOOR = {
++    1: {"corridor": 4, "boss": 5},    # mine: room=0 (RockyMud), corridor=4 (RockRoad), boss=5 (GravelNeedles)
++    2: {"corridor": 6, "boss": 7},    # city: room=2 (Cobblestone2), corridor=6 (ICB_B), boss=7 (Cobblestone)
++}
++
++
++def _floor_role_bucket(role):
++    """role (e.g. "room_boss", "corridor_t") -> "room" | "corridor" | "boss".
++
++    Every ROLE_TABLE entry is one of exactly these three buckets: "room" and
++    "room_entrance" read as a plain room floor, "room_boss" is its own
++    bucket, and every "corridor_*" (straight/corner/t/cross/dead_end) shares
++    one corridor floor regardless of its socket shape - the floor is a
++    property of the role, not of which sockets a given mask opens."""
++    if role == "room_boss":
++        return "boss"
++    if role.startswith("corridor"):
++        return "corridor"
++    return "room"
++
++
++def tex_layers_for(theme, role):
++    """[wallIdx, floorIdx] for this (theme, role) - the pair a kit file's
++    MCLY paints with. Resolved once per variant and carried in kit_meta.json
++    so script 51 is a pure consumer and never re-derives the bucket itself."""
++    wall_idx, room_floor_idx = THEME_TEXTURE_LAYERS[theme]
++    bucket = _floor_role_bucket(role)
++    floor_idx = THEME_ROLE_FLOOR.get(theme, {}).get(bucket, room_floor_idx)
++    return [wall_idx, floor_idx]
++
+ # One union registry per kind: MMDX/MWMO are KIT-WIDE tables (uniformity), so
+ # a nameId means the same thing in every file of either theme. Keys are
+ # disjoint across themes by construction - asserted right here, at import
+@@ -3195,6 +3295,7 @@
+             "surfaceClasses": classes,
+             "anchors": anchors,
+             "anchorsJson": json.dumps(anchors, separators=(",", ":")),
++            "textureLayers": v["textureLayers"],
+         })
+     say("    built %d block variants, each %d bytes", len(rows), len(donor))
+ 
+@@ -3492,13 +3593,21 @@
+                 "name": THEME_NAMES[t],
+                 "chunkIdBase": THEME_BASES[t],
+                 "textureLayers": THEME_TEXTURE_LAYERS[t],
++                "roleFloor": THEME_ROLE_FLOOR.get(t, {}),
+             } for t in sorted(THEME_BASES)
+         },
+         "textures": {
+             "superset": list(TEXTURE_SUPERSET),
+             "note": "MTEX is this superset in EVERY kit file (uniformity); "
+-                    "each MCNK's MCLY picks its theme's pair by index. "
+-                    "Script 51 consumes this - do not also pass --textures.",
++                    "each chunk's own resolved [wallIdx, floorIdx] lives on "
++                    "its 'chunks' entry as textureLayers (Task 16: floor "
++                    "varies by role - room/corridor/boss - within a theme, "
++                    "wall never does). Script 51 reads textureLayers per "
++                    "chunk file and never re-derives the role->floor rule "
++                    "itself; 'themes'.textureLayers/roleFloor above are the "
++                    "room default and the per-role overrides that produced "
++                    "it, kept for humans reading this file. Do not also "
++                    "pass --textures.",
+         },
+         "placements": {
+             "design": "fixed-slot MDDF/MODF + per-MCNK MCRF capacity, baked "
+@@ -3527,7 +3636,7 @@
+                                       "sha256", "walkMask", "walkableCells",
+                                       "surfaceClasses", "anchors",
+                                       "m2Placements", "wmoPlacements",
+-                                      "goProps")}
++                                      "goProps", "textureLayers")}
+                    for r in rows],
+     }
+     meta_blob = (json.dumps(meta, indent=2) + "\n").encode("utf-8")
+=== 51_texture_blockkit.py (cumulative vs pre-round backup) ===
+--- 51_texture_blockkit.py.pre_roundA_20260901	2026-09-01 16:52:39.686350100 +0200
++++ 51_texture_blockkit.py	2026-09-01 23:33:34.314070700 +0200
+@@ -113,6 +113,14 @@
+ )
+ 
+ MAX_LAYERS = 4                               # 3.3.5a renders at most 4 per MCNK
++# Task 16: MTEX is a plain NUL-terminated string table (mtex_blob below) - the
++# client caps LAYERS PER MCNK at MAX_LAYERS (MCLY entries actually painted,
++# checked against layers_per_mcnk further down), never the number of PATHS
++# that table may list. Since the Phase-4 kit shares one MTEX superset across
++# every file and each file's MCLY picks 2 of its entries by index (tex_ids),
++# the superset legitimately outgrows MAX_LAYERS - this is a sanity ceiling
++# against a typo'd meta file, not the real engine limit.
++MAX_SUPERSET = 32
+ MCLY_ENTRY = 16                              # texId, flags, ofsInMCAL, effectId
+ MCLY_FLAG_USE_ALPHA = 0x100                  # "this layer reads MCAL"
+ MCLY_FLAG_COMPRESSED = 0x200                 # never set here: we write raw 4-bit
+@@ -196,11 +204,19 @@
+ # --------------------------------------------------------------------------- #
+ # Texture table
+ # --------------------------------------------------------------------------- #
+-def parse_textures(text):
++def parse_textures(text, max_n=MAX_LAYERS):
++    """Split, then validate, a comma separated MTEX path list.
++
++    `max_n` defaults to MAX_LAYERS because the historical caller (--textures,
++    or a pre-superset kit) passes exactly the per-file layer list, where that
++    IS the real engine cap. The meta-driven superset caller passes
++    MAX_SUPERSET instead - see the note above MAX_SUPERSET for why a bigger
++    MTEX table is not the same claim as more layers per MCNK.
++    """
+     names = [t.strip() for t in text.split(",") if t.strip()]
+-    if not (2 <= len(names) <= MAX_LAYERS):
++    if not (2 <= len(names) <= max_n):
+         raise SystemExit("--textures needs 2..%d paths, got %d"
+-                         % (MAX_LAYERS, len(names)))
++                         % (max_n, len(names)))
+     for n in names:
+         if "/" in n:
+             raise SystemExit("texture %r uses '/'; MTEX paths are backslashed "
+@@ -398,6 +414,44 @@
+ PIXELS_PER_CELL = 16                         # 8.33 yd cell / 0.52 yd pixel
+ WALK_CELLS_PER_BLOCK = 8
+ 
++# Task 14: the walkable->wall alpha used to STEP straight from the floor's
++# 2..10 band to ALPHA_WALL at the class boundary, which the operator read as
++# a hard line and "monotonous". FEATHER_TEXELS ramps the walkable side only
++# (see paint_block_alpha) over this many texels. One texel is 8.3333/16 =
++# 0.5208 yd, so 4 texels is a 2.08 yd ramp - narrow enough to still read as a
++# floor, wide enough to remove the step.
++FEATHER_TEXELS = 4                           # ~2.08 yd ramp
++
++
++def _is_wall_class(cls):
++    return cls == CLASS_WALL_L or cls == CLASS_VOID_L
++
++
++def _class_at(classes, gu, gv):
++    """Surface class of the block-global alpha pixel (gu, gv).
++
++    Clamped at the block edge, which is deliberate: a block is authored with no
++    knowledge of its neighbours, so 'outside' has to read as more of the same
++    class or two blocks would disagree at their join.
++    """
++    cell_r = min(max(gu // PIXELS_PER_CELL, 0), WALK_CELLS_PER_BLOCK - 1)
++    cell_c = min(max(gv // PIXELS_PER_CELL, 0), WALK_CELLS_PER_BLOCK - 1)
++    return classes[cell_r * WALK_CELLS_PER_BLOCK + cell_c]
++
++
++def _wall_distance(classes, gu, gv):
++    """Chebyshev distance in texels from a WALKABLE pixel to the nearest
++    wall/void pixel, capped at FEATHER_TEXELS (which means 'far enough').
++    """
++    for d in range(1, FEATHER_TEXELS + 1):
++        for du in range(-d, d + 1):
++            for dv in range(-d, d + 1):
++                if max(abs(du), abs(dv)) != d:
++                    continue
++                if _is_wall_class(_class_at(classes, gu + du, gv + dv)):
++                    return d
++    return FEATHER_TEXELS
++
+ 
+ def _mottle(gu, gv):
+     """Deterministic pseudo-noise from block-global pixel coords (no RNG)."""
+@@ -422,24 +476,53 @@
+             cell_r = min(gu // PIXELS_PER_CELL, WALK_CELLS_PER_BLOCK - 1)
+             cell_c = min(gv // PIXELS_PER_CELL, WALK_CELLS_PER_BLOCK - 1)
+             cls = classes[cell_r * WALK_CELLS_PER_BLOCK + cell_c]
+-            if cls == CLASS_WALL_L or cls == CLASS_VOID_L:
++            if _is_wall_class(cls):
+                 value = ALPHA_WALL
+             else:
+-                edge_pass = cell_r in (0, WALK_CELLS_PER_BLOCK - 1) or \
+-                    cell_c in (0, WALK_CELLS_PER_BLOCK - 1)
+-                if is_corridor or edge_pass:
+-                    # Worn track. Direction-agnostic on purpose - an S-curve's
+-                    # sideways cells are as much track as the straight run -
+-                    # each walkable cell paints a cross through its own centre;
+-                    # chained cells join into a continuous line with a short
+-                    # cross-tie per cell, which on a mine floor reads as rail
+-                    # sleepers rather than as an artifact.
+-                    cu = cell_r * PIXELS_PER_CELL + PIXELS_PER_CELL // 2
+-                    cv = cell_c * PIXELS_PER_CELL + PIXELS_PER_CELL // 2
+-                    d = min(abs(gu - cu), abs(gv - cv))
+-                    value = ALPHA_STRIPE_CORE if d <= 2 else ALPHA_STRIPE_RIM
++                # `is_corridor` alone decides the track now. edge_pass painted a
++                # stripe patch into the two socket-throat cells of every ROOM,
++                # which is a doorway, not a worn path - measured on the live kit,
++                # those are the only walkable cells a block boundary has.
++                if is_corridor:
++                    # ONE continuous band per axis, measured to the BLOCK
++                    # centre. The old form measured to the CELL centre, which
++                    # is what drew a plus sign in every cell and therefore a
++                    # ladder of cross-ties at cell pitch.
++                    #
++                    # This is continuous by construction: a north/south corridor
++                    # is walkable on columns 3 and 4, i.e. gv in 48..79, so
++                    # |gv - 64| is the band across the lane and |gu - 64| never
++                    # wins - the result is one longitudinal stripe. A cross
++                    # corridor gets both arms and they meet in the middle,
++                    # which is a real crossing rather than an artifact.
++                    centre = PIXELS_PER_MCNK      # 64 = the block centre
++                    d = min(abs(gu - centre), abs(gv - centre))
++                    base = ALPHA_STRIPE_CORE if d <= 2 else ALPHA_STRIPE_RIM
++                else:
++                    base = _mottle(gu, gv)
++                # Feather (task 14). ONLY walkable pixels move: the wall's
++                # constant region is never made thinner, because a thin
++                # filtered alpha band was measured to lose the rock on the
++                # inner wall face (48:1410-1430) - that is the failure a ramp
++                # eating into the wall would reproduce.
++                #
++                # The outermost pixel row/column of this MCNK is pinned to its
++                # unramped class value. MCNK flag 0x8000 (do_not_fix_alpha_map)
++                # is not set on these chunks, so the client DUPLICATES the last
++                # alpha row and column; a gradient there would show up as a
++                # 0.52 yd discontinuity every 33.33 yd, and it is also what
++                # lets two independently authored blocks agree at a join.
++                # Setting the flag is the cleaner long-term fix - it changes a
++                # header field the composer and the client DLL have never seen
++                # set, so it is recorded for later rather than done this round.
++                on_mcnk_edge = (pr == PIXELS_PER_MCNK - 1 or
++                                pc == PIXELS_PER_MCNK - 1)
++                d_wall = _wall_distance(classes, gu, gv)
++                if d_wall < FEATHER_TEXELS and not on_mcnk_edge:
++                    t = d_wall / float(FEATHER_TEXELS)     # 0 at the wall, 1 far
++                    value = int(round(ALPHA_WALL + (base - ALPHA_WALL) * t))
+                 else:
+-                    value = _mottle(gu, gv)
++                    value = base
+             # INVERTED, because layer 0 is now the WALL texture and
+             # layer 1 the floor: `value` is still "how much rock", so
+             # the blended layer gets its complement. The rendered mix is
+@@ -612,6 +695,50 @@
+     return fields
+ 
+ 
++def _gate_wall_distance(classes, gu, gv):
++    """Verify-gate-only re-derivation of paint_block_alpha's wall distance.
++
++    Deliberately NOT a call into _wall_distance (or the _class_at it reads
++    through). A gate that asks the code under test what it produced will
++    agree with any bug the two of them happen to share, and this project
++    has already paid for exactly that shape of mistake twice: this file's
++    own specular-texture check used to pass while shipping a solid-green
++    dungeon floor because it asked "does the path resolve" instead of
++    re-deriving "will the layer bind" (see the "[2] Textures" section
++    below), and 48_gen_t1_blockkit.py's anchor-only walkability check
++    passed while 8 of 15 masks still had a floor cell marked unwalkable,
++    because it trusted the same computation it was meant to be checking
++    (48:3045-3046). A verify gate only earns its keep if it is capable of
++    disagreeing with the thing it guards, which requires its own,
++    independently written implementation - not a shared helper the two
++    call into.
++
++    Same Chebyshev-ring definition as _wall_distance (nearest wall/void
++    pixel, capped at FEATHER_TEXELS), but built differently on purpose: the
++    ring at each radius is walked as four explicit edges (top row, bottom
++    row, then the left/right columns with the two corners already covered
++    by the rows left out) rather than filtering a full (2d+1)x(2d+1)
++    square, and the cell-class lookup is inlined here instead of shared -
++    matching how the invariant that calls this already inlines its own
++    cell_r/cell_c/cls rather than calling _class_at.
++    """
++    for d in range(1, FEATHER_TEXELS + 1):
++        edge = []
++        for dv in range(-d, d + 1):
++            edge.append((-d, dv))
++            edge.append((d, dv))
++        for du in range(-d + 1, d):
++            edge.append((du, -d))
++            edge.append((du, d))
++        for du, dv in edge:
++            pu, pv = gu + du, gv + dv
++            cell_r = min(max(pu // PIXELS_PER_CELL, 0), WALK_CELLS_PER_BLOCK - 1)
++            cell_c = min(max(pv // PIXELS_PER_CELL, 0), WALK_CELLS_PER_BLOCK - 1)
++            if classes[cell_r * WALK_CELLS_PER_BLOCK + cell_c] in (CLASS_WALL_L, CLASS_VOID_L):
++                return d
++    return FEATHER_TEXELS
++
++
+ def verify_file(name, before, after, textures, alpha_values, problems,
+                 classes=None, role=None, tex_ids=None):
+     if tex_ids is None:
+@@ -740,22 +867,67 @@
+                 # complement of "how much rock": a WALL/VOID cell carries 0
+                 # floor, and a walkable cell carries the complement of the
+                 # mottle band and still has to vary.
++                #
++                # Task 14 rewrote the walkable half of this invariant (never
++                # the WALL/VOID half - the wall's own region is still exactly
++                # ALPHA_WALL everywhere, unchanged, per the "feather inward
++                # from the wall only" rule). The old rule was: a walkable
++                # pixel's rock value is always in [ALPHA_MOTTLE[0],
++                # ALPHA_STRIPE_CORE]. The new rule:
++                #
++                #   A walkable pixel farther than FEATHER_TEXELS texels
++                #   (Chebyshev) from the nearest wall/void pixel, OR sitting
++                #   on the outermost pixel row/column of the MCNK (pinned -
++                #   see paint_block_alpha), obeys the OLD rule unchanged.
++                #
++                #   A walkable pixel inside the feather band must lie between
++                #   the two class values - i.e. between the walkable class's
++                #   own range and ALPHA_WALL - and must get monotonically
++                #   closer to ALPHA_WALL as its distance to the boundary
++                #   shrinks. Concretely: at Chebyshev distance d < FEATHER_
++                #   TEXELS, its rock value must fall inside the envelope the
++                #   ramp formula produces at that exact d for the walkable
++                #   class's own extremes (ALPHA_MOTTLE[0] and
++                #   ALPHA_STRIPE_CORE); that envelope narrows monotonically
++                #   from ALPHA_WALL at d=0 down to the old 2..10 band at
++                #   d == FEATHER_TEXELS, where it reduces to the old rule
++                #   exactly (continuous, no seam in the invariant itself).
++                #
++                # This is still stated independently of the painter: it
++                # re-derives distance-to-boundary from `classes`, the same
++                # input the painter reads, through _gate_wall_distance - a
++                # separately written implementation, not paint_block_alpha's
++                # own _wall_distance (see that function's docstring for why
++                # the duplication is deliberate) - rather than asking
++                # paint_block_alpha, or the function it calls, what they
++                # produced.
+                 walk_pixels = set()
+                 for pr in range(PIXELS_PER_MCNK):
+                     for pc in range(PIXELS_PER_MCNK):
+                         byte = span[(pr * PIXELS_PER_MCNK + pc) // 2]
+                         pix = (byte >> 4) & ALPHA_MAX if pc % 2 else byte & ALPHA_MAX
+-                        cell_r = min((biy * PIXELS_PER_MCNK + pr) // PIXELS_PER_CELL,
+-                                     WALK_CELLS_PER_BLOCK - 1)
+-                        cell_c = min((bix * PIXELS_PER_MCNK + pc) // PIXELS_PER_CELL,
+-                                     WALK_CELLS_PER_BLOCK - 1)
++                        gu = biy * PIXELS_PER_MCNK + pr
++                        gv = bix * PIXELS_PER_MCNK + pc
++                        cell_r = min(gu // PIXELS_PER_CELL, WALK_CELLS_PER_BLOCK - 1)
++                        cell_c = min(gv // PIXELS_PER_CELL, WALK_CELLS_PER_BLOCK - 1)
+                         cls = classes[cell_r * WALK_CELLS_PER_BLOCK + cell_c]
+                         rock = ALPHA_MAX - pix        # back to "how much rock"
+                         if cls in (CLASS_WALL_L, CLASS_VOID_L):
+                             if rock != ALPHA_WALL:
+                                 painted_bad += 1
+                         else:
+-                            if not (ALPHA_MOTTLE[0] <= rock <= ALPHA_STRIPE_CORE):
++                            on_mcnk_edge = (pr == PIXELS_PER_MCNK - 1 or
++                                            pc == PIXELS_PER_MCNK - 1)
++                            d_wall = _gate_wall_distance(classes, gu, gv)
++                            if on_mcnk_edge or d_wall >= FEATHER_TEXELS:
++                                lo, hi = ALPHA_MOTTLE[0], ALPHA_STRIPE_CORE
++                            else:
++                                t = d_wall / float(FEATHER_TEXELS)
++                                lo = int(round(ALPHA_WALL -
++                                               (ALPHA_WALL - ALPHA_MOTTLE[0]) * t))
++                                hi = int(round(ALPHA_WALL -
++                                               (ALPHA_WALL - ALPHA_STRIPE_CORE) * t))
++                            if not (lo <= rock <= hi):
+                                 painted_bad += 1
+                             walk_pixels.add(pix)
+                 # The variety floor applies only where the mottle paints: a
+@@ -857,9 +1029,18 @@
+     # Phase 4: the kit's own meta names the MTEX superset and which layer pair
+     # each theme paints with - one source of truth, exported by script 48. A
+     # pre-Phase-4 kit has no such section and the CLI/default behaviour stays.
++    #
++    # Task 16: script 48 now resolves [wallIdx, floorIdx] PER CHUNK (room,
++    # corridor and boss floors differ within a theme; the wall index never
++    # does) and carries the answer on each 'chunks' entry as textureLayers -
++    # so this file stays a pure consumer of kit_meta.json and never
++    # re-derives the role->floor bucket rule itself. theme_layers (the old
++    # theme-wide pair) is kept only as the fallback for a kit built before
++    # this field existed, and to size layers_per_mcnk.
+     meta_textures = None
+     theme_layers = {}
+     theme_by_chunk_file = {}
++    layers_by_chunk_file = {}
+     meta_early = os.path.join(kit_dir, META_NAME)
+     if os.path.isfile(meta_early):
+         with open(meta_early, "rb") as fh:
+@@ -871,13 +1052,30 @@
+                 theme_layers[int(tkey)] = list(tinfo["textureLayers"])
+             for entry in early_doc.get("chunks", []):
+                 theme_by_chunk_file[entry["file"]] = int(entry.get("theme", 1))
++                if entry.get("textureLayers"):
++                    layers_by_chunk_file[entry["file"]] = list(entry["textureLayers"])
+ 
+     if meta_textures is not None:
+         if args.textures != ",".join(DEFAULT_TEXTURES):
+             raise SystemExit("this kit's MTEX superset comes from kit_meta.json "
+                              "(script 48 owns it) - drop --textures")
+-        textures = parse_textures(",".join(meta_textures))
++        # MAX_SUPERSET, not MAX_LAYERS: this is the whole kit-wide MTEX table,
++        # not the layer list of any one MCNK - see the note above MAX_SUPERSET.
++        textures = parse_textures(",".join(meta_textures), max_n=MAX_SUPERSET)
+         layers_per_mcnk = len(theme_layers.get(1, [0, 1]))
++        # The real engine cap DOES apply here and to every per-chunk override:
++        # each is the literal tex_ids list build_mcly writes into one file's
++        # MCLY, so however many entries the superset grows to, no chunk may
++        # ask for more than MAX_LAYERS of them at once.
++        if layers_per_mcnk > MAX_LAYERS:
++            raise SystemExit("theme layer pair has %d entries, MAX_LAYERS is %d"
++                             % (layers_per_mcnk, MAX_LAYERS))
++        bad_chunks = [f for f, ids in layers_by_chunk_file.items()
++                     if len(ids) > MAX_LAYERS]
++        if bad_chunks:
++            raise SystemExit("%d chunk(s) resolve to more than MAX_LAYERS (%d) "
++                             "texture layers, e.g. %s"
++                             % (len(bad_chunks), MAX_LAYERS, bad_chunks[0]))
+     else:
+         textures = parse_textures(args.textures)
+         layers_per_mcnk = len(textures)
+@@ -886,6 +1084,10 @@
+     def tex_ids_for(file_name):
+         if meta_textures is None:
+             return None
++        if file_name in layers_by_chunk_file:
++            return layers_by_chunk_file[file_name]
++        # Pre-Task-16 kit_meta.json: no per-chunk textureLayers, fall back to
++        # the theme-wide room pair (the only pair that used to exist).
+         theme = theme_by_chunk_file.get(file_name, 1)
+         return theme_layers.get(theme, theme_layers.get(1, [0, 1]))
+ 

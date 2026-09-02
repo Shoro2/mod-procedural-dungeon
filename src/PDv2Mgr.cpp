@@ -559,11 +559,13 @@ namespace PDungeon
             rule.weight = static_cast<int>(fields[7].Get<uint32>());
             rule.minSpacingYd = fields[8].Get<float>();
 
-            if (rule.placement != DECOR_PLACEMENT_WALL_FOOT)
+            if (rule.placement != DECOR_PLACEMENT_WALL_FOOT &&
+                rule.placement != DECOR_PLACEMENT_CORNER &&
+                rule.placement != DECOR_PLACEMENT_SCATTER)
             {
                 // Kept in the list all the same: the planner skips it by the
                 // same test, and dropping it here would hide a typo that the
-                // operator can only find by counting torches.
+                // operator can only find by counting props.
                 LOG_ERROR(PD_LOG, "PDv2: decor rule {} asks for placement '{}', which "
                                   "no planner implements - it will place nothing",
                           rule.id, rule.placement);
@@ -574,6 +576,41 @@ namespace PDungeon
 
         LOG_INFO(PD_LOG, "PDv2: loaded {} decor rule(s) from pdungeon_decor_rules",
                  uint32(_decorRules.size()));
+    }
+
+    void PDv2Mgr::LoadCritterRules()
+    {
+        _critterRules.clear();
+
+        // Ambient life, ascending id: BuildCritterPlan's draw sequence follows
+        // this order, so ORDER BY id is the fixed iteration order the
+        // determinism promise rests on - see PDv2DecorPlan.h.
+        QueryResult result = WorldDatabase.Query(
+            "SELECT id, theme, roleFilter, creatureEntry, minPerBlock, "
+            "maxPerBlock, weight FROM pdungeon_critter_rules ORDER BY id");
+        if (!result)
+        {
+            LOG_INFO(PD_LOG, "PDv2: pdungeon_critter_rules has no rows - dungeons "
+                             "will be built without ambient life");
+            return;
+        }
+
+        do
+        {
+            Field* fields = result->Fetch();
+            CritterRule rule;
+            rule.id = static_cast<int>(fields[0].Get<uint32>());
+            rule.theme = fields[1].Get<uint8>();
+            rule.roleFilter = fields[2].Get<std::string>();
+            rule.creatureEntry = static_cast<int>(fields[3].Get<uint32>());
+            rule.minPerBlock = fields[4].Get<uint8>();
+            rule.maxPerBlock = fields[5].Get<uint8>();
+            rule.weight = static_cast<int>(fields[6].Get<uint32>());
+            _critterRules.push_back(std::move(rule));
+        } while (result->NextRow());
+
+        LOG_INFO(PD_LOG, "PDv2: loaded {} critter rule(s) from pdungeon_critter_rules",
+                 uint32(_critterRules.size()));
     }
 
     bool PDv2Mgr::EntranceWorldPos(BlockPlan const& plan, float& x, float& y, float& z) const

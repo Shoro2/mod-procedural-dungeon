@@ -22,56 +22,46 @@
 #include "Log.h"
 #include "PDDefines.h"
 #include "QueryResult.h"
-#include "generator/PDRandom.h"
 #include "generator/PDv2GameMath.h"
+#include "generator/PDv2PackDraw.h"
 
 namespace PDungeon
 {
     namespace
     {
-        // A distinct RNG stream from the layout draw. Mixing the seed with the
-        // golden-ratio constant means adding, removing or re-weighting a pack
-        // member can never shift the LAYOUT an account already owns - the two
-        // draws share a seed but not a sequence.
-        uint32_t const SPAWN_STREAM_MIX = 0x9E3779B9u;
-
         // 01 §8: the band a player picks is one grid step wide, i.e. the five
         // levels [bandMin, bandMin + 4]. Derived rather than restated so the
         // band cannot mean two different things in two files.
         int const BAND_WIDTH = PD_GAME_BAND_STEP - 1;
 
-        int EffectiveWeight(PackMember const* m)
+        // Groups a flat, already band-filtered role pool by the packId each
+        // member carries, in the pool's own order - what PackPools::meleeOf/
+        // casterOf search. A linear build over a linear store: pack counts
+        // are single digits, so this is not the place an unordered_map would
+        // buy anything, and PDv2PackDraw.h's determinism rule keeps one out
+        // of the generator layer entirely.
+        std::vector<PackPools::PackGroup> GroupByPack(std::vector<PackMember> const& flat)
         {
-            // A zero weight in the table would silently make a member
-            // undrawable AND break the running total; treat it as the minimum
-            // instead, because "present but never picked" is never what an
-            // operator meant by leaving the column at its default.
-            return (m && m->weight > 0) ? static_cast<int>(m->weight) : 1;
-        }
-
-        PackMember const* WeightedPick(std::vector<PackMember const*> const& pool, PDRandom& rng)
-        {
-            if (pool.empty())
+            std::vector<PackPools::PackGroup> groups;
+            for (PackMember const& m : flat)
             {
-                return nullptr;
-            }
-
-            int total = 0;
-            for (PackMember const* m : pool)
-            {
-                total += EffectiveWeight(m);
-            }
-
-            int roll = rng.UniformInt(1, total);
-            for (PackMember const* m : pool)
-            {
-                roll -= EffectiveWeight(m);
-                if (roll <= 0)
+                PackPools::PackGroup* g = nullptr;
+                for (PackPools::PackGroup& existing : groups)
                 {
-                    return m;
+                    if (existing.packId == m.packId)
+                    {
+                        g = &existing;
+                        break;
+                    }
                 }
+                if (!g)
+                {
+                    groups.push_back(PackPools::PackGroup{ m.packId, {} });
+                    g = &groups.back();
+                }
+                g->members.push_back(m);
             }
-            return pool.back();
+            return groups;
         }
     }
 
@@ -165,6 +155,7 @@ namespace PDungeon
             }
 
             PackMember member;
+            member.packId = static_cast<int>(packId);
             member.entry = entry;
             member.role = fields[6].Get<uint8>();
             member.casterSpellId = fields[7].Get<uint32>();
@@ -195,6 +186,33 @@ namespace PDungeon
                 ++members;
                 if (m.role == PACK_ROLE_CASTER) ++casters;
                 else if (m.role == PACK_ROLE_BOSS) ++bosses;
+            }
+        }
+
+        // _trashPackIds: every pack with at least one non-boss member,
+        // ascending, for the WHOLE THEME - band- and unlock-INDEPENDENT.
+        // This is the load-time CANDIDATE list only, not PackPools::
+        // trashPackIds itself: SelectSpawns filters it down, per run,
+        // against that run's actual band/unlock-filtered melee/caster
+        // groups before handing it to the draw (FilterEligibleTrashPacks,
+        // generator/PDv2PackDraw.cpp - Task 13 fix-pass review finding: a
+        // pack can sit in this list and still have nothing left once the
+        // band/unlock filter runs). Built here rather than per SelectSpawns
+        // call because computing the theme-wide shape does not need to
+        // repeat on every draw - only the per-run FILTER does, and that part
+        // lives with the draw it feeds. _packs is already ascending by id
+        // (the loader's own "ORDER BY p.id, m.entry"), so no sort is needed
+        // to keep this list ascending too.
+        _trashPackIds.clear();
+        for (Pack const& p : _packs)
+        {
+            for (PackMember const& m : p.members)
+            {
+                if (m.role != PACK_ROLE_BOSS)
+                {
+                    _trashPackIds.push_back(static_cast<int>(p.id));
+                    break;
+                }
             }
         }
 
@@ -472,33 +490,12 @@ namespace PDungeon
             return false;
         }
 
-        PDRandom rng(seed ^ SPAWN_STREAM_MIX);
-
-        // THE SPAWN STREAM, in the order it is consumed - this list IS the
-        // determinism contract, because every draw below shifts every draw
-        // after it:
-        //
-        //   per room        one carrier Chance + one slot draw (the at-most-
-        //                   one-affix-per-room rule, drawn hit or miss so the
-        //                   stream stays aligned)
-        //   per boss room   additionally one weighted boss pick (no affix -
-        //                   bosses are never carriers, see the emit below)
-        //   per trash slot  one caster/melee Chance, one weighted entry pick
-        //
-        // Same seed and same inputs therefore rebuild the identical dungeon,
-        // affixed mobs included, across restarts and compilers. The INPUTS are
-        // part of that: casterPct, bandMin, the room list and now affixPct all
-        // steer the sequence, so changing one re-rolls WHICH creatures a stored
-        // seed spawns (the layout itself is untouched - it comes from a
-        // different stream). PDRandom::Chance also short-circuits at 0 and 100
-        // without drawing, so those two values move the sequence as well.
-        // Nothing here is a bug; it is why the pack tables and these knobs are
-        // startup/config state rather than something a player can nudge.
-
-        // The two role pools, and they are the WHOLE pool: every trash slot in
-        // the dungeon draws from these, independently. There is deliberately no
-        // per-run subset any more - one was drawn here until 2026-08-08, and it
-        // made a 25-creature stock read in-game as a four-creature one.
+        // Everything above this line is pool ASSEMBLY: which packs qualify
+        // for this run, given the band and the unlock level. Everything the
+        // actual draw needs from that assembly is a role-split view, so build
+        // one - PackPools - and hand it to PDv2SelectSpawns
+        // (generator/PDv2PackDraw.cpp), which does not know a Pack, a level
+        // band or a WorldDatabase query exists.
         std::vector<PackMember const*> melee;
         std::vector<PackMember const*> casters;
         for (PackMember const* m : trash)
@@ -506,120 +503,108 @@ namespace PDungeon
             (m->role == PACK_ROLE_CASTER ? casters : melee).push_back(m);
         }
 
-        // A boss room with no boss to put in it is a data problem, not a
-        // reason to leave the room empty: the highest-weight melee stands in,
-        // once per selection so a full dungeon does not spam the log.
-        PackMember const* bossStandIn = nullptr;
-        if (bosses.empty() && !trash.empty())
+        PackPools pools;
+        pools.melee.reserve(melee.size());
+        for (PackMember const* m : melee)
         {
-            for (PackMember const* m : trash)
-            {
-                if (!bossStandIn || EffectiveWeight(m) > EffectiveWeight(bossStandIn))
-                {
-                    bossStandIn = m;
-                }
-            }
+            pools.melee.push_back(*m);
+        }
+        pools.caster.reserve(casters.size());
+        for (PackMember const* m : casters)
+        {
+            pools.caster.push_back(*m);
+        }
+        pools.boss.reserve(bosses.size());
+        for (PackMember const* m : bosses)
+        {
+            pools.boss.push_back(*m);
+        }
+        // `trash` above is already melee and caster INTERLEAVED in loader
+        // order (built straight off `_packs`, which is itself "ORDER BY
+        // p.id, m.entry" - see LoadFromDB) - the very members pools.melee
+        // and pools.caster hold, just not yet split by role. Carry that
+        // order across as pools.trash instead of re-deriving it from the two
+        // split vectors: PDv2SelectSpawns's boss-standin tie-break needs the
+        // real interleave to reproduce the pre-refactor scan (PDv2PackDraw.h
+        // explains why melee-then-caster is not the same order).
+        pools.trash.reserve(trash.size());
+        for (PackMember const* m : trash)
+        {
+            pools.trash.push_back(*m);
+        }
+        pools.meleeByPack = GroupByPack(pools.melee);
+        pools.casterByPack = GroupByPack(pools.caster);
+
+        // Review finding (Task 13 fix pass): _trashPackIds is the theme-wide
+        // candidate list from LoadFromDB, independent of the band/unlock
+        // filter fillPool just applied above - handing it through as-is
+        // could draw a pack absent from meleeByPack/casterByPack, and every
+        // trash slot in that room would then fall back to the merged pool,
+        // silently re-creating the jumble Task 13 removes. Filter it down to
+        // this run's actually-fillable packs, from the SAME groups the draw
+        // itself reads via meleeOf/casterOf - not a second, hand-rolled
+        // filter that could drift from them. It does not bite today (every
+        // shipped pack is level_min = level_max = 80, unlock_dlvl = 0, so
+        // the filtered and unfiltered lists are identical), but level_min/
+        // level_max/unlock_dlvl are real columns the content design intends
+        // to use (mod_pdungeon_packs.sql).
+        pools.trashPackIds = FilterEligibleTrashPacks(_trashPackIds, pools);
+
+        // The boss-standin fallback runs inside PDv2SelectSpawns, on the
+        // seeded stream, at the exact point the original ternary did - that
+        // file's own comment says why the pick cannot move here without
+        // shifting every draw after it. PDv2PackDraw.cpp is engine-free and
+        // cannot log, so it hands the pick it made back through
+        // outBossStandIn and THIS function logs it - one scan, one place,
+        // rather than a second copy kept in sync by hand (which had already
+        // drifted from the original once before this fix).
+        std::vector<SpawnPick> flat;
+        PackMember const* bossStandIn = nullptr;
+        if (!PDv2SelectSpawns(seed, in, pools, flat, &bossStandIn))
+        {
+            return false;
+        }
+        if (bossStandIn)
+        {
             LOG_WARN(PD_LOG, "PDv2: no boss in the unlocked packs for band {}..{} - "
                              "creature {} stands in for every boss room",
-                     bandLo, bandHi, bossStandIn ? bossStandIn->entry : 0);
+                     bandLo, bandHi, bossStandIn->entry);
         }
 
-        auto pickTrash = [&]() -> PackMember const*
-        {
-            // Caster or melee by the 01 §8 ratio, then a weighted draw from
-            // that role's FULL pool; when the pool for the wanted role is empty
-            // the other one answers, because a room short of spawns is worse
-            // than a room off-ratio.
-            bool const wantCaster = rng.Chance(in.casterPct);
-            std::vector<PackMember const*> const& first = wantCaster ? casters : melee;
-            std::vector<PackMember const*> const& second = wantCaster ? melee : casters;
-            PackMember const* m = WeightedPick(first, rng);
-            return m ? m : WeightedPick(second, rng);
-        };
-
-        auto emit = [](PackMember const* m, bool affixed, std::vector<SpawnPick>& picks)
-        {
-            if (!m)
-            {
-                return;
-            }
-            SpawnPick pick;
-            pick.entry = m->entry;
-            pick.role = m->role;
-            pick.casterSpellId = m->casterSpellId;
-            pick.affixed = affixed;
-            picks.push_back(pick);
-        };
-
-        // A normal room is `spawnsPerRoom` trash; a boss room is the boss PLUS
-        // `bossRoomAdds` trash, not spawnsPerRoom-minus-the-boss. The two are
-        // separate knobs since 2026-08-08: normal rooms were asked to grow to
-        // five, boss rooms were asked to stay at three (boss + 2 adds).
+        // PDv2SelectSpawns hands back one flat stream, room after room in
+        // `in.rooms` order (that grouping is the caller's job now, per its
+        // own header comment). A room's slot count is `trashWanted +
+        // (isBoss ? 1 : 0)` UNLESS a role that room needs has nothing to draw
+        // from, in which case PDv2SelectSpawns's own `emit` silently skips
+        // that slot rather than push a null pick - so the count actually
+        // consumed is computed the same way PDv2SelectSpawns decides whether
+        // to draw at all, not assumed to always match the request.
+        bool const trashAvailable = !(pools.melee.empty() && pools.caster.empty());
+        // There used to be a `bossAvailable = !pools.boss.empty() ||
+        // trashAvailable` gating bossGot below, but it is provably always
+        // true here: the guard at the top of this function
+        // (`if (trash.empty() && bosses.empty()) return false;`) already
+        // rules out the one case where neither a real boss (pools.boss) nor
+        // a stand-in (trashAvailable, which PDv2SelectSpawns falls back to -
+        // see PDv2PackDraw.cpp) exists. Every boss room therefore always
+        // gets its one slot filled.
         int const perRoom = in.spawnsPerRoom > 0 ? in.spawnsPerRoom : 1;
         int const bossAdds = in.bossRoomAdds > 0 ? in.bossRoomAdds : 0;
         out.reserve(in.rooms.size());
+        size_t cursor = 0;
         for (RoomRequest const& room : in.rooms)
         {
+            int const trashWanted = room.isBoss ? bossAdds : perRoom;
+            size_t const trashGot = trashAvailable ? static_cast<size_t>(trashWanted) : 0;
+            size_t const bossGot = room.isBoss ? 1 : 0;
+
             RoomSpawns spawns;
             spawns.roomIndex = room.roomIndex;
-            int const trashWanted = room.isBoss ? bossAdds : perRoom;
-            spawns.picks.reserve(static_cast<size_t>(trashWanted + (room.isBoss ? 1 : 0)));
-
-            if (room.isBoss)
+            spawns.picks.reserve(trashGot + bossGot);
+            for (size_t i = 0; i < trashGot + bossGot && cursor < flat.size(); ++i, ++cursor)
             {
-                // Exactly one boss, and it is the room's FIRST pick - the
-                // instance script keys run completion on that slot.
-                //
-                // THE BOSS NOW CARRIES THE ROOM'S AFFIX (operator verdict
-                // 2026-08-10, after the first live run on the host). This
-                // REVERSES the earlier rule, whose reasoning is kept because it
-                // is the thing to re-read if boss fights start feeling like
-                // walls: mod-dungeon-challenge excludes bosses from its own
-                // affix draw outright (AssignAffixesToCreatures skips
-                // isWorldBoss / IsDungeonBoss / rank >= 3), and the worry was
-                // that a boss which is also Bigger Boy + Hell Touched ON TOP of
-                // the difficulty curve stops being a fight. The counter-argument
-                // that won: one affix per platform is the rule players can read,
-                // and the boss platform's affix mob should obviously be the
-                // boss. The difficulty dial remains the knob if it bites.
-                emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), true,
-                     spawns.picks);
+                spawns.picks.push_back(flat[cursor]);
             }
-            // EXACTLY ONE carrier per room, always - no longer a percentage.
-            //
-            // History, because the value moved twice: the first implementation
-            // rolled per mob and clustered (a 5-mob room could carry 0..5 and
-            // read as lopsided), so 2026-08-09 made it "at most one, gated by
-            // V2.Affix.Percentage". The live run on 2026-08-10 showed the gate
-            // itself is the problem - at 40 % most platforms carry nothing and
-            // the affix stops being a thing players learn to look for. Now every
-            // platform has its one carrier: a trash slot in a normal room, and
-            // the BOSS in a boss room (above), which is why boss rooms no longer
-            // draw a carrier among their adds.
-            //
-            // `V2.Affix.Percentage` is consequently DEAD as a gate. The draw is
-            // still consumed so the RNG stream keeps its shape - a constant draw
-            // count per room is what makes a seed reproduce the same spawns
-            // however the knobs move, and skipping it here would silently
-            // re-roll every existing seed.
-            (void)rng.Chance(in.affixPct);
-            bool const roomHasCarrier = !room.isBoss && trashWanted > 0;
-            int const carrierSlot = rng.UniformInt(0, trashWanted > 0 ? trashWanted - 1 : 0);
-
-            for (int i = 0; i < trashWanted; ++i)
-            {
-                // TWO statements, not one call. C++ leaves the evaluation order
-                // of function arguments unspecified, so writing
-                // emit(pickTrash(), ...) with a second draw inline would let
-                // the compiler decide which draw comes first - and a spawn
-                // stream whose order depends on the compiler is not
-                // deterministic, which is the one property this whole file
-                // exists to keep.
-                PackMember const* m = pickTrash();
-                bool const affixed = roomHasCarrier && i == carrierSlot;
-                emit(m, affixed, spawns.picks);
-            }
-
             out.push_back(spawns);
         }
         return true;
