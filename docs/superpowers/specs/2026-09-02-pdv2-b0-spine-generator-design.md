@@ -308,3 +308,68 @@ carries it as its first section.
 - `CLAUDE.md` (planner row), `README.md` (a PDv2 note under the v1 pipeline line).
 - Vault, same commit as the merge: `procedural-dungeon/01` planner paragraph, `12-server-todo.md`
   row, `claude_log.md` at the end, MIG entry with the round's deploy.
+
+---
+
+## 11. As built (2026-09-03, after the final review)
+
+Everything above is the approved design and stands. This section records where the shipped code
+says something more specific, or something else, than §2–§9 — B1–B4 are written from this document,
+so the code wins here and the text above is history.
+
+**The info line prints `pockets {} | shortcut {}%`,** not §5's `branches {} | loop {}%`. Same two
+values, named after what they do; `tools/pd_testlauf_runde28.md` and the operator ritual quote the
+code's wording.
+
+**The host clamp is `(total − 1 − N) / 2` with `N = max(1, bossRooms)`,** not §2's `(rooms − 1) / 2`.
+The two agree wherever `bossRooms ≥ 1`; they differ at `bossRooms = 0`, which is reachable from
+`ProceduralDungeon.V2.BossRooms` for an account with no row and where the planner still seats one
+boss. `PocketCountFor` and the harness row `{5, 0, 2}` both carry the implemented one.
+
+**Pockets are seated inside the chain search, not after it** (§4 said "runs after the chain is
+complete"). A spine the pockets do not fit around is backtracked rather than failing the attempt, so
+§3.3's "no eligible host → the attempt fails" is now "the search unwinds and tries another spine".
+That is what makes the live default (5 rooms, 2 pockets) reliable; measured, and the reason the
+draw-order comment lists the pockets under item 3 of the same search.
+
+**A placed stub never hosts another stub.** §4.3's "unchanged code" is no longer true: before Round B
+the layout was full of junctions anyway, so the stub pass could chain stubs. It cannot now — a stub
+on a stub would give the block they hang off a third socket to a non-stub block and leave the middle
+stub with two, which is exactly the junction the spine rules out.
+
+**The validator proves the corridors, not just the declared fields** (§5 listed the field-level rules
+only). `ValidateBlockPlan` additionally enforces, from the sockets, on every generation:
+
+- **junction rule** — a corridor block that is not a `CorridorDeadEnd` has exactly two sockets
+  leading to non-stub blocks;
+- **spine adjacency** — consecutive chain rooms are joined by exactly one corridor run;
+- **pocket physics** — the rooms a pocket's corridors actually reach are exactly its declared host
+  (once) and, if it declares one, its shortcut target (once);
+- **chain length** — `chainLen == max(2, rooms + bossRooms) − pockets`;
+- every interior spine position that is not a boss carries `BlockRole::Room`.
+
+Without these a pocket labelled into segment *k* while physically hanging off a room behind boss *k*
+passed both cut floods, and B3 would have counted its spawns into a barrier the player cannot clear
+yet.
+
+**The field follows the TOTAL room count.** `GeneratePlan` sizes it
+`min(V2.FieldBlocks, GameFieldBlocksForRooms(rooms + bossRooms))`. Sizing it from `cfg.rooms` alone
+handed a dlvl-30 account that picks two rooms a 3×3 field for six rooms — a field that provably
+cannot hold the plan. §7.3's sweep now walks the engine's real space (`dlvl ∈ {0, 10, 20, 30}` ×
+room choice `∈ {1, 2, 3, 4, cap(dlvl)}`) rather than the `rooms = 3 + dlvl` diagonal.
+
+**B4's entry-edge rule.** The stub pass enumerates every occupied cell, so a **boss room may carry a
+stub doorway** and present two or three doorways in all (spine in, spine out, stub). §8's in-game
+line "every boss room is entered through exactly one corridor" therefore reads "exactly one *non-stub*
+corridor". B4 must pick the entry edge as *the socket whose corridor run leads to chain room k−1*
+(equivalently: whose flood with the boss excluded reaches it) — never "the boss room's only socket".
+`chainIndex` makes that a ten-line helper; it belongs beside `SegmentOf` so B4 and B5 share it.
+
+**Measured shortcut yield: 11 of 500 layouts, 2.2 %,** at the live default (5 rooms, 2 pockets,
+`V2.LoopChance` 15). Far below what the key reads as, because a pocket only gets a target list when
+one exists inside its segment. The operator decision on whether to raise it is queued
+(`12-server-todo.md`, "DECISION: PDv2 shortcut yield") and is owed **before the round deploys**:
+every candidate fix moves the draw stream, and so do the optional stub-host filter and the
+backward-candidate lever for the chain search. All of them are free under the single
+`PD_LAYOUT_VERSION` 2 → 3 bump this round already spends — and cost another forced reroll of every
+stored layout once the round ships. Batch them or drop them.
