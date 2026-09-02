@@ -1476,10 +1476,20 @@ namespace
 
     // --- decor -------------------------------------------------------------
     //
-    // The three seed rows of `pdungeon_decor_rules`, mirrored as a fixture.
-    // THE SQL IS THE RUNTIME SOURCE - data/sql/db-world/mod_pdungeon_decor.sql
-    // - and this copy exists only so the placement can be checked without a
+    // The full 14 shipped rows of `pdungeon_decor_rules`, mirrored exactly
+    // (id, entry, placement, min/max, weight, spacing): ids 1-3 from
+    // mod_pdungeon_decor.sql, ids 4-14 from mod_pdungeon_decor_clutter.sql.
+    // THE SQL IS THE RUNTIME SOURCE - both files under data/sql/db-world/ -
+    // and this copy exists only so the placement can be checked without a
     // database. If one moves, move the other.
+    //
+    // Final whole-branch review, item 5: the fixture used to carry only the
+    // first 5 rules (roughly half the shipped density) and the room-count
+    // matrix topped out at 8, well under the measured room cap of 15 - so
+    // PD_DECOR_MAX_SPOTS/PD_CRITTER_MAX_SPOTS were declared inert on data
+    // thinner than what actually ships. This mirror plus the 15-room row
+    // added to RunDecorBatch's ROOM_MATRIX below is what makes that
+    // measurement real.
     std::vector<DecorRule> DecorFixture()
     {
         std::vector<DecorRule> rules;
@@ -1517,33 +1527,140 @@ namespace
         torchCorridor.minSpacingYd = 8.0;
         rules.push_back(torchCorridor);
 
-        DecorRule crateCorner;
-        crateCorner.id = 4;
-        crateCorner.theme = 0;
-        crateCorner.roleFilter = "room";
-        crateCorner.goEntry = 910060;
-        crateCorner.placement = DECOR_PLACEMENT_CORNER;
-        crateCorner.minPerBlock = 1;
-        crateCorner.maxPerBlock = 2;
-        crateCorner.weight = 100;
-        crateCorner.minSpacingYd = 8.0;
-        rules.push_back(crateCorner);
+        DecorRule barrelWallFoot;
+        barrelWallFoot.id = 4;
+        barrelWallFoot.theme = 0;
+        barrelWallFoot.roleFilter = "room";
+        barrelWallFoot.goEntry = 910050;
+        barrelWallFoot.minPerBlock = 0;
+        barrelWallFoot.maxPerBlock = 2;
+        barrelWallFoot.weight = 30;
+        barrelWallFoot.minSpacingYd = 8.0;
+        rules.push_back(barrelWallFoot);
 
-        DecorRule rubbleScatter;
-        rubbleScatter.id = 5;
-        rubbleScatter.theme = 0;
-        rubbleScatter.roleFilter = "room";
-        rubbleScatter.goEntry = 910070;
-        rubbleScatter.placement = DECOR_PLACEMENT_SCATTER;
-        rubbleScatter.minPerBlock = 1;
-        rubbleScatter.maxPerBlock = 3;
-        rubbleScatter.weight = 100;
-        rubbleScatter.minSpacingYd = 12.0;
-        rules.push_back(rubbleScatter);
+        DecorRule crateWallFoot;
+        crateWallFoot.id = 5;
+        crateWallFoot.theme = 0;
+        crateWallFoot.roleFilter = "room";
+        crateWallFoot.goEntry = 910051;
+        crateWallFoot.minPerBlock = 0;
+        crateWallFoot.maxPerBlock = 2;
+        crateWallFoot.weight = 30;
+        crateWallFoot.minSpacingYd = 8.0;
+        rules.push_back(crateWallFoot);
+
+        DecorRule bookshelfWallFoot;
+        bookshelfWallFoot.id = 6;
+        bookshelfWallFoot.theme = 0;
+        bookshelfWallFoot.roleFilter = "room";
+        bookshelfWallFoot.goEntry = 910054;
+        bookshelfWallFoot.minPerBlock = 0;
+        bookshelfWallFoot.maxPerBlock = 1;
+        bookshelfWallFoot.weight = 20;
+        bookshelfWallFoot.minSpacingYd = 8.0;
+        rules.push_back(bookshelfWallFoot);
+
+        DecorRule alchemyBenchWallFoot;
+        alchemyBenchWallFoot.id = 7;
+        alchemyBenchWallFoot.theme = 0;
+        alchemyBenchWallFoot.roleFilter = "room";
+        alchemyBenchWallFoot.goEntry = 910055;
+        alchemyBenchWallFoot.minPerBlock = 0;
+        alchemyBenchWallFoot.maxPerBlock = 1;
+        alchemyBenchWallFoot.weight = 15;
+        alchemyBenchWallFoot.minSpacingYd = 8.0;
+        rules.push_back(alchemyBenchWallFoot);
+
+        DecorRule longTableWallFoot;
+        longTableWallFoot.id = 8;
+        longTableWallFoot.theme = 0;
+        longTableWallFoot.roleFilter = "room";
+        longTableWallFoot.goEntry = 910056;
+        longTableWallFoot.minPerBlock = 0;
+        longTableWallFoot.maxPerBlock = 1;
+        longTableWallFoot.weight = 15;
+        longTableWallFoot.minSpacingYd = 8.0;
+        rules.push_back(longTableWallFoot);
+
+        DecorRule plagueBarrelCorridor;
+        plagueBarrelCorridor.id = 9;
+        plagueBarrelCorridor.theme = 0;
+        plagueBarrelCorridor.roleFilter = "corridor";
+        plagueBarrelCorridor.goEntry = 910052;
+        plagueBarrelCorridor.minPerBlock = 0;
+        plagueBarrelCorridor.maxPerBlock = 1;
+        plagueBarrelCorridor.weight = 40;
+        plagueBarrelCorridor.minSpacingYd = 8.0;
+        rules.push_back(plagueBarrelCorridor);
+
+        DecorRule crateStackCorner;
+        crateStackCorner.id = 10;
+        crateStackCorner.theme = 0;
+        crateStackCorner.roleFilter = "room";
+        crateStackCorner.goEntry = 910060;
+        crateStackCorner.placement = DECOR_PLACEMENT_CORNER;
+        crateStackCorner.minPerBlock = 0;
+        crateStackCorner.maxPerBlock = 2;
+        crateStackCorner.weight = 50;
+        crateStackCorner.minSpacingYd = 8.0;
+        rules.push_back(crateStackCorner);
+
+        DecorRule brokenCrateStackCorner;
+        brokenCrateStackCorner.id = 11;
+        brokenCrateStackCorner.theme = 0;
+        brokenCrateStackCorner.roleFilter = "room";
+        brokenCrateStackCorner.goEntry = 910062;
+        brokenCrateStackCorner.placement = DECOR_PLACEMENT_CORNER;
+        brokenCrateStackCorner.minPerBlock = 0;
+        brokenCrateStackCorner.maxPerBlock = 2;
+        brokenCrateStackCorner.weight = 50;
+        brokenCrateStackCorner.minSpacingYd = 8.0;
+        rules.push_back(brokenCrateStackCorner);
+
+        DecorRule tallBarrelCorridorCorner;
+        tallBarrelCorridorCorner.id = 12;
+        tallBarrelCorridorCorner.theme = 0;
+        tallBarrelCorridorCorner.roleFilter = "corridor_corner";
+        tallBarrelCorridorCorner.goEntry = 910063;
+        tallBarrelCorridorCorner.placement = DECOR_PLACEMENT_CORNER;
+        tallBarrelCorridorCorner.minPerBlock = 0;
+        tallBarrelCorridorCorner.maxPerBlock = 1;
+        tallBarrelCorridorCorner.weight = 60;
+        tallBarrelCorridorCorner.minSpacingYd = 8.0;
+        rules.push_back(tallBarrelCorridorCorner);
+
+        DecorRule rubbleLowScatter;
+        rubbleLowScatter.id = 13;
+        rubbleLowScatter.theme = 0;
+        rubbleLowScatter.roleFilter = "room";
+        rubbleLowScatter.goEntry = 910070;
+        rubbleLowScatter.placement = DECOR_PLACEMENT_SCATTER;
+        rubbleLowScatter.minPerBlock = 0;
+        rubbleLowScatter.maxPerBlock = 3;
+        rubbleLowScatter.weight = 60;
+        rubbleLowScatter.minSpacingYd = 12.0;
+        rules.push_back(rubbleLowScatter);
+
+        DecorRule skeletonBossScatter;
+        skeletonBossScatter.id = 14;
+        skeletonBossScatter.theme = 0;
+        skeletonBossScatter.roleFilter = "room_boss";
+        skeletonBossScatter.goEntry = 910073;
+        skeletonBossScatter.placement = DECOR_PLACEMENT_SCATTER;
+        skeletonBossScatter.minPerBlock = 1;
+        skeletonBossScatter.maxPerBlock = 3;
+        skeletonBossScatter.weight = 80;
+        skeletonBossScatter.minSpacingYd = 12.0;
+        rules.push_back(skeletonBossScatter);
 
         return rules;
     }
 
+    // The full 5 shipped rows of `pdungeon_critter_rules`, mirrored exactly
+    // (id, entry, min/max, weight): mod_pdungeon_critters.sql ids 1-4 and 6.
+    // Id 5 does not exist any more - final whole-branch review, item 2
+    // removed it as a geometric dead zone (a corridor_dead_end block can
+    // never carry a critter, whichever rule matches it).
     std::vector<CritterRule> CritterFixture()
     {
         std::vector<CritterRule> rules;
@@ -1551,8 +1668,17 @@ namespace
         r.id = 1; r.theme = 0; r.roleFilter = "room";
         r.creatureEntry = 32428; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 100;
         rules.push_back(r);
-        r.id = 2; r.theme = 0; r.roleFilter = "corridor";
-        r.creatureEntry = 26525; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 100;
+        r.id = 2; r.theme = 0; r.roleFilter = "room";
+        r.creatureEntry = 23086; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 80;
+        rules.push_back(r);
+        r.id = 3; r.theme = 0; r.roleFilter = "room";
+        r.creatureEntry = 2110; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 60;
+        rules.push_back(r);
+        r.id = 4; r.theme = 0; r.roleFilter = "corridor";
+        r.creatureEntry = 26525; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 100;
+        rules.push_back(r);
+        r.id = 6; r.theme = 0; r.roleFilter = "room_boss";
+        r.creatureEntry = 26525; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 60;
         rules.push_back(r);
         return rules;
     }
@@ -1848,6 +1974,36 @@ namespace
                 why = "a critter is not on a walkable cell";
                 return false;
             }
+
+            // "never on a wall foot": the same four-side wall test
+            // CheckDecorSpots applies to a scatter placement, asserted here
+            // too rather than just trusted from the collector's name -
+            // critters draw from CollectScatter (see BuildCritterPlan),
+            // and this is what would turn this gate red if that collector
+            // were ever swapped for CollectWallFeet in the planner (final
+            // whole-branch review, item 5).
+            int const drow[4] = { -1, 0, 1, 0 };
+            int const dcol[4] = { 0, 1, 0, -1 };
+            int wallSides = 0;
+            for (int d = 0; d < 4; ++d)
+            {
+                int const r = row + drow[d];
+                int const c = col + dcol[d];
+                if (r < 0 || c < 0 ||
+                    r >= PD_CELLS_PER_BLOCK || c >= PD_CELLS_PER_BLOCK)
+                {
+                    continue;
+                }
+                if (classes[static_cast<size_t>(r) * PD_CELLS_PER_BLOCK + c] == 'L')
+                {
+                    ++wallSides;
+                }
+            }
+            if (wallSides)
+            {
+                why = "a critter's cell touches a wall cell";
+                return false;
+            }
         }
         if (spots.size() > static_cast<size_t>(PD_CRITTER_MAX_SPOTS))
         {
@@ -2007,8 +2163,12 @@ namespace
     {
         // Rooms is the one config axis that changes what a plan is made of:
         // a 3-room layout is nearly all corridor and a 9-room one is nearly
-        // all room, so the matrix covers both ends of the rule set.
-        int const ROOM_MATRIX[3] = { 3, 5, 8 };
+        // all room, so the matrix covers both ends of the rule set. 15 is
+        // added (final whole-branch review, item 5) because that is the
+        // measured room cap (PD_GAME_ROOMS_CAP_MEASURED / `pdblock
+        // --roomcap`) - without it the budget checks below never saw a
+        // layout anywhere near what a real account can reach.
+        int const ROOM_MATRIX[4] = { 3, 5, 8, 15 };
 
         std::printf("decor batch of %d seeds x %d room counts\n\n",
                     count, static_cast<int>(sizeof(ROOM_MATRIX) / sizeof(int)));
