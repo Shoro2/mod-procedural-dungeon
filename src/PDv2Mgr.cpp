@@ -124,7 +124,17 @@ namespace PDungeon
         // field with the room count keeps cells-per-room roughly constant, so a
         // small dungeon is small instead of sparse. The room cap
         // (PD_GAME_ROOMS_CAP_MEASURED) still keeps big layouts inside the tile.
-        cfg.fieldBlocks = std::min(_config.fieldBlocks, GameFieldBlocksForRooms(cfg.rooms));
+        //
+        // The field follows the TOTAL room count, bosses included: the layout
+        // seats rooms + bossRooms cells, and sizing it from cfg.rooms alone
+        // proposed a field that provably cannot hold the plan. A dlvl-30
+        // account that picks two rooms runs six rooms (2 + 4 bosses), and six
+        // rooms do not exist on the 3x3 field the old expression handed it -
+        // MIN_ROOM_GAP 2 admits at most 5 cells on 3x3, so every attempt failed
+        // and the player got "no valid layout" (final review of B0, 2026-09-03).
+        // The live default is unmoved: 5 + 1 = 24 cells still asks for 5x5.
+        cfg.fieldBlocks = std::min(_config.fieldBlocks,
+                                   GameFieldBlocksForRooms(cfg.rooms + cfg.bossRooms));
         cfg.loopChancePct = _config.loopChancePct;
         cfg.branches = _config.branches;
         cfg.originBX = _config.originBX;

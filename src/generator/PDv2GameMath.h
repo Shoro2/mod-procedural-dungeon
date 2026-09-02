@@ -346,6 +346,17 @@ namespace PDungeon
 
     // How large the planning field should be for a given room count.
     //
+    // `rooms` is the TOTAL room count the planner will seat - cfg.rooms PLUS
+    // cfg.bossRooms - and not the player's room slider on its own. Every cell
+    // the layout claims counts here: a boss room needs the same cell and the
+    // same MIN_ROOM_GAP as any other room, so a field sized from the slider
+    // alone is a field the plan provably does not fit in. That is not
+    // hypothetical - it shipped: at dlvl 30 (four boss rooms) a two-room
+    // choice asked for a 3x3 field for six rooms, and 3x3 holds at most five
+    // cells pairwise Manhattan >= 2, so generation failed on every seed and
+    // the account got no dungeon at all (found by the final review of B0,
+    // 2026-09-03; the caller was fixed in the same wave).
+    //
     // THE PROBLEM THIS SOLVES (operator, first live run 2026-08-10): the field
     // was a constant 8x8 at every dlvl, so a three-room dungeon put its three
     // rooms anywhere in 64 cells and the corridors between them became the
