@@ -19,7 +19,9 @@
 #include "PDRandom.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <queue>
 #include <set>
@@ -46,13 +48,6 @@ namespace PDungeon
             }
 
             bool operator==(Cell const& o) const { return x == o.x && y == o.y; }
-        };
-
-        struct Node                 // a room, before roles are assigned
-        {
-            Cell cell;
-            int id = 0;
-            int depth = 0;
         };
 
         unsigned OppositeBit(unsigned bit)
@@ -158,115 +153,356 @@ namespace PDungeon
             return s.empty() ? std::string("-") : s;
         }
 
-        // --- graph helpers ---------------------------------------------------
+        // --- Round B chain helpers (spec 2026-09-02 §3, §4) ------------------
 
-        struct GraphEdge
+        int Manhattan(Cell const& a, Cell const& b)
         {
-            int a = 0;
-            int b = 0;
-            int weightSq = 0;
+            return std::abs(a.x - b.x) + std::abs(a.y - b.y);
+        }
+
+        // The planning field while a chain is being laid: occupancy, the
+        // socket bits as they accumulate, every room cell placed so far (for
+        // the gap rule) and the spine in chain order. Small enough (<= 64
+        // cells) that the depth-first search copies it per level.
+        struct Field
+        {
+            int size = 0;
+            std::vector<uint8_t> occ;       // 0 free, 1 room, 2 corridor
+            std::vector<unsigned> masks;    // socket bits per cell
+            std::vector<Cell> rooms;
+            std::vector<Cell> chain;
+
+            explicit Field(int n)
+                : size(n), occ(static_cast<size_t>(n) * static_cast<size_t>(n), 0),
+                  masks(static_cast<size_t>(n) * static_cast<size_t>(n), 0u) { }
+
+            size_t Index(Cell const& c) const
+            {
+                return static_cast<size_t>(c.y) * static_cast<size_t>(size) + static_cast<size_t>(c.x);
+            }
+
+            bool Inside(Cell const& c) const
+            {
+                return c.x >= 0 && c.y >= 0 && c.x < size && c.y < size;
+            }
+
+            bool Free(Cell const& c) const
+            {
+                return Inside(c) && occ[Index(c)] == 0;
+            }
         };
 
-        int DistSq(Cell const& p, Cell const& q)
+        // Interior cells of the L-route from a to b (endpoints excluded), in
+        // walking order. xFirst walks the x axis to b.x, then the y axis - the
+        // same two walks the v2 planner routed its MST edges with.
+        std::vector<Cell> LRouteInterior(Cell const& a, Cell const& b, bool xFirst)
         {
-            int const dx = p.x - q.x;
-            int const dy = p.y - q.y;
-            return dx * dx + dy * dy;
-        }
-
-        // Union-find over room ids, for Kruskal.
-        int FindRoot(std::vector<int>& parent, int i)
-        {
-            while (parent[static_cast<size_t>(i)] != i)
+            std::vector<Cell> out;
+            Cell cur = a;
+            auto walk = [&](int targetX, int targetY)
             {
-                parent[static_cast<size_t>(i)] = parent[static_cast<size_t>(parent[static_cast<size_t>(i)])];
-                i = parent[static_cast<size_t>(i)];
-            }
-            return i;
-        }
-
-        bool ScatterRooms(BlockCfg const& cfg, PDRandom& rng, int wanted, std::vector<Node>& out)
-        {
-            out.clear();
-            // Rooms are kept MIN_ROOM_GAP apart so an L-route always has at
-            // least one free cell to become a corridor block. Without that the
-            // planner would emit rooms sharing an edge, which is legal geometry
-            // but produces dungeons with no corridors at all.
-            int const attempts = wanted * 200;
-            for (int i = 0; i < attempts && static_cast<int>(out.size()) < wanted; ++i)
-            {
-                Cell c;
-                c.x = rng.UniformInt(0, cfg.fieldBlocks - 1);
-                c.y = rng.UniformInt(0, cfg.fieldBlocks - 1);
-
-                bool ok = true;
-                for (Node const& n : out)
+                while (cur.x != targetX || cur.y != targetY)
                 {
-                    int const md = std::abs(n.cell.x - c.x) + std::abs(n.cell.y - c.y);
-                    if (md < MIN_ROOM_GAP)
+                    if (cur.x != targetX)
                     {
-                        ok = false;
-                        break;
+                        cur.x += (targetX > cur.x) ? 1 : -1;
+                    }
+                    else
+                    {
+                        cur.y += (targetY > cur.y) ? 1 : -1;
+                    }
+                    if (!(cur == b))
+                    {
+                        out.push_back(cur);
                     }
                 }
-                if (!ok)
-                {
-                    continue;
-                }
-
-                Node n;
-                n.cell = c;
-                n.id = static_cast<int>(out.size());
-                out.push_back(n);
+            };
+            if (xFirst)
+            {
+                walk(b.x, a.y);
+                walk(b.x, b.y);
             }
-            return static_cast<int>(out.size()) == wanted;
+            else
+            {
+                walk(a.x, b.y);
+                walk(b.x, b.y);
+            }
+            return out;
         }
 
-        std::vector<GraphEdge> SelectCorridorEdges(std::vector<Node> const& nodes, PDRandom& rng,
-                                                   int loopChancePct)
+        enum : int
         {
-            std::vector<GraphEdge> candidates;
-            for (size_t i = 0; i < nodes.size(); ++i)
-            {
-                for (size_t j = i + 1; j < nodes.size(); ++j)
-                {
-                    GraphEdge e;
-                    e.a = static_cast<int>(i);
-                    e.b = static_cast<int>(j);
-                    e.weightSq = DistSq(nodes[i].cell, nodes[j].cell);
-                    candidates.push_back(e);
-                }
-            }
-            // Stable order first, so the sort cannot depend on input order.
-            std::sort(candidates.begin(), candidates.end(), [](GraphEdge const& l, GraphEdge const& r)
-            {
-                if (l.weightSq != r.weightSq) return l.weightSq < r.weightSq;
-                if (l.a != r.a) return l.a < r.a;
-                return l.b < r.b;
-            });
+            ORDER_NONE = 0,
+            ORDER_X_FIRST = 1,
+            ORDER_Y_FIRST = 2
+        };
 
-            std::vector<int> parent(nodes.size());
-            for (size_t i = 0; i < parent.size(); ++i)
+        bool InteriorFree(Field const& f, std::vector<Cell> const& interior)
+        {
+            for (Cell const& c : interior)
             {
-                parent[i] = static_cast<int>(i);
+                if (!f.Free(c))
+                {
+                    return false;
+                }
             }
+            return true;
+        }
 
-            std::vector<GraphEdge> chosen;
-            for (GraphEdge const& e : candidates)
+        // Which L-orders between a and b run over free cells only. This is the
+        // rule that makes the layout one path by construction: a corridor is
+        // never laid through a room or across another corridor. A straight
+        // route (same row or column) is ONE route and reports x-first only,
+        // so it never costs an axis draw.
+        int FeasibleOrders(Field const& f, Cell const& a, Cell const& b)
+        {
+            if (a.x == b.x || a.y == b.y)
             {
-                int const ra = FindRoot(parent, e.a);
-                int const rb = FindRoot(parent, e.b);
-                if (ra != rb)
+                return InteriorFree(f, LRouteInterior(a, b, true)) ? ORDER_X_FIRST : ORDER_NONE;
+            }
+            int orders = ORDER_NONE;
+            if (InteriorFree(f, LRouteInterior(a, b, true)))
+            {
+                orders |= ORDER_X_FIRST;
+            }
+            if (InteriorFree(f, LRouteInterior(a, b, false)))
+            {
+                orders |= ORDER_Y_FIRST;
+            }
+            return orders;
+        }
+
+        // The axis coin, drawn ONLY when both orders are open.
+        bool ChooseXFirst(PDRandom& rng, int orders)
+        {
+            if (orders == (ORDER_X_FIRST | ORDER_Y_FIRST))
+            {
+                return rng.Chance(50);
+            }
+            return orders == ORDER_X_FIRST;
+        }
+
+        // Claims the corridor cells between two room cells and opens the
+        // sockets along the way.
+        void CommitRoute(Field& f, Cell const& a, Cell const& b, bool xFirst)
+        {
+            std::vector<Cell> const interior = LRouteInterior(a, b, xFirst);
+            std::vector<Cell> path = interior;
+            path.push_back(b);
+            Cell cur = a;
+            for (Cell const& next : path)
+            {
+                unsigned const outBit = BitForStep(next.x - cur.x, next.y - cur.y);
+                f.masks[f.Index(cur)] |= outBit;
+                f.masks[f.Index(next)] |= OppositeBit(outBit);
+                cur = next;
+            }
+            for (Cell const& c : interior)
+            {
+                f.occ[f.Index(c)] = 2;
+            }
+        }
+
+        struct StepCandidate
+        {
+            Cell cell;
+            int orders = ORDER_NONE;
+        };
+
+        int const STEP_MIN = 2;     // Manhattan: one corridor block
+        int const STEP_MAX = 3;     // two corridor blocks
+
+        // Cells the next room may take, seen from `from`: the step rule, the
+        // room gap against every room placed so far, at least one free
+        // L-route. Enumerated in the field's (y, x) order so a draw index
+        // means the same on every compiler. `prev` is the room before `from`
+        // (nullptr at the entrance and for pockets): candidates heading back
+        // toward it are dropped unless they are all there is.
+        std::vector<StepCandidate> StepCandidates(Field const& f, Cell const& from, Cell const* prev)
+        {
+            std::vector<StepCandidate> forward;
+            std::vector<StepCandidate> backward;
+            for (int y = 0; y < f.size; ++y)
+            {
+                for (int x = 0; x < f.size; ++x)
                 {
-                    parent[static_cast<size_t>(ra)] = rb;
-                    chosen.push_back(e);
-                }
-                else if (rng.Chance(loopChancePct))
-                {
-                    chosen.push_back(e);        // a loop, for layouts that are not pure trees
+                    Cell c;
+                    c.x = x;
+                    c.y = y;
+                    int const d = Manhattan(from, c);
+                    if (d < STEP_MIN || d > STEP_MAX || !f.Free(c))
+                    {
+                        continue;
+                    }
+                    bool gapOk = true;
+                    for (Cell const& r : f.rooms)
+                    {
+                        if (Manhattan(r, c) < MIN_ROOM_GAP)
+                        {
+                            gapOk = false;
+                            break;
+                        }
+                    }
+                    if (!gapOk)
+                    {
+                        continue;
+                    }
+                    StepCandidate cand;
+                    cand.cell = c;
+                    cand.orders = FeasibleOrders(f, from, c);
+                    if (cand.orders == ORDER_NONE)
+                    {
+                        continue;
+                    }
+                    bool reversal = false;
+                    if (prev)
+                    {
+                        int const px = from.x - prev->x;
+                        int const py = from.y - prev->y;
+                        int const sx = c.x - from.x;
+                        int const sy = c.y - from.y;
+                        reversal = (px * sx + py * sy) < 0;
+                    }
+                    (reversal ? backward : forward).push_back(cand);
                 }
             }
-            return chosen;
+            return forward.empty() ? backward : forward;
+        }
+
+        // Commits per attempt before the search gives up on this seed.
+        int const CHAIN_BUDGET = 4000;
+
+        // Depth-first over chain positions. Every commit draws; a failed
+        // subtree removes the drawn candidate and draws again from what is
+        // left, so the draw sequence is a pure function of the seed whatever
+        // path the search takes. Every level checks the budget, so an
+        // exhausted attempt unwinds at once.
+        bool ExtendChain(PDRandom& rng, int chainLen, Field& f, int& budget)
+        {
+            if (static_cast<int>(f.chain.size()) == chainLen)
+            {
+                return true;
+            }
+            Cell const from = f.chain.back();
+            Cell const* prev = f.chain.size() >= 2 ? &f.chain[f.chain.size() - 2] : nullptr;
+            std::vector<StepCandidate> cands = StepCandidates(f, from, prev);
+            while (!cands.empty())
+            {
+                if (budget <= 0)
+                {
+                    return false;
+                }
+                --budget;
+                size_t const pick = static_cast<size_t>(
+                    rng.UniformInt(0, static_cast<int>(cands.size()) - 1));
+                StepCandidate const cand = cands[pick];
+
+                Field next = f;
+                CommitRoute(next, from, cand.cell, ChooseXFirst(rng, cand.orders));
+                next.occ[next.Index(cand.cell)] = 1;
+                next.rooms.push_back(cand.cell);
+                next.chain.push_back(cand.cell);
+                if (ExtendChain(rng, chainLen, next, budget))
+                {
+                    f = next;
+                    return true;
+                }
+                cands.erase(cands.begin() + static_cast<std::ptrdiff_t>(pick));
+            }
+            return false;
+        }
+
+        struct Pocket
+        {
+            Cell cell;
+            int host = -1;          // chain index
+            int shortcutTo = -1;    // chain index, -1 = dead end
+        };
+
+        bool IsBossIndex(std::vector<int> const& bosses, int idx)
+        {
+            return std::find(bosses.begin(), bosses.end(), idx) != bosses.end();
+        }
+
+        int NextBossAfter(std::vector<int> const& bosses, int idx)
+        {
+            for (int b : bosses)        // ascending by construction
+            {
+                if (b > idx)
+                {
+                    return b;
+                }
+            }
+            return -1;
+        }
+
+        // Pockets hang off ordinary spine rooms, one each, placed like a chain
+        // step without the direction bias. A pocket may carry a shortcut to a
+        // later spine room of its own segment (never onto or past a boss -
+        // the boss room must stay a cut of the graph for B4's barrier).
+        bool PlacePockets(BlockCfg const& cfg, PDRandom& rng, std::vector<int> const& bosses,
+                          int pockets, Field& f, std::vector<Pocket>& out)
+        {
+            int const chainLen = static_cast<int>(f.chain.size());
+            std::vector<bool> hosted(static_cast<size_t>(chainLen), false);
+            for (int p = 0; p < pockets; ++p)
+            {
+                std::vector<int> hosts;
+                for (int i = 1; i < chainLen - 1; ++i)
+                {
+                    if (IsBossIndex(bosses, i) || hosted[static_cast<size_t>(i)])
+                    {
+                        continue;
+                    }
+                    if (StepCandidates(f, f.chain[static_cast<size_t>(i)], nullptr).empty())
+                    {
+                        continue;
+                    }
+                    hosts.push_back(i);
+                }
+                if (hosts.empty())
+                {
+                    return false;
+                }
+                int const host = hosts[static_cast<size_t>(
+                    rng.UniformInt(0, static_cast<int>(hosts.size()) - 1))];
+                Cell const from = f.chain[static_cast<size_t>(host)];
+                std::vector<StepCandidate> const cands = StepCandidates(f, from, nullptr);
+                StepCandidate const cand = cands[static_cast<size_t>(
+                    rng.UniformInt(0, static_cast<int>(cands.size()) - 1))];
+                CommitRoute(f, from, cand.cell, ChooseXFirst(rng, cand.orders));
+                f.occ[f.Index(cand.cell)] = 1;
+                f.rooms.push_back(cand.cell);
+                hosted[static_cast<size_t>(host)] = true;
+
+                Pocket pocket;
+                pocket.cell = cand.cell;
+                pocket.host = host;
+
+                if (rng.Chance(cfg.loopChancePct))
+                {
+                    int const segmentBoss = NextBossAfter(bosses, host);
+                    std::vector<std::pair<int, int>> targets;      // (chain index, orders)
+                    for (int j = host + 1; j < segmentBoss; ++j)
+                    {
+                        int const orders = FeasibleOrders(f, cand.cell, f.chain[static_cast<size_t>(j)]);
+                        if (orders != ORDER_NONE)
+                        {
+                            targets.push_back(std::make_pair(j, orders));
+                        }
+                    }
+                    if (!targets.empty())
+                    {
+                        std::pair<int, int> const target = targets[static_cast<size_t>(
+                            rng.UniformInt(0, static_cast<int>(targets.size()) - 1))];
+                        CommitRoute(f, cand.cell, f.chain[static_cast<size_t>(target.first)],
+                                    ChooseXFirst(rng, target.second));
+                        pocket.shortcutTo = target.first;
+                    }
+                }
+                out.push_back(pocket);
+            }
+            return true;
         }
     }
 
@@ -422,6 +658,128 @@ namespace PDungeon
             }
         }
 
+        // Round B: the spine (spec 2026-09-02 §5). Chain indices are exactly
+        // 0..L-1 once each, the entrance is chain 0, the last chain room is a
+        // boss, bosses sit at their formula positions, pockets hang off
+        // ordinary spine rooms (one each) and a shortcut lands forward on a
+        // non-boss room of the same segment.
+        std::vector<int> chainBlock;
+        for (size_t i = 0; i < plan.blocks.size(); ++i)
+        {
+            PlacedBlock const& b = plan.blocks[i];
+            if (b.chainIndex < 0)
+            {
+                continue;
+            }
+            if (b.roomId < 0)
+            {
+                return fail("a corridor block carries a chain index");
+            }
+            if (static_cast<size_t>(b.chainIndex) >= chainBlock.size())
+            {
+                chainBlock.resize(static_cast<size_t>(b.chainIndex) + 1, -1);
+            }
+            if (chainBlock[static_cast<size_t>(b.chainIndex)] != -1)
+            {
+                return fail("two blocks share a chain index");
+            }
+            chainBlock[static_cast<size_t>(b.chainIndex)] = static_cast<int>(i);
+        }
+        if (chainBlock.size() < 2)
+        {
+            return fail("the chain has fewer than two rooms");
+        }
+        for (int idx : chainBlock)
+        {
+            if (idx < 0)
+            {
+                return fail("a chain index is missing");
+            }
+        }
+        int const chainLen = static_cast<int>(chainBlock.size());
+        int const wantBosses = plan.config.bossRooms > 0 ? plan.config.bossRooms : 1;
+        if (plan.entranceIndex != chainBlock[0] ||
+            plan.blocks[static_cast<size_t>(chainBlock[0])].role != BlockRole::RoomEntrance)
+        {
+            return fail("chain 0 is not the entrance");
+        }
+        if (plan.bossIndex != chainBlock[static_cast<size_t>(chainLen - 1)] ||
+            plan.blocks[static_cast<size_t>(plan.bossIndex)].role != BlockRole::RoomBoss)
+        {
+            return fail("bossIndex is not the last chain room, or it is not a boss");
+        }
+        int bossCount = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.role == BlockRole::RoomBoss)
+            {
+                ++bossCount;
+                if (b.chainIndex < 1)
+                {
+                    return fail("a boss room is off the spine");
+                }
+            }
+        }
+        if (bossCount != wantBosses)
+        {
+            return fail("boss room count does not match the config");
+        }
+        for (int k = 1; k <= wantBosses; ++k)
+        {
+            int const at = BossChainIndex(chainLen, plan.config.bossRooms, k);
+            if (at < 1 || at >= chainLen ||
+                plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(at)])].role != BlockRole::RoomBoss)
+            {
+                return fail("a boss room is off its formula position");
+            }
+        }
+        std::vector<bool> hosted(static_cast<size_t>(chainLen), false);
+        int pocketCount = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.roomId < 0 || b.chainIndex >= 0)
+            {
+                continue;
+            }
+            if (b.branchOf < 0)
+            {
+                return fail("a room is neither on the chain nor a pocket");
+            }
+            ++pocketCount;
+            if (b.role != BlockRole::Room)
+            {
+                return fail("a pocket room carries the wrong role");
+            }
+            if (b.branchOf < 1 || b.branchOf >= chainLen - 1 ||
+                plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.branchOf)])].role != BlockRole::Room)
+            {
+                return fail("a pocket hangs off the entrance, a boss or nothing");
+            }
+            if (hosted[static_cast<size_t>(b.branchOf)])
+            {
+                return fail("two pockets on one host");
+            }
+            hosted[static_cast<size_t>(b.branchOf)] = true;
+            if (b.shortcutTo >= 0)
+            {
+                if (b.shortcutTo <= b.branchOf || b.shortcutTo >= chainLen)
+                {
+                    return fail("a shortcut does not lead forward");
+                }
+                for (int j = b.branchOf + 1; j <= b.shortcutTo; ++j)
+                {
+                    if (plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(j)])].role == BlockRole::RoomBoss)
+                    {
+                        return fail("a shortcut crosses or lands on a boss room");
+                    }
+                }
+            }
+        }
+        if (pocketCount != PocketCountFor(plan.config.rooms, plan.config.bossRooms, plan.config.branches))
+        {
+            return fail("pocket count does not match the config");
+        }
+
         // Every open socket must be answered by the neighbour. A dangling
         // socket would render as a corridor ending in mid-air, and a mismatched
         // pair would leave a wall where the player expects a doorway.
@@ -448,144 +806,188 @@ namespace PDungeon
         }
 
         // Connectivity: every block must be reachable from the entrance through
-        // open sockets, or part of the dungeon is unplayable.
+        // open sockets, or part of the dungeon is unplayable. The same flood,
+        // run once more per boss room with that room removed, proves the boss
+        // cut property: nothing behind a boss is reachable around it, so B4's
+        // barrier on its doorway is a real gate.
         std::map<std::pair<int, int>, size_t> index;
         for (size_t i = 0; i < plan.blocks.size(); ++i)
         {
             index[std::make_pair(plan.blocks[i].bx, plan.blocks[i].by)] = i;
         }
-        std::vector<bool> visited(plan.blocks.size(), false);
-        std::queue<size_t> q;
-        q.push(static_cast<size_t>(plan.entranceIndex));
-        visited[static_cast<size_t>(plan.entranceIndex)] = true;
-        size_t reached = 1;
-        while (!q.empty())
+        auto flood = [&](int skipBlock, std::vector<bool>& visited)
         {
-            PlacedBlock const& b = plan.blocks[q.front()];
-            q.pop();
-            for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+            visited.assign(plan.blocks.size(), false);
+            std::queue<size_t> q;
+            q.push(static_cast<size_t>(plan.entranceIndex));
+            visited[static_cast<size_t>(plan.entranceIndex)] = true;
+            size_t reached = 1;
+            while (!q.empty())
             {
-                if (!(b.socketMask & bit)) continue;
-                int dx = 0, dy = 0;
-                StepFor(bit, dx, dy);
-                auto it = index.find(std::make_pair(b.bx + dx, b.by + dy));
-                if (it == index.end()) continue;
-                if (visited[it->second]) continue;
-                visited[it->second] = true;
-                ++reached;
-                q.push(it->second);
+                PlacedBlock const& b = plan.blocks[q.front()];
+                q.pop();
+                for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                {
+                    if (!(b.socketMask & bit)) continue;
+                    int dx = 0, dy = 0;
+                    StepFor(bit, dx, dy);
+                    auto it = index.find(std::make_pair(b.bx + dx, b.by + dy));
+                    if (it == index.end()) continue;
+                    if (static_cast<int>(it->second) == skipBlock) continue;
+                    if (visited[it->second]) continue;
+                    visited[it->second] = true;
+                    ++reached;
+                    q.push(it->second);
+                }
             }
-        }
-        if (reached != plan.blocks.size())
+            return reached;
+        };
+
+        std::vector<bool> visited;
+        if (flood(-1, visited) != plan.blocks.size())
         {
             return fail("some blocks are unreachable from the entrance");
+        }
+        for (int idx = 1; idx < chainLen; ++idx)
+        {
+            int const bossBlock = chainBlock[static_cast<size_t>(idx)];
+            if (plan.blocks[static_cast<size_t>(bossBlock)].role != BlockRole::RoomBoss)
+            {
+                continue;
+            }
+            flood(bossBlock, visited);
+            for (size_t i = 0; i < plan.blocks.size(); ++i)
+            {
+                PlacedBlock const& b = plan.blocks[i];
+                if (visited[i] && (b.chainIndex > idx || b.branchOf > idx))
+                {
+                    return fail("a boss room can be bypassed");
+                }
+            }
         }
         return true;
     }
 
     bool GenerateBlockPlan(BlockCfg const& cfg, BlockPlan* out)
     {
-        if (!out)
+        if (!out || cfg.fieldBlocks < 2)
         {
             return false;
         }
 
+        // Round B (spec 2026-09-02): the budget is arithmetic, not a draw.
+        int const total = std::max(2, cfg.rooms + cfg.bossRooms);
+        int const bosses = cfg.bossRooms > 0 ? cfg.bossRooms : 1;
+        int const pocketsWanted = PocketCountFor(cfg.rooms, cfg.bossRooms, cfg.branches);
+        int const chainLen = total - pocketsWanted;
+        if (chainLen - 1 < bosses)
+        {
+            return false;       // cannot seat N distinct bosses on the spine
+        }
+        std::vector<int> bossIdx;
+        for (int k = 1; k <= bosses; ++k)
+        {
+            bossIdx.push_back(BossChainIndex(chainLen, cfg.bossRooms, k));
+        }
+
+        // DRAW ORDER (the contract every stored seed depends on; the layout
+        // version is bumped when it changes):
+        //   1. start cell: x then y                     (2 draws)
+        //   2. each chain step: a candidate index, then the axis coin only if
+        //      both L-orders are open; backtracking re-draws from the
+        //      shrunken list (ExtendChain)
+        //   3. per pocket: host index, candidate index, axis coin (if both),
+        //      the shortcut Chance(loopChancePct), then target index and
+        //      axis coin (if both) only when the Chance hit AND a target exists
+        //   4. dead-end stubs: count, then one index per stub (unchanged code)
+        //   5. visual alternates, one per multi-alt block, last (unchanged)
+        // Nothing else draws. Theme moves no draw.
         for (int attempt = 0; attempt < cfg.maxTries; ++attempt)
         {
             uint32_t const seed = cfg.seed + static_cast<uint32_t>(attempt);
             PDRandom rng(seed);
 
-            int const wanted = std::max(2, cfg.rooms + cfg.bossRooms);
-            std::vector<Node> nodes;
-            if (!ScatterRooms(cfg, rng, wanted, nodes))
+            Field field(cfg.fieldBlocks);
+            Cell start;
+            start.x = rng.UniformInt(0, cfg.fieldBlocks - 1);
+            start.y = rng.UniformInt(0, cfg.fieldBlocks - 1);
+            field.occ[field.Index(start)] = 1;
+            field.rooms.push_back(start);
+            field.chain.push_back(start);
+
+            int budget = CHAIN_BUDGET;
+            if (!ExtendChain(rng, chainLen, field, budget))
             {
-                continue;       // the field is too small for this many rooms
+                continue;       // this seed cannot lay the chain on this field
             }
 
-            // Socket masks accumulate per cell as corridors are routed.
+            std::vector<Pocket> pockets;
+            if (!PlacePockets(cfg, rng, bossIdx, pocketsWanted, field, pockets))
+            {
+                continue;       // no host with room for a pocket - next seed
+            }
+
+            // Hand over to the ordered (y, x) map the rest of the pipeline has
+            // always worked on: the stub pass, the depth BFS and the
+            // materialisation all iterate it, which is what keeps the block
+            // order and the alt draws reproducible.
             std::map<Cell, unsigned> masks;
             std::map<Cell, int> roomOf;         // cell -> room id, rooms only
-            for (Node const& n : nodes)
+            std::map<Cell, int> chainOf;        // cell -> chain index, spine only
+            std::map<Cell, size_t> pocketOf;    // cell -> index into `pockets`
+            for (int y = 0; y < field.size; ++y)
             {
-                masks[n.cell] = 0u;
-                roomOf[n.cell] = n.id;
-            }
-
-            std::vector<GraphEdge> const edges = SelectCorridorEdges(nodes, rng, cfg.loopChancePct);
-
-            // Route every edge as an L: one axis first, then the other. Which
-            // axis leads is a coin flip, which is what keeps layouts from all
-            // looking like staircases in the same direction.
-            bool routed = true;
-            for (GraphEdge const& e : edges)
-            {
-                Cell const from = nodes[static_cast<size_t>(e.a)].cell;
-                Cell const to = nodes[static_cast<size_t>(e.b)].cell;
-                bool const xFirst = rng.Chance(50);
-
-                Cell cur = from;
-                std::vector<Cell> path;
-                auto walk = [&](int targetX, int targetY)
+                for (int x = 0; x < field.size; ++x)
                 {
-                    while (cur.x != targetX || cur.y != targetY)
+                    Cell c;
+                    c.x = x;
+                    c.y = y;
+                    if (field.occ[field.Index(c)] != 0)
                     {
-                        Cell next = cur;
-                        if (cur.x != targetX)
-                        {
-                            next.x += (targetX > cur.x) ? 1 : -1;
-                        }
-                        else
-                        {
-                            next.y += (targetY > cur.y) ? 1 : -1;
-                        }
-
-                        unsigned const outBit = BitForStep(next.x - cur.x, next.y - cur.y);
-                        masks[cur] |= outBit;
-                        masks[next] |= OppositeBit(outBit);
-                        cur = next;
-                        path.push_back(cur);
+                        masks[c] = field.masks[field.Index(c)];
                     }
-                };
-
-                if (xFirst)
-                {
-                    walk(to.x, cur.y);
-                    walk(to.x, to.y);
-                }
-                else
-                {
-                    walk(cur.x, to.y);
-                    walk(to.x, to.y);
-                }
-
-                if (cur.x != to.x || cur.y != to.y)
-                {
-                    routed = false;
-                    break;
                 }
             }
-            if (!routed)
+            for (size_t i = 0; i < field.chain.size(); ++i)
             {
-                continue;
+                roomOf[field.chain[i]] = static_cast<int>(i);
+                chainOf[field.chain[i]] = static_cast<int>(i);
+            }
+            for (size_t p = 0; p < pockets.size(); ++p)
+            {
+                roomOf[pockets[p].cell] = chainLen + static_cast<int>(p);
+                pocketOf[pockets[p].cell] = p;
             }
 
             // Dead-end stubs, AFTER every routing draw: the whole layout up to
-            // here consumes exactly the draws it consumed before Phase 2, so
-            // the stub pass is additive to the stream, never a reshuffle.
+            // here consumes exactly the draws it consumed before, so the stub
+            // pass is additive to the stream, never a reshuffle.
             // A stub is one extra block hanging off an existing cell through a
             // socket the host did not have - a side passage worth peeking into
             // (the kit puts a chest there and no spawns).
             if (cfg.maxDeadEnds > 0)
             {
                 int const wantStubs = rng.UniformInt(0, cfg.maxDeadEnds);
+                // A stub is ONE block. A placed stub claims its cell but never
+                // becomes a host itself: a chain of two stubs would give the
+                // block they hang off a third socket leading to a non-stub
+                // block, and would leave the middle stub with two sockets - the
+                // corridor junction Round B's spine rules out (spec 2026-09-02
+                // §7.1). Before Round B the layout was full of junctions
+                // anyway, so the pass could host stubs on stubs.
+                std::set<Cell> stubs;
                 for (int placedStubs = 0; placedStubs < wantStubs; ++placedStubs)
                 {
                     // Candidates recomputed per stub over the ordered map, so
-                    // a placed stub both claims its cell and becomes a host
-                    // itself; the order is the map's own (y, x) order.
+                    // a placed stub claims its cell for the next round; the
+                    // order is the map's own (y, x) order.
                     std::vector<std::pair<Cell, unsigned>> candidates;
                     for (auto const& kv : masks)
                     {
+                        if (stubs.find(kv.first) != stubs.end())
+                        {
+                            continue;   // one block per stub, never a chain
+                        }
                         for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
                         {
                             if (kv.second & bit)
@@ -622,30 +1024,17 @@ namespace PDungeon
                     stub.y = pick.first.y + dy;
                     masks[pick.first] |= pick.second;
                     masks[stub] = OppositeBit(pick.second);
+                    stubs.insert(stub);
                 }
             }
 
-            // BFS from the room nearest the field's north-west corner, so the
-            // entrance is stable for a given layout rather than a draw.
-            int entranceRoom = 0;
-            for (Node const& n : nodes)
-            {
-                Node const& best = nodes[static_cast<size_t>(entranceRoom)];
-                int const a = n.cell.y * cfg.fieldBlocks + n.cell.x;
-                int const b = best.cell.y * cfg.fieldBlocks + best.cell.x;
-                if (a < b)
-                {
-                    entranceRoom = n.id;
-                }
-            }
-
-            // Depth over the block graph, then rooms by depth: the deepest is
-            // the boss. Corridors take no depth.
+            // Depth over the block graph from the entrance (chain 0). Nothing
+            // downstream reads it today; it stays the BFS depth it always was.
             std::map<Cell, int> depth;
             std::queue<Cell> q;
-            Cell const start = nodes[static_cast<size_t>(entranceRoom)].cell;
-            depth[start] = 0;
-            q.push(start);
+            Cell const entranceCell = field.chain[0];
+            depth[entranceCell] = 0;
+            q.push(entranceCell);
             while (!q.empty())
             {
                 Cell const c = q.front();
@@ -666,61 +1055,6 @@ namespace PDungeon
                 }
             }
 
-            // The `cfg.bossRooms` DEEPEST rooms become boss rooms, picked one at
-            // a time so the order is the same "deepest, ties to the lowest room
-            // id" rule that used to pick the single boss. Written as a repeated
-            // selection rather than a sort ON PURPOSE: the first pass is
-            // literally the old code, so a layout with bossRooms = 1 comes out
-            // byte-identical (pinned by the fixed-seed manifest check in
-            // tests/blockplan_harness.cpp) and no PD_LAYOUT_VERSION bump is
-            // needed for the accounts that already have a stored seed.
-            //
-            // A stored plan with gen_boss_rooms > 1 WOULD regenerate differently
-            // than before this change - it gains boss rooms it did not have. No
-            // such account exists yet (boss rooms only pass 1 at dlvl 10), and
-            // that is the whole reason this lands now rather than later.
-            //
-            // A configured 0 still yields ONE boss room, as it always did:
-            // plan.bossIndex has to point at a block, and every reader from the
-            // manifest to the harness assumes a dungeon has an end.
-            int const wantBossRooms = cfg.bossRooms > 0 ? cfg.bossRooms : 1;
-
-            std::set<int> bossRooms;
-            int bossRoom = -1;
-            for (int picked = 0; picked < wantBossRooms; ++picked)
-            {
-                int best = -1;
-                int bestDepth = -1;
-                for (Node const& n : nodes)
-                {
-                    auto it = depth.find(n.cell);
-                    if (it == depth.end()) continue;    // unreachable; caught by validation
-                    if (n.id == entranceRoom) continue; // the way in is never the boss
-                    if (bossRooms.find(n.id) != bossRooms.end()) continue;
-                    if (it->second > bestDepth || (it->second == bestDepth && n.id < best))
-                    {
-                        bestDepth = it->second;
-                        best = n.id;
-                    }
-                }
-                if (best < 0)
-                {
-                    break;          // fewer reachable rooms than boss rooms asked for
-                }
-                bossRooms.insert(best);
-                if (bossRoom < 0)
-                {
-                    // The FIRST pick stays "the" boss: plan.bossIndex means the
-                    // deepest room (entrance distance), and the manifest, the
-                    // harness and the client all read it that way.
-                    bossRoom = best;
-                }
-            }
-            if (bossRoom < 0 || static_cast<int>(bossRooms.size()) < wantBossRooms)
-            {
-                continue;           // try the next seed rather than ship a layout short of bosses
-            }
-
             // Materialise. Fixed iteration order (masks is an ordered map keyed
             // by (y, x)), so the block list is reproducible.
             BlockPlan plan;
@@ -739,11 +1073,22 @@ namespace PDungeon
                 auto rit = roomOf.find(c);
                 if (rit != roomOf.end())
                 {
-                    bool const isBoss = bossRooms.find(rit->second) != bossRooms.end();
                     b.roomId = rit->second;
-                    b.role = (rit->second == entranceRoom) ? BlockRole::RoomEntrance
-                           : isBoss                        ? BlockRole::RoomBoss
-                                                           : BlockRole::Room;
+                    auto cit = chainOf.find(c);
+                    if (cit != chainOf.end())
+                    {
+                        b.chainIndex = cit->second;
+                        b.role = (cit->second == 0)             ? BlockRole::RoomEntrance
+                               : IsBossIndex(bossIdx, cit->second) ? BlockRole::RoomBoss
+                                                                   : BlockRole::Room;
+                    }
+                    else
+                    {
+                        Pocket const& pocket = pockets[pocketOf[c]];
+                        b.role = BlockRole::Room;
+                        b.branchOf = pocket.host;
+                        b.shortcutTo = pocket.shortcutTo;
+                    }
                 }
                 else
                 {
@@ -768,11 +1113,11 @@ namespace PDungeon
                 {
                     plan.entranceIndex = static_cast<int>(plan.blocks.size());
                 }
-                else if (b.roomId == bossRoom)
+                else if (b.chainIndex == chainLen - 1)
                 {
-                    // The PRIMARY boss room only. With several boss rooms the
-                    // role is shared, but bossIndex still means "the deepest
-                    // room", which is what makes it a stable landmark.
+                    // The END of the dungeon: the last chain room, always a
+                    // boss. The manifest, the harness and the HUD read
+                    // bossIndex as the landmark the run finishes at.
                     plan.bossIndex = static_cast<int>(plan.blocks.size());
                 }
                 plan.blocks.push_back(b);
@@ -870,7 +1215,7 @@ namespace PDungeon
                 {
                     case BlockRole::RoomEntrance: out += 'E'; break;
                     case BlockRole::RoomBoss:     out += 'B'; break;
-                    case BlockRole::Room:         out += 'R'; break;
+                    case BlockRole::Room:         out += (b->branchOf >= 0) ? 'r' : 'R'; break;
                     case BlockRole::CorridorDeadEnd: out += 'D'; break;
                     default:
                         // Corridors draw as the shape of their sockets, which

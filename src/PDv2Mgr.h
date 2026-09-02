@@ -148,7 +148,13 @@ namespace PDungeon
     // from the stream, so a v1 seed no longer reproduces its stored layout.
     // Every stored dungeon rerolls once on first entry; dlvl/dxp are
     // untouched by design (layout columns update via ON DUPLICATE KEY only).
-    constexpr uint32_t PD_LAYOUT_VERSION = 2;
+    //
+    // v3 (2026-09-02, Round B): the chain generator replaces scatter + MST -
+    // rooms are laid as one path through the boss rooms with pockets and
+    // segment-local shortcuts, `gen_branches` joins the generation inputs,
+    // and LoopChance now means "a pocket carries a shortcut". Every stored
+    // layout rerolls once; dlvl/dxp untouched, as before.
+    constexpr uint32_t PD_LAYOUT_VERSION = 3;
 
     class PDv2Mgr
     {
