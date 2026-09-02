@@ -10,6 +10,11 @@ tile grid → decoration. The server runs exactly that pipeline per instance run
 and **assembles the result out of existing WMO/M2 GameObjects** (Wintergrasp
 walls, gates, braziers, chests) on an unused, client-known base map.
 
+> **PDv2 (map 760, the client-composed kit) plans differently since Round B:** one chain of
+> rooms from the entrance through the boss rooms, a few one-room pockets and an occasional
+> shortcut forward - see `docs/superpowers/specs/2026-09-02-pdv2-b0-spine-generator-design.md`.
+> The v1 pipeline below still describes the GameObject-assembled prototype.
+
 ## How it works
 
 - Each run is a fresh `InstanceMap` with its **own dynamic collision tree** —
