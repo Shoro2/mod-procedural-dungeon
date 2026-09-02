@@ -110,25 +110,31 @@ namespace PDungeon
     // (ONE ADT tile - multi-tile plans are untested client-side, so the field
     // is never widened to buy rooms). bossRooms per row is GameBossRooms at the
     // dlvl where that room count unlocks, i.e. what a player there would run.
-    // Measured 2026-08-07, 3000 seeds per row:
+    // Measured 2026-09-02 (Round B chain generator), 3000 seeds per row:
     //
     //   rooms  bossRooms  room cells  gen failures  max manifest B
-    //      12          1          13         0            1309
-    //      13          2          15         0            1371
-    //      14          2          16         0            1391
-    //      15          2          17         0            1406
+    //      12          1          13         0             913
+    //      13          2          15         0             971
+    //      14          2          16         0            1033
+    //      15          2          17         0            1071
     //
-    // Both constraints are far from binding at 15. A separate sweep past the
-    // design cap (1000 seeds per row) puts the real edges at:
-    //   * manifest size saturates around 1425 B - 75% of the 1900 B ceiling
-    //     and 70% of the 2048 B wire budget - because block count grows much
-    //     more slowly than room count once corridors start being shared;
+    // Both constraints are far from binding at 15, and the chain leaves MORE
+    // manifest headroom than the MST it replaced (15 rooms measured 1406 B on
+    // 2026-08-07 and 1071 B now: one spine plus its pockets needs fewer
+    // corridor blocks than a tree with loops and stubs did). A separate sweep
+    // past the design cap (1000 seeds per row) puts the real edges at:
+    //   * manifest size saturates around 1330 B - 70% of the 1900 B ceiling
+    //     and 65% of the 2048 B wire budget - because an 8x8 field holds at
+    //     most 64 blocks, so the manifest is bounded by the tile long before
+    //     it is bounded by the room count;
     //   * ROOM PACKING is what eventually gives: MIN_ROOM_GAP = 2 Manhattan
-    //     (PDBlockPlan.cpp:34) on 64 cells is clean through 25 room cells, and
-    //     the rejection sampler first misses a seed at 26 (7 of 1000, even
-    //     across all 12 retries), then collapses fast - 93 of 1000 at 27.
+    //     (PDBlockPlan.cpp:38) on 64 cells is clean through 24 room cells, and
+    //     the search first misses seeds at 26 (88 of 1000, across all 12
+    //     attempts; 25 cells is never asked for, because bossRooms steps
+    //     2 -> 3 at the dlvl that would have wanted it), then collapses fast -
+    //     432 of 1000 at 27 cells, and nothing generates at all at 32.
     //
-    // So 15 rooms + 2 boss rooms = 17 cells sits 8 cells below the first
+    // So 15 rooms + 2 boss rooms = 17 cells sits 9 cells below the first
     // observed failure. If either the gap rule or the manifest format changes,
     // re-run `pdblock --roomcap 3000`; the batch re-measures this constant on
     // every run so it cannot rot silently.

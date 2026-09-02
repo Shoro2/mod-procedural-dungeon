@@ -288,6 +288,81 @@ namespace
         return it == g_kit.end() ? nullptr : &it->second.anchors;
     }
 
+    // Round B: the spine in one glance - the chain in order, every pocket
+    // with its host and its shortcut, the segments. Printed by the single
+    // layout and by --path, and quoted by the operator document.
+    std::string ChainSummary(BlockPlan const& plan)
+    {
+        int const len = ChainLength(plan);
+        std::vector<PlacedBlock const*> chain(static_cast<size_t>(len), nullptr);
+        std::vector<PlacedBlock const*> pockets;
+        int bosses = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.chainIndex >= 0) chain[static_cast<size_t>(b.chainIndex)] = &b;
+            if (b.branchOf >= 0) pockets.push_back(&b);
+            if (b.role == BlockRole::RoomBoss) ++bosses;
+        }
+
+        std::string out;
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "chain (%d rooms, %d boss): ", len, bosses);
+        out += buf;
+        for (int i = 0; i < len; ++i)
+        {
+            PlacedBlock const* b = chain[static_cast<size_t>(i)];
+            if (!b)
+            {
+                out += (i ? " -> ?" : "?");
+                continue;
+            }
+            char const tag = b->role == BlockRole::RoomEntrance ? 'E'
+                           : b->role == BlockRole::RoomBoss     ? 'B' : 'R';
+            std::snprintf(buf, sizeof(buf), "%s%c#%d (%d,%d)", i ? " -> " : "", tag, i, b->bx, b->by);
+            out += buf;
+        }
+        out += '\n';
+
+        if (!pockets.empty())
+        {
+            out += "pockets:";
+            for (PlacedBlock const* p : pockets)
+            {
+                if (p->shortcutTo >= 0)
+                {
+                    std::snprintf(buf, sizeof(buf), "  R#%d + pocket (%d,%d) [shortcut -> R#%d]",
+                                  p->branchOf, p->bx, p->by, p->shortcutTo);
+                }
+                else
+                {
+                    std::snprintf(buf, sizeof(buf), "  R#%d + pocket (%d,%d) [dead end]",
+                                  p->branchOf, p->bx, p->by);
+                }
+                out += buf;
+            }
+            out += '\n';
+        }
+
+        int segStart = 1;
+        int k = 0;
+        for (int i = 1; i < len; ++i)
+        {
+            PlacedBlock const* b = chain[static_cast<size_t>(i)];
+            if (!b || b->role != BlockRole::RoomBoss) continue;
+            ++k;
+            int inSegment = 0;
+            for (PlacedBlock const* p : pockets)
+            {
+                if (p->branchOf >= segStart && p->branchOf < i) ++inSegment;
+            }
+            std::snprintf(buf, sizeof(buf), "segment %d: chain %d..%d, pockets %d, boss B#%d\n",
+                          k, segStart, i, inSegment, i);
+            out += buf;
+            segStart = i + 1;
+        }
+        return out;
+    }
+
     void PrintOne(uint32_t seed, int rooms)
     {
         BlockCfg const cfg = MakeCfg(seed, rooms);
@@ -308,7 +383,8 @@ namespace
         std::printf("seed %u (effective %u): %d blocks = %d rooms + %d corridors\n",
                     seed, plan.effectiveSeed, static_cast<int>(plan.blocks.size()),
                     roomCount, corridorCount);
-        std::printf("E = entrance, B = boss, R = room, | - + = corridor\n\n");
+        std::printf("E = entrance, B = boss, R = spine room, r = pocket room, D = dead end, | - + = corridor\n\n");
+        std::printf("%s\n", ChainSummary(plan).c_str());
         std::printf("%s\n", AsciiBlockDump(plan).c_str());
 
         std::string const manifest = EmitManifest(plan, 1);
@@ -643,6 +719,8 @@ namespace
         std::printf("grid %dx%d cells, %u walkable (%.1f%%)\n", grid.width, grid.height,
                     static_cast<unsigned>(grid.WalkableCount()),
                     100.0 * grid.WalkableCount() / (grid.width * grid.height));
+
+        std::printf("\n%s\n", ChainSummary(plan).c_str());
 
         PlacedBlock const& entrance = plan.blocks[static_cast<size_t>(plan.entranceIndex)];
         PlacedBlock const& boss = plan.blocks[static_cast<size_t>(plan.bossIndex)];
@@ -3050,6 +3128,56 @@ namespace
         }
     }
 
+    // Round B: the field the ENGINE runs. PDv2Mgr::GeneratePlan shrinks the
+    // field to GameFieldBlocksForRooms(rooms) (capped at the configured 8),
+    // which the fixed 8x8 batch never exercised. A chain packs tighter than
+    // an MST, so every (rooms, field, bossRooms) row the engine can ask for
+    // must generate on every seed, validate, and fit the manifest budget.
+    void RunEngineFieldSweep(int seeds)
+    {
+        std::printf("engine-field sweep, %d seeds per row (branches 2)\n", seeds);
+        std::printf("  rooms  field  boss  genfail  retries  maxManifest\n");
+        for (int rooms = PD_GAME_ROOMS_MIN; rooms <= PD_GAME_ROOMS_CAP_MEASURED; ++rooms)
+        {
+            int const field = std::min(PD_GAME_FIELD_BLOCKS_HARD_MAX, GameFieldBlocksForRooms(rooms));
+            int const boss = GameBossRooms(rooms > 3 ? rooms - 3 : 0);
+            int failures = 0;
+            int retries = 0;
+            size_t maxManifest = 0;
+            for (int i = 0; i < seeds; ++i)
+            {
+                uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 5u;
+                BlockCfg cfg = MakeCfg(seed, rooms);
+                cfg.bossRooms = boss;
+                cfg.fieldBlocks = field;
+                BlockPlan plan;
+                if (!GenerateBlockPlan(cfg, &plan))
+                {
+                    ++failures;
+                    continue;
+                }
+                if (plan.effectiveSeed != cfg.seed)
+                {
+                    ++retries;
+                }
+                std::string err;
+                Check(ValidateBlockPlan(plan, &err), err.empty() ? "sweep layout failed validation" : err.c_str(), seed);
+                std::string const m = EmitManifest(plan, 99);
+                maxManifest = (m.size() > maxManifest) ? m.size() : maxManifest;
+            }
+            std::printf("  %5d  %5d  %4d  %7d  %7d  %11d\n", rooms, field, boss, failures,
+                        retries, static_cast<int>(maxManifest));
+            char msg[200];
+            std::snprintf(msg, sizeof(msg),
+                          "engine field %dx%d cannot seat %d room(s) + %d boss on %d of %d seeds",
+                          field, field, rooms, boss, failures, seeds);
+            Check(failures == 0, msg, 0);
+            Check(maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B),
+                  "an engine-field layout is over the manifest budget", 0);
+        }
+        std::printf("\n");
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
@@ -3125,10 +3253,13 @@ namespace
             Check(measuredCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
         }
 
+        RunEngineFieldSweep(count);
+
         size_t maxManifest = 0;
         int longestPath = 0;
         int minBlocks = 1 << 30;
         int maxBlocks = 0;
+        int minPockets = 1 << 30, maxPockets = 0, shortcutLayouts = 0;
 
         for (int i = 0; i < count; ++i)
         {
@@ -3235,10 +3366,23 @@ namespace
             int const blocks = static_cast<int>(plan.blocks.size());
             minBlocks = (blocks < minBlocks) ? blocks : minBlocks;
             maxBlocks = (blocks > maxBlocks) ? blocks : maxBlocks;
+
+            int pocketsHere = 0;
+            int shortcutsHere = 0;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                if (b.branchOf >= 0) ++pocketsHere;
+                if (b.shortcutTo >= 0) ++shortcutsHere;
+            }
+            minPockets = (pocketsHere < minPockets) ? pocketsHere : minPockets;
+            maxPockets = (pocketsHere > maxPockets) ? pocketsHere : maxPockets;
+            shortcutLayouts += shortcutsHere ? 1 : 0;
         }
 
         if (longestPath) std::printf("longest room-to-room path: %d cells\n", longestPath);
         std::printf("blocks per layout: %d..%d\n", minBlocks, maxBlocks);
+        std::printf("pockets per layout: %d..%d, %d of %d layouts carry a shortcut\n",
+                    minPockets, maxPockets, shortcutLayouts, count);
         std::printf("largest manifest  : %d bytes (budget 2048)\n", static_cast<int>(maxManifest));
         std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
         std::printf("%s\n", g_failures == 0 ? "ALL CHECKS PASS" : "FAILURES");
