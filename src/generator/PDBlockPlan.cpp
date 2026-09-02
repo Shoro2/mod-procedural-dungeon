@@ -372,46 +372,6 @@ namespace PDungeon
         // Commits per attempt before the search gives up on this seed.
         int const CHAIN_BUDGET = 4000;
 
-        // Depth-first over chain positions. Every commit draws; a failed
-        // subtree removes the drawn candidate and draws again from what is
-        // left, so the draw sequence is a pure function of the seed whatever
-        // path the search takes. Every level checks the budget, so an
-        // exhausted attempt unwinds at once.
-        bool ExtendChain(PDRandom& rng, int chainLen, Field& f, int& budget)
-        {
-            if (static_cast<int>(f.chain.size()) == chainLen)
-            {
-                return true;
-            }
-            Cell const from = f.chain.back();
-            Cell const* prev = f.chain.size() >= 2 ? &f.chain[f.chain.size() - 2] : nullptr;
-            std::vector<StepCandidate> cands = StepCandidates(f, from, prev);
-            while (!cands.empty())
-            {
-                if (budget <= 0)
-                {
-                    return false;
-                }
-                --budget;
-                size_t const pick = static_cast<size_t>(
-                    rng.UniformInt(0, static_cast<int>(cands.size()) - 1));
-                StepCandidate const cand = cands[pick];
-
-                Field next = f;
-                CommitRoute(next, from, cand.cell, ChooseXFirst(rng, cand.orders));
-                next.occ[next.Index(cand.cell)] = 1;
-                next.rooms.push_back(cand.cell);
-                next.chain.push_back(cand.cell);
-                if (ExtendChain(rng, chainLen, next, budget))
-                {
-                    f = next;
-                    return true;
-                }
-                cands.erase(cands.begin() + static_cast<std::ptrdiff_t>(pick));
-            }
-            return false;
-        }
-
         struct Pocket
         {
             Cell cell;
@@ -503,6 +463,71 @@ namespace PDungeon
                 out.push_back(pocket);
             }
             return true;
+        }
+
+        // What the search is for: the spine length, the pockets that must
+        // fit around it, and the boss positions the pocket hosts avoid.
+        struct ChainGoal
+        {
+            BlockCfg const* cfg = nullptr;
+            std::vector<int> const* bosses = nullptr;
+            int chainLen = 0;
+            int pockets = 0;
+        };
+
+        // Depth-first over chain positions. Every commit draws; a failed
+        // subtree removes the drawn candidate and draws again from what is
+        // left, so the draw sequence is a pure function of the seed whatever
+        // path the search takes. Every level checks the budget, so an
+        // exhausted attempt unwinds at once.
+        //
+        // The pockets are seated HERE, once the spine is complete, and a
+        // spine they do not fit around is treated like any other dead end of
+        // the search - the level above draws its next candidate. Measured
+        // 2026-09-02: seating them after the search instead failed ~55 % of
+        // single attempts at the live default (5 rooms on a 5x5 field).
+        bool ExtendChain(PDRandom& rng, ChainGoal const& goal, Field& f,
+                         std::vector<Pocket>& pocketsOut, int& budget)
+        {
+            if (static_cast<int>(f.chain.size()) == goal.chainLen)
+            {
+                Field seated = f;
+                std::vector<Pocket> placed;
+                if (!PlacePockets(*goal.cfg, rng, *goal.bosses, goal.pockets, seated, placed))
+                {
+                    return false;
+                }
+                f = seated;
+                pocketsOut = placed;
+                return true;
+            }
+            Cell const from = f.chain.back();
+            Cell const* prev = f.chain.size() >= 2 ? &f.chain[f.chain.size() - 2] : nullptr;
+            std::vector<StepCandidate> cands = StepCandidates(f, from, prev);
+            while (!cands.empty())
+            {
+                if (budget <= 0)
+                {
+                    return false;
+                }
+                --budget;
+                size_t const pick = static_cast<size_t>(
+                    rng.UniformInt(0, static_cast<int>(cands.size()) - 1));
+                StepCandidate const cand = cands[pick];
+
+                Field next = f;
+                CommitRoute(next, from, cand.cell, ChooseXFirst(rng, cand.orders));
+                next.occ[next.Index(cand.cell)] = 1;
+                next.rooms.push_back(cand.cell);
+                next.chain.push_back(cand.cell);
+                if (ExtendChain(rng, goal, next, pocketsOut, budget))
+                {
+                    f = next;
+                    return true;
+                }
+                cands.erase(cands.begin() + static_cast<std::ptrdiff_t>(pick));
+            }
+            return false;
         }
     }
 
@@ -896,10 +921,14 @@ namespace PDungeon
         //   2. each chain step: a candidate index, then the axis coin only if
         //      both L-orders are open; backtracking re-draws from the
         //      shrunken list (ExtendChain)
-        //   3. per pocket: host index, candidate index, axis coin (if both),
-        //      the shortcut Chance(loopChancePct), then target index and
-        //      axis coin (if both) only when the Chance hit AND a target exists
-        //   4. dead-end stubs: count, then one index per stub (unchanged code)
+        //   3. once the spine is complete, the pockets, still inside the
+        //      search: per pocket a host index, a candidate index, the axis
+        //      coin (if both), the shortcut Chance(loopChancePct), then a
+        //      target index and axis coin only when the Chance hit AND a
+        //      target exists. Pockets that do not fit send the search back
+        //      one chain step, and the draws simply continue from there
+        //   4. dead-end stubs: count, then one index per stub (a placed stub
+        //      is never a host, since Round B)
         //   5. visual alternates, one per multi-alt block, last (unchanged)
         // Nothing else draws. Theme moves no draw.
         for (int attempt = 0; attempt < cfg.maxTries; ++attempt)
@@ -915,16 +944,17 @@ namespace PDungeon
             field.rooms.push_back(start);
             field.chain.push_back(start);
 
-            int budget = CHAIN_BUDGET;
-            if (!ExtendChain(rng, chainLen, field, budget))
-            {
-                continue;       // this seed cannot lay the chain on this field
-            }
+            ChainGoal goal;
+            goal.cfg = &cfg;
+            goal.bosses = &bossIdx;
+            goal.chainLen = chainLen;
+            goal.pockets = pocketsWanted;
 
+            int budget = CHAIN_BUDGET;
             std::vector<Pocket> pockets;
-            if (!PlacePockets(cfg, rng, bossIdx, pocketsWanted, field, pockets))
+            if (!ExtendChain(rng, goal, field, pockets, budget))
             {
-                continue;       // no host with room for a pocket - next seed
+                continue;       // no spine with seated pockets within the budget - next seed
             }
 
             // Hand over to the ordered (y, x) map the rest of the pipeline has
