@@ -47,6 +47,11 @@ namespace PDungeon
         _config.originBX = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBX", 256);
         _config.originBY = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBY", 256);
         _config.loopChancePct = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.LoopChance", 15);
+
+        // Round B: pocket rooms hanging off the spine. Clamped at 0 on the way
+        // in; the planner's own arithmetic bounds it from above.
+        _config.branches = std::max(0, sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.Branches", 2));
+
         _config.theme = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.Theme", 1);
         _config.manifestPath = sConfigMgr->GetOption<std::string>(
             "ProceduralDungeon.V2.ManifestPath", "");
@@ -80,10 +85,10 @@ namespace PDungeon
         _config.decorEnable = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Decor.Enable", true);
 
-        LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{})",
+        LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} shortcut {}%",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,
-                 _config.originBX, _config.originBY);
+                 _config.originBX, _config.originBY, _config.branches, _config.loopChancePct);
         if (_config.enabled && _config.manifestPath.empty())
         {
             LOG_WARN(PD_LOG, "PDv2: ProceduralDungeon.V2.ManifestPath is empty - `.pdungeon v2 gen` "
@@ -121,6 +126,7 @@ namespace PDungeon
         // (PD_GAME_ROOMS_CAP_MEASURED) still keeps big layouts inside the tile.
         cfg.fieldBlocks = std::min(_config.fieldBlocks, GameFieldBlocksForRooms(cfg.rooms));
         cfg.loopChancePct = _config.loopChancePct;
+        cfg.branches = _config.branches;
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;
         cfg.theme = themeOverride ? themeOverride : _config.theme;
@@ -167,15 +173,16 @@ namespace PDungeon
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
-            "gen_loop_pct, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
-            "cfg_packs) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
+            "gen_loop_pct, gen_branches, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
+            "cfg_packs) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE theme = VALUES(theme), "
             "layout_seed = VALUES(layout_seed), layout_version = VALUES(layout_version), "
             "gen_rooms = VALUES(gen_rooms), gen_boss_rooms = VALUES(gen_boss_rooms), "
             "gen_field_blocks = VALUES(gen_field_blocks), gen_origin_bx = VALUES(gen_origin_bx), "
-            "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct)",
+            "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct), "
+            "gen_branches = VALUES(gen_branches)",
             accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
-            cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.loopChancePct,
+            cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.loopChancePct, cfg.branches,
             state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct, state.cfgBandMin, packs);
     }
 
@@ -312,7 +319,7 @@ namespace PDungeon
 
         QueryResult result = CharacterDatabase.Query(
             "SELECT layout_seed, layout_version, theme, gen_rooms, gen_boss_rooms, "
-            "gen_field_blocks, gen_origin_bx, gen_origin_by, gen_loop_pct "
+            "gen_field_blocks, gen_origin_bx, gen_origin_by, gen_loop_pct, gen_branches "
             "FROM pdungeon_account WHERE accountId = {}", accountId);
         if (!result)
         {
@@ -343,6 +350,7 @@ namespace PDungeon
         cfg.originBX = fields[6].Get<uint16>();
         cfg.originBY = fields[7].Get<uint16>();
         cfg.loopChancePct = fields[8].Get<uint8>();
+        cfg.branches = fields[9].Get<uint8>();
 
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))

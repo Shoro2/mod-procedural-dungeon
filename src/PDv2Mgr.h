@@ -61,7 +61,8 @@ namespace PDungeon
         int         fieldBlocks = 8;
         int         originBX = 256;      // 256/8 = tile 32
         int         originBY = 256;
-        int         loopChancePct = 15;
+        int         loopChancePct = 15;  // Round B: chance that a pocket carries a shortcut
+        int         branches = 2;        // Round B: pocket rooms per layout (V2.Branches)
         int         theme = 1;
         std::string manifestPath;        // where `v2 gen` writes the manifest
 

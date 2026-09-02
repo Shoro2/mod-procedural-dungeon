@@ -198,10 +198,10 @@ private:
     {
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
         handler->PSendSysMessage("pdungeon v2: {} | map {} | floorZ {:.2f} | rooms {}+{} | "
-                                 "field {} blocks | origin ({},{})",
+                                 "field {} blocks | origin ({},{}) | pockets {} | shortcut {}%",
                                  cfg.enabled ? "enabled" : "disabled", cfg.mapId, cfg.floorZ,
                                  cfg.rooms, cfg.bossRooms, cfg.fieldBlocks,
-                                 cfg.originBX, cfg.originBY);
+                                 cfg.originBX, cfg.originBY, cfg.branches, cfg.loopChancePct);
         // 0 here means mod_pdungeon_chunk_meta.sql never reached the world DB
         // - the one failure that makes every mob stand still.
         handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded",

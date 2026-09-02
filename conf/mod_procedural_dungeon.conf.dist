@@ -296,12 +296,27 @@ ProceduralDungeon.V2.OriginBY = 256
 
 #
 #    ProceduralDungeon.V2.LoopChance
-#        Description: Percent chance to keep a non-MST edge, which is what makes
-#                     a layout a graph rather than a tree.
+#        Description: Round B: percent chance that a pocket room, instead of
+#                     dead-ending, carries a shortcut forward to a later room
+#                     of the same segment - so the way out of a cleared pocket
+#                     is not the way in. Never onto or past a boss room.
+#                     Stored per account as gen_loop_pct with the layout.
 #        Default:     15
 #
 
 ProceduralDungeon.V2.LoopChance = 15
+
+#
+#    ProceduralDungeon.V2.Branches
+#        Description: Round B: pocket rooms hanging off the main path, at most
+#                     one per ordinary spine room and never more than a third
+#                     of the rooms. Pockets come out of the same room budget,
+#                     so the total room count does not change. Stored per
+#                     account as gen_branches with the layout.
+#        Default:     2
+#
+
+ProceduralDungeon.V2.Branches = 2
 
 #
 #    ProceduralDungeon.V2.Theme
