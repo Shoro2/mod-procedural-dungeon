@@ -14,12 +14,25 @@
 --
 -- roleFilter is the same PREFIX match `pdungeon_decor_rules`.`roleFilter`
 -- uses against `pdungeon_chunk_meta`.`role` - see mod_pdungeon_decor.sql for
--- the full match table. 'corridor' already matches corridor_dead_end (a
--- stub reports itself as a corridor role, prefixed the same as every other
--- corridor variant), so rule 5's own 'corridor_dead_end' row STACKS on top
--- of rule 4's 'corridor' row rather than replacing it - a dead-end stub
--- gets both budgets, which is deliberate: it is otherwise the barest block
--- in the kit.
+-- the full match table. Two consequences worth stating explicitly:
+--
+-- 'room' matches room, room_entrance AND room_boss, while 'room_boss' matches
+-- room_boss only - so a boss room collects from rules 1-3 (roleFilter 'room')
+-- AND rule 6 (roleFilter 'room_boss') AT THE SAME TIME, DecorRoleMatches being
+-- a straight prefix match, and ends up with denser ambient life than a plain
+-- room gets. Possibly intended, previously undisclosed here.
+--
+-- 'corridor' matches every corridor_* role INCLUDING corridor_dead_end (the
+-- stub block reports itself as a corridor role, prefixed like every other
+-- corridor variant) - but a corridor_dead_end block is a geometric dead zone
+-- for THIS table regardless of which rule matches it: BuildCritterPlan draws
+-- candidates only from CollectScatter (wall-free walkable cells), and every
+-- corridor_dead_end chunk in both themes is exactly two cells wide, its only
+-- walkable cells sitting on the excluded socket track - zero scatter
+-- candidates remain. A dedicated rule for it (formerly id 5, a Black Rat)
+-- could therefore never place anything either, and only cost one draw per
+-- stub. Removed rather than kept as dead weight - the stub is the one block
+-- in the kit that can never carry ambient life, by geometry.
 -- ----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS `pdungeon_critter_rules` (
@@ -40,9 +53,10 @@ CREATE TABLE IF NOT EXISTS `pdungeon_critter_rules` (
 -- REPLACE and never DROP - an operator who added rules of their own keeps
 -- them, and a REPLACE would silently resurrect columns this file does not
 -- name. The range reserves ids 1-10 for the full researched set; only the
--- six below have been verified against the live world DB and the client
--- DBCs so far, so only six are inserted - the remaining ids stay free for a
--- later addition once verified the same way.
+-- five below have been verified against the live world DB and the client
+-- DBCs so far, so only five are inserted - the remaining ids stay free for a
+-- later addition once verified the same way. (id 5 was briefly a sixth,
+-- verified row - removed as geometrically dead, see the header above.)
 DELETE FROM `pdungeon_critter_rules` WHERE `id` BETWEEN 1 AND 10;
 
 -- Every creatureEntry below was checked against creature_template /
@@ -67,5 +81,4 @@ INSERT INTO `pdungeon_critter_rules`
 ( 2, 0, 'room',            23086, 0, 2,  80),  -- Sewer Rat
 ( 3, 0, 'room',             2110, 0, 1,  60),  -- Black Rat
 ( 4, 0, 'corridor',        26525, 0, 2, 100),  -- Cockroach
-( 5, 0, 'corridor_dead_end', 2110, 0, 1, 100), -- Black Rat, stub dressing
 ( 6, 0, 'room_boss',       26525, 0, 1,  60);  -- Cockroach
