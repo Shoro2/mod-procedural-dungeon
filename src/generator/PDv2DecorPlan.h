@@ -220,7 +220,18 @@ namespace PDungeon
     // Its own stream, its own budget, its own table - the decor shape, applied
     // to creatures.
     uint32_t const PD_CRITTER_SEED_MIX = 0xC817E12Bu;
-    int const PD_CRITTER_MAX_SPOTS = 60;
+
+    // Hard ceiling on the critters one layout may plan - the same role
+    // PD_DECOR_MAX_SPOTS plays for props. Measured at the 15-room cap
+    // against the shipped rule set: true pre-truncation mean 56.47, true
+    // max 82, and 3398 of 12000 fifteen-room layouts (28.3%) were being
+    // truncated by the old ceiling of 60. A budget that fires on ordinary
+    // content is tuning by accident - density is the rules' min/max to set,
+    // and this constant's only job is to catch a rule set that runs away.
+    // 100 clears the measured max with room to spare, so it stays inert on
+    // everything the shipped rules produce. Same as the decor budget, the
+    // cut is taken at the END, in plan order.
+    int const PD_CRITTER_MAX_SPOTS = 100;
 
     // One row of `pdungeon_critter_rules`. `roleFilter` is the same prefix
     // match `DecorRule` uses.
