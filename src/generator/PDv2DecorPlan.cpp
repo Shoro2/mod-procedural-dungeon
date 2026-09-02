@@ -704,7 +704,14 @@ namespace PDungeon
 
         std::vector<size_t> byId(rules.size());
         for (size_t i = 0; i < rules.size(); ++i) byId[i] = i;
-        std::sort(byId.begin(), byId.end(), [&rules](size_t l, size_t r)
+        // stable_sort, not sort: the sibling BuildDecorPlan uses stable_sort for
+        // the same ascending-id ordering, and std::sort's tie order is
+        // implementation-defined - MSVC's STL and libstdc++ are free to break
+        // ties differently, which is exactly the divergence class this
+        // project's determinism discipline forbids. Unreachable today
+        // (`pdungeon_critter_rules` has PRIMARY KEY(id), so no two rules ever
+        // tie), but free to fix and cheaper to fix now than to re-discover.
+        std::stable_sort(byId.begin(), byId.end(), [&rules](size_t l, size_t r)
         {
             return rules[l].id < rules[r].id;
         });
