@@ -700,6 +700,13 @@ namespace PDungeon
             {
                 return fail("a corridor block carries a chain index");
             }
+            // Bounded BEFORE the resize: the chain can never be longer than
+            // the block list, so a garbage index must not be allowed to
+            // allocate a vector sized by whatever happened to be in memory.
+            if (static_cast<size_t>(b.chainIndex) >= plan.blocks.size())
+            {
+                return fail("a chain index is outside the block list");
+            }
             if (static_cast<size_t>(b.chainIndex) >= chainBlock.size())
             {
                 chainBlock.resize(static_cast<size_t>(b.chainIndex) + 1, -1);
@@ -749,6 +756,7 @@ namespace PDungeon
         {
             return fail("boss room count does not match the config");
         }
+        std::vector<bool> bossPos(static_cast<size_t>(chainLen), false);
         for (int k = 1; k <= wantBosses; ++k)
         {
             int const at = BossChainIndex(chainLen, plan.config.bossRooms, k);
@@ -756,6 +764,23 @@ namespace PDungeon
                 plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(at)])].role != BlockRole::RoomBoss)
             {
                 return fail("a boss room is off its formula position");
+            }
+            bossPos[static_cast<size_t>(at)] = true;
+        }
+        // Every other spine position is an ordinary room. Chain 0 is the
+        // entrance (checked above) and the last chain room is a boss, so the
+        // interior is the only place a wrong role could hide - a second
+        // RoomEntrance at chain 3 used to validate, and B1's altar cadence and
+        // B4's barrier both read the role, not just the index.
+        for (int idx = 1; idx < chainLen - 1; ++idx)
+        {
+            if (bossPos[static_cast<size_t>(idx)])
+            {
+                continue;
+            }
+            if (plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(idx)])].role != BlockRole::Room)
+            {
+                return fail("a spine room carries the wrong role");
             }
         }
         std::vector<bool> hosted(static_cast<size_t>(chainLen), false);
@@ -830,16 +855,212 @@ namespace PDungeon
             }
         }
 
-        // Connectivity: every block must be reachable from the entrance through
-        // open sockets, or part of the dungeon is unplayable. The same flood,
-        // run once more per boss room with that room removed, proves the boss
-        // cut property: nothing behind a boss is reachable around it, so B4's
-        // barrier on its doorway is a real gate.
+        // The coordinate index the corridor walk and the floods below share.
         std::map<std::pair<int, int>, size_t> index;
         for (size_t i = 0; i < plan.blocks.size(); ++i)
         {
             index[std::make_pair(plan.blocks[i].bx, plan.blocks[i].by)] = i;
         }
+
+        // Which room a socket of `from` leads to, walking the corridor run
+        // behind it: -1 for a run that ends in a chest stub (or nowhere),
+        // otherwise the block index of the first room reached. Corridor
+        // blocks on the way must have exactly two non-stub sockets - the
+        // junction rule - or the walk reports the junction.
+        auto roomAtEndOf = [&](size_t from, unsigned bit, bool& junction) -> int
+        {
+            junction = false;
+            size_t prev = from;
+            unsigned entryBit = bit;
+            // A run cannot be longer than the block list; the bound turns a
+            // corridor cycle (which the junction rule forbids, but which a
+            // future generator bug could still hand us) into a rejection
+            // rather than a hang inside the engine.
+            for (size_t steps = 0; steps <= plan.blocks.size(); ++steps)
+            {
+                int dx = 0, dy = 0;
+                StepFor(entryBit, dx, dy);
+                auto it = index.find(std::make_pair(plan.blocks[prev].bx + dx,
+                                                    plan.blocks[prev].by + dy));
+                if (it == index.end())
+                {
+                    return -1;
+                }
+                size_t const at = it->second;
+                PlacedBlock const& b = plan.blocks[at];
+                if (b.roomId >= 0)
+                {
+                    return static_cast<int>(at);
+                }
+                if (b.role == BlockRole::CorridorDeadEnd)
+                {
+                    return -1;      // the run ends in a chest stub
+                }
+                // Leave through the one socket that is neither the way in nor
+                // a stub hanging off this corridor block.
+                unsigned const cameFrom = OppositeBit(entryBit);
+                unsigned next = 0;
+                int outs = 0;
+                for (unsigned side = 1; side <= SOCKET_W; side <<= 1)
+                {
+                    if (!(b.socketMask & side) || side == cameFrom)
+                    {
+                        continue;
+                    }
+                    int nx = 0, ny = 0;
+                    StepFor(side, nx, ny);
+                    auto n = index.find(std::make_pair(b.bx + nx, b.by + ny));
+                    if (n != index.end() &&
+                        plan.blocks[n->second].role == BlockRole::CorridorDeadEnd)
+                    {
+                        continue;
+                    }
+                    ++outs;
+                    next = side;
+                }
+                if (outs != 1)
+                {
+                    junction = true;
+                    return -1;
+                }
+                prev = at;
+                entryBit = next;
+            }
+            junction = true;
+            return -1;
+        };
+
+        // Round B, the physical half of the spine rules (final review of B0,
+        // item I2). Everything above reads the DECLARED chainIndex / branchOf /
+        // shortcutTo; these three rules prove them against the sockets. A
+        // pocket labelled into segment k but physically hanging off a room
+        // behind boss k passes both cut floods and would put its spawns into
+        // the wrong barrier denominator - a softlock B3 could ship.
+        //
+        // 1. Junction rule: no corridor block forks. Exactly two of its
+        //    sockets lead to non-stub blocks, so a corridor run is a path.
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.roomId >= 0 || b.role == BlockRole::CorridorDeadEnd)
+            {
+                continue;
+            }
+            int through = 0;
+            for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+            {
+                if (!(b.socketMask & bit))
+                {
+                    continue;
+                }
+                int dx = 0, dy = 0;
+                StepFor(bit, dx, dy);
+                auto it = index.find(std::make_pair(b.bx + dx, b.by + dy));
+                if (it != index.end() &&
+                    plan.blocks[it->second].role != BlockRole::CorridorDeadEnd)
+                {
+                    ++through;
+                }
+            }
+            if (through != 2)
+            {
+                return fail("a corridor block is a junction");
+            }
+        }
+
+        // 2. Spine adjacency: consecutive chain rooms are joined by exactly
+        //    one corridor run, which is what makes the chain order physical
+        //    rather than a label (B1's altar cadence, B5's patrol).
+        for (int i = 1; i < chainLen; ++i)
+        {
+            size_t const from = static_cast<size_t>(chainBlock[static_cast<size_t>(i - 1)]);
+            int hits = 0;
+            for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+            {
+                if (!(plan.blocks[from].socketMask & bit))
+                {
+                    continue;
+                }
+                bool junction = false;
+                int const to = roomAtEndOf(from, bit, junction);
+                if (junction)
+                {
+                    return fail("a corridor block is a junction");
+                }
+                if (to == chainBlock[static_cast<size_t>(i)])
+                {
+                    ++hits;
+                }
+            }
+            if (hits != 1)
+            {
+                return fail("consecutive chain rooms are not joined by one corridor run");
+            }
+        }
+
+        // 3. Pocket physics: the rooms a pocket's corridors actually reach are
+        //    exactly its declared host (once) and, when it declares one, its
+        //    shortcut target (once). Stub runs are ignored; anything else is a
+        //    corridor the plan does not admit to.
+        for (size_t i = 0; i < plan.blocks.size(); ++i)
+        {
+            PlacedBlock const& b = plan.blocks[i];
+            if (b.roomId < 0 || b.chainIndex >= 0)
+            {
+                continue;
+            }
+            int hostHits = 0;
+            int targetHits = 0;
+            int others = 0;
+            for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+            {
+                if (!(b.socketMask & bit))
+                {
+                    continue;
+                }
+                bool junction = false;
+                int const to = roomAtEndOf(i, bit, junction);
+                if (junction)
+                {
+                    return fail("a corridor block is a junction");
+                }
+                if (to < 0)
+                {
+                    continue;
+                }
+                if (to == chainBlock[static_cast<size_t>(b.branchOf)])
+                {
+                    ++hostHits;
+                }
+                else if (b.shortcutTo >= 0 &&
+                         to == chainBlock[static_cast<size_t>(b.shortcutTo)])
+                {
+                    ++targetHits;
+                }
+                else
+                {
+                    ++others;
+                }
+            }
+            if (hostHits != 1 || others != 0 ||
+                targetHits != (b.shortcutTo >= 0 ? 1 : 0))
+            {
+                return fail("a pocket's corridors do not match its declared host and shortcut");
+            }
+        }
+
+        // 4. Chain length: the spine holds the whole room budget minus the
+        //    pockets. Without this a 3-room chain with the bosses at the
+        //    formula positions for L = 3 validates against a 4-room config.
+        if (chainLen != std::max(2, plan.config.rooms + plan.config.bossRooms) - pocketCount)
+        {
+            return fail("chain length does not match the room budget");
+        }
+
+        // Connectivity: every block must be reachable from the entrance through
+        // open sockets, or part of the dungeon is unplayable. The same flood,
+        // run once more per boss room with that room removed, proves the boss
+        // cut property: nothing behind a boss is reachable around it, so B4's
+        // barrier on its doorway is a real gate.
         auto flood = [&](int skipBlock, std::vector<bool>& visited)
         {
             visited.assign(plan.blocks.size(), false);
@@ -925,12 +1146,27 @@ namespace PDungeon
         //      search: per pocket a host index, a candidate index, the axis
         //      coin (if both), the shortcut Chance(loopChancePct), then a
         //      target index and axis coin only when the Chance hit AND a
-        //      target exists. Pockets that do not fit send the search back
-        //      one chain step, and the draws simply continue from there
+        //      target exists. Pockets that do not fit unwind the search, and
+        //      the draws simply continue from wherever it lands
         //   4. dead-end stubs: count, then one index per stub (a placed stub
         //      is never a host, since Round B)
         //   5. visual alternates, one per multi-alt block, last (unchanged)
         // Nothing else draws. Theme moves no draw.
+        //
+        // Three properties of PDRandom the items above lean on (PDRandom.h:41-68):
+        //   - a single candidate costs NO draw. UniformInt(lo, hi) returns lo
+        //     without touching the stream when lo >= hi, so a one-element
+        //     candidate list, a single eligible host and a single feasible
+        //     L-route are all free. That is why "a candidate index" is not the
+        //     same as "a draw" in items 2 and 3.
+        //   - Chance(pct) draws nothing at pct <= 0 and pct >= 100, so
+        //     V2.LoopChance 0 and 100 sit on a DIFFERENT stream from 1..99,
+        //     not merely on a different outcome.
+        //   - a failed base case does not unwind exactly one step. It keeps
+        //     unwinding for as long as the level above has no candidate left,
+        //     so a failure deep in the chain can return the search several
+        //     positions - and the stream simply continues from there, since
+        //     every abandoned level's draws have already been consumed.
         for (int attempt = 0; attempt < cfg.maxTries; ++attempt)
         {
             uint32_t const seed = cfg.seed + static_cast<uint32_t>(attempt);
