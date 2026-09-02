@@ -63,13 +63,14 @@ DELETE FROM `pdungeon_decor_rules` WHERE `id` BETWEEN 1 AND 3;
 -- minSpacingYd of 8 is one cell (8.33 yd) rounded down, so two props of the
 -- same rule never end up in cells that touch.
 --
--- Rule 3 is DORMANT against kit v2 and is shipped all the same. Every corridor
--- variant the kit ships is exactly its socket track - the walkable cells of
--- corridor_straight are column 4 and nothing else - and the planner never
--- places on the track, because that is the one line every player has to walk.
--- The rule becomes live with the first corridor variant that is wider than
--- one cell; until then it costs one draw per corridor block and places
--- nothing.
+-- Rule 3 is LIVE against kit v23 (previously documented here as DORMANT -
+-- false since kit v23 widened every corridor to two cells). The walkable
+-- cells of corridor_straight are columns 3 AND 4, not column 4 alone; only
+-- index 4 (the socket track itself, the one line every player has to walk)
+-- is excluded, leaving column 3 as a real wall-foot candidate. The four
+-- corridor_straight variants yield 30 wall-foot candidates between them, and
+-- rule 3 measures out to fire on roughly half of all corridor blocks -
+-- planting a torch in the lane beside the track, not on it.
 INSERT INTO `pdungeon_decor_rules`
     (`id`, `theme`, `roleFilter`, `goEntry`, `placement`, `minPerBlock`, `maxPerBlock`, `weight`, `minSpacingYd`) VALUES
     (1, 0, 'room',      910020, 'wall_foot', 1, 3, 100, 8),
