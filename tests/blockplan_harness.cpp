@@ -289,18 +289,21 @@ namespace
     }
 
     // Round B: the spine in one glance - the chain in order, every pocket
-    // with its host, the segments. Printed by the single layout and by
-    // --path, and quoted by the operator document.
+    // with its host, every loop room with the run it hangs off, the segments.
+    // Printed by the single layout and by --path, and quoted by the operator
+    // document.
     std::string ChainSummary(BlockPlan const& plan)
     {
         int const len = ChainLength(plan);
         std::vector<PlacedBlock const*> chain(static_cast<size_t>(len), nullptr);
         std::vector<PlacedBlock const*> pockets;
+        std::vector<PlacedBlock const*> loops;
         int bosses = 0;
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.chainIndex >= 0) chain[static_cast<size_t>(b.chainIndex)] = &b;
             if (b.branchOf >= 0) pockets.push_back(&b);
+            if (b.detourOf >= 0) loops.push_back(&b);
             if (b.role == BlockRole::RoomBoss) ++bosses;
         }
 
@@ -335,6 +338,18 @@ namespace
             out += '\n';
         }
 
+        if (!loops.empty())
+        {
+            out += "loops:";
+            for (PlacedBlock const* l : loops)
+            {
+                std::snprintf(buf, sizeof(buf), "  R#%d run + loop room (%d,%d) [segment %d]",
+                              l->detourOf, l->bx, l->by, SegmentOf(plan, *l));
+                out += buf;
+            }
+            out += '\n';
+        }
+
         int segStart = 1;
         int k = 0;
         for (int i = 1; i < len; ++i)
@@ -347,8 +362,18 @@ namespace
             {
                 if (p->branchOf >= segStart && p->branchOf < i) ++inSegment;
             }
-            std::snprintf(buf, sizeof(buf), "segment %d: chain %d..%d, pockets %d, boss B#%d\n",
-                          k, segStart, i, inSegment, i);
+            // A loop room belongs to the segment of the spine room its run
+            // leads INTO, and that room may be the boss itself - so the upper
+            // bound is inclusive here where the pocket line's is not (a boss
+            // never hosts a pocket).
+            int loopsIn = 0;
+            for (PlacedBlock const* l : loops)
+            {
+                if (l->detourOf >= segStart && l->detourOf <= i) ++loopsIn;
+            }
+            std::snprintf(buf, sizeof(buf),
+                          "segment %d: chain %d..%d, pockets %d, loops %d, boss B#%d\n",
+                          k, segStart, i, inSegment, loopsIn, i);
             out += buf;
             segStart = i + 1;
         }
@@ -375,7 +400,8 @@ namespace
         std::printf("seed %u (effective %u): %d blocks = %d rooms + %d corridors\n",
                     seed, plan.effectiveSeed, static_cast<int>(plan.blocks.size()),
                     roomCount, corridorCount);
-        std::printf("E = entrance, B = boss, R = spine room, r = pocket room, D = dead end, | - + = corridor\n\n");
+        std::printf("E = entrance, B = boss, R = spine room, r = pocket room, o = loop room, "
+                    "D = dead end, | - + = corridor\n\n");
         std::printf("%s\n", ChainSummary(plan).c_str());
         std::printf("%s\n", AsciiBlockDump(plan).c_str());
 
@@ -1284,22 +1310,24 @@ namespace
     // regenerates a different dungeon.
     void RunLayoutFreezeCheck()
     {
-        // Re-pinned 2026-09-03 for B0b: the pocket's forward-cut draw is
-        // withdrawn, so the stream after the first pocket moves and the
-        // seed-12345 layout with it. PD_LAYOUT_VERSION stays 3 - nothing is
-        // deployed. The B0 pin was 363 / E;a5019024, the v2 pin
-        // 571 / E;85fc0e4c, the v1 pin 551 / E;13df5510.
+        // Re-pinned 2026-09-03 for B0b's loop rooms: one Chance per boss
+        // segment now enters the stream BEFORE any chain step, so every
+        // layout moves whatever the draws then decide. PD_LAYOUT_VERSION
+        // stays 3 - nothing is deployed. The pin before this one was
+        // 383 / E;0eeda3ad (B0b task 1, the shortcut draw withdrawn), the B0
+        // pin 363 / E;a5019024, the v2 pin 571 / E;85fc0e4c, the v1 pin
+        // 551 / E;13df5510.
         uint32_t const PINNED_SEED = 12345u;
         int const PINNED_ROOMS = 5;
-        size_t const PINNED_BYTES = 383;
-        char const* const PINNED_TRAILER = "E;0eeda3ad\n";
+        size_t const PINNED_BYTES = 403;
+        char const* const PINNED_TRAILER = "E;c1478940\n";
         // The failure message names the pin this one REPLACED, so whoever
         // reads it can tell a fresh move from the B0b re-roll. Kept as
         // constants beside the live pin: the message used to pair the current
         // byte count with the previous trailer, which read as a third value
         // that never existed.
-        size_t const PREVIOUS_BYTES = 363;
-        char const* const PREVIOUS_TRAILER = "E;a5019024";
+        size_t const PREVIOUS_BYTES = 383;
+        char const* const PREVIOUS_TRAILER = "E;0eeda3ad";
 
         BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
         cfg.bossRooms = 1;
@@ -1532,7 +1560,13 @@ namespace
     // nothing. Deliberately the harness's own walk rather than a call into
     // ValidateBlockPlan - the validator grew the same rule in this wave and
     // the point of these checks is that a bug in it cannot hide here.
-    int RoomAtEndOf(BlockPlan const& plan, size_t from, unsigned bit)
+    //
+    // B0b: `attachments` holds the two cells of a loop room's run that carry
+    // the strip. They are the only three-socket corridors a layout admits, and
+    // a run entering one along the run leaves it straight ahead; entered from
+    // the strip side it is the end of the walk, not a through route.
+    int RoomAtEndOf(BlockPlan const& plan, size_t from, unsigned bit,
+                    std::set<size_t> const& attachments)
     {
         struct Dir { unsigned bit; int dx; int dy; unsigned opp; };
         Dir const dirs[4] = {
@@ -1571,14 +1605,27 @@ namespace
                 ++outs;
                 next = d.bit;
             }
-            if (outs != 1) return -1;       // a junction - the junction rule catches it
+            if (outs != 1)
+            {
+                // The one sanctioned fork: a loop attachment entered along the
+                // run continues straight through it. Anything else is a
+                // junction and the junction rule catches it.
+                if (attachments.count(at) && (b.socketMask & entry) && outs == 2)
+                {
+                    next = entry;
+                }
+                else
+                {
+                    return -1;
+                }
+            }
             prev = at;
             entry = next;
         }
         return -1;
     }
 
-    void RunChainChecks(int seeds, bool& sawPocket)
+    void RunChainChecks(int seeds, bool& sawPocket, bool& sawDetour)
     {
         char msg[224];
         // The engine's real configuration space, not a diagonal of it:
@@ -1604,6 +1651,11 @@ namespace
         };
         for (Combo const& combo : combos)
         {
+            // Per COMBO, not per seed: the two DetourChance edge combos assert
+            // over the whole sample (100 must yield at least one loop room,
+            // 0 must yield none), which is a statement about the draw, not
+            // about any single layout.
+            bool sawDetourHere = false;
             for (int i = 0; i < seeds; ++i)
             {
                 uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
@@ -1660,13 +1712,17 @@ namespace
                     {
                         ++pockets;
                     }
+                    else if (b.detourOf >= 0)
+                    {
+                        // A loop room (B0b) is a legitimate third kind of room;
+                        // it is counted and checked in its own pass below.
+                    }
                     else
                     {
                         ++strays;
                     }
                 }
-                Check(rooms == total, "room count is not rooms + bossRooms", seed);
-                Check(strays == 0, "a room is neither on the chain nor a pocket (or a chain index repeats)", seed);
+                Check(strays == 0, "a room is neither on the chain, a pocket nor a loop room (or a chain index repeats)", seed);
                 std::snprintf(msg, sizeof(msg), "%d pocket(s), want %d", pockets, wantPockets);
                 Check(pockets == wantPockets, msg, seed);
                 Check(bosses == N, "boss room count does not match the config", seed);
@@ -1714,6 +1770,110 @@ namespace
                 Check(SegmentOf(plan, plan.blocks[static_cast<size_t>(chainBlock[0])]) == 0,
                       "the entrance is not segment 0", seed);
 
+                // Loop rooms (B0b): re-derived from the sockets. R has exactly
+                // two opposite sockets; the corners, the two attachment cells
+                // and the straight middle cell have exactly the masks the
+                // geometry demands; the run's two ends are chain rooms
+                // detourOf-1 and detourOf (either orientation).
+                //
+                // Placed BEFORE the spine-adjacency walk, not after the pocket
+                // pass: the attachment cells are the only corridors the walk is
+                // allowed to pass straight through, so it needs the set.
+                //
+                // The mask without sockets that lead to chest stubs - the same
+                // normalisation the junction rule and the corridor walk use.
+                auto const StubsOff = [&](PlacedBlock const* c) -> unsigned
+                {
+                    unsigned out = 0;
+                    for (unsigned bit = 1; c && bit <= SOCKET_W; bit <<= 1)
+                    {
+                        if (!(c->socketMask & bit)) continue;
+                        int ex = 0, ey = 0;
+                        if (bit == SOCKET_N) ey = -1; else if (bit == SOCKET_S) ey = 1;
+                        else if (bit == SOCKET_W) ex = -1; else ex = 1;
+                        PlacedBlock const* n = plan.At(c->bx + ex, c->by + ey);
+                        if (n && n->role == BlockRole::CorridorDeadEnd) continue;
+                        out |= bit;
+                    }
+                    return out;
+                };
+                std::set<size_t> attachments;
+                std::vector<bool> loopInSegment(static_cast<size_t>(N + 1), false);
+                int loops = 0;
+                for (size_t at = 0; at < plan.blocks.size(); ++at)
+                {
+                    PlacedBlock const& b = plan.blocks[at];
+                    if (b.detourOf < 0) continue;
+                    ++loops;
+                    if (b.detourOf > 0 && b.detourOf < wantChain) sawDetourHere = true;
+                    Check(b.role == BlockRole::Room && b.chainIndex < 0 && b.branchOf < 0,
+                          "a loop room carries the wrong role or fields", seed);
+                    bool const intoOk = b.detourOf >= 1 && b.detourOf < wantChain;
+                    Check(intoOk, "a loop room's run leads into no chain room", seed);
+                    if (!intoOk) continue;
+                    int const seg = SegmentOf(plan, plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.detourOf)])]);
+                    Check(seg >= 1 && seg <= N && SegmentOf(plan, b) == seg, "a loop room is not in its run's segment", seed);
+                    if (seg >= 1 && seg <= N)
+                    {
+                        Check(!loopInSegment[static_cast<size_t>(seg)], "two loop rooms in one segment", seed);
+                        loopInSegment[static_cast<size_t>(seg)] = true;
+                    }
+                    // Stub-normalised throughout: the stub pass is free to hang
+                    // a chest alcove off any cell of the loop, the loop room
+                    // included (design 2026-09-03 §2.5).
+                    unsigned const m = StubsOff(&b);
+                    bool const opposite = (m == (SOCKET_N | SOCKET_S)) || (m == (SOCKET_E | SOCKET_W));
+                    Check(opposite, "a loop room does not have exactly two opposite sockets", seed);
+                    if (!opposite) continue;
+                    int dx = 0, dy = 0;
+                    if (m == (SOCKET_N | SOCKET_S)) { dx = 0; dy = 1; } else { dx = 1; dy = 0; }
+                    // The strip: S1 = R - d, S2 = R + d, both corners sharing a side t.
+                    PlacedBlock const* s1 = plan.At(b.bx - dx, b.by - dy);
+                    PlacedBlock const* s2 = plan.At(b.bx + dx, b.by + dy);
+                    unsigned const dBit = (dy > 0) ? SOCKET_S : SOCKET_E;
+                    unsigned const dOpp = (dy > 0) ? SOCKET_N : SOCKET_W;
+                    unsigned const s1Mask = StubsOff(s1);
+                    unsigned const s2Mask = StubsOff(s2);
+                    bool cornersOk = s1 && s2 && s1->roomId < 0 && s2->roomId < 0 &&
+                                     (s1Mask & dBit) && (s2Mask & dOpp);
+                    unsigned const t1 = s1Mask & ~dBit;
+                    unsigned const t2 = s2Mask & ~dOpp;
+                    cornersOk = cornersOk && t1 == t2 && (t1 == SOCKET_N || t1 == SOCKET_E || t1 == SOCKET_S || t1 == SOCKET_W)
+                                && t1 != dBit && t1 != dOpp;
+                    Check(cornersOk, "a loop room's corners are not two matching corner corridors", seed);
+                    if (!cornersOk) continue;
+                    int tx = 0, ty = 0;
+                    if (t1 == SOCKET_N) ty = -1; else if (t1 == SOCKET_S) ty = 1; else if (t1 == SOCKET_W) tx = -1; else tx = 1;
+                    unsigned const tOpp = (t1 == SOCKET_N) ? SOCKET_S : (t1 == SOCKET_S) ? SOCKET_N : (t1 == SOCKET_W) ? SOCKET_E : SOCKET_W;
+                    PlacedBlock const* m1 = plan.At(s1->bx + tx, s1->by + ty);
+                    PlacedBlock const* m2 = plan.At(s2->bx + tx, s2->by + ty);
+                    PlacedBlock const* mid = plan.At(b.bx + tx, b.by + ty);
+                    unsigned const attachMask = dBit | dOpp | tOpp;
+                    bool const runOk = m1 && m2 && mid && m1->roomId < 0 && m2->roomId < 0 && mid->roomId < 0 &&
+                                       StubsOff(m1) == attachMask && StubsOff(m2) == attachMask &&
+                                       StubsOff(mid) == (dBit | dOpp);
+                    Check(runOk, "a loop room's run is not the straight three-cell run with two attachments", seed);
+                    if (!runOk) continue;
+                    for (size_t k = 0; k < plan.blocks.size(); ++k)
+                    {
+                        if (&plan.blocks[k] == m1 || &plan.blocks[k] == m2) attachments.insert(k);
+                    }
+                    PlacedBlock const* e1 = plan.At(m1->bx - dx, m1->by - dy);
+                    PlacedBlock const* e2 = plan.At(m2->bx + dx, m2->by + dy);
+                    PlacedBlock const* into = &plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.detourOf)])];
+                    PlacedBlock const* before = &plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.detourOf - 1)])];
+                    bool const endsOk = (e1 == before && e2 == into) || (e1 == into && e2 == before);
+                    Check(endsOk, "a loop room's run does not join chain rooms detourOf-1 and detourOf", seed);
+                }
+                Check(loops <= N, "more loop rooms than segments", seed);
+                Check(rooms == total + loops, "room count is not rooms + bossRooms + loop rooms", seed);
+                // Non-vacuity over the WHOLE sample, exactly like sawPocket -
+                // not a property of any single layout. Set here rather than
+                // from the DetourChance-100 combo alone: that combo already
+                // has its own per-combo assertion, and hanging the batch-wide
+                // one off it would make it true by construction.
+                if (loops > 0) sawDetour = true;
+
                 // Spine adjacency (spec 7.1 invariant 3, final review M2):
                 // consecutive chain rooms are joined by EXACTLY one corridor
                 // run. Construction guarantees it today and one pinned seed
@@ -1727,7 +1887,7 @@ namespace
                     for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
                     {
                         if (!(plan.blocks[from].socketMask & bit)) continue;
-                        if (RoomAtEndOf(plan, from, bit) == chainBlock[static_cast<size_t>(idx)]) ++hits;
+                        if (RoomAtEndOf(plan, from, bit, attachments) == chainBlock[static_cast<size_t>(idx)]) ++hits;
                     }
                     std::snprintf(msg, sizeof(msg),
                                   "chain %d and %d are joined by %d corridor run(s), want 1",
@@ -1766,9 +1926,11 @@ namespace
                 }
 
                 // No junction that is not a stub: a corridor block has exactly
-                // two sockets leading to non-stub blocks.
-                for (PlacedBlock const& b : plan.blocks)
+                // two sockets leading to non-stub blocks - three for a loop
+                // attachment, the only fork B0b sanctions.
+                for (size_t k = 0; k < plan.blocks.size(); ++k)
                 {
+                    PlacedBlock const& b = plan.blocks[k];
                     if (b.roomId >= 0 || b.role == BlockRole::CorridorDeadEnd) continue;
                     int through = 0;
                     struct Dir { unsigned bit; int dx; int dy; };
@@ -1779,7 +1941,8 @@ namespace
                         PlacedBlock const* n = plan.At(b.bx + d.dx, b.by + d.dy);
                         if (n && n->role != BlockRole::CorridorDeadEnd) ++through;
                     }
-                    Check(through == 2, "a corridor block is a junction (more than two non-stub sockets)", seed);
+                    Check(through == (attachments.count(k) ? 3 : 2),
+                          "a corridor block is a junction (not a loop attachment)", seed);
                 }
 
                 // Boss cut property: without boss block k nothing behind it is
@@ -1803,6 +1966,19 @@ namespace
                 }
             }
 
+            // The detour draw, asserted where PDRandom does NOT draw at all:
+            // at 100 every segment wants a loop room, at 0 none does, so both
+            // are statements about the whole sample rather than about a seed.
+            if (combo.detourPct >= 100)
+            {
+                std::snprintf(msg, sizeof(msg), "no loop room at all over %d seeds with DetourChance 100 (%d rooms + %d boss)",
+                              seeds, combo.rooms, combo.bossRooms);
+                Check(sawDetourHere, msg, 0);
+            }
+            if (combo.detourPct <= 0)
+            {
+                Check(!sawDetourHere, "a loop room appeared with DetourChance 0", 0);
+            }
         }
     }
 
@@ -2608,18 +2784,20 @@ namespace
     // change, that is the change being noticed, not the pin being wrong -
     // update it in the same commit as the draw-order comment.
     //
-    // Re-captured 2026-09-03 for B0b: the pocket's forward-cut draw is
-    // withdrawn, so the seed-12345 layout moved again and both pins with it.
-    // (2026-09-02, Round B: the chain generator replaced scatter + MST.)
+    // Re-captured 2026-09-03 for B0b's loop rooms: the per-segment detour
+    // Chance draws land before the first chain step, so the seed-12345 layout
+    // moved again and both pins with it. (Earlier that day, B0b task 1: the
+    // pocket's forward-cut draw was withdrawn. 2026-09-02, Round B: the chain
+    // generator replaced scatter + MST.)
     //
     // CAPTURE PROCEDURE, every time: run `pdblock --decor-batch` (seed 12345,
     // 5 rooms, the shipped fixtures) and paste the value out of the "plan
     // moved" failure message - never by reasoning about what it should be -
     // and only once every change that can move these streams has landed.
     char const* const PD_DECOR_PLAN_PIN =
-        "257,256,1,910020,56.666666,20.833333,0.000000;257,256,4,910050,10.000000,54.166666,3.141593;257,256,5,910051,20.833333,10.000000,4.712389;257,256,5,910051,10.000000,20.833333,3.141593;257,256,6,910054,10.000000,45.833333,3.141593;257,256,7,910055,45.833333,56.666666,1.570796;257,256,10,910060,56.666666,10.000000,5.497787;257,256,10,910060,10.000000,56.666666,2.356194;257,256,13,910070,20.833333,20.833333,0.000000;257,257,9,910052,62.500000,26.666666,4.712389;258,257,9,910052,45.833333,18.333333,4.712389;256,258,3,910020,26.666666,62.500000,3.141593;256,258,9,910052,62.500000,26.666666,4.712389;256,258,12,910063,26.666666,26.666666,3.926991;258,258,1,910020,4.166667,26.666666,4.712389;258,258,1,910020,10.000000,54.166666,3.141593;258,258,1,910020,56.666666,20.833333,0.000000;258,258,4,910050,20.833333,56.666666,1.570796;258,258,4,910050,18.333333,12.500000,3.141593;258,258,7,910055,26.666666,4.166667,3.141593;258,258,8,910056,45.833333,56.666666,1.570796;258,258,11,910062,10.000000,56.666666,2.356194;258,258,11,910062,18.333333,10.000000,3.926991;258,258,13,910070,45.833333,20.833333,0.000000;258,258,13,910070,29.166666,45.833333,0.000000;259,258,3,910020,26.666666,20.833333,3.141593;260,258,3,910020,62.500000,26.666666,4.712389;261,258,1,910020,20.833333,10.000000,4.712389;261,258,1,910020,10.000000,45.833333,3.141593;261,258,5,910051,62.500000,26.666666,4.712389;261,258,5,910051,56.666666,12.500000,0.000000;261,258,7,910055,20.833333,56.666666,1.570796;261,258,8,910056,10.000000,20.833333,3.141593;261,258,11,910062,10.000000,56.666666,2.356194;261,258,11,910062,56.666666,10.000000,5.497787;261,258,13,910070,20.833333,29.166666,0.000000;261,258,13,910070,45.833333,20.833333,0.000000;261,258,13,910070,20.833333,45.833333,0.000000;256,259,1,910020,18.333333,12.500000,3.141593;256,259,1,910020,29.166666,56.666666,1.570796;256,259,1,910020,29.166666,10.000000,4.712389;256,259,2,910021,10.000000,45.833333,3.141593;256,259,8,910056,10.000000,54.166666,3.141593;256,259,13,910070,20.833333,20.833333,0.000000;256,259,13,910070,45.833333,29.166666,0.000000;256,259,13,910070,20.833333,45.833333,0.000000;256,259,14,910073,12.500000,29.166666,0.000000;258,259,3,910020,54.166666,26.666666,4.712389;259,259,1,910020,26.666666,62.500000,3.141593;259,259,1,910020,45.833333,56.666666,1.570796;259,259,1,910020,26.666666,4.166667,3.141593;259,259,5,910051,10.000000,54.166666,3.141593;259,259,5,910051,45.833333,10.000000,4.712389;259,259,6,910054,10.000000,20.833333,3.141593;259,259,7,910055,20.833333,56.666666,1.570796;259,259,11,910062,10.000000,56.666666,2.356194;259,259,11,910062,48.333333,56.666666,0.785398;259,259,13,910070,12.500000,29.166666,0.000000;259,259,13,910070,29.166666,54.166666,0.000000;260,259,3,910020,20.833333,26.666666,4.712389;260,259,9,910052,26.666666,62.500000,3.141593;261,259,3,910020,26.666666,12.500000,3.141593;261,259,9,910052,26.666666,20.833333,3.141593;258,260,3,910020,56.666666,20.833333,0.000000;258,261,1,910020,10.000000,12.500000,3.141593;258,261,1,910020,10.000000,45.833333,3.141593;258,261,5,910051,4.166667,26.666666,4.712389;258,261,5,910051,56.666666,20.833333,0.000000;258,261,7,910055,20.833333,56.666666,1.570796;258,261,11,910062,10.000000,56.666666,2.356194;258,261,13,910070,45.833333,45.833333,0.000000";
+        "258,257,1,910020,18.333333,12.500000,3.141593;258,257,4,910050,56.666666,20.833333,0.000000;258,257,5,910051,10.000000,20.833333,3.141593;258,257,5,910051,56.666666,29.166666,0.000000;258,257,6,910054,29.166666,10.000000,4.712389;258,257,7,910055,10.000000,45.833333,3.141593;258,257,10,910060,18.333333,10.000000,3.926991;258,257,10,910060,48.333333,56.666666,0.785398;258,257,11,910062,10.000000,56.666666,2.356194;258,257,11,910062,56.666666,10.000000,5.497787;259,258,3,910020,45.833333,18.333333,4.712389;258,259,9,910052,26.666666,45.833333,3.141593;258,259,12,910063,26.666666,26.666666,3.926991;259,259,1,910020,56.666666,29.166666,0.000000;259,259,4,910050,45.833333,56.666666,1.570796;259,259,8,910056,45.833333,10.000000,4.712389;259,259,13,910070,29.166666,45.833333,0.000000;259,259,13,910070,45.833333,20.833333,0.000000;260,259,9,910052,26.666666,45.833333,3.141593;261,259,9,910052,26.666666,4.166667,3.141593;258,260,3,910020,4.166667,26.666666,4.712389;260,260,9,910052,26.666666,54.166666,3.141593;260,260,12,910063,26.666666,26.666666,3.926991;261,260,1,910020,56.666666,45.833333,0.000000;261,260,1,910020,20.833333,10.000000,4.712389;261,260,1,910020,10.000000,20.833333,3.141593;261,260,4,910050,26.666666,62.500000,3.141593;261,260,5,910051,56.666666,12.500000,0.000000;261,260,7,910055,10.000000,45.833333,3.141593;261,260,8,910056,4.166667,26.666666,4.712389;261,260,11,910062,10.000000,56.666666,2.356194;261,260,13,910070,29.166666,20.833333,0.000000;262,260,3,910020,26.666666,4.166667,3.141593;262,260,9,910052,62.500000,26.666666,4.712389;258,261,1,910020,29.166666,10.000000,4.712389;258,261,1,910020,18.333333,12.500000,3.141593;258,261,1,910020,29.166666,56.666666,1.570796;258,261,5,910051,56.666666,29.166666,0.000000;258,261,5,910051,10.000000,54.166666,3.141593;258,261,6,910054,45.833333,56.666666,1.570796;258,261,7,910055,20.833333,56.666666,1.570796;258,261,10,910060,10.000000,56.666666,2.356194;258,261,11,910062,48.333333,56.666666,0.785398;258,261,11,910062,56.666666,10.000000,5.497787;258,261,13,910070,20.833333,20.833333,0.000000;258,261,13,910070,45.833333,29.166666,0.000000;258,261,13,910070,20.833333,45.833333,0.000000;262,261,3,910020,45.833333,31.666666,1.570796;260,262,1,910020,4.166667,26.666666,4.712389;260,262,1,910020,10.000000,54.166666,3.141593;260,262,1,910020,10.000000,12.500000,3.141593;260,262,6,910054,10.000000,20.833333,3.141593;260,262,7,910055,29.166666,10.000000,4.712389;260,262,8,910056,20.833333,56.666666,1.570796;260,262,10,910060,56.666666,10.000000,5.497787;261,262,3,910020,26.666666,45.833333,3.141593;261,262,9,910052,26.666666,54.166666,3.141593;262,262,1,910020,26.666666,4.166667,3.141593;262,262,2,910021,20.833333,56.666666,1.570796;262,262,2,910021,10.000000,20.833333,3.141593;262,262,7,910055,56.666666,29.166666,0.000000;262,262,10,910060,18.333333,10.000000,3.926991;262,262,11,910062,10.000000,56.666666,2.356194;262,262,13,910070,29.166666,12.500000,0.000000;262,262,14,910073,29.166666,20.833333,0.000000;262,262,14,910073,45.833333,29.166666,0.000000;262,262,14,910073,29.166666,45.833333,0.000000;260,263,3,910020,4.166667,26.666666,4.712389;260,263,9,910052,12.500000,26.666666,4.712389";
     char const* const PD_CRITTER_PLAN_PIN =
-        "258,257,4,26525,29.166666,29.166666;258,257,4,26525,54.166666,29.166666;257,258,4,26525,29.166666,29.166666;258,258,1,32428,29.166666,20.833333;258,258,2,23086,45.833333,45.833333;258,258,2,23086,29.166666,45.833333;258,258,3,2110,12.500000,29.166666;261,258,1,32428,20.833333,20.833333;256,259,1,32428,29.166666,45.833333;256,259,2,23086,45.833333,45.833333;256,259,2,23086,45.833333,29.166666;256,259,3,2110,29.166666,20.833333;259,259,1,32428,20.833333,29.166666;259,259,1,32428,29.166666,45.833333;259,259,2,23086,45.833333,29.166666;259,259,2,23086,29.166666,12.500000;260,259,4,26525,29.166666,29.166666;261,259,4,26525,29.166666,29.166666;258,261,1,32428,20.833333,20.833333;258,261,1,32428,45.833333,45.833333";
+        "259,259,1,32428,45.833333,45.833333;259,259,1,32428,12.500000,29.166666;259,259,2,23086,29.166666,12.500000;261,260,1,32428,45.833333,29.166666;261,260,2,23086,20.833333,29.166666;258,261,1,32428,29.166666,45.833333;258,261,2,23086,45.833333,45.833333;258,261,2,23086,45.833333,29.166666;258,261,3,2110,29.166666,20.833333;260,261,4,26525,29.166666,29.166666;262,261,4,26525,29.166666,29.166666;262,261,4,26525,54.166666,29.166666;260,262,2,23086,20.833333,29.166666;260,262,2,23086,29.166666,29.166666;262,262,1,32428,45.833333,20.833333;262,262,2,23086,20.833333,20.833333;262,262,2,23086,45.833333,45.833333";
 
     bool CheckDecorPlanPinned(std::string& why)
     {
@@ -2686,20 +2864,23 @@ namespace
     // Round B: the chain itself, pinned. RunLayoutFreezeCheck pins the
     // manifest bytes and would notice most draw-order moves, but two
     // different chains can in principle emit the same block set; this pin
-    // reads the chain order and the pockets directly.
+    // reads the chain order, the pockets and the loop rooms directly.
+    // Format: chain cells `|` pockets `host>x,y;` `|` loops `into>x,y;`.
     // Captured by RUNNING `pdblock --batch` and reading the "the chain moved"
     // message, never by reasoning about the value.
-    char const* const PD_CHAIN_PIN = "258,261;259,259;258,258;256,259;|2>257,256;1>261,258;";
+    char const* const PD_CHAIN_PIN = "258,261;259,259;261,260;262,262;|1>258,257;2>260,262;|";
 
     std::string ChainPinString(BlockPlan const& plan)
     {
         int const len = ChainLength(plan);
         std::vector<PlacedBlock const*> chain(static_cast<size_t>(len), nullptr);
         std::vector<PlacedBlock const*> pockets;
+        std::vector<PlacedBlock const*> loops;
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.chainIndex >= 0) chain[static_cast<size_t>(b.chainIndex)] = &b;
             if (b.branchOf >= 0) pockets.push_back(&b);
+            if (b.detourOf >= 0) loops.push_back(&b);
         }
         std::string got;
         char buf[64];
@@ -2712,6 +2893,12 @@ namespace
         for (PlacedBlock const* p : pockets)
         {
             std::snprintf(buf, sizeof(buf), "%d>%d,%d;", p->branchOf, p->bx, p->by);
+            got += buf;
+        }
+        got += '|';
+        for (PlacedBlock const* l : loops)
+        {
+            std::snprintf(buf, sizeof(buf), "%d>%d,%d;", l->detourOf, l->bx, l->by);
             got += buf;
         }
         return got;
@@ -3354,8 +3541,10 @@ namespace
         // answer is deterministic per generator version). At a much smaller
         // --batch it could in principle go red without anything being wrong.
         bool sawPocket = false;
-        RunChainChecks(count / 10 + 1, sawPocket);
+        bool sawDetour = false;
+        RunChainChecks(count / 10 + 1, sawPocket, sawDetour);
         Check(sawPocket, "no seed in the sample produced a pocket - the pocket pass is dead code", 0);
+        Check(sawDetour, "no seed in the sample produced a loop room - the detour draw is dead code", 0);
         RunPhase2Checks(count / 10 + 1);
         RunThemeParityChecks(count / 10 + 1);
         // Same tenth-of-the-batch reasoning: one pack per room is structural
@@ -3404,6 +3593,11 @@ namespace
         // at all, and a summary line reading "pockets per layout: 1073741824..0"
         // is a worse answer than "0..0".
         int minPockets = 0, maxPockets = 0;
+        // B0b yield: how many boss segments across the whole batch ended up
+        // with a loop room. 33 % per segment is a chance, not a quota, and the
+        // geometry has to fit as well - so the summary reports what the sample
+        // actually produced rather than what the config asked for.
+        int loopRoomsSeen = 0, segmentsSeen = 0, loopLayouts = 0;
         bool sawLayout = false;
 
         for (int i = 0; i < count; ++i)
@@ -3439,13 +3633,18 @@ namespace
             Check(same, "two runs of the same seed differ", seed);
 
             // The room count must be what was asked for; a planner that quietly
-            // drops rooms would make dlvl meaningless.
+            // drops rooms would make dlvl meaningless. Loop rooms are the one
+            // legitimate extra: B0b adds them ON TOP of the budget, so a layout
+            // whose segment drew one has exactly one room more.
             int rooms_found = 0;
+            int loopsHere = 0;
             for (PlacedBlock const& b : plan.blocks)
             {
                 if (b.roomId >= 0) ++rooms_found;
+                if (b.detourOf >= 0) ++loopsHere;
             }
-            Check(rooms_found == rooms + 1, "room count does not match the config", seed);
+            Check(rooms_found == rooms + 1 + loopsHere,
+                  "room count does not match the config plus the loop rooms", seed);
 
             // Entrance and boss must be distinct blocks.
             Check(plan.entranceIndex != plan.bossIndex, "entrance and boss are the same block", seed);
@@ -3517,6 +3716,9 @@ namespace
             {
                 if (b.branchOf >= 0) ++pocketsHere;
             }
+            loopRoomsSeen += loopsHere;
+            segmentsSeen += std::max(1, cfg.bossRooms);
+            ++loopLayouts;
             minPockets = (!sawLayout || pocketsHere < minPockets) ? pocketsHere : minPockets;
             maxPockets = (pocketsHere > maxPockets) ? pocketsHere : maxPockets;
             sawLayout = true;
@@ -3525,6 +3727,8 @@ namespace
         if (longestPath) std::printf("longest room-to-room path: %d cells\n", longestPath);
         std::printf("blocks per layout: %d..%d\n", minBlocks, maxBlocks);
         std::printf("pockets per layout: %d..%d\n", minPockets, maxPockets);
+        std::printf("loop rooms: %d of %d segments carry one (%d layouts)\n",
+                    loopRoomsSeen, segmentsSeen, loopLayouts);
         std::printf("largest manifest  : %d bytes (budget 2048)\n", static_cast<int>(maxManifest));
         std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
         std::printf("%s\n", g_failures == 0 ? "ALL CHECKS PASS" : "FAILURES");

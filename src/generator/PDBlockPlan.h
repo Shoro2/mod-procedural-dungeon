@@ -134,7 +134,8 @@ namespace PDungeon
 
     // Reads of a generated plan. ChainLength is 0 for a plan without chain
     // fields. SegmentOf: 0 for the entrance, k for a spine room in boss k's
-    // segment (boss k included), a pocket's host segment, -1 for corridors.
+    // segment (boss k included), a pocket's host segment, a loop room's run
+    // segment, -1 for corridors.
     int ChainLength(BlockPlan const& plan);
     int SegmentOf(BlockPlan const& plan, PlacedBlock const& block);
 
