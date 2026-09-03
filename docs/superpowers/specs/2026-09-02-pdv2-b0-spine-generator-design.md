@@ -378,3 +378,35 @@ every candidate fix moves the draw stream, and so do the optional stub-host filt
 backward-candidate lever for the chain search. All of them are free under the single
 `PD_LAYOUT_VERSION` 2 → 3 bump this round already spends — and cost another forced reroll of every
 stored layout once the round ships. Batch them or drop them.
+
+**B0b (2026-09-03): shortcuts are withdrawn, the loop room takes their place.** The operator's
+instruction of 2026-09-03 removed the pocket → later-spine-room corridor and every draw that fed
+it; pockets are plain dead ends again, and **the measured shortcut yield above is history** — so is
+the operator decision it queued. In its place a **loop room** sits beside a straight three-cell
+corridor run of the spine: out of the run to the side at `P+d`, a corner at `P+d+s`, the room at
+`P+2d+s` (entrance and exit on opposite sides), a corner at `P+3d+s`, back into the run at `P+3d`,
+with `P+2d` keeping a wall toward the room. At most **one per boss segment**, and the
+`Chance(detourChancePct)` calls are **second in the draw order** — one per segment, in segment
+order, after the start cell and before the chain steps. A step leading into a room of a segment
+that wants a detour and has none tries the detour candidates first (destination cell in `(y, x)`
+order, side left before right, no axis coin) and falls back to the ordinary ones. Loop rooms are
+**additional** to the budget: the spine still holds `rooms + bossRooms` rooms and the plan holds
+`rooms + bossRooms + loopRooms`. `PlacedBlock::shortcutTo` is gone; `detourOf` carries the chain
+index of the spine room the run leads into.
+
+The validator reconstructs the whole strip from the sockets on every generation — the room's two
+opposite sockets, the two corner corridors, the straight cell between them, the run's ends at chain
+rooms `detourOf − 1` and `detourOf`, and the two three-socket **attachment cells**, the one corridor
+kind allowed to break the junction rule. The corridor-run walk continues straight through an
+attachment cell entered along the run and stops there when entered from the strip, so spine
+adjacency and pocket physics read exactly as before.
+
+`ProceduralDungeon.V2.LoopChance` is retired and **`ProceduralDungeon.V2.DetourChance`** (default
+33, clamped 0..100) replaces it; the persisted column keeps its name `gen_loop_pct` and carries the
+detour chance (a one-line comment above the INSERT in `SavePlanToDB` says so). `ChainSummary` prints
+a `loops:` line (`R#i run + loop room (bx,by) [segment k]`), `AsciiBlockDump` draws a loop room as
+`o`, and `PD_CHAIN_PIN` grew a third field: chain cells `|` pockets `host>x,y;` `|` loops
+`into>x,y;`. `PD_LAYOUT_VERSION` stays **3** — the draw stream moved again, but nothing of this
+round is deployed. Measured yield at the live default (5 rooms, 2 pockets, `V2.DetourChance` 33):
+**168 of 500 segments** in `--batch 500`. Design:
+`docs/superpowers/specs/2026-09-03-pdv2-b0b-loop-rooms-design.md`.
