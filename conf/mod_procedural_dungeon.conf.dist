@@ -130,7 +130,7 @@ ProceduralDungeon.Rooms.SizeMax = 11
 #
 #    ProceduralDungeon.LoopChance
 #        Description: Percent chance to keep a non-MST connection as an
-#                     extra loop corridor (shortcuts, alternate routes).
+#                     extra loop corridor (alternate routes).
 #        Default:     15
 
 ProceduralDungeon.LoopChance = 15
@@ -295,16 +295,18 @@ ProceduralDungeon.V2.OriginBX = 256
 ProceduralDungeon.V2.OriginBY = 256
 
 #
-#    ProceduralDungeon.V2.LoopChance
-#        Description: Round B: percent chance that a pocket room, instead of
-#                     dead-ending, carries a shortcut forward to a later room
-#                     of the same segment - so the way out of a cleared pocket
-#                     is not the way in. Never onto or past a boss room.
+#    ProceduralDungeon.V2.DetourChance
+#        Description: Round B: percent chance, per boss segment, that a loop
+#                     room hangs off the main path - out of a straight corridor
+#                     run to the side, around a corner into an extra room, out
+#                     of its far side and back into the run two cells further.
+#                     One per segment at most; the room is additional to the
+#                     room count. Replaces V2.LoopChance, now withdrawn.
 #                     Stored per account as gen_loop_pct with the layout.
-#        Default:     15
+#        Default:     33
 #
 
-ProceduralDungeon.V2.LoopChance = 15
+ProceduralDungeon.V2.DetourChance = 33
 
 #
 #    ProceduralDungeon.V2.Branches

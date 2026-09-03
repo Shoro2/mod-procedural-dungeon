@@ -204,7 +204,7 @@ namespace PDungeon
     }
 
     // Every cell a straight line between two cell centres passes through must
-    // be walkable, or the shortcut would cut a corner. Public because it is
+    // be walkable, or the straight run would cut a corner. Public because it is
     // also the creature AI's chase gate (see the header).
     bool GridLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b)
     {

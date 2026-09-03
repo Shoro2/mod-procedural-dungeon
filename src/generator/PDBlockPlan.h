@@ -90,7 +90,7 @@ namespace PDungeon
         int rooms = 3;              // ROOM blocks, before boss rooms are added
         int bossRooms = 1;
         int fieldBlocks = 8;        // planning field is fieldBlocks square
-        int loopChancePct = 15;     // Round B: chance that a pocket carries a shortcut
+        int detourChancePct = 33;   // Round B (B0b): chance per boss segment that a loop room hangs off the run
         int originBX = 256;         // global block coord of the field origin
         int originBY = 256;
         int theme = 1;
@@ -110,13 +110,15 @@ namespace PDungeon
         int depth = 0;              // BFS depth from the entrance, rooms only
         int alt = 0;                // visual alternate, < AltCountFor(role)
 
-        // Round B (spec 2026-09-02 §5). Spine rooms carry their chain index;
-        // pocket rooms carry the chain index of the room they hang off and,
-        // if they have one, the chain index their shortcut lands on. -1 means
-        // "not that kind of block". B1/B3/B4 read nothing else.
+        // Round B. Spine rooms carry their chain index; pocket rooms (dead
+        // ends off a spine room) carry the chain index of the room they hang
+        // off; loop rooms (B0b: beside a straight run, entered from the run
+        // and left back into it) carry the chain index of the spine room
+        // their run leads into. -1 means "not that kind of block". B1/B3/B4
+        // read nothing else.
         int chainIndex = -1;
         int branchOf = -1;
-        int shortcutTo = -1;
+        int detourOf = -1;
     };
 
     struct BlockPlan

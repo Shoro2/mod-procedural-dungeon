@@ -289,8 +289,8 @@ namespace
     }
 
     // Round B: the spine in one glance - the chain in order, every pocket
-    // with its host and its shortcut, the segments. Printed by the single
-    // layout and by --path, and quoted by the operator document.
+    // with its host, the segments. Printed by the single layout and by
+    // --path, and quoted by the operator document.
     std::string ChainSummary(BlockPlan const& plan)
     {
         int const len = ChainLength(plan);
@@ -328,16 +328,8 @@ namespace
             out += "pockets:";
             for (PlacedBlock const* p : pockets)
             {
-                if (p->shortcutTo >= 0)
-                {
-                    std::snprintf(buf, sizeof(buf), "  R#%d + pocket (%d,%d) [shortcut -> R#%d]",
-                                  p->branchOf, p->bx, p->by, p->shortcutTo);
-                }
-                else
-                {
-                    std::snprintf(buf, sizeof(buf), "  R#%d + pocket (%d,%d) [dead end]",
-                                  p->branchOf, p->bx, p->by);
-                }
+                std::snprintf(buf, sizeof(buf), "  R#%d + pocket (%d,%d)",
+                              p->branchOf, p->bx, p->by);
                 out += buf;
             }
             out += '\n';
@@ -917,10 +909,11 @@ namespace
 
         // The struct defaults the later tasks rely on.
         PlacedBlock const fresh;
-        Check(fresh.chainIndex == -1 && fresh.branchOf == -1 && fresh.shortcutTo == -1,
+        Check(fresh.chainIndex == -1 && fresh.branchOf == -1 && fresh.detourOf == -1,
               "PlacedBlock chain fields must default to -1", 0);
         BlockCfg const cfg;
         Check(cfg.branches == 2, "BlockCfg::branches must default to 2", 0);
+        Check(cfg.detourChancePct == 33, "BlockCfg::detourChancePct must default to 33", 0);
     }
 
     void RunGameMathChecks()
@@ -1291,21 +1284,22 @@ namespace
     // regenerates a different dungeon.
     void RunLayoutFreezeCheck()
     {
-        // Re-pinned 2026-09-02 with PD_LAYOUT_VERSION 3 (Round B: the chain
-        // generator replaces scatter + MST; every stored seed rerolls once,
-        // by design). The v2 pin was 571 / E;85fc0e4c, the v1 pin
-        // 551 / E;13df5510.
+        // Re-pinned 2026-09-03 for B0b: the pocket's forward-cut draw is
+        // withdrawn, so the stream after the first pocket moves and the
+        // seed-12345 layout with it. PD_LAYOUT_VERSION stays 3 - nothing is
+        // deployed. The B0 pin was 363 / E;a5019024, the v2 pin
+        // 571 / E;85fc0e4c, the v1 pin 551 / E;13df5510.
         uint32_t const PINNED_SEED = 12345u;
         int const PINNED_ROOMS = 5;
-        size_t const PINNED_BYTES = 363;
-        char const* const PINNED_TRAILER = "E;a5019024\n";
+        size_t const PINNED_BYTES = 383;
+        char const* const PINNED_TRAILER = "E;0eeda3ad\n";
         // The failure message names the pin this one REPLACED, so whoever
-        // reads it can tell a fresh move from the Round B re-roll. Kept as
+        // reads it can tell a fresh move from the B0b re-roll. Kept as
         // constants beside the live pin: the message used to pair the current
         // byte count with the previous trailer, which read as a third value
         // that never existed.
-        size_t const PREVIOUS_BYTES = 571;
-        char const* const PREVIOUS_TRAILER = "E;85fc0e4c";
+        size_t const PREVIOUS_BYTES = 363;
+        char const* const PREVIOUS_TRAILER = "E;a5019024";
 
         BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
         cfg.bossRooms = 1;
@@ -1324,7 +1318,7 @@ namespace
         char msg[256];
         std::snprintf(msg, sizeof(msg),
                       "pinned manifest is %d bytes / %.*s, the pin says %d / %.*s "
-                      "(the pin before Round B was %d / %s) - the bossRooms=1 "
+                      "(the pin before B0b was %d / %s) - the bossRooms=1 "
                       "layout MOVED",
                       static_cast<int>(m.size()),
                       static_cast<int>(actualTrailer.size() ? actualTrailer.size() - 1 : 0),
@@ -1469,7 +1463,7 @@ namespace
                 if (a.bx != b.bx || a.by != b.by || a.role != b.role ||
                     a.socketMask != b.socketMask || a.alt != b.alt ||
                     a.chainIndex != b.chainIndex || a.branchOf != b.branchOf ||
-                    a.shortcutTo != b.shortcutTo ||
+                    a.detourOf != b.detourOf ||
                     b.chunkId - a.chunkId != 10000)
                 {
                     same = false;
@@ -1584,12 +1578,12 @@ namespace
         return -1;
     }
 
-    void RunChainChecks(int seeds, bool& sawPocket, bool& sawShortcut)
+    void RunChainChecks(int seeds, bool& sawPocket)
     {
         char msg[224];
         // The engine's real configuration space, not a diagonal of it:
         // bossRooms reaches 4 at the conf's DlvlCap 30, branches and
-        // loopChancePct are both operator keys whose extremes sit on their
+        // detourChancePct are both operator keys whose extremes sit on their
         // own draw streams (PDRandom's no-draw contract at a single candidate
         // and at Chance 0/100), and bossRooms 0 is reachable from the server
         // config for an account with no row.
@@ -1598,33 +1592,32 @@ namespace
             int rooms;
             int bossRooms;
             int branches = 2;
-            int loopPct = 15;
+            int detourPct = 15;
         };
         Combo const combos[] = {
             { 8, 1 }, { 8, 2 }, { 8, 3 }, { 15, 2 }, { 3, 1 }, { 1, 1 },
             { 4, 4 }, { 2, 4 }, { 1, 4 },                   // dlvl 30's boss count
             { 8, 1, 0, 15 },                                // V2.Branches 0: no pockets at all
-            { 8, 1, 2, 0 },                                 // V2.LoopChance 0: Chance draws nothing
-            { 8, 1, 2, 100 },                               // V2.LoopChance 100: same, other way
+            { 8, 1, 2, 0 },                                 // V2.DetourChance 0: Chance draws nothing
+            { 8, 1, 2, 100 },                               // V2.DetourChance 100: same, other way
             { 5, 0, 2, 15 },                                // bossRooms 0 still means one boss
         };
         for (Combo const& combo : combos)
         {
-            int shortcutsHere = 0;
             for (int i = 0; i < seeds; ++i)
             {
                 uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
                 BlockCfg cfg = MakeCfg(seed, combo.rooms);
                 cfg.bossRooms = combo.bossRooms;
                 cfg.branches = combo.branches;
-                cfg.loopChancePct = combo.loopPct;
+                cfg.detourChancePct = combo.detourPct;
 
                 BlockPlan plan;
                 if (!GenerateBlockPlan(cfg, &plan))
                 {
                     std::snprintf(msg, sizeof(msg),
                                   "generation failed with %d rooms + %d boss, branches %d, loop %d%%",
-                                  combo.rooms, combo.bossRooms, combo.branches, combo.loopPct);
+                                  combo.rooms, combo.bossRooms, combo.branches, combo.detourPct);
                     Check(false, msg, seed);
                     continue;
                 }
@@ -1646,7 +1639,7 @@ namespace
                     PlacedBlock const& b = plan.blocks[k];
                     if (b.roomId < 0)
                     {
-                        Check(b.chainIndex < 0 && b.branchOf < 0 && b.shortcutTo < 0,
+                        Check(b.chainIndex < 0 && b.branchOf < 0 && b.detourOf < 0,
                               "a corridor block carries chain fields", seed);
                         continue;
                     }
@@ -1743,11 +1736,9 @@ namespace
                 }
 
                 // Pockets: host is an ordinary spine room, one pocket per host,
-                // shortcut forward, inside the segment, never onto a boss - and
-                // physically what the fields claim: with the HOST removed, a
-                // flood from the pocket reaches the shortcut target (there is
-                // no other way there), and a dead-end pocket reaches no spine
-                // room at all.
+                // in the host's segment - and physically what the fields claim:
+                // with the HOST removed, a flood from the pocket reaches no
+                // spine room at all.
                 std::vector<bool> hosted(static_cast<size_t>(wantChain), false);
                 for (size_t at = 0; at < plan.blocks.size(); ++at)
                 {
@@ -1766,36 +1757,12 @@ namespace
 
                     std::vector<bool> seen;
                     FloodFrom(plan, static_cast<int>(at), chainBlock[static_cast<size_t>(b.branchOf)], seen);
-                    if (b.shortcutTo >= 0)
+                    bool touchesSpine = false;
+                    for (size_t k = 0; k < plan.blocks.size(); ++k)
                     {
-                        ++shortcutsHere;
-                        // Non-vacuity only counts where a shortcut CAN happen:
-                        // at V2.LoopChance 0 the Chance short-circuits without
-                        // drawing, so a combo with loopPct 0 producing none is
-                        // the contract, not dead code.
-                        if (combo.loopPct > 0) sawShortcut = true;
-                        bool ok = b.shortcutTo > b.branchOf && b.shortcutTo < wantChain;
-                        for (int j = b.branchOf + 1; ok && j <= b.shortcutTo; ++j)
-                        {
-                            if (isBossIdx[static_cast<size_t>(j)]) ok = false;
-                        }
-                        Check(ok, "shortcut goes backward, past or onto a boss", seed);
-                        if (ok)
-                        {
-                            Check(seen[static_cast<size_t>(chainBlock[static_cast<size_t>(b.shortcutTo)])],
-                                  "a shortcut is declared but its target is not reachable from the pocket around the host",
-                                  seed);
-                        }
+                        if (seen[k] && plan.blocks[k].chainIndex >= 0) touchesSpine = true;
                     }
-                    else
-                    {
-                        bool touchesSpine = false;
-                        for (size_t k = 0; k < plan.blocks.size(); ++k)
-                        {
-                            if (seen[k] && plan.blocks[k].chainIndex >= 0) touchesSpine = true;
-                        }
-                        Check(!touchesSpine, "a dead-end pocket reaches the spine around its host", seed);
-                    }
+                    Check(!touchesSpine, "a dead-end pocket reaches the spine around its host", seed);
                 }
 
                 // No junction that is not a stub: a corridor block has exactly
@@ -1836,22 +1803,6 @@ namespace
                 }
             }
 
-            // V2.LoopChance 100 means the Chance never draws and always hits,
-            // so every pocket that has a feasible target gets a shortcut.
-            // Whether a given pocket HAS one is not derivable from the plan
-            // alone (the target list is a routing question inside the search),
-            // so what is asserted is the weaker, still-falsifiable statement:
-            // over the loopPct-100 seeds at least one shortcut occurs. If the
-            // Chance short-circuit ever stopped hitting, this row goes red
-            // while the loopPct-15 rows would only get statistically thinner.
-            if (combo.loopPct >= 100 && combo.branches > 0)
-            {
-                std::snprintf(msg, sizeof(msg),
-                              "no shortcut at all over %d seeds with LoopChance 100 "
-                              "(%d rooms + %d boss, branches %d)",
-                              seeds, combo.rooms, combo.bossRooms, combo.branches);
-                Check(shortcutsHere > 0, msg, 0);
-            }
         }
     }
 
@@ -2657,17 +2608,18 @@ namespace
     // change, that is the change being noticed, not the pin being wrong -
     // update it in the same commit as the draw-order comment.
     //
-    // Re-captured 2026-09-02 for the Round B chain layout: the chain generator
-    // replaced scatter + MST, so the seed-12345 plan moved and both pins with it.
+    // Re-captured 2026-09-03 for B0b: the pocket's forward-cut draw is
+    // withdrawn, so the seed-12345 layout moved again and both pins with it.
+    // (2026-09-02, Round B: the chain generator replaced scatter + MST.)
     //
-    // CAPTURE PROCEDURE, both times: run `pdblock --decor-batch` (seed 12345,
+    // CAPTURE PROCEDURE, every time: run `pdblock --decor-batch` (seed 12345,
     // 5 rooms, the shipped fixtures) and paste the value out of the "plan
     // moved" failure message - never by reasoning about what it should be -
     // and only once every change that can move these streams has landed.
     char const* const PD_DECOR_PLAN_PIN =
-        "256,257,1,910020,18.333333,12.500000,3.141593;256,257,4,910050,56.666666,20.833333,0.000000;256,257,5,910051,10.000000,20.833333,3.141593;256,257,5,910051,56.666666,29.166666,0.000000;256,257,6,910054,29.166666,10.000000,4.712389;256,257,7,910055,10.000000,45.833333,3.141593;256,257,10,910060,18.333333,10.000000,3.926991;256,257,10,910060,48.333333,56.666666,0.785398;256,257,11,910062,10.000000,56.666666,2.356194;256,257,11,910062,56.666666,10.000000,5.497787;258,257,9,910052,54.166666,26.666666,4.712389;256,258,9,910052,26.666666,45.833333,3.141593;256,258,12,910063,26.666666,26.666666,3.926991;257,258,3,910020,26.666666,54.166666,3.141593;257,258,9,910052,26.666666,12.500000,3.141593;258,258,1,910020,45.833333,10.000000,4.712389;258,258,5,910051,56.666666,20.833333,0.000000;258,258,5,910051,4.166667,26.666666,4.712389;258,258,6,910054,10.000000,20.833333,3.141593;258,258,13,910070,20.833333,29.166666,0.000000;258,258,13,910070,29.166666,45.833333,0.000000;258,258,13,910070,45.833333,20.833333,0.000000;259,258,9,910052,26.666666,4.166667,3.141593;261,258,1,910020,29.166666,56.666666,1.570796;261,258,1,910020,10.000000,20.833333,3.141593;261,258,1,910020,10.000000,45.833333,3.141593;261,258,4,910050,10.000000,29.166666,3.141593;261,258,4,910050,45.833333,10.000000,4.712389;261,258,5,910051,45.833333,56.666666,1.570796;261,258,5,910051,62.500000,26.666666,4.712389;261,258,8,910056,10.000000,54.166666,3.141593;261,258,11,910062,48.333333,56.666666,0.785398;261,258,11,910062,10.000000,56.666666,2.356194;256,259,1,910020,56.666666,29.166666,0.000000;256,259,1,910020,20.833333,56.666666,1.570796;256,259,2,910021,29.166666,10.000000,4.712389;256,259,2,910021,56.666666,20.833333,0.000000;256,259,7,910055,56.666666,12.500000,0.000000;256,259,10,910060,56.666666,10.000000,5.497787;256,259,10,910060,10.000000,56.666666,2.356194;256,259,11,910062,18.333333,10.000000,3.926991;256,259,11,910062,48.333333,56.666666,0.785398;256,259,14,910073,45.833333,20.833333,0.000000;256,259,14,910073,12.500000,29.166666,0.000000;258,259,12,910063,26.666666,26.666666,3.926991;259,259,1,910020,62.500000,26.666666,4.712389;259,259,1,910020,56.666666,20.833333,0.000000;259,259,1,910020,20.833333,10.000000,4.712389;259,259,4,910050,56.666666,12.500000,0.000000;259,259,5,910051,26.666666,62.500000,3.141593;259,259,5,910051,4.166667,26.666666,4.712389;259,259,6,910054,45.833333,56.666666,1.570796;259,259,10,910060,10.000000,56.666666,2.356194;259,259,10,910060,56.666666,10.000000,5.497787;259,259,13,910070,12.500000,29.166666,0.000000;259,259,13,910070,20.833333,45.833333,0.000000;259,259,13,910070,54.166666,29.166666,0.000000;260,259,3,910020,26.666666,12.500000,3.141593;261,259,3,910020,26.666666,4.166667,3.141593;258,260,3,910020,62.500000,26.666666,4.712389;259,260,9,910052,12.500000,26.666666,4.712389;258,261,1,910020,29.166666,56.666666,1.570796;258,261,4,910050,10.000000,20.833333,3.141593;258,261,4,910050,10.000000,54.166666,3.141593;258,261,5,910051,56.666666,29.166666,0.000000;258,261,5,910051,45.833333,10.000000,4.712389;258,261,8,910056,45.833333,56.666666,1.570796;258,261,11,910062,48.333333,56.666666,0.785398;258,261,11,910062,56.666666,10.000000,5.497787;258,261,13,910070,45.833333,20.833333,0.000000;258,261,13,910070,45.833333,45.833333,0.000000;258,261,13,910070,20.833333,29.166666,0.000000";
+        "257,256,1,910020,56.666666,20.833333,0.000000;257,256,4,910050,10.000000,54.166666,3.141593;257,256,5,910051,20.833333,10.000000,4.712389;257,256,5,910051,10.000000,20.833333,3.141593;257,256,6,910054,10.000000,45.833333,3.141593;257,256,7,910055,45.833333,56.666666,1.570796;257,256,10,910060,56.666666,10.000000,5.497787;257,256,10,910060,10.000000,56.666666,2.356194;257,256,13,910070,20.833333,20.833333,0.000000;257,257,9,910052,62.500000,26.666666,4.712389;258,257,9,910052,45.833333,18.333333,4.712389;256,258,3,910020,26.666666,62.500000,3.141593;256,258,9,910052,62.500000,26.666666,4.712389;256,258,12,910063,26.666666,26.666666,3.926991;258,258,1,910020,4.166667,26.666666,4.712389;258,258,1,910020,10.000000,54.166666,3.141593;258,258,1,910020,56.666666,20.833333,0.000000;258,258,4,910050,20.833333,56.666666,1.570796;258,258,4,910050,18.333333,12.500000,3.141593;258,258,7,910055,26.666666,4.166667,3.141593;258,258,8,910056,45.833333,56.666666,1.570796;258,258,11,910062,10.000000,56.666666,2.356194;258,258,11,910062,18.333333,10.000000,3.926991;258,258,13,910070,45.833333,20.833333,0.000000;258,258,13,910070,29.166666,45.833333,0.000000;259,258,3,910020,26.666666,20.833333,3.141593;260,258,3,910020,62.500000,26.666666,4.712389;261,258,1,910020,20.833333,10.000000,4.712389;261,258,1,910020,10.000000,45.833333,3.141593;261,258,5,910051,62.500000,26.666666,4.712389;261,258,5,910051,56.666666,12.500000,0.000000;261,258,7,910055,20.833333,56.666666,1.570796;261,258,8,910056,10.000000,20.833333,3.141593;261,258,11,910062,10.000000,56.666666,2.356194;261,258,11,910062,56.666666,10.000000,5.497787;261,258,13,910070,20.833333,29.166666,0.000000;261,258,13,910070,45.833333,20.833333,0.000000;261,258,13,910070,20.833333,45.833333,0.000000;256,259,1,910020,18.333333,12.500000,3.141593;256,259,1,910020,29.166666,56.666666,1.570796;256,259,1,910020,29.166666,10.000000,4.712389;256,259,2,910021,10.000000,45.833333,3.141593;256,259,8,910056,10.000000,54.166666,3.141593;256,259,13,910070,20.833333,20.833333,0.000000;256,259,13,910070,45.833333,29.166666,0.000000;256,259,13,910070,20.833333,45.833333,0.000000;256,259,14,910073,12.500000,29.166666,0.000000;258,259,3,910020,54.166666,26.666666,4.712389;259,259,1,910020,26.666666,62.500000,3.141593;259,259,1,910020,45.833333,56.666666,1.570796;259,259,1,910020,26.666666,4.166667,3.141593;259,259,5,910051,10.000000,54.166666,3.141593;259,259,5,910051,45.833333,10.000000,4.712389;259,259,6,910054,10.000000,20.833333,3.141593;259,259,7,910055,20.833333,56.666666,1.570796;259,259,11,910062,10.000000,56.666666,2.356194;259,259,11,910062,48.333333,56.666666,0.785398;259,259,13,910070,12.500000,29.166666,0.000000;259,259,13,910070,29.166666,54.166666,0.000000;260,259,3,910020,20.833333,26.666666,4.712389;260,259,9,910052,26.666666,62.500000,3.141593;261,259,3,910020,26.666666,12.500000,3.141593;261,259,9,910052,26.666666,20.833333,3.141593;258,260,3,910020,56.666666,20.833333,0.000000;258,261,1,910020,10.000000,12.500000,3.141593;258,261,1,910020,10.000000,45.833333,3.141593;258,261,5,910051,4.166667,26.666666,4.712389;258,261,5,910051,56.666666,20.833333,0.000000;258,261,7,910055,20.833333,56.666666,1.570796;258,261,11,910062,10.000000,56.666666,2.356194;258,261,13,910070,45.833333,45.833333,0.000000";
     char const* const PD_CRITTER_PLAN_PIN =
-        "258,258,1,32428,29.166666,20.833333;258,258,1,32428,20.833333,20.833333;258,258,2,23086,29.166666,29.166666;258,258,2,23086,29.166666,12.500000;261,258,2,23086,29.166666,29.166666;256,259,1,32428,29.166666,45.833333;259,259,1,32428,45.833333,29.166666;259,259,1,32428,29.166666,45.833333;259,259,2,23086,12.500000,29.166666;259,259,2,23086,20.833333,45.833333;259,259,3,2110,29.166666,12.500000;261,259,4,26525,29.166666,29.166666;258,261,2,23086,20.833333,45.833333;258,261,2,23086,45.833333,20.833333;258,261,3,2110,29.166666,45.833333";
+        "258,257,4,26525,29.166666,29.166666;258,257,4,26525,54.166666,29.166666;257,258,4,26525,29.166666,29.166666;258,258,1,32428,29.166666,20.833333;258,258,2,23086,45.833333,45.833333;258,258,2,23086,29.166666,45.833333;258,258,3,2110,12.500000,29.166666;261,258,1,32428,20.833333,20.833333;256,259,1,32428,29.166666,45.833333;256,259,2,23086,45.833333,45.833333;256,259,2,23086,45.833333,29.166666;256,259,3,2110,29.166666,20.833333;259,259,1,32428,20.833333,29.166666;259,259,1,32428,29.166666,45.833333;259,259,2,23086,45.833333,29.166666;259,259,2,23086,29.166666,12.500000;260,259,4,26525,29.166666,29.166666;261,259,4,26525,29.166666,29.166666;258,261,1,32428,20.833333,20.833333;258,261,1,32428,45.833333,45.833333";
 
     bool CheckDecorPlanPinned(std::string& why)
     {
@@ -2734,10 +2686,10 @@ namespace
     // Round B: the chain itself, pinned. RunLayoutFreezeCheck pins the
     // manifest bytes and would notice most draw-order moves, but two
     // different chains can in principle emit the same block set; this pin
-    // reads the chain order, the pockets and the shortcuts directly.
+    // reads the chain order and the pockets directly.
     // Captured by RUNNING `pdblock --batch` and reading the "the chain moved"
     // message, never by reasoning about the value.
-    char const* const PD_CHAIN_PIN = "258,261;259,259;258,258;256,259;|2>256,257>-1;1>261,258>-1;";
+    char const* const PD_CHAIN_PIN = "258,261;259,259;258,258;256,259;|2>257,256;1>261,258;";
 
     std::string ChainPinString(BlockPlan const& plan)
     {
@@ -2759,7 +2711,7 @@ namespace
         got += '|';
         for (PlacedBlock const* p : pockets)
         {
-            std::snprintf(buf, sizeof(buf), "%d>%d,%d>%d;", p->branchOf, p->bx, p->by, p->shortcutTo);
+            std::snprintf(buf, sizeof(buf), "%d>%d,%d;", p->branchOf, p->bx, p->by);
             got += buf;
         }
         return got;
@@ -3392,23 +3344,18 @@ namespace
             Check(ok, why.c_str(), 12345u);
         }
         // A tenth of the batch, over thirteen (rooms, bossRooms, branches,
-        // loopChancePct) combos: the spine properties are STRUCTURAL and hold
-        // per seed, so the sample size only decides how much of the draw space
-        // gets walked, never whether a rule is true.
+        // detourChancePct) combos: the spine properties are STRUCTURAL and
+        // hold per seed, so the sample size only decides how much of the draw
+        // space gets walked, never whether a rule is true.
         //
-        // sawPocket and sawShortcut are the two STATISTICAL ones - non-vacuity
-        // over the sample, not a property of any single layout. Both are safe
-        // at the mandated 500 (a tenth of it is 51 seeds per combo, and the
-        // seeds are fixed, so the answer is deterministic per generator
-        // version); sawShortcut additionally has the LoopChance-100 combo
-        // behind it, which cannot go quiet without the Chance contract
-        // breaking. At a much smaller --batch they could in principle both go
-        // red without anything being wrong.
+        // sawPocket is the STATISTICAL one - non-vacuity over the sample, not
+        // a property of any single layout. It is safe at the mandated 500 (a
+        // tenth of it is 51 seeds per combo, and the seeds are fixed, so the
+        // answer is deterministic per generator version). At a much smaller
+        // --batch it could in principle go red without anything being wrong.
         bool sawPocket = false;
-        bool sawShortcut = false;
-        RunChainChecks(count / 10 + 1, sawPocket, sawShortcut);
+        RunChainChecks(count / 10 + 1, sawPocket);
         Check(sawPocket, "no seed in the sample produced a pocket - the pocket pass is dead code", 0);
-        Check(sawShortcut, "no seed in the sample produced a shortcut - the shortcut draw is dead code", 0);
         RunPhase2Checks(count / 10 + 1);
         RunThemeParityChecks(count / 10 + 1);
         // Same tenth-of-the-batch reasoning: one pack per room is structural
@@ -3456,7 +3403,7 @@ namespace
         // minPockets starts at 0, not at a sentinel: `--batch 0` runs no seed
         // at all, and a summary line reading "pockets per layout: 1073741824..0"
         // is a worse answer than "0..0".
-        int minPockets = 0, maxPockets = 0, shortcutLayouts = 0;
+        int minPockets = 0, maxPockets = 0;
         bool sawLayout = false;
 
         for (int i = 0; i < count; ++i)
@@ -3566,22 +3513,18 @@ namespace
             maxBlocks = (blocks > maxBlocks) ? blocks : maxBlocks;
 
             int pocketsHere = 0;
-            int shortcutsHere = 0;
             for (PlacedBlock const& b : plan.blocks)
             {
                 if (b.branchOf >= 0) ++pocketsHere;
-                if (b.shortcutTo >= 0) ++shortcutsHere;
             }
             minPockets = (!sawLayout || pocketsHere < minPockets) ? pocketsHere : minPockets;
             maxPockets = (pocketsHere > maxPockets) ? pocketsHere : maxPockets;
-            shortcutLayouts += shortcutsHere ? 1 : 0;
             sawLayout = true;
         }
 
         if (longestPath) std::printf("longest room-to-room path: %d cells\n", longestPath);
         std::printf("blocks per layout: %d..%d\n", minBlocks, maxBlocks);
-        std::printf("pockets per layout: %d..%d, %d of %d layouts carry a shortcut\n",
-                    minPockets, maxPockets, shortcutLayouts, count);
+        std::printf("pockets per layout: %d..%d\n", minPockets, maxPockets);
         std::printf("largest manifest  : %d bytes (budget 2048)\n", static_cast<int>(maxManifest));
         std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
         std::printf("%s\n", g_failures == 0 ? "ALL CHECKS PASS" : "FAILURES");

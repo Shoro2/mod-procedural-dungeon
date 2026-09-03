@@ -376,7 +376,6 @@ namespace PDungeon
         {
             Cell cell;
             int host = -1;          // chain index
-            int shortcutTo = -1;    // chain index, -1 = dead end
         };
 
         bool IsBossIndex(std::vector<int> const& bosses, int idx)
@@ -384,23 +383,10 @@ namespace PDungeon
             return std::find(bosses.begin(), bosses.end(), idx) != bosses.end();
         }
 
-        int NextBossAfter(std::vector<int> const& bosses, int idx)
-        {
-            for (int b : bosses)        // ascending by construction
-            {
-                if (b > idx)
-                {
-                    return b;
-                }
-            }
-            return -1;
-        }
-
         // Pockets hang off ordinary spine rooms, one each, placed like a chain
-        // step without the direction bias. A pocket may carry a shortcut to a
-        // later spine room of its own segment (never onto or past a boss -
-        // the boss room must stay a cut of the graph for B4's barrier).
-        bool PlacePockets(BlockCfg const& cfg, PDRandom& rng, std::vector<int> const& bosses,
+        // step without the direction bias. A pocket is a dead end: its only
+        // corridor run leads back to its host.
+        bool PlacePockets(PDRandom& rng, std::vector<int> const& bosses,
                           int pockets, Field& f, std::vector<Pocket>& out)
         {
             int const chainLen = static_cast<int>(f.chain.size());
@@ -438,28 +424,6 @@ namespace PDungeon
                 Pocket pocket;
                 pocket.cell = cand.cell;
                 pocket.host = host;
-
-                if (rng.Chance(cfg.loopChancePct))
-                {
-                    int const segmentBoss = NextBossAfter(bosses, host);
-                    std::vector<std::pair<int, int>> targets;      // (chain index, orders)
-                    for (int j = host + 1; j < segmentBoss; ++j)
-                    {
-                        int const orders = FeasibleOrders(f, cand.cell, f.chain[static_cast<size_t>(j)]);
-                        if (orders != ORDER_NONE)
-                        {
-                            targets.push_back(std::make_pair(j, orders));
-                        }
-                    }
-                    if (!targets.empty())
-                    {
-                        std::pair<int, int> const target = targets[static_cast<size_t>(
-                            rng.UniformInt(0, static_cast<int>(targets.size()) - 1))];
-                        CommitRoute(f, cand.cell, f.chain[static_cast<size_t>(target.first)],
-                                    ChooseXFirst(rng, target.second));
-                        pocket.shortcutTo = target.first;
-                    }
-                }
                 out.push_back(pocket);
             }
             return true;
@@ -469,7 +433,6 @@ namespace PDungeon
         // fit around it, and the boss positions the pocket hosts avoid.
         struct ChainGoal
         {
-            BlockCfg const* cfg = nullptr;
             std::vector<int> const* bosses = nullptr;
             int chainLen = 0;
             int pockets = 0;
@@ -493,7 +456,7 @@ namespace PDungeon
             {
                 Field seated = f;
                 std::vector<Pocket> placed;
-                if (!PlacePockets(*goal.cfg, rng, *goal.bosses, goal.pockets, seated, placed))
+                if (!PlacePockets(rng, *goal.bosses, goal.pockets, seated, placed))
                 {
                     return false;
                 }
@@ -685,9 +648,8 @@ namespace PDungeon
 
         // Round B: the spine (spec 2026-09-02 §5). Chain indices are exactly
         // 0..L-1 once each, the entrance is chain 0, the last chain room is a
-        // boss, bosses sit at their formula positions, pockets hang off
-        // ordinary spine rooms (one each) and a shortcut lands forward on a
-        // non-boss room of the same segment.
+        // boss, bosses sit at their formula positions and pockets hang off
+        // ordinary spine rooms (one each).
         std::vector<int> chainBlock;
         for (size_t i = 0; i < plan.blocks.size(); ++i)
         {
@@ -810,20 +772,6 @@ namespace PDungeon
                 return fail("two pockets on one host");
             }
             hosted[static_cast<size_t>(b.branchOf)] = true;
-            if (b.shortcutTo >= 0)
-            {
-                if (b.shortcutTo <= b.branchOf || b.shortcutTo >= chainLen)
-                {
-                    return fail("a shortcut does not lead forward");
-                }
-                for (int j = b.branchOf + 1; j <= b.shortcutTo; ++j)
-                {
-                    if (plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(j)])].role == BlockRole::RoomBoss)
-                    {
-                        return fail("a shortcut crosses or lands on a boss room");
-                    }
-                }
-            }
         }
         if (pocketCount != PocketCountFor(plan.config.rooms, plan.config.bossRooms, plan.config.branches))
         {
@@ -931,8 +879,8 @@ namespace PDungeon
         };
 
         // Round B, the physical half of the spine rules (final review of B0,
-        // item I2). Everything above reads the DECLARED chainIndex / branchOf /
-        // shortcutTo; these three rules prove them against the sockets. A
+        // item I2). Everything above reads the DECLARED chainIndex and
+        // branchOf; these three rules prove them against the sockets. A
         // pocket labelled into segment k but physically hanging off a room
         // behind boss k passes both cut floods and would put its spawns into
         // the wrong barrier denominator - a softlock B3 could ship.
@@ -998,9 +946,8 @@ namespace PDungeon
         }
 
         // 3. Pocket physics: the rooms a pocket's corridors actually reach are
-        //    exactly its declared host (once) and, when it declares one, its
-        //    shortcut target (once). Stub runs are ignored; anything else is a
-        //    corridor the plan does not admit to.
+        //    exactly its declared host (once). Stub runs are ignored; anything
+        //    else is a corridor the plan does not admit to.
         for (size_t i = 0; i < plan.blocks.size(); ++i)
         {
             PlacedBlock const& b = plan.blocks[i];
@@ -1009,7 +956,6 @@ namespace PDungeon
                 continue;
             }
             int hostHits = 0;
-            int targetHits = 0;
             int others = 0;
             for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
             {
@@ -1031,20 +977,14 @@ namespace PDungeon
                 {
                     ++hostHits;
                 }
-                else if (b.shortcutTo >= 0 &&
-                         to == chainBlock[static_cast<size_t>(b.shortcutTo)])
-                {
-                    ++targetHits;
-                }
                 else
                 {
                     ++others;
                 }
             }
-            if (hostHits != 1 || others != 0 ||
-                targetHits != (b.shortcutTo >= 0 ? 1 : 0))
+            if (hostHits != 1 || others != 0)
             {
-                return fail("a pocket's corridors do not match its declared host and shortcut");
+                return fail("a pocket's corridors do not match its declared host");
             }
         }
 
@@ -1143,11 +1083,9 @@ namespace PDungeon
         //      both L-orders are open; backtracking re-draws from the
         //      shrunken list (ExtendChain)
         //   3. once the spine is complete, the pockets, still inside the
-        //      search: per pocket a host index, a candidate index, the axis
-        //      coin (if both), the shortcut Chance(loopChancePct), then a
-        //      target index and axis coin only when the Chance hit AND a
-        //      target exists. Pockets that do not fit unwind the search, and
-        //      the draws simply continue from wherever it lands
+        //      search: per pocket a host index, a candidate index and the
+        //      axis coin (if both). Pockets that do not fit unwind the search,
+        //      and the draws simply continue from wherever it lands
         //   4. dead-end stubs: count, then one index per stub (a placed stub
         //      is never a host, since Round B)
         //   5. visual alternates, one per multi-alt block, last (unchanged)
@@ -1160,7 +1098,7 @@ namespace PDungeon
         //     L-route are all free. That is why "a candidate index" is not the
         //     same as "a draw" in items 2 and 3.
         //   - Chance(pct) draws nothing at pct <= 0 and pct >= 100, so
-        //     V2.LoopChance 0 and 100 sit on a DIFFERENT stream from 1..99,
+        //     V2.DetourChance 0 and 100 sit on a DIFFERENT stream from 1..99,
         //     not merely on a different outcome.
         //   - a failed base case does not unwind exactly one step. It keeps
         //     unwinding for as long as the level above has no candidate left,
@@ -1181,7 +1119,6 @@ namespace PDungeon
             field.chain.push_back(start);
 
             ChainGoal goal;
-            goal.cfg = &cfg;
             goal.bosses = &bossIdx;
             goal.chainLen = chainLen;
             goal.pockets = pocketsWanted;
@@ -1353,7 +1290,6 @@ namespace PDungeon
                         Pocket const& pocket = pockets[pocketOf[c]];
                         b.role = BlockRole::Room;
                         b.branchOf = pocket.host;
-                        b.shortcutTo = pocket.shortcutTo;
                     }
                 }
                 else

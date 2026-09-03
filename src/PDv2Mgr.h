@@ -61,7 +61,7 @@ namespace PDungeon
         int         fieldBlocks = 8;
         int         originBX = 256;      // 256/8 = tile 32
         int         originBY = 256;
-        int         loopChancePct = 15;  // Round B: chance that a pocket carries a shortcut
+        int         detourChancePct = 33;  // Round B (B0b): chance per boss segment of a loop room (V2.DetourChance)
         int         branches = 2;        // Round B: pocket rooms per layout (V2.Branches)
         int         theme = 1;
         std::string manifestPath;        // where `v2 gen` writes the manifest
@@ -151,10 +151,11 @@ namespace PDungeon
     // untouched by design (layout columns update via ON DUPLICATE KEY only).
     //
     // v3 (2026-09-02, Round B): the chain generator replaces scatter + MST -
-    // rooms are laid as one path through the boss rooms with pockets and
-    // segment-local shortcuts, `gen_branches` joins the generation inputs,
-    // and LoopChance now means "a pocket carries a shortcut". Every stored
-    // layout rerolls once; dlvl/dxp untouched, as before.
+    // rooms are laid as one path through the boss rooms with pockets,
+    // `gen_branches` joins the generation inputs, and `gen_loop_pct` carries
+    // V2.DetourChance (B0b: loop rooms; the forward-cut mechanism the key was
+    // named for is withdrawn). Every stored layout rerolls once; dlvl/dxp
+    // untouched, as before.
     constexpr uint32_t PD_LAYOUT_VERSION = 3;
 
     class PDv2Mgr

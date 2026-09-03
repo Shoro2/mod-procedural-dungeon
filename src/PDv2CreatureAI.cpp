@@ -186,7 +186,7 @@ namespace PDungeon
         {
             // Arrived where the target WAS when the path was planned. Resume
             // the chase and force the next tick to re-decide, so a target
-            // that moved on is followed by plan rather than by shortcut.
+            // that moved on is followed by plan rather than by beeline.
             StopWaypointRun(true);
             _repathTimer = 0;
             return;

@@ -46,17 +46,19 @@ namespace PDungeon
         _config.fieldBlocks = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.FieldBlocks", 8);
         _config.originBX = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBX", 256);
         _config.originBY = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBY", 256);
-        // Clamped into [0, 100] because it is a percentage AND because it is
-        // persisted: pdungeon_account.gen_loop_pct is TINYINT UNSIGNED, so an
-        // operator typo above 255 makes SavePlanToDB fail under strict
-        // sql_mode and the layout that was just generated is never stored.
-        _config.loopChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
-            "ProceduralDungeon.V2.LoopChance", 15)));
+        // Round B (B0b): the chance, per boss segment, that a loop room hangs
+        // off the spine's corridor run. Clamped into a percent; persisted in
+        // the gen_loop_pct column, whose name predates the loop rooms.
+        _config.detourChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.DetourChance", 33)));
 
         // Round B: pocket rooms hanging off the spine. Clamped into [0, 255]
-        // for the same persistence reason - pdungeon_account.gen_branches is
-        // TINYINT UNSIGNED. The planner's own arithmetic bounds the effective
-        // value far lower; the ceiling here only keeps the column writable.
+        // because the value is persisted: pdungeon_account.gen_branches is
+        // TINYINT UNSIGNED, so an operator typo above it makes SavePlanToDB
+        // fail under strict sql_mode and the layout that was just generated is
+        // never stored - the same reason the percent above is clamped. The
+        // planner's own arithmetic bounds the effective value far lower; the
+        // ceiling here only keeps the column writable.
         _config.branches = std::min(255, std::max(0, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Branches", 2)));
 
@@ -93,10 +95,10 @@ namespace PDungeon
         _config.decorEnable = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Decor.Enable", true);
 
-        LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} shortcut {}%",
+        LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} detour {}%",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,
-                 _config.originBX, _config.originBY, _config.branches, _config.loopChancePct);
+                 _config.originBX, _config.originBY, _config.branches, _config.detourChancePct);
         if (_config.enabled && _config.manifestPath.empty())
         {
             LOG_WARN(PD_LOG, "PDv2: ProceduralDungeon.V2.ManifestPath is empty - `.pdungeon v2 gen` "
@@ -143,7 +145,7 @@ namespace PDungeon
         // The live default is unmoved: 5 + 1 = 24 cells still asks for 5x5.
         cfg.fieldBlocks = std::min(_config.fieldBlocks,
                                    GameFieldBlocksForRooms(cfg.rooms + cfg.bossRooms));
-        cfg.loopChancePct = _config.loopChancePct;
+        cfg.detourChancePct = _config.detourChancePct;
         cfg.branches = _config.branches;
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;
@@ -188,6 +190,8 @@ namespace PDungeon
         // pack at all against v1's level-80 stock. Seeding the row from the
         // cached state keeps a first `v2 gen` from silently disagreeing with
         // the state the server has been using since login.
+
+        // gen_loop_pct carries V2.DetourChance since B0b
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
@@ -200,7 +204,7 @@ namespace PDungeon
             "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct), "
             "gen_branches = VALUES(gen_branches)",
             accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
-            cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.loopChancePct, cfg.branches,
+            cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.detourChancePct, cfg.branches,
             state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct, state.cfgBandMin, packs);
     }
 
@@ -367,7 +371,7 @@ namespace PDungeon
         cfg.fieldBlocks = fields[5].Get<uint8>();
         cfg.originBX = fields[6].Get<uint16>();
         cfg.originBY = fields[7].Get<uint16>();
-        cfg.loopChancePct = fields[8].Get<uint8>();
+        cfg.detourChancePct = fields[8].Get<uint8>();
         cfg.branches = fields[9].Get<uint8>();
 
         BlockPlan plan;
