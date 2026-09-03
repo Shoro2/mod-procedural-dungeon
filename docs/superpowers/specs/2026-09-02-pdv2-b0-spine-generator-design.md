@@ -15,6 +15,11 @@ Evidence tiers as used across this project: **T0** written · **T1** verified of
 
 ## 0. Decisions taken 2026-09-02 (operator)
 
+> **Superseded 2026-09-03 (B0b):** the operator withdrew shortcuts altogether. Pockets stay as
+> dead ends; the side structure is now the **loop room** beside a straight corridor run, 33 % per
+> boss segment, additional to the room budget — see
+> `2026-09-03-pdv2-b0b-loop-rooms-design.md`. Decision 1 below is kept for the record only.
+
 1. **Shortcuts are segment-local.** A shortcut leaves a pocket room and lands on a *later* chain
    room **of the same segment** that is **not a boss room**. The parent spec's "a later chain room"
    would let a shortcut land behind a boss room, and B4's barrier could then be walked around
