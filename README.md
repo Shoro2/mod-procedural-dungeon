@@ -13,6 +13,22 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > **PDv2 (map 760, the client-composed kit) plans differently since Round B:** one chain of
 > rooms from the entrance through the boss rooms, a few one-room pockets and, per boss segment,
 > a possible loop room beside the corridor - see `docs/superpowers/specs/2026-09-02-pdv2-b0-spine-generator-design.md`.
+>
+> Round B also **fills** that chain. An **Altar of Return** (GO 910058) stands in the entrance
+> room and every fifth chain room: clicking one binds you, and dying returns you there alive
+> with resurrection sickness instead of sending you to a world graveyard (map 760 has none).
+> A **sealed portcullis** (GO 910059) holds each boss doorway - the walk grid is cut on both
+> sides, so creatures stop at it too - until that segment's PLANNED non-boss kills reach
+> `V2.Barrier.Pct`. One **patroller** walks the corridor run in front of every boss room and
+> rejoins its existing beat after an evade rather than re-planning a shorter one. And with
+> `V2.Ambush.Chance` one corridor per segment is an **ambush**: a 2 s stun and
+> `V2.Ambush.Mobs` creatures, once. Neither patrol nor ambush moves any counter.
+> Creatures also stand on the kit's **published spawn anchors** now, not on a 12 yd circle
+> around the block centre (that circle survives only as the overflow), and the ordinary room
+> gained a **third size** - a 33.33 yd platform - while the entrance and boss rooms lost their
+> centre pad. Eight conf keys tune the three hazards; every code default equals the shipped
+> `.conf.dist` value, so none has to be set.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
