@@ -95,6 +95,39 @@ namespace PDungeon
         _config.decorEnable = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Decor.Enable", true);
 
+        // Round B / B3: a percent handed straight to a threshold test, so it
+        // gets the same [0, 100] clamp the affix share does. 0 opens every
+        // barrier on the first kill of its segment, 100 demands all of it.
+        _config.barrierPct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Barrier.Pct", 50)));
+        // Radians, deliberately unclamped: an orientation is periodic, so
+        // there is no value an operator could type that means nothing.
+        _config.barrierOrientNS = sConfigMgr->GetOption<float>(
+            "ProceduralDungeon.V2.Barrier.OrientNS", 0.0f);
+        _config.barrierOrientEW = sConfigMgr->GetOption<float>(
+            "ProceduralDungeon.V2.Barrier.OrientEW", 1.5708f);
+
+        // B4: never below 100. The patroller is drawn from the trash pool and
+        // is meant to be the hardest thing in the corridor; a multiplier under
+        // 100 would make it the softest thing in the dungeon.
+        _config.patrolHealthMultPct = std::max(100, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Patrol.HealthMult", 300));
+
+        // B5: a percent roll like the ones above; a mob count the spawn ring
+        // can actually seat (0 disarms the ambush without disarming anything
+        // else); and a radius at least a yard wide, because a 0 would arm a
+        // trap the player has to stand exactly on.
+        _config.ambushChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Ambush.Chance", 50)));
+        _config.ambushMobs = std::min(8, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Ambush.Mobs", 4)));
+        _config.ambushRadiusYd = std::max(1.0f, sConfigMgr->GetOption<float>(
+            "ProceduralDungeon.V2.Ambush.RadiusYd", 9.0f));
+        // Unclamped on purpose: 0 means "no stun at all", and any other id is
+        // the operator's choice of spell, which this module must not overrule.
+        _config.ambushStunSpell = sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Ambush.StunSpell", 20170);
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} detour {}%",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,

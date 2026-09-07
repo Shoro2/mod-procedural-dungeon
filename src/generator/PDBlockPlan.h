@@ -149,6 +149,27 @@ namespace PDungeon
         return block.chainIndex >= 0 && block.chainIndex % PD_ALTAR_EVERY_N_ROOMS == 0;
     }
 
+    // Round B / B3-B5: the corridor run behind socket `bit` of block `from`.
+    // Walks corridor blocks, ignores chest stubs, continues straight through a
+    // loop attachment, and returns the index of the first ROOM reached. -1
+    // when the run ends in a stub, in nothing, at the far side of a loop strip
+    // or at a fork - `junction` says which (nullptr when the caller does not
+    // care). `outRun`, when given, collects the corridor blocks walked, in
+    // order; it is cleared first.
+    //
+    // This is the SAME walk ValidateBlockPlan's spine and pocket rules run, so
+    // the run a barrier seals and the run the validator proved are one run.
+    int RunFromSocket(BlockPlan const& plan, size_t from, unsigned bit,
+                      std::vector<size_t>* outRun, bool* junction);
+
+    // The socket of chain room `chainIndex` that the corridor run from chain
+    // room `chainIndex - 1` arrives through, or 0 when there is none (chain
+    // index below 1, a plan without chain fields, or no single-run join).
+    // `outRun`, when given, receives that run's corridor blocks in WALKING
+    // order - from `chainIndex - 1` toward `chainIndex`, which is the
+    // direction B3's barrier and B4's patrol think in.
+    unsigned SpineRunInto(BlockPlan const& plan, int chainIndex, std::vector<size_t>* outRun);
+
     // Deterministic: the same cfg always yields the same plan on any compiler,
     // because every draw goes through PDRandom's hand-rolled helpers.
     // Returns false only when maxTries layouts in a row failed validation.

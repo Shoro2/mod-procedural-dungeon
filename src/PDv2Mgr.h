@@ -102,6 +102,37 @@ namespace PDungeon
         // or a display problem - it costs nothing else, since the props are
         // decoration and no mechanic reads them.
         bool        decorEnable = true;
+
+        // Round B / B3-B5 (2026-09-03). All eight are read live in LoadConfig
+        // and none is persisted with a layout: they change what a RUN does,
+        // not what a plan is, so a `.reload config` retunes the next barrier,
+        // the next patroller and the next ambush without rerolling anybody's
+        // dungeon.
+
+        // B3. Share of a boss segment's planned trash that must fall before
+        // the portcullis in front of that segment's boss room opens. The boss
+        // room's own pack is not in the denominator (design §B3.1).
+        int         barrierPct = 50;
+        // The portcullis' facing, in radians, for the two lane orientations -
+        // conf keys rather than constants so the operator can calibrate the
+        // model against the doorway in game without a rebuild.
+        float       barrierOrientNS = 0.0f;
+        float       barrierOrientEW = 1.5708f;
+
+        // B4. The patroller's health as a percent of the trash it is drawn
+        // from, through SpawnTaggedMob's baseHealthOverride. Never below 100:
+        // a patrol that is weaker than the pack it came from is not a threat
+        // on the road, it is loot walking towards the player.
+        int         patrolHealthMultPct = 300;
+
+        // B5. Chance per boss segment that one of its corridors is armed, how
+        // many mobs the trap spawns, how close the player has to come, and the
+        // stun it opens with (0 = no stun). The chance is read live and is not
+        // a layout input - BuildAmbushPlan draws on its own stream.
+        int         ambushChancePct = 50;
+        int         ambushMobs = 4;
+        float       ambushRadiusYd = 9.0f;
+        uint32_t    ambushStunSpell = 20170;
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the

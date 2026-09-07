@@ -168,6 +168,17 @@ namespace PDungeon
             // SpawnFromPlan re-derives difficulty, roomsTotal and bossTotal, and
             // the `!_run.started` block below re-arms the clock and the leader.
             _run = PDv2RunState{};
+
+            // ...and the per-room bookkeeping with it. SpawnFromPlan refills
+            // every one of these, but a rebuild that failed halfway must not
+            // leave the previous layout's room segments behind for the next
+            // OnMobDied to index into.
+            _roomAlive.clear();
+            _roomPlanned.clear();
+            _roomSegment.clear();
+            _roomIsBoss.clear();
+            _segmentPlanned.clear();
+            _segmentKilled.clear();
             MarkRunDirty();
         }
 
@@ -441,17 +452,39 @@ namespace PDungeon
             SplitOnDeath(creature, *tag, killer);
         }
 
-        ++_run.killed;
-        if (tag->isRunBoss && _run.bossKilled < _run.bossTotal)
+        // Round B / B4-B5: the patrol and the ambush are RISK, not progress.
+        // They fight, scale, split and drop loot like any dungeon mob, but a
+        // run whose total counted them could not be finished without hunting
+        // down a patroller, and a barrier whose denominator counted them would
+        // seal itself behind mobs that may never be pulled at all.
+        if (tag->countsForRun)
         {
-            ++_run.bossKilled;
-        }
-
-        if (tag->roomIndex < _roomAlive.size() && _roomAlive[tag->roomIndex] > 0)
-        {
-            if (--_roomAlive[tag->roomIndex] == 0)
+            ++_run.killed;
+            if (tag->isRunBoss && _run.bossKilled < _run.bossTotal)
             {
-                ++_run.roomsCleared;
+                ++_run.bossKilled;
+            }
+
+            if (tag->roomIndex < _roomAlive.size() && _roomAlive[tag->roomIndex] > 0)
+            {
+                if (--_roomAlive[tag->roomIndex] == 0)
+                {
+                    ++_run.roomsCleared;
+                }
+            }
+
+            // B3's numerator, and the boss room is out of it on purpose: its
+            // pack stands BEHIND the barrier, so counting it would ask the
+            // player to clear a room they cannot reach yet (design 2026-09-03
+            // §B3.1, the single-boss-segment softlock).
+            if (tag->roomIndex < _roomSegment.size() && !_roomIsBoss[tag->roomIndex])
+            {
+                int const seg = _roomSegment[tag->roomIndex];
+                if (seg >= 1 && static_cast<size_t>(seg) < _segmentKilled.size())
+                {
+                    ++_segmentKilled[static_cast<size_t>(seg)];
+                    EvaluateBarrier(seg);
+                }
             }
         }
         MarkRunDirty();
@@ -661,6 +694,13 @@ namespace PDungeon
         tag->isRunBoss = proto.isRunBoss;
         tag->affixMask = proto.affixMask;
         tag->splitDepth = proto.splitDepth;
+        // Round B: everything the module spawns comes through here, the patrol
+        // and the ambush included, so the four fields that say "this one is not
+        // part of the run's arithmetic" are copied here and nowhere else.
+        tag->countsForRun = proto.countsForRun;
+        tag->isPatrol = proto.isPatrol;
+        tag->patrolGoalCellX = proto.patrolGoalCellX;
+        tag->patrolGoalCellY = proto.patrolGoalCellY;
 
         // Before the affixes, never after: a Lil' Bro child is a TENTH of its
         // parent that a Big Boy bit then grows by half again, and reversing
@@ -749,6 +789,12 @@ namespace PDungeon
         // run finish twice over.
         proto.isRunBoss = false;
 
+        // Round B: the children of an uncounted mob are uncounted too, or a
+        // patroller with Lil' Bro would quietly hand the run two kills it was
+        // never asked to earn. `isPatrol` stays false - a child inherits the
+        // exemption, not the beat; it has no route and no goal cell.
+        proto.countsForRun = parentTag.countsForRun;
+
         WalkGrid const* grid = GetWalkGrid();
         float const floorZ = sPDv2Mgr->GetConfig().floorZ;
 
@@ -810,10 +856,18 @@ namespace PDungeon
         // live count never touches zero while children are standing in it -
         // which would otherwise count the room cleared and then count it again
         // when the children died.
-        _run.total = static_cast<uint16>(_run.total + born);
-        if (proto.roomIndex < _roomAlive.size())
+        //
+        // ...and only for a counted parent (Round B): OnMobDied will never
+        // score an uncounted child, so raising the run total for one would
+        // leave a HUD that can never reach its own denominator. Design
+        // 2026-09-03 B4.3 - "_run.total excludes them".
+        if (proto.countsForRun)
         {
-            _roomAlive[proto.roomIndex] = static_cast<uint16>(_roomAlive[proto.roomIndex] + born);
+            _run.total = static_cast<uint16>(_run.total + born);
+            if (proto.roomIndex < _roomAlive.size())
+            {
+                _roomAlive[proto.roomIndex] = static_cast<uint16>(_roomAlive[proto.roomIndex] + born);
+            }
         }
         MarkRunDirty();
 
@@ -843,6 +897,12 @@ namespace PDungeon
         // entrance stays empty so an arriving player is not already in combat.
         std::vector<PlacedBlock const*> roomBlocks;
         SpawnSelectInputs inputs;
+        // Round B / B3: the per-room facts a barrier's arithmetic needs, taken
+        // in the same pass and in the same order, so `roomIndex` means one
+        // thing in all four vectors. `roomBlocks` is discarded at the end of
+        // this function - these are what survives it.
+        _roomSegment.clear();
+        _roomIsBoss.clear();
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.roomId < 0 || b.role == BlockRole::RoomEntrance)
@@ -855,6 +915,10 @@ namespace PDungeon
             room.isBoss = b.role == BlockRole::RoomBoss;
             inputs.rooms.push_back(room);
             roomBlocks.push_back(&b);
+            // SegmentOf answers for all three room kinds: a spine room's own
+            // segment, a pocket's host segment, a loop room's run segment.
+            _roomSegment.push_back(SegmentOf(plan, b));
+            _roomIsBoss.push_back(b.role == BlockRole::RoomBoss);
         }
 
         inputs.spawnsPerRoom = cfg.spawnsPerRoom;
@@ -982,6 +1046,29 @@ namespace PDungeon
         }
         _run.total = static_cast<uint16>(spawned);
 
+        // Round B / B3: the barrier's DENOMINATOR, frozen here. _roomAlive is
+        // the live count and a Lil' Bro split inflates it mid-run, so the copy
+        // - not the vector - is what a threshold is ever measured against.
+        _roomPlanned = _roomAlive;
+        size_t const segments = static_cast<size_t>(std::max(1, plan.config.bossRooms)) + 1;
+        _segmentPlanned.assign(segments, 0);
+        _segmentKilled.assign(segments, 0);
+        for (size_t r = 0; r < _roomPlanned.size(); ++r)
+        {
+            // The boss room's own pack stands BEHIND its barrier and is left
+            // out, or a segment whose only room is its boss could never open
+            // (design 2026-09-03 §B3.1). Segment 0 is the entrance: no barrier.
+            if (r >= _roomSegment.size() || _roomIsBoss[r] || _roomSegment[r] < 1)
+            {
+                continue;
+            }
+            size_t const seg = static_cast<size_t>(_roomSegment[r]);
+            if (seg < _segmentPlanned.size())
+            {
+                _segmentPlanned[seg] += _roomPlanned[r];
+            }
+        }
+
         LOG_INFO(PD_LOG, "PDv2: instance {} on map {} spawned {} creature(s) in {} room(s) "
                          "({} boss) from a {}-block plan, difficulty {} lootMult {}, "
                          "{} mob(s) wearing {} affix(es)",
@@ -989,6 +1076,32 @@ namespace PDungeon
                  uint32(_run.roomsTotal), uint32(_run.bossTotal),
                  uint32(plan.blocks.size()), uint32(_run.difficulty),
                  uint32(_run.lootMultX100), affixedMobs, uint32(_runAffixes.size()));
+    }
+
+    void PDv2InstanceScript::EvaluateBarrier(int /*segment*/)
+    {
+        // Round B / B3 fills this in: compare _segmentKilled[segment] against
+        // _segmentPlanned[segment] x V2.Barrier.Pct and drop the segment's
+        // portcullis when the threshold is met. Declared and called now so the
+        // ORDER is settled by the task that owns the counters - the numerator
+        // moves in OnMobDied before MarkRunDirty, and the barrier is asked
+        // right after it, never on a timer that could read a stale count.
+    }
+
+    void PDv2InstanceScript::SetCellsWalkable(std::vector<GridPoint> const& cells, bool walkable)
+    {
+        if (!_gridReady)
+        {
+            return;
+        }
+        for (GridPoint const& p : cells)
+        {
+            if (!_grid.InBounds(p.x, p.y))
+            {
+                continue;
+            }
+            _grid.cells[static_cast<size_t>(p.y) * _grid.width + p.x] = walkable ? 1 : 0;
+        }
     }
 
     void PDv2InstanceScript::SpawnDecor(BlockPlan const& plan, std::vector<Position>& outPositions)

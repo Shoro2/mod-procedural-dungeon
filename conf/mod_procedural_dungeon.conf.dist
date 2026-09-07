@@ -548,3 +548,126 @@ ProceduralDungeon.V2.AggroRangeYd = 20.0
 
 ProceduralDungeon.V2.Decor.Enable = 1
 
+#
+#    ProceduralDungeon.V2.Barrier.Pct
+#        Description: Round B (2026-09-03): how much of a boss segment must be
+#                     cleared before the portcullis in front of that segment's
+#                     boss room opens, in percent of the trash the layout
+#                     PLANNED for that segment's rooms.
+#
+#                     The boss room's own pack is deliberately not counted -
+#                     it stands behind the barrier, and a segment whose only
+#                     room is its boss (dlvl 30 with a low room count) would
+#                     otherwise seal itself for ever. A segment with nothing
+#                     planned in front of its boss opens immediately.
+#
+#                     Patrol and ambush mobs never count towards it either:
+#                     they are risk on the road, not progress.
+#        Default:     50 (0 = the first kill opens it, 100 = clear it all)
+#
+
+ProceduralDungeon.V2.Barrier.Pct = 50
+
+#
+#    ProceduralDungeon.V2.Barrier.OrientNS
+#    ProceduralDungeon.V2.Barrier.OrientEW
+#        Description: Round B (2026-09-03): the portcullis' facing in RADIANS,
+#                     one value per lane orientation - NS for a doorway on a
+#                     block's north or south edge, EW for its west or east one.
+#
+#                     Two conf keys rather than two constants because the right
+#                     number depends on how the model is authored, and finding
+#                     it means standing in front of one in game. Calibrate with
+#                     `.reload config`; no rebuild and no re-roll is needed,
+#                     the next barrier that is placed uses the new value.
+#        Default:     0.0 / 1.5708 (that is pi/2, a quarter turn)
+#
+
+ProceduralDungeon.V2.Barrier.OrientNS = 0.0
+ProceduralDungeon.V2.Barrier.OrientEW = 1.5708
+
+#
+#    ProceduralDungeon.V2.Patrol.HealthMult
+#        Description: Round B (2026-09-03): the health of a segment's patrolling
+#                     creature, in percent of the trash mob it is drawn from -
+#                     applied like every other health lever in this module, on
+#                     top of the difficulty scale.
+#
+#                     There is one patroller per boss segment and it walks the
+#                     corridor run between that segment's boss room and the
+#                     previous one. It is meant to be a real fight in a narrow
+#                     place, so values below 100 are refused: a patroller
+#                     softer than the pack it came from is loot walking towards
+#                     the player, not a threat.
+#
+#                     Killing it moves no counter and opens no barrier.
+#        Default:     300
+#
+
+ProceduralDungeon.V2.Patrol.HealthMult = 300
+
+#
+#    ProceduralDungeon.V2.Ambush.Chance
+#        Description: Round B (2026-09-03): percent chance, per boss segment,
+#                     that one of the corridors on the way to its boss room is
+#                     armed with an ambush. At most one per segment, and a
+#                     segment whose runs hold no usable corridor gets none.
+#
+#                     Read live like the decor rules: it is not part of what a
+#                     layout IS, so changing it re-arms the next run rather
+#                     than re-rolling anybody's dungeon.
+#        Default:     50
+#
+
+ProceduralDungeon.V2.Ambush.Chance = 50
+
+#
+#    ProceduralDungeon.V2.Ambush.Mobs
+#        Description: Round B (2026-09-03): how many creatures an ambush spawns
+#                     around the player it fires on. They fight, scale and drop
+#                     loot like any dungeon mob but count towards nothing - not
+#                     the run total, not a room, not a barrier.
+#
+#                     Clamped to 0..8: the spawn ring is a fixed pattern beside
+#                     the player and more than eight would stack them inside
+#                     each other. 0 leaves the trigger and the stun in place
+#                     with nothing to fight.
+#        Default:     4
+#
+
+ProceduralDungeon.V2.Ambush.Mobs = 4
+
+#
+#    ProceduralDungeon.V2.Ambush.RadiusYd
+#        Description: Round B (2026-09-03): how close a player has to come to
+#                     an armed corridor's centre, in yards and measured flat,
+#                     before the ambush fires. A corridor block is 66.67 yd
+#                     across and its walkable lane is 8.3 yd wide, so the
+#                     default catches anyone walking through it without
+#                     reaching into the rooms at either end.
+#
+#                     Never below 1.0 - a 0 would arm a trap the player has to
+#                     stand exactly on. A spot fires once and stays disarmed
+#                     until the run is rebuilt.
+#        Default:     9.0
+#
+
+ProceduralDungeon.V2.Ambush.RadiusYd = 9.0
+
+#
+#    ProceduralDungeon.V2.Ambush.StunSpell
+#        Description: Round B (2026-09-03): the aura an ambush applies to the
+#                     player it fires on, with the player as the caster. The
+#                     default is the generic 2-second "Stun" (20170): aura-only,
+#                     flat duration, mechanic 12, and it releases itself - so
+#                     the client shows a real stun with a debuff icon and no
+#                     code has to remember to take it off.
+#
+#                     0 means the ambush spawns its mobs without a stun. Any
+#                     other id is used as given; a spell that does not stun
+#                     simply makes the ambush a plain spawn.
+#        Default:     20170
+#
+
+ProceduralDungeon.V2.Ambush.StunSpell = 20170
+

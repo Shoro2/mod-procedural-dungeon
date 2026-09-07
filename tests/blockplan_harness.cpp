@@ -1614,16 +1614,26 @@ namespace
             }
             if (outs != 1)
             {
-                // The one sanctioned fork: a loop attachment entered along the
-                // run continues straight through it. Anything else is a
-                // junction and the junction rule catches it.
-                if (attachments.count(at) && (b.socketMask & entry) && outs == 2)
+                bool const isAttachment = attachments.count(at) != 0;
+                bool const alongRun = (b.socketMask & entry) != 0;
+                // The one sanctioned fork: a loop attachment entered ALONG the
+                // run continues straight through it.
+                if (isAttachment && alongRun && outs == 2)
                 {
                     next = entry;
                 }
+                else if (isAttachment && !alongRun)
+                {
+                    // Entered from the STRIP side (the entry socket is not one
+                    // of the attachment's own): design 2026-09-03 §4 calls that
+                    // the end of the strip, not a fork. The engine's WalkRun
+                    // ends the run here WITHOUT reporting a junction; the walk
+                    // ends either way, which is all this one returns.
+                    return -1;
+                }
                 else
                 {
-                    return -1;
+                    return -1;      // a junction, and the junction rule catches it
                 }
             }
             prev = at;
@@ -1871,6 +1881,23 @@ namespace
                     PlacedBlock const* before = &plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.detourOf - 1)])];
                     bool const endsOk = (e1 == before && e2 == into) || (e1 == into && e2 == before);
                     Check(endsOk, "a loop room's run does not join chain rooms detourOf-1 and detourOf", seed);
+
+                    // B0b §4, through the ENGINE's public walk: every socket of
+                    // a loop room leads into the strip (or, at most, into a
+                    // chest stub hanging off it), and the walk there ends at
+                    // the attachment cell it enters FROM THE STRIP SIDE. That
+                    // is the end of the strip, not a fork - so the answer is
+                    // "no room" WITHOUT a junction. This is the only place a
+                    // strip-side entry is reachable at all, so without it the
+                    // rule would be untested (B0b Task 2 review, item 1).
+                    for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                    {
+                        if (!(b.socketMask & bit)) continue;
+                        bool junction = true;
+                        int const to = RunFromSocket(plan, at, bit, nullptr, &junction);
+                        Check(to < 0 && !junction,
+                              "a walk out of a loop room does not end quietly at the strip", seed);
+                    }
                 }
                 Check(loops <= N, "more loop rooms than segments", seed);
                 Check(rooms == total + loops, "room count is not rooms + bossRooms + loop rooms", seed);
@@ -1914,6 +1941,66 @@ namespace
                                   "chain %d and %d are joined by %d corridor run(s), want 1",
                                   idx - 1, idx, hits);
                     Check(hits == 1, msg, seed);
+
+                    // Round B / B3-B5: the ENGINE's own reader of that same
+                    // run. SpineRunInto is what the barrier, the patrol and
+                    // the ambush plan will call, and it walks the planner's
+                    // shared WalkRun - so it is checked against the harness's
+                    // independent RoomAtEndOf rather than against itself.
+                    std::vector<size_t> run;
+                    unsigned const entryBit = SpineRunInto(plan, idx, &run);
+                    std::snprintf(msg, sizeof(msg),
+                                  "SpineRunInto found no run into chain %d", idx);
+                    Check(entryBit != 0, msg, seed);
+                    if (entryBit == 0) continue;
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "the run into chain %d is empty - a barrier would have no corridor to seal", idx);
+                    Check(!run.empty(), msg, seed);
+                    if (run.empty()) continue;
+
+                    bool allCorridors = true;
+                    for (size_t at : run)
+                    {
+                        PlacedBlock const& c = plan.blocks[at];
+                        if (c.roomId >= 0 || c.role == BlockRole::CorridorDeadEnd) allCorridors = false;
+                    }
+                    std::snprintf(msg, sizeof(msg),
+                                  "the run into chain %d holds a room or a chest stub", idx);
+                    Check(allCorridors, msg, seed);
+
+                    // WALKING ORDER, which is the half of the contract the
+                    // block indices alone do not state: run[0] touches chain
+                    // idx-1, run.back() touches chain idx, and every step in
+                    // between is one block. B3 seats its portcullis on the
+                    // last block, B4 starts its patrol there.
+                    auto const Adjacent = [&](PlacedBlock const& p, PlacedBlock const& q)
+                    {
+                        int const d = std::abs(p.bx - q.bx) + std::abs(p.by - q.by);
+                        return d == 1;
+                    };
+                    bool ordered = Adjacent(plan.blocks[run.front()],
+                                            plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(idx - 1)])]) &&
+                                   Adjacent(plan.blocks[run.back()],
+                                            plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(idx)])]);
+                    for (size_t k = 1; k < run.size(); ++k)
+                    {
+                        if (!Adjacent(plan.blocks[run[k - 1]], plan.blocks[run[k]])) ordered = false;
+                    }
+                    std::snprintf(msg, sizeof(msg),
+                                  "the run into chain %d is not a contiguous walk from %d to %d",
+                                  idx, idx - 1, idx);
+                    Check(ordered, msg, seed);
+
+                    // ...and it arrives through the socket SpineRunInto named:
+                    // walking that socket backwards out of chain idx must land
+                    // on chain idx-1, by the harness's own walk.
+                    std::snprintf(msg, sizeof(msg),
+                                  "SpineRunInto's socket for chain %d does not walk back to chain %d",
+                                  idx, idx - 1);
+                    Check(RoomAtEndOf(plan, static_cast<size_t>(chainBlock[static_cast<size_t>(idx)]),
+                                      entryBit, attachments) == chainBlock[static_cast<size_t>(idx - 1)],
+                          msg, seed);
                 }
 
                 // Pockets: host is an ordinary spine room, one pocket per host,
@@ -1976,7 +2063,11 @@ namespace
                     for (size_t k = 0; k < plan.blocks.size(); ++k)
                     {
                         PlacedBlock const& b = plan.blocks[k];
-                        bool const behind = b.chainIndex > idx || b.branchOf > idx;
+                        // detourOf is "behind" as well: a loop room whose run
+                        // leads into chain room detourOf hangs off the corridor
+                        // between detourOf-1 and detourOf, so a detourOf past
+                        // the removed boss puts the whole strip behind it.
+                        bool const behind = b.chainIndex > idx || b.branchOf > idx || b.detourOf > idx;
                         if (behind && seen[k])
                         {
                             std::snprintf(msg, sizeof(msg), "boss at chain %d can be bypassed", idx);
@@ -2891,6 +2982,16 @@ namespace
     // message, never by reasoning about the value.
     char const* const PD_CHAIN_PIN = "258,261;259,259;261,260;262,262;|1>258,257;2>260,262;|";
 
+    // A SECOND chain, because the pin above ends in an empty loop field: seed
+    // 12345 draws no loop room at the default DetourChance, so it pins the
+    // chain and the pockets and says nothing about where a loop strip lands.
+    // 12348 carries one. Without this a B0b regression that only moved loop
+    // rooms would pass every pin in the file (B0b Task 2 review, item 3).
+    // Captured the same way: by RUNNING `pdblock --batch` and reading the
+    // "the loop chain moved" message, never by reasoning about the value.
+    char const* const PD_CHAIN_PIN_LOOP =
+        "263,259;259,259;258,257;260,256;|2>257,258;1>260,260;|1>261,258;";
+
     std::string ChainPinString(BlockPlan const& plan)
     {
         int const len = ChainLength(plan);
@@ -2937,6 +3038,23 @@ namespace
         if (got != PD_CHAIN_PIN)
         {
             why = "the chain moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    bool CheckLoopChainPinned(std::string& why)
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(MakeCfg(12348u, 5), &plan))
+        {
+            why = "the pinned loop chain could not generate a layout";
+            return false;
+        }
+        std::string const got = ChainPinString(plan);
+        if (got != PD_CHAIN_PIN_LOOP)
+        {
+            why = "the loop chain moved: " + got;
             return false;
         }
         return true;
@@ -3682,6 +3800,13 @@ namespace
             std::string why;
             bool const ok = CheckChainPinned(why);
             Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // The loop-carrying twin of the pin above, same two-statements
+            // shape for the same argument-evaluation-order reason.
+            std::string why;
+            bool const ok = CheckLoopChainPinned(why);
+            Check(ok, why.c_str(), 12348u);
         }
         // A tenth of the batch, over thirteen (rooms, bossRooms, branches,
         // detourChancePct) combos: the spine properties are STRUCTURAL and

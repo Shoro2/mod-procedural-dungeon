@@ -715,6 +715,151 @@ namespace PDungeon
             }
             return false;
         }
+
+        // The corridor run behind socket `bit` of block `from`: walks corridor
+        // blocks, ignores chest stubs, continues straight through a loop
+        // attachment (a corridor with three non-stub sockets that is in
+        // `attachments`), and returns the index of the first ROOM reached.
+        // -1 when the run ends in a stub, in nothing, at the far side of a
+        // loop strip or at a fork - `junction` says which. `outRun` collects
+        // the corridor blocks walked, in order.
+        //
+        // ONE implementation, two callers: ValidateBlockPlan's spine and
+        // pocket rules walk with the attachment set the loop reconstruction
+        // built, the public RunFromSocket below derives an equivalent set from
+        // the socket degrees. A barrier (B3) that stood on a different run
+        // from the one the validator proved would be a softlock nobody could
+        // reproduce, so the two must not be two pieces of code.
+        int WalkRun(BlockPlan const& plan, std::map<std::pair<int, int>, size_t> const& index,
+                    std::set<size_t> const& attachments, size_t from, unsigned bit,
+                    std::vector<size_t>* outRun, bool& junction)
+        {
+            junction = false;
+            if (outRun)
+            {
+                outRun->clear();
+            }
+            size_t prev = from;
+            unsigned entryBit = bit;
+            // A run cannot be longer than the block list; the bound turns a
+            // corridor cycle (which the junction rule forbids, but which a
+            // future generator bug could still hand us) into a rejection
+            // rather than a hang inside the engine.
+            for (size_t steps = 0; steps <= plan.blocks.size(); ++steps)
+            {
+                int dx = 0, dy = 0;
+                StepFor(entryBit, dx, dy);
+                auto it = index.find(std::make_pair(plan.blocks[prev].bx + dx,
+                                                    plan.blocks[prev].by + dy));
+                if (it == index.end())
+                {
+                    return -1;
+                }
+                size_t const at = it->second;
+                PlacedBlock const& b = plan.blocks[at];
+                if (b.roomId >= 0)
+                {
+                    return static_cast<int>(at);
+                }
+                if (b.role == BlockRole::CorridorDeadEnd)
+                {
+                    return -1;      // the run ends in a chest stub
+                }
+                if (outRun)
+                {
+                    outRun->push_back(at);
+                }
+                // Leave through the one socket that is neither the way in nor
+                // a stub hanging off this corridor block.
+                unsigned const cameFrom = OppositeBit(entryBit);
+                unsigned next = 0;
+                int outs = 0;
+                for (unsigned side = 1; side <= SOCKET_W; side <<= 1)
+                {
+                    if (!(b.socketMask & side) || side == cameFrom)
+                    {
+                        continue;
+                    }
+                    int nx = 0, ny = 0;
+                    StepFor(side, nx, ny);
+                    auto n = index.find(std::make_pair(b.bx + nx, b.by + ny));
+                    if (n != index.end() &&
+                        plan.blocks[n->second].role == BlockRole::CorridorDeadEnd)
+                    {
+                        continue;
+                    }
+                    ++outs;
+                    next = side;
+                }
+                if (outs != 1)
+                {
+                    bool const isAttachment = attachments.count(at) != 0;
+                    bool const alongRun = (b.socketMask & entryBit) != 0;
+                    if (isAttachment && alongRun && outs == 2)
+                    {
+                        next = entryBit;        // straight through the attachment
+                    }
+                    else if (isAttachment && !alongRun)
+                    {
+                        // Entered from the STRIP side: the attachment's mask is
+                        // {-d, +d, -t} and the walk arrived along +t, out of the
+                        // loop room's corner. Design 2026-09-03 §4 calls that the
+                        // end of the strip, not a fork - so the run simply ends
+                        // and `junction` stays false. Reporting a junction here
+                        // would make a walk out of a loop room look like a broken
+                        // layout to every caller.
+                        return -1;
+                    }
+                    else
+                    {
+                        junction = true;
+                        return -1;
+                    }
+                }
+                prev = at;
+                entryBit = next;
+            }
+            junction = true;
+            return -1;
+        }
+
+        // In a validated plan the attachment cells are exactly the corridors
+        // with three non-stub sockets; the validator computes its own set from
+        // the loop reconstruction, the public wrappers derive it this way.
+        std::set<size_t> AttachmentsByDegree(BlockPlan const& plan,
+                                             std::map<std::pair<int, int>, size_t> const& index)
+        {
+            std::set<size_t> out;
+            for (size_t i = 0; i < plan.blocks.size(); ++i)
+            {
+                PlacedBlock const& b = plan.blocks[i];
+                if (b.roomId >= 0 || b.role == BlockRole::CorridorDeadEnd)
+                {
+                    continue;
+                }
+                int through = 0;
+                for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                {
+                    if (!(b.socketMask & bit))
+                    {
+                        continue;
+                    }
+                    int dx = 0, dy = 0;
+                    StepFor(bit, dx, dy);
+                    auto it = index.find(std::make_pair(b.bx + dx, b.by + dy));
+                    if (it != index.end() &&
+                        plan.blocks[it->second].role != BlockRole::CorridorDeadEnd)
+                    {
+                        ++through;
+                    }
+                }
+                if (through == 3)
+                {
+                    out.insert(i);
+                }
+            }
+            return out;
+        }
     }
 
     int AltCountFor(BlockRole role)
@@ -789,6 +934,70 @@ namespace PDungeon
             }
         }
         return bosses;
+    }
+
+    int RunFromSocket(BlockPlan const& plan, size_t from, unsigned bit,
+                      std::vector<size_t>* outRun, bool* junction)
+    {
+        std::map<std::pair<int, int>, size_t> index;
+        for (size_t i = 0; i < plan.blocks.size(); ++i)
+        {
+            index[std::make_pair(plan.blocks[i].bx, plan.blocks[i].by)] = i;
+        }
+        bool j = false;
+        int const end = WalkRun(plan, index, AttachmentsByDegree(plan, index), from, bit, outRun, j);
+        if (junction)
+        {
+            *junction = j;
+        }
+        return end;
+    }
+
+    unsigned SpineRunInto(BlockPlan const& plan, int chainIndex, std::vector<size_t>* outRun)
+    {
+        if (chainIndex < 1)
+        {
+            return 0;
+        }
+        int into = -1, before = -1;
+        for (size_t i = 0; i < plan.blocks.size(); ++i)
+        {
+            if (plan.blocks[i].chainIndex == chainIndex)
+            {
+                into = static_cast<int>(i);
+            }
+            if (plan.blocks[i].chainIndex == chainIndex - 1)
+            {
+                before = static_cast<int>(i);
+            }
+        }
+        if (into < 0 || before < 0)
+        {
+            return 0;
+        }
+        for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+        {
+            if (!(plan.blocks[static_cast<size_t>(into)].socketMask & bit))
+            {
+                continue;
+            }
+            std::vector<size_t> run;
+            bool junction = false;
+            if (RunFromSocket(plan, static_cast<size_t>(into), bit, &run, &junction) == before && !junction)
+            {
+                if (outRun)
+                {
+                    // Walking order from room i-1 toward room i: the walk
+                    // collected the corridors the other way round, and every
+                    // caller (the barrier's entry cell, the patrol's route)
+                    // thinks in the direction the player travels.
+                    std::reverse(run.begin(), run.end());
+                    *outRun = run;
+                }
+                return bit;
+            }
+        }
+        return 0;
     }
 
     uint32_t Crc32(void const* data, size_t len)
@@ -1174,78 +1383,15 @@ namespace PDungeon
         // otherwise the block index of the first room reached. Corridor
         // blocks on the way must have exactly two non-stub sockets - the
         // junction rule - or the walk reports the junction.
+        //
+        // The walk itself is WalkRun, shared with the public RunFromSocket the
+        // engine reads (B3's barrier, B4's patrol): the rules below and the
+        // gameplay must never disagree about which run joins two rooms. The
+        // attachment set stays the loop reconstruction's, not the degree-based
+        // one the public wrapper derives - here it is the stronger statement.
         auto roomAtEndOf = [&](size_t from, unsigned bit, bool& junction) -> int
         {
-            junction = false;
-            size_t prev = from;
-            unsigned entryBit = bit;
-            // A run cannot be longer than the block list; the bound turns a
-            // corridor cycle (which the junction rule forbids, but which a
-            // future generator bug could still hand us) into a rejection
-            // rather than a hang inside the engine.
-            for (size_t steps = 0; steps <= plan.blocks.size(); ++steps)
-            {
-                int dx = 0, dy = 0;
-                StepFor(entryBit, dx, dy);
-                auto it = index.find(std::make_pair(plan.blocks[prev].bx + dx,
-                                                    plan.blocks[prev].by + dy));
-                if (it == index.end())
-                {
-                    return -1;
-                }
-                size_t const at = it->second;
-                PlacedBlock const& b = plan.blocks[at];
-                if (b.roomId >= 0)
-                {
-                    return static_cast<int>(at);
-                }
-                if (b.role == BlockRole::CorridorDeadEnd)
-                {
-                    return -1;      // the run ends in a chest stub
-                }
-                // Leave through the one socket that is neither the way in nor
-                // a stub hanging off this corridor block.
-                unsigned const cameFrom = OppositeBit(entryBit);
-                unsigned next = 0;
-                int outs = 0;
-                for (unsigned side = 1; side <= SOCKET_W; side <<= 1)
-                {
-                    if (!(b.socketMask & side) || side == cameFrom)
-                    {
-                        continue;
-                    }
-                    int nx = 0, ny = 0;
-                    StepFor(side, nx, ny);
-                    auto n = index.find(std::make_pair(b.bx + nx, b.by + ny));
-                    if (n != index.end() &&
-                        plan.blocks[n->second].role == BlockRole::CorridorDeadEnd)
-                    {
-                        continue;
-                    }
-                    ++outs;
-                    next = side;
-                }
-                if (outs != 1)
-                {
-                    // The one sanctioned fork: a loop attachment entered along
-                    // the run continues straight through it. Entered from the
-                    // strip side (the entry bit is not one of its sockets) the
-                    // walk ends here rather than picking a side.
-                    if (attachment.count(at) && (b.socketMask & entryBit) && outs == 2)
-                    {
-                        next = entryBit;
-                    }
-                    else
-                    {
-                        junction = true;
-                        return -1;
-                    }
-                }
-                prev = at;
-                entryBit = next;
-            }
-            junction = true;
-            return -1;
+            return WalkRun(plan, index, attachment, from, bit, nullptr, junction);
         };
 
         // Round B, the physical half of the spine rules (final review of B0,
@@ -1433,7 +1579,12 @@ namespace PDungeon
             for (size_t i = 0; i < plan.blocks.size(); ++i)
             {
                 PlacedBlock const& b = plan.blocks[i];
-                if (visited[i] && (b.chainIndex > idx || b.branchOf > idx))
+                // detourOf counts as "behind" too: a loop room whose run leads
+                // into chain room detourOf hangs off the corridor between
+                // detourOf-1 and detourOf, so a detourOf past the removed boss
+                // puts the whole strip behind it. Without this clause a loop
+                // room reachable around boss k would validate.
+                if (visited[i] && (b.chainIndex > idx || b.branchOf > idx || b.detourOf > idx))
                 {
                     return fail("a boss room can be bypassed");
                 }

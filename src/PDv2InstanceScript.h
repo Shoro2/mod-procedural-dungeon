@@ -76,6 +76,18 @@ namespace PDungeon
         // carrier is worth 1 -> 2 -> 4 corpses and no more.
         uint8  splitDepth = 0;
 
+        // Round B. false for the patrol (B4) and the ambush mobs (B5): they
+        // fight, scale, split and drop loot like any dungeon mob but move no
+        // run counter and no barrier - risk on the road, not progress.
+        bool   countsForRun = true;
+
+        // B4: this creature walks the spine out of combat. The goal cell is
+        // the far end of its beat in GLOBAL grid cells; the AI plans the
+        // route on its first idle tick and reverses it at either end.
+        bool   isPatrol = false;
+        int    patrolGoalCellX = 0;
+        int    patrolGoalCellY = 0;
+
         // Damage Reduce (affix 8) is the one affix a creature cannot answer
         // about itself: the carrier is somebody else, so the verdict costs a
         // grid search. It is taken lazily on the damage path and kept for
@@ -148,8 +160,14 @@ namespace PDungeon
 
         // The walkable surface of this instance's plan, or nullptr while no
         // plan is bound yet (or its masks are missing). The creature AI paths
-        // over this; it is built once on first entry and read-only afterwards,
-        // and AI updates run on this map's own update thread, so no lock.
+        // over this.
+        //
+        // It is built once on first entry and written afterwards ONLY by the
+        // instance itself, through SetCellsWalkable: since Round B (B3) a
+        // closed barrier seals its lane cells and reopens them when it falls,
+        // because creatures ignore GameObject collision and this grid is the
+        // only thing they path over. Every reader and that one writer run on
+        // this map's own update thread, so there is still no lock.
         WalkGrid const* GetWalkGrid() const { return _gridReady ? &_grid : nullptr; }
 
         // The live run. Read-only for everyone outside this class: the counters
@@ -290,6 +308,21 @@ namespace PDungeon
         // counter, which is the only ordering that keeps them honest.
         void SplitOnDeath(Creature* parent, PDv2MobData const& parentTag, Unit* killer);
         void MarkRunDirty() { _runDirty = true; }
+
+        // Round B / B3. A segment's kill counter moved: re-decide whether that
+        // segment's barrier may fall. Empty until B3's own task fills it in -
+        // OnMobDied calls it from the counter block, so the call site and the
+        // ordering it depends on are settled here rather than retro-fitted.
+        void EvaluateBarrier(int segment);
+
+        // Flips walkability on a handful of grid cells, in place - the grid's
+        // OWN (local) coordinates, the shape LocalFromGlobalCell returns. B3's
+        // barrier is the only caller: creatures ignore GameObject collision,
+        // so a closed portcullis has to be a hole in this grid or mobs walk
+        // straight through it. No-op while the grid is not ready; a cell
+        // outside it is skipped, never clamped.
+        void SetCellsWalkable(std::vector<GridPoint> const& cells, bool walkable);
+
         void FinishRun();
         void RollBonusLoot(Unit* killer);
         void DespawnAll();
@@ -309,6 +342,23 @@ namespace PDungeon
         bool     _runDirty = false;
         uint64   _leaderGuid = 0;               // the character that opened this run
         std::vector<uint16> _roomAlive;         // per room, index-aligned with the spawn draw
+
+        // Round B / B3, the barrier's arithmetic. All five are per dense room
+        // index or per boss segment and are filled once, at the end of
+        // SpawnFromPlan, beside _roomAlive.
+        //
+        // _roomPlanned is a COPY of _roomAlive taken there and never moved
+        // again: _roomAlive is inflated mid-run by a Lil' Bro split, so it can
+        // only ever be the numerator's live count, never the denominator a
+        // threshold is measured against.
+        std::vector<uint16> _roomPlanned;       // per room, what the draw actually spawned
+        std::vector<int>    _roomSegment;       // per room, SegmentOf its block
+        std::vector<bool>   _roomIsBoss;        // per room, its block is a RoomBoss
+        // Index 1..N, [0] unused: segment 0 is the entrance, which has no
+        // barrier. The boss room's own pack is deliberately NOT in `planned` -
+        // a segment whose only room is its boss would otherwise never open.
+        std::vector<uint32> _segmentPlanned;
+        std::vector<uint32> _segmentKilled;
         std::vector<Altar> _altars;                              // chain order; [0] = the entrance's
         std::unordered_map<ObjectGuid, size_t> _altarByGuid;     // altar GO -> index into _altars
         std::unordered_map<ObjectGuid, size_t> _boundAltar;      // player -> index into _altars

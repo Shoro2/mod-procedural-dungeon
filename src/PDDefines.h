@@ -82,6 +82,13 @@ namespace PDungeon
         PD_KIT_OPENING_MAX_MS = 2000
     };
 
+    // Round B / B4-B5. The roomIndex of a mob that belongs to no room - the
+    // patrol and the ambush. Deliberately a value no dense room index can
+    // reach, so every `roomIndex < _roomAlive.size()` guard in the instance
+    // script rejects it on its own; the tag's 0 default would have decremented
+    // room 0 instead.
+    uint32 const PD_ROOM_NONE = 0xFFFFFFFFu;
+
     char const* const PD_LOG = "module.pdungeon";
 }
 
