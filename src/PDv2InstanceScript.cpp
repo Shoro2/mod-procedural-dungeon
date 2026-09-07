@@ -1325,6 +1325,10 @@ namespace PDungeon
                 {
                     continue;       // the socket track: the one line every player walks
                 }
+                if (row == 0 || col == 0 || row == PD_CELLS_PER_BLOCK - 1 || col == PD_CELLS_PER_BLOCK - 1)
+                {
+                    continue;       // the kit's doorways are two cells wide, so a block-edge cell is either the doorway or the wall band
+                }
                 float ax = 0.0f, ay = 0.0f, az = 0.0f;
                 sPDv2Mgr->BlockToWorld(b->bx, b->by, (row + 0.5) * PD_CELL_SIZE_YD,
                                        (col + 0.5) * PD_CELL_SIZE_YD, ax, ay, az);
