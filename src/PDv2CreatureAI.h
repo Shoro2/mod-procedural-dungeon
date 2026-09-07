@@ -76,6 +76,16 @@ namespace PDungeon
         void UpdateAI(uint32 diff) override;
         void MovementInform(uint32 type, uint32 id) override;
 
+        // Round B / B4. The core's evade sends a creature home in a STRAIGHT
+        // LINE (HomeMovementGenerator, MoveTo with pathfinding disabled on a
+        // map with no mmaps), and on this map a straight line crosses the void
+        // - so a patroller pulled halfway down its beat would walk back to its
+        // spawn block through nothing. The override lets the base do the whole
+        // combat stop, then moves the home position to wherever the creature
+        // stands, throws that home walk away and puts the patrol back on the
+        // grid instead. Every other mob keeps the core's behaviour untouched.
+        void EnterEvadeMode(EvadeReason why) override;
+
     protected:
         // One slot-1 spell with its own live timer. A plain vector rather than
         // an EventMap: the whole schedule is "cast the first one that is
@@ -97,6 +107,21 @@ namespace PDungeon
         void MoveToWaypoint(size_t index, WalkGrid const& grid);
         void StopWaypointRun(bool resumeChase);
 
+        // Round B / B4, the out-of-combat half of a patroller's life. The
+        // route is planned ONCE per beat - an A* from wherever the creature
+        // stands to the goal cell its spawn tag carries - and then walked back
+        // and forth, reversed by MovementInform at either end. Everything the
+        // chase already owns is reused: the same grid, the same 500 ms
+        // decision interval, the same waypoint runner and the same snap radius,
+        // because a patrol that agreed with the chase about walkable ground
+        // only approximately would eventually step off the world.
+        void UpdatePatrol(uint32 diff);
+        // Drops the current beat and asks for a fresh one on the next tick.
+        // Called after an evade (and from JustReachedHome): the creature is
+        // rarely standing on one of its own waypoints by then, so the route it
+        // had is no longer a route it can walk from here.
+        void ResumePatrol();
+
         // Reads the creature's rows once and keeps only what this run's
         // difficulty unlocks, so no tick ever looks at minDiff again.
         void BuildKit();
@@ -117,6 +142,12 @@ namespace PDungeon
         uint32 _immolationTimer = 0;    // affix 4, accumulates toward 2 s
         std::vector<GridPoint> _waypoints;
         size_t _waypointIndex = 0;
+        // B4. The whole beat, kept across runs and reversed at either end -
+        // _waypoints is only ever the leg currently being walked, and
+        // StopWaypointRun clears it. _patrolTimer shares REPATH_INTERVAL_MS
+        // with the chase for the same reason the snap radius is shared.
+        std::vector<GridPoint> _patrolRoute;
+        uint32 _patrolTimer = 0;
         std::vector<KitSpell> _kit;     // slot-1 spells this run unlocked
         uint32 _fillerSpellId = 0;      // slot-0 spell, or the pack fallback
         uint32 _fillerCooldownMs = 0;   // normally 0 - the filler is spammed
@@ -126,6 +157,7 @@ namespace PDungeon
         bool _lineOk = false;       // last grid-line verdict, refreshed on the tick
         bool _holding = false;      // a caster that has planted itself at range
         bool _hasCalled = false;    // affix 1 already shouted for THIS fight
+        bool _patrolActive = false; // _patrolRoute holds a beat worth walking
     };
 }
 

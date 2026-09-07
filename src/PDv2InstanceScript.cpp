@@ -42,6 +42,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -84,6 +85,21 @@ namespace PDungeon
         // cells (8.33 yd each), so the hint fires when the portcullis fills
         // the screen and not from the far end of the corridor run.
         float const BARRIER_HINT_YD = 12.0f;
+
+        // Round B / B4: the patrol's own RNG stream. The module's precedent is
+        // layoutSeed ^ CONSTANT (PD_DECOR_SEED_MIX, PD_CRITTER_SEED_MIX), and
+        // the reason is the same one every time: a draw that shares the layout
+        // stream cannot be added, removed or retuned without moving every pick
+        // that follows it. The patrol takes it one step further and mixes the
+        // SEGMENT in as well, so a run with three bosses draws the same first
+        // patroller as a run with one.
+        uint32 const PD_PATROL_SEED_MIX = 0x9A7201EDu;
+
+        // The odd golden-ratio word, the standard way to fold an index into a
+        // seed without the low bits marching in lockstep. Multiplied, not
+        // added: with `+` a segment step of 1 would leave the low bits of two
+        // neighbouring segments' seeds one apart.
+        uint32 const PD_SEGMENT_SEED_STEP = 0x9E3779B1u;
 
         // Where a Lil' Bro's two children land relative to the corpse. That
         // module's own offsets, mirrored (DungeonChallengeScripts.cpp:877-878);
@@ -233,6 +249,11 @@ namespace PDungeon
             // barrier is evaluated the moment it is placed, and a segment
             // whose denominator is zero has to open right there.
             SpawnBarriers(*plan);
+            // Last, and after the barriers on purpose: a patroller belongs to
+            // the segment a barrier defines, and it walks the run that barrier
+            // seals - reading them in that order is what keeps the two from
+            // drifting apart.
+            SpawnPatrols(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -1808,6 +1829,155 @@ namespace PDungeon
         }
 
         LOG_INFO(PD_LOG, "PDv2: instance {} placed {} barrier(s) for {} boss segment(s)",
+                 instance->GetInstanceId(), placed, uint32(bossRooms));
+    }
+
+    void PDv2InstanceScript::SpawnPatrols(BlockPlan const& plan)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        PDv2AccountState const account = sPDv2Mgr->GetAccountState(_accountId);
+
+        int const chainLen = ChainLength(plan);
+        int const bossRooms = std::max(1, plan.config.bossRooms);
+        double const mid = PD_BLOCK_SIZE_YD / 2.0;
+        uint32 placed = 0;
+        for (int k = 1; k <= bossRooms; ++k)
+        {
+            // The SAME walk SpawnBarriers made, with the same argument, so the
+            // block a patroller starts on is the block its own portcullis
+            // stands next to - one run with one meaning, not two lookups that
+            // could disagree.
+            int const bossChain = BossChainIndex(chainLen, plan.config.bossRooms, k);
+            std::vector<size_t> run;
+            unsigned const entryBit = SpineRunInto(plan, bossChain, &run);
+            if (!entryBit || run.empty())
+            {
+                // Whatever costs a segment its barrier costs it its patrol too,
+                // and for the same reason: there is no single run to walk.
+                LOG_WARN(PD_LOG, "PDv2: instance {} found no single entry run into boss {} "
+                                 "(chain room {}) - segment {} gets no patrol",
+                         instance->GetInstanceId(), k, bossChain, k);
+                continue;
+            }
+
+            // The far end of the beat: boss k-1 for every segment but the
+            // first, whose predecessor on the chain is the entrance itself
+            // (chain index 0) - the block SegmentOf calls segment 0.
+            int const goalChain = k > 1 ? BossChainIndex(chainLen, plan.config.bossRooms, k - 1) : 0;
+            PlacedBlock const* goal = nullptr;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                // chainIndex is -1 on everything that is not a spine room, so
+                // this can never catch a corridor, a pocket or a loop room;
+                // last match, the way SpineRunInto picks it.
+                if (b.chainIndex == goalChain)
+                {
+                    goal = &b;
+                }
+            }
+            if (!goal)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} has no chain room {} to walk back to - "
+                                 "segment {} gets no patrol",
+                         instance->GetInstanceId(), goalChain, k);
+                continue;
+            }
+
+            // GLOBAL cells, never this grid's local ones: the AI reads the tag
+            // through LocalFromGlobalCell, and the grid origin is a property of
+            // the layout rather than of the creature that walks over it.
+            float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+            sPDv2Mgr->BlockToWorld(goal->bx, goal->by, mid, mid, gx, gy, gz);
+            int goalCellX = 0, goalCellY = 0;
+            WorldToCell(gx, gy, goalCellX, goalCellY);
+
+            // One draw on the patrol's OWN stream, shaped like a single-slot
+            // room with no boss: the pick comes off the same pools, the same
+            // band and the same unlock as the dungeon's trash, because in a
+            // module with no rank and no elite pool an "elite" IS a trash mob
+            // with a bigger bar (design 2026-09-03 §B4.2).
+            SpawnSelectInputs in;
+            RoomRequest room;
+            room.roomIndex = 0;
+            room.isBoss = false;
+            in.rooms.push_back(room);
+            in.spawnsPerRoom = 1;
+            in.bossRoomAdds = 0;
+            // Melee only. A caster plants itself at range the moment it pulls,
+            // and a corridor sentry that never closes is not a patrol.
+            in.casterPct = 0;
+            // Copied from the room draw for the SHAPE of the stream, not for
+            // its result: the draw rolls `affixed` per trash pick either way,
+            // and the flag is deliberately dropped below - §B4.2 gives the
+            // patroller no affix, and proto.affixMask staying 0 is what says so.
+            in.affixPct = cfg.affixPct;
+            in.bandMin = account.cfgBandMin;
+            in.unlockedDlvl = static_cast<int>(account.dlvl);
+
+            std::vector<RoomSpawns> out;
+            uint32 entry = PLACEHOLDER_CREATURE;
+            uint32 const seed = plan.effectiveSeed ^ PD_PATROL_SEED_MIX ^
+                                (static_cast<uint32>(k) * PD_SEGMENT_SEED_STEP);
+            if (sPDv2PackMgr->SelectSpawns(seed, in, out) && !out.empty() && !out[0].picks.empty())
+            {
+                entry = out[0].picks[0].entry;
+            }
+
+            // run is in walking order, so its LAST block is the corridor that
+            // touches the boss room's doorway - the same block SpawnBarriers
+            // seals the far side of.
+            PlacedBlock const& start = plan.blocks[run.back()];
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            sPDv2Mgr->BlockToWorld(start.bx, start.by, mid, mid, x, y, z);
+
+            PDv2MobData proto;
+            proto.role = PACK_ROLE_MELEE;
+            // In no room and in no counter: the patrol is risk on the road, not
+            // progress (design §B4.3). PD_ROOM_NONE rather than the tag's 0
+            // default is what keeps OnMobDied from decrementing room 0.
+            proto.roomIndex = PD_ROOM_NONE;
+            proto.countsForRun = false;
+            proto.isPatrol = true;
+            proto.patrolGoalCellX = goalCellX;
+            proto.patrolGoalCellY = goalCellY;
+
+            Creature* c = SpawnTaggedMob(entry, proto, x, y, z);
+            if (!c)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} could not summon creature {} as the "
+                                 "patroller of segment {}",
+                         instance->GetInstanceId(), entry, k);
+                continue;
+            }
+
+            // A MULTIPLIER, which is exactly why it cannot go through
+            // baseHealthOverride: that argument is an ABSOLUTE number the
+            // caller has to know in advance (it is how a Lil' Bro child gets
+            // its tenth), and the number this one multiplies - what this run's
+            // difficulty scale already made of the template - does not exist
+            // until SummonCreature has run PDv2Scaling's OnCreatureSelectLevel
+            // (PDv2Scaling.cpp:232-263; gated on the MAP, not on the tag, so it
+            // has fired by the time SpawnTaggedMob returns). The patroller is
+            // therefore a multiple of what this run's trash actually is, never
+            // of the row.
+            //
+            // 64-bit product on purpose. The multiplier is clamped from below
+            // (>= 100) and not from above, so a conf typo of 100000 would wrap
+            // a big bar into a small one in 32 bits - the opposite of what the
+            // key is for.
+            uint64 const scaled = static_cast<uint64>(c->GetMaxHealth()) *
+                                  static_cast<uint64>(cfg.patrolHealthMultPct) / 100;
+            uint64 const capped = std::min<uint64>(
+                scaled, static_cast<uint64>(std::numeric_limits<uint32>::max()));
+            SetDungeonHealth(c, static_cast<uint32>(capped));
+            c->SetFullHealth();
+            // Out of combat it walks; JustEngagedWith puts it back on run speed
+            // the moment it pulls.
+            c->SetWalk(true);
+            ++placed;
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} patroller(s) for {} boss segment(s)",
                  instance->GetInstanceId(), placed, uint32(bossRooms));
     }
 

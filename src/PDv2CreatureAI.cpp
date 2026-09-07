@@ -26,6 +26,7 @@
 #include "Player.h"
 #include "ScriptMgr.h"
 
+#include <algorithm>
 #include <list>
 
 namespace PDungeon
@@ -107,6 +108,16 @@ namespace PDungeon
         // pulled again calls again, which is what that module's reset of its
         // hasCalled flag after an evade amounts to (:671).
         _hasCalled = false;
+
+        // B4: a patroller walks its beat and RUNS its fights. The chase - the
+        // core's or this AI's waypoints - takes over from here; the beat is
+        // picked back up by EnterEvadeMode when the fight is over. The
+        // StopWaypointRun above already threw the current leg away, which is
+        // the other half of the handover.
+        if (_mob && _mob->isPatrol)
+        {
+            me->SetWalk(false);
+        }
     }
 
     void PDv2MobAI::JustDied(Unit* killer)
@@ -132,6 +143,54 @@ namespace PDungeon
         {
             _instance->ReapplyAffixAuras(me, _mob->affixMask);
         }
+
+        // B4. EnterEvadeMode below normally cancels the home walk before it can
+        // arrive, so this hook is not the usual way back - but it is the core's
+        // contract for "this creature is home and out of evade", and a
+        // HomeMovementGenerator that finishes by any route fires it
+        // (HomeMovementGenerator.cpp:31-42). Whichever route it was, the beat
+        // has to be re-planned from where the creature now stands.
+        if (_mob && _mob->isPatrol)
+        {
+            ResumePatrol();
+        }
+    }
+
+    void PDv2MobAI::EnterEvadeMode(EvadeReason why)
+    {
+        // The base call FIRST, always and for every creature: it is what stops
+        // the combat, drops the threat list, restores the health and adds
+        // UNIT_STATE_EVADE (CreatureAI::_EnterEvadeMode). Nothing below is a
+        // substitute for any of that - it only redirects the walk home.
+        ScriptedAI::EnterEvadeMode(why);
+
+        // Alive, because _EnterEvadeMode refuses a dead creature outright and
+        // clearing a corpse's motion during its own death would be a second
+        // opinion about a transition setDeathState already owns.
+        if (!_mob || !_mob->isPatrol || !me->IsAlive())
+        {
+            return;
+        }
+
+        // HOME IS WHEREVER THE PATROL STANDS. For an ownerless creature the
+        // base call queues a MoveTargetedHome (CreatureAI.cpp:255-259), and
+        // that generator walks a straight line to the home position with
+        // pathfinding disabled - which on map 760 goes through the void,
+        // because there are no mmaps and no terrain for the engine to refuse
+        // over.
+        me->SetHomePosition(me->GetPositionX(), me->GetPositionY(),
+                            me->GetPositionZ(), me->GetOrientation());
+
+        // Throw that walk away. Clear() pops the home generator, whose
+        // Finalize clears UNIT_STATE_EVADE without calling JustReachedHome
+        // (HomeMovementGenerator.cpp:31-42) - so the creature leaves evade
+        // state here rather than at the end of a walk it will never take, and
+        // UpdateProximityAggro is free to look again on the next tick. MoveIdle
+        // is the no-op that follows a Clear down to a static idle generator; it
+        // is there so the motion stack is never left half-described.
+        me->GetMotionMaster()->Clear();
+        me->GetMotionMaster()->MoveIdle();
+        ResumePatrol();
     }
 
     void PDv2MobAI::MoveToWaypoint(size_t index, WalkGrid const& grid)
@@ -182,8 +241,37 @@ namespace PDungeon
         }
 
         ++_waypointIndex;
+
+        // B4: which RUN this is, not which creature. A patroller in combat is
+        // walking a chase path, and that path has to end the way every other
+        // chase path ends - resuming the chase. Only an out-of-combat run
+        // belongs to the beat.
+        bool const onBeat = _mob && _mob->isPatrol && !me->GetVictim();
+        if (onBeat)
+        {
+            // The home position follows the patrol along its lane, so an evade
+            // in the middle of the beat is a few yards of walking rather than a
+            // straight line back to the spawn block across the void. Done at
+            // every waypoint, not only at the ends: the pull can come anywhere.
+            me->SetHomePosition(me->GetPositionX(), me->GetPositionY(),
+                                me->GetPositionZ(), me->GetOrientation());
+        }
+
         if (_waypointIndex >= _waypoints.size())
         {
+            if (onBeat)
+            {
+                // The end of the beat: turn around. Reversing the ROUTE (not
+                // the leg, which StopWaypointRun is about to clear) is what
+                // makes the next UpdatePatrol walk back the way it came
+                // without paying for a second A*. _patrolActive stays true, so
+                // the reversed list is used as it is.
+                std::reverse(_patrolRoute.begin(), _patrolRoute.end());
+                StopWaypointRun(false);
+                _patrolTimer = 0;
+                return;
+            }
+
             // Arrived where the target WAS when the path was planned. Resume
             // the chase and force the next tick to re-decide, so a target
             // that moved on is followed by plan rather than by beeline.
@@ -199,6 +287,90 @@ namespace PDungeon
             return;
         }
         MoveToWaypoint(_waypointIndex, *grid);
+    }
+
+    void PDv2MobAI::UpdatePatrol(uint32 diff)
+    {
+        WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
+        if (!grid || !_mob || !_mob->isPatrol || !me->IsAlive())
+        {
+            return;
+        }
+        if (_patrolTimer > diff)
+        {
+            _patrolTimer -= diff;
+            return;
+        }
+        _patrolTimer = REPATH_INTERVAL_MS;
+
+        // A stale run, the same shape UpdateGridChase carries and for the same
+        // reason: an evade, a knockback or a crowd-control effect can end the
+        // motion without a MovementInform, and the flag alone would then hold
+        // the beat still for ever.
+        if (_followingPath &&
+            me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
+        {
+            StopWaypointRun(false);
+            _patrolActive = false;
+        }
+        if (_followingPath)
+        {
+            return;     // a leg is live; MovementInform owns the next decision
+        }
+
+        if (!_patrolActive)
+        {
+            // ONE A* per beat. `here` is where the creature actually stands -
+            // never where it spawned - so the first plan, the plan after an
+            // evade and the plan after a knockback are all this same code.
+            GridPoint const here = CellOf(*grid, me->GetPositionX(), me->GetPositionY());
+            GridPoint const goal = grid->LocalFromGlobalCell(_mob->patrolGoalCellX,
+                                                             _mob->patrolGoalCellY);
+            GridPoint a, b;
+            if (!NearestWalkable(*grid, here.x, here.y, SNAP_RADIUS_CELLS, a) ||
+                !NearestWalkable(*grid, goal.x, goal.y, SNAP_RADIUS_CELLS, b))
+            {
+                // Off the walkable surface at one end or the other. Hold and
+                // ask again in 500 ms rather than walk at a cell the grid does
+                // not call floor - the same refusal the chase makes.
+                return;
+            }
+            std::vector<GridPoint> path;
+            if (!FindGridPath(*grid, a, b, path))
+            {
+                return;
+            }
+            SimplifyGridPath(*grid, path);
+            if (path.size() < 2)
+            {
+                // Standing on the goal already. Nothing to walk this tick; a
+                // barrier that opens later can still turn this into a route.
+                return;
+            }
+            _patrolRoute = path;
+            _patrolActive = true;
+        }
+
+        // Out of combat the patrol WALKS: it is meant to be seen coming down a
+        // corridor, not to sprint. JustEngagedWith puts it back on run speed
+        // the moment it pulls.
+        me->SetWalk(true);
+        // A COPY. StartWaypointRun takes ownership of what it is handed and
+        // StopWaypointRun clears it, but _patrolRoute has to survive both -
+        // it is the beat, and _waypoints is only the leg being walked.
+        std::vector<GridPoint> run = _patrolRoute;
+        StartWaypointRun(std::move(run), *grid);
+    }
+
+    void PDv2MobAI::ResumePatrol()
+    {
+        // Re-plan from wherever we stand rather than pick the old leg back up:
+        // after an evade the creature is almost never on one of its own
+        // waypoints, and StartWaypointRun's contract is that index 0 is the
+        // cell under its feet.
+        _patrolActive = false;
+        _patrolTimer = 0;
+        StopWaypointRun(false);
     }
 
     bool PDv2MobAI::UpdateGridChase(uint32 diff)
@@ -703,6 +875,15 @@ namespace PDungeon
         // bay by UpdateGridChase's Unreachable case, not by walking after it.
         if (!UpdateVictim())
         {
+            // B4 first, aggro second. The beat is what a patroller does when
+            // nothing is happening, and the proximity check below can turn this
+            // very tick into a fight - JustEngagedWith then throws the leg away
+            // again, which is the handover in the right order. Every other mob
+            // pays one branch for this and nothing else.
+            if (_mob && _mob->isPatrol)
+            {
+                UpdatePatrol(diff);
+            }
             UpdateProximityAggro(diff);
             return;
         }

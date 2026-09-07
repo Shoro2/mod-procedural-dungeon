@@ -302,6 +302,23 @@ namespace PDungeon
         };
         void SpawnBarriers(BlockPlan const& plan);
 
+        // Round B / B4. One elite patroller per boss segment: it stands on the
+        // corridor block in front of the boss room - the last block of the
+        // SAME run the barrier seals - and walks that spine back to the
+        // previous boss room (the entrance for segment 1) and forward again.
+        //
+        // The beat never crosses a portcullis. Barrier k stands INSIDE boss
+        // room b_k on the edge this corridor touches, and the patroller lives
+        // on the outside of it; barrier k-1 stands on b_{k-1}'s OTHER edge, the
+        // one facing b_{k-2}, and the route reaches b_{k-1} from this side. So
+        // the order against SpawnBarriers is a matter of reading, not of
+        // reachability - it is called after it because a patrol belongs to the
+        // segment a barrier defines.
+        //
+        // Its own RNG stream (PD_PATROL_SEED_MIX, mixed again per segment), so
+        // adding or retuning a patroller cannot move one pick of the room draw.
+        void SpawnPatrols(BlockPlan const& plan);
+
         // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
         // is safe: everyone recorded there who is still on this map and still
         // dead comes back alive at RespawnAltarFor's spot with resurrection
