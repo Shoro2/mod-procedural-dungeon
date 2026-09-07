@@ -259,7 +259,17 @@ namespace PDungeon
             ObjectGuid guid;        // the altar GameObject; empty when none could be seated
         };
         void SpawnAltars(BlockPlan const& plan);
+
+        // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
+        // is safe: everyone recorded there who is still on this map and still
+        // dead comes back alive at RespawnAltarFor's spot with resurrection
+        // sickness. Called after CatchFallers, so a death below the floor is
+        // pulled onto the map before it is sent to its altar.
         void RespawnPending();
+
+        // The altar a player respawns at: the one they bound, else the
+        // entrance room's (_altars[0]). nullptr only when the build seated
+        // no altar at all - RespawnPending owns that fallback.
         Altar const* RespawnAltarFor(ObjectGuid const& playerGuid) const;
 
         // Summons ONE dungeon mob: the floor plane, the disabled gravity, the

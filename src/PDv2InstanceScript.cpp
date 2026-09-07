@@ -25,6 +25,7 @@
 #include "Log.h"
 #include "LootMgr.h"
 #include "Map.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "PDDefines.h"
 #include "PDv2Affixes.h"
@@ -35,10 +36,13 @@
 #include "Position.h"
 #include "SpellMgr.h"
 #include "TemporarySummon.h"
+#include "Timer.h"
 #include "WorldSession.h"
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
+#include <vector>
 
 namespace PDungeon
 {
@@ -1395,11 +1399,95 @@ namespace PDungeon
         return _altars.empty() ? nullptr : &_altars[0];
     }
 
-    void PDv2InstanceScript::OnUnitDeath(Unit* /*unit*/)
+    void PDv2InstanceScript::OnUnitDeath(Unit* unit)
     {
-        // Task 3 fills this in: record the death in _pendingRespawn and let
-        // the 1 Hz tick resurrect. Empty until then, deliberately - the core
-        // is still inside Unit::Kill here and nothing may resurrect from it.
+        if (!unit || !unit->IsPlayer())
+        {
+            return;
+        }
+
+        // RECORDED ONLY. This hook fires from setDeathState(JustDied)
+        // (Unit.cpp:11439-11440) - the core is still inside Unit::Kill, and
+        // KillPlayer has not yet set the corpse state or the death timer, so
+        // anything resurrected from in here would be killed again on the way
+        // out. RespawnPending does it on the next 1 Hz tick instead, and that
+        // one second is the whole window the release veto in PDClientLink
+        // exists to cover.
+        _pendingRespawn[unit->GetGUID()] = getMSTime();
+        LOG_DEBUG(PD_LOG, "PDv2: {} died in instance {} - respawn on the next tick",
+                  unit->GetName(), instance->GetInstanceId());
+    }
+
+    void PDv2InstanceScript::RespawnPending()
+    {
+        if (_pendingRespawn.empty())
+        {
+            return;
+        }
+
+        // Taken out and the map emptied BEFORE anything below runs. Every
+        // branch drops its entry anyway, so this changes no outcome - but
+        // ResurrectPlayer walks UpdateZone and the aura machinery, and an
+        // iterator into _pendingRespawn held across that would dangle the
+        // moment any of it reached back into OnUnitDeath and rehashed the
+        // map. A death recorded while this loop runs is a NEW death and
+        // belongs to the next tick, which is exactly what it gets.
+        std::vector<std::pair<ObjectGuid, uint32>> due(_pendingRespawn.begin(),
+                                                       _pendingRespawn.end());
+        _pendingRespawn.clear();
+
+        for (auto const& entry : due)
+        {
+            // GetPlayer(Map const*, guid) already answers nullptr for anyone
+            // who is not in world on THIS map, so a player who left, logged
+            // out or was evicted simply drops out here: the core owns them.
+            Player* player = ObjectAccessor::GetPlayer(instance, entry.first);
+            if (!player || player->IsAlive())
+            {
+                continue;               // gone, or someone else resurrected them
+            }
+
+            // Alive, full health, resurrection sickness scaled by level (the
+            // core's own rule inside ResurrectPlayer); no durability loss.
+            // SpawnCorpseBones is a no-op when the player never released, and
+            // when they did it only clears the ghost flag and re-saves the
+            // auras - it never writes the position, so dying in here can
+            // never be what stores a character on this map.
+            uint32 const waitedMs = GetMSTimeDiffToNow(entry.second);
+            player->ResurrectPlayer(1.0f, true);
+            player->SpawnCorpseBones();
+
+            // Where to: the bound altar, else the entrance room's altar (both
+            // answered by RespawnAltarFor). If the build seated no altar at
+            // all, the entrance itself; and if there is not even one of
+            // those, nowhere - they rise where they fell, because (0, 0, 0)
+            // on a composed map is the void and the fall catcher that would
+            // rescue them from it is switched off by the same missing
+            // entrance that got us here.
+            if (Altar const* altar = RespawnAltarFor(entry.first))
+            {
+                player->TeleportTo(instance->GetId(), altar->x, altar->y, altar->z + 2.0f, 0.0f);
+                sPDv2UILink->SendNotice(player, "You return to the altar, weakened.");
+                LOG_INFO(PD_LOG, "PDv2: {} returned alive to the altar of chain room {} in "
+                                 "instance {} after {} ms",
+                         player->GetName(), altar->chainIndex, instance->GetInstanceId(), waitedMs);
+            }
+            else if (_haveEntrance)
+            {
+                player->TeleportTo(instance->GetId(), _entranceX, _entranceY, _entranceZ + 2.0f, 0.0f);
+                sPDv2UILink->SendNotice(player, "You return to the entrance, weakened.");
+                LOG_WARN(PD_LOG, "PDv2: instance {} seated no altar - {} returned alive to the "
+                                 "entrance after {} ms",
+                         instance->GetInstanceId(), player->GetName(), waitedMs);
+            }
+            else
+            {
+                sPDv2UILink->SendNotice(player, "You rise again where you fell.");
+                LOG_WARN(PD_LOG, "PDv2: instance {} has neither an altar nor an entrance - "
+                                 "{} was resurrected in place after {} ms",
+                         instance->GetInstanceId(), player->GetName(), waitedMs);
+            }
+        }
     }
 
     void PDv2InstanceScript::CatchFallers()
@@ -1476,6 +1564,11 @@ namespace PDungeon
         {
             _fallCheckTimer = FALL_CHECK_INTERVAL_MS;
             CatchFallers();
+            // After the fall catcher on purpose: a player who died BELOW the
+            // floor is first pulled back onto the map by CatchFallers and
+            // then sent on to their altar, so the altar is the teleport that
+            // lands last and the ordering never leaves a corpse in the void.
+            RespawnPending();
             EvictDisconnected();
             TickVoidZones();
 
