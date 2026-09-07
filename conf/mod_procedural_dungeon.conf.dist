@@ -629,10 +629,20 @@ ProceduralDungeon.V2.Ambush.Chance = 50
 #                     loot like any dungeon mob but count towards nothing - not
 #                     the run total, not a room, not a barrier.
 #
-#                     Clamped to 0..8: the spawn ring is a fixed pattern beside
-#                     the player and more than eight would stack them inside
-#                     each other. 0 leaves the trigger and the stun in place
-#                     with nothing to fight.
+#                     Clamped to 0..8: the spawn pattern beside the player is
+#                     a fixed table of eight distinct places (two ranks of
+#                     four, at 6 yd and 2 yd along the corridor, 4 yd either
+#                     side of it), and past the eighth the table repeats and
+#                     would stack mobs inside each other. 0 leaves the trigger
+#                     and the stun in place with nothing to fight.
+#
+#                     Read when an instance BUILDS its dungeon, not when the
+#                     ambush fires: the creatures are drawn once and stored
+#                     with the spot, so a .reload config takes effect for the
+#                     next dungeon that is built and leaves a standing run
+#                     alone. Chance is read per build the same way; RadiusYd
+#                     and StunSpell are the two that are read at fire time and
+#                     therefore change a standing run.
 #        Default:     4
 #
 
@@ -643,13 +653,20 @@ ProceduralDungeon.V2.Ambush.Mobs = 4
 #        Description: Round B (2026-09-03): how close a player has to come to
 #                     an armed corridor's centre, in yards and measured flat,
 #                     before the ambush fires. A corridor block is 66.67 yd
-#                     across and its walkable lane is 8.3 yd wide, so the
-#                     default catches anyone walking through it without
-#                     reaching into the rooms at either end.
+#                     across, but only its lane is floor: two cells of 8.333 yd
+#                     each, so 16.67 yd wide and 8.33 yd either side of the
+#                     lane centre. The default of 9.0 therefore clears a player
+#                     hugging the lane wall by 0.67 yd - enough to catch anyone
+#                     walking through, without reaching into the rooms at
+#                     either end, but not a roomy margin: tune it DOWN and a
+#                     player walking the wall can pass an armed corridor
+#                     untouched.
 #
 #                     Never below 1.0 - a 0 would arm a trap the player has to
 #                     stand exactly on. A spot fires once and stays disarmed
-#                     until the run is rebuilt.
+#                     until the run is rebuilt. Read at fire time, so a
+#                     .reload config changes a standing run: every spot still
+#                     armed is scanned at the new radius from the next tick on.
 #        Default:     9.0
 #
 

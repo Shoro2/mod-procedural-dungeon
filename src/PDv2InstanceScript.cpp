@@ -113,28 +113,39 @@ namespace PDungeon
         // Where an ambush's mobs land relative to the player it fires on:
         // along the corridor's own axis and across it, in yards. 6 yd along
         // puts two in front and two behind - close enough to be an ambush, far
-        // enough not to spawn inside the player - and 4 yd across is about half
-        // a grid cell to either side. Whether either offset is actually floor
-        // is not assumed: FireAmbush vetoes every one of them against the walk
-        // grid and falls back to the player's own cell.
+        // enough not to spawn inside the player - and 4 yd across stays inside
+        // the lane, which is two cells of 8.333 yd and therefore 8.33 yd of
+        // floor either side of its centre. Whether any offset is actually
+        // floor is not assumed: FireAmbush vetoes every one of them against
+        // the walk grid and falls back to the player's own cell.
         //
-        // FOUR of them for a key that allows up to eight mobs. Past the fourth
-        // the pattern repeats, which is exactly what V2.Ambush.Mobs' own 0..8
-        // clamp is documented to mean ("more than eight would stack them inside
-        // each other").
+        // EIGHT of them for a key that allows up to eight mobs: a full
+        // V2.Ambush.Mobs = 8 puts eight creatures in eight distinct places
+        // rather than four pairs, which is what the key's own 0..8 clamp has
+        // always been documented to mean. The second four sit at 2 yd along -
+        // a nearer rank on the same two lines across, because the lane has no
+        // room for a second rank ACROSS it (4 yd is already most of the
+        // 8.33 yd half-width) while the corridor is 66.67 yd long and has
+        // room to spare along it. The first four are unchanged and in their
+        // original order, so the default of 4 places its mobs exactly where
+        // it did before.
         struct AmbushOffset
         {
             float along;
             float across;
         };
 
-        size_t const AMBUSH_OFFSET_COUNT = 4;
+        size_t const AMBUSH_OFFSET_COUNT = 8;
 
         AmbushOffset const AMBUSH_OFFSETS[AMBUSH_OFFSET_COUNT] = {
             {  6.0f,  4.0f },
             {  6.0f, -4.0f },
             { -6.0f,  4.0f },
-            { -6.0f, -4.0f }
+            { -6.0f, -4.0f },
+            {  2.0f,  4.0f },
+            {  2.0f, -4.0f },
+            { -2.0f,  4.0f },
+            { -2.0f, -4.0f }
         };
 
         // Where a Lil' Bro's two children land relative to the corpse. That
@@ -2112,8 +2123,13 @@ namespace PDungeon
                 Player* player = it->GetSource();
                 // A dead player does not spring a trap: the corpse run back
                 // through the corridor is not the moment to spend the one
-                // ambush this segment gets.
-                if (!player || !player->IsInWorld() || !player->IsAlive())
+                // ambush this segment gets. A game master springs nothing at
+                // all - TickVoidZones filters IsGameMaster for the same reason
+                // and it matters more here, because a sprung spot stays spent
+                // until the run is rebuilt: a GM flying the layout to look at
+                // it would otherwise disarm every ambush in the dungeon.
+                if (!player || !player->IsInWorld() || !player->IsAlive() ||
+                    player->IsGameMaster())
                 {
                     continue;
                 }

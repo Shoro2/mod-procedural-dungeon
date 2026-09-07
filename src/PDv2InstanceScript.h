@@ -353,8 +353,12 @@ namespace PDungeon
         void TickAmbushes();
 
         // Disarms the spot, stuns the player, says so, and puts the stored
-        // picks on the floor around them - grid-vetoed, because the corridor
-        // is 66.67 yd wide and its walkable lane is 8.3 yd of that.
+        // picks on the floor around them - grid-vetoed, because a corridor
+        // block is 66.67 yd across and only its lane is floor: two cells of
+        // 8.333 yd (LaneCellsForSocket puts the doorway on columns 3-4 / rows
+        // 3-4), so 16.67 yd wide, 8.33 yd of it either side of the lane
+        // centre. That half-width is what the V2.Ambush.RadiusYd default of
+        // 9.0 clears a wall-hugging player by - 0.67 yd, not a roomy margin.
         void FireAmbush(Ambush& ambush, Player* player);
 
         // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
