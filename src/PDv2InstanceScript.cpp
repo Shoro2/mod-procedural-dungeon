@@ -117,22 +117,6 @@ namespace PDungeon
             int    weight;
         };
 
-        // The socket on the far side of the same block edge. A barrier seals
-        // BOTH sides of one doorway, so the neighbour's own doorway - the one
-        // facing ours - is the other half of the lane. 0 for anything that is
-        // not a single socket bit.
-        unsigned OppositeSocket(unsigned bit)
-        {
-            switch (bit)
-            {
-                case SOCKET_N:  return SOCKET_S;
-                case SOCKET_S:  return SOCKET_N;
-                case SOCKET_W:  return SOCKET_E;
-                case SOCKET_E:  return SOCKET_W;
-                default:        return 0;
-            }
-        }
-
         BonusMat const BONUS_MATS[5] = {
             { 920100, 60 },     // Forgotten Shard
             { 920101, 25 },     // Forgotten Sliver
@@ -1686,31 +1670,22 @@ namespace PDungeon
                      instance->GetInstanceId());
         }
 
-        // (row, col) of the two cells a block's doorway occupies on the edge a
-        // socket bit names, appended as walk-grid cells. Row 0 is the north
-        // edge and col 0 the west one - the kit's own mask layout - and the
-        // doorway is the two centre cells, 3 and 4, of the other axis.
+        // The two cells a block's doorway occupies on the edge a socket bit
+        // names, appended as walk-grid cells. The TABLE itself lives in the
+        // engine-free planner (LaneCellsForSocket) so `pdblock` can pin it -
+        // B3-B5 Task 2 review, Important 1; all that is left here is the one
+        // translation an engine has to do, (row, col) -> LocalFromGlobalCell(
+        // x = col, y = row).
         auto laneCells = [this](PlacedBlock const& block, unsigned edge,
                                 std::vector<GridPoint>& out)
         {
-            int const lo = PD_CELLS_PER_BLOCK / 2 - 1;
-            int const hi = PD_CELLS_PER_BLOCK / 2;
-            int const last = PD_CELLS_PER_BLOCK - 1;
-            int rows[2] = { lo, hi };
-            int cols[2] = { lo, hi };
-            switch (edge)
-            {
-                case SOCKET_N:  rows[0] = rows[1] = 0;      break;
-                case SOCKET_S:  rows[0] = rows[1] = last;   break;
-                case SOCKET_W:  cols[0] = cols[1] = 0;      break;
-                case SOCKET_E:  cols[0] = cols[1] = last;   break;
-                default:        return;
-            }
+            int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+            LaneCellsForSocket(edge, cells);
             for (int i = 0; i < 2; ++i)
             {
                 out.push_back(_grid.LocalFromGlobalCell(
-                    block.bx * PD_CELLS_PER_BLOCK + cols[i],
-                    block.by * PD_CELLS_PER_BLOCK + rows[i]));
+                    block.bx * PD_CELLS_PER_BLOCK + cells[i][1],
+                    block.by * PD_CELLS_PER_BLOCK + cells[i][0]));
             }
         };
 
@@ -1735,6 +1710,18 @@ namespace PDungeon
                 LOG_WARN(PD_LOG, "PDv2: instance {} found no single entry run into boss {} "
                                  "(chain room {}) - segment {} gets no barrier",
                          instance->GetInstanceId(), k, bossChain, k);
+                continue;
+            }
+            if (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W)
+            {
+                // SpineRunInto only ever answers with one of the four bits, so
+                // this is a contract check rather than a branch a plan can
+                // reach - but it has to be made HERE: LaneCellsForSocket and
+                // OppositeSocket read anything else as SOCKET_E, and a
+                // portcullis on the wrong edge is worse than none.
+                LOG_WARN(PD_LOG, "PDv2: instance {} could not name the lane cells of "
+                                 "socket {} into chain room {} - segment {} gets no barrier",
+                         instance->GetInstanceId(), bit, bossChain, k);
                 continue;
             }
 
@@ -1764,13 +1751,6 @@ namespace PDungeon
             std::vector<GridPoint> cells;
             laneCells(*boss, bit, cells);
             laneCells(neighbour, OppositeSocket(bit), cells);
-            if (cells.size() != 4)
-            {
-                LOG_WARN(PD_LOG, "PDv2: instance {} could not name the lane cells of "
-                                 "socket {} into chain room {} - segment {} gets no barrier",
-                         instance->GetInstanceId(), bit, bossChain, k);
-                continue;
-            }
 
             // One cell INSIDE the boss block, on that edge, at the lane
             // centre - the doorway's own square. u runs along the row axis and
@@ -1791,7 +1771,7 @@ namespace PDungeon
                 case SOCKET_S:  u = farEdge;    orientation = cfg.barrierOrientNS;  break;
                 case SOCKET_W:  v = nearEdge;   orientation = cfg.barrierOrientEW;  break;
                 case SOCKET_E:  v = farEdge;    orientation = cfg.barrierOrientEW;  break;
-                default:        break;      // unreachable: the lane cells above already agreed
+                default:        break;      // unreachable: `bit` was checked against the four sockets above
             }
 
             float x = 0.0f, y = 0.0f, z = 0.0f;

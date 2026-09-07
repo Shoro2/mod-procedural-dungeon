@@ -18,6 +18,11 @@
 #ifndef MOD_PDUNGEON_BLOCK_PLAN_H
 #define MOD_PDUNGEON_BLOCK_PLAN_H
 
+// Only for PD_CELLS_PER_BLOCK, the unit a block's doorway cells are counted
+// in (LaneCellsForSocket below). PDv2WorldMath.h is header-only, engine-free
+// and includes nothing of ours, so this cannot cycle.
+#include "PDv2WorldMath.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -52,6 +57,31 @@ namespace PDungeon
         SOCKET_S = 4u,
         SOCKET_W = 8u
     };
+
+    // The socket on the far side of the same block edge: a run leaving block A
+    // through `bit` enters its neighbour through this one, and a barrier that
+    // seals one doorway has to seal both halves of it. Not a single socket bit
+    // in - SOCKET_E out, the generator's own long-standing fallback; every
+    // caller either passes one of the four bits or checks first.
+    unsigned OppositeSocket(unsigned bit);
+
+    // The two doorway cells the socket `bit` names on a block's OWN edge, as
+    // (row, col) pairs in the kit's cell frame: row 0 is the north edge, col 0
+    // the west one, and the doorway is the two centre cells of the other axis.
+    //   N  (0, 3) (0, 4)      S  (7, 3) (7, 4)
+    //   W  (3, 0) (4, 0)      E  (3, 7) (4, 7)
+    // `outRowCol[i][0]` is the row, `outRowCol[i][1]` the column - and the
+    // walk grid's x axis is the COLUMN one (PDv2WorldMath.h: v runs east along
+    // the columns, u runs south along the rows), which is the argument order a
+    // caller has to get right.
+    //
+    // Engine-free and public on purpose (B3-B5 Task 2 review, Important 1):
+    // this table used to be a lambda inside SpawnBarriers, where no harness
+    // could reach it, so a kit change or a SOCKET_* renumber would have
+    // shipped a portcullis standing in a wall instead of turning `pdblock
+    // --batch` red. Same fallback as OppositeSocket for a bit that is not one
+    // of the four.
+    void LaneCellsForSocket(unsigned bit, int outRowCol[2][2]);
 
     // Index into the kit's role table;
     // chunkId = 2000 + alt * 1000 + roleIndex * 100 + mask.

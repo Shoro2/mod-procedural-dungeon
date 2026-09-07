@@ -936,6 +936,41 @@ namespace PDungeon
         return bosses;
     }
 
+    unsigned OppositeSocket(unsigned bit)
+    {
+        // The public face of the mirror the planner has always used for its
+        // own socket bookkeeping, so the edge the engine seals and the edge
+        // the planner joined are one edge by construction.
+        return OppositeBit(bit);
+    }
+
+    void LaneCellsForSocket(unsigned bit, int outRowCol[2][2])
+    {
+        // The doorway is the two CENTRE cells of the edge's other axis - the
+        // kit's own mask layout (48_gen_t1_blockkit.py), which is why these
+        // come out of PD_CELLS_PER_BLOCK rather than being typed as 0/3/4/7.
+        int const lo = PD_CELLS_PER_BLOCK / 2 - 1;
+        int const hi = PD_CELLS_PER_BLOCK / 2;
+        int const last = PD_CELLS_PER_BLOCK - 1;
+        int rows[2] = { lo, hi };
+        int cols[2] = { lo, hi };
+        switch (bit)
+        {
+            case SOCKET_N:  rows[0] = rows[1] = 0;      break;
+            case SOCKET_S:  rows[0] = rows[1] = last;   break;
+            case SOCKET_W:  cols[0] = cols[1] = 0;      break;
+            // SOCKET_E, and anything that is not a single socket bit -
+            // OppositeBit's fallback, so the two helpers answer the same
+            // garbage rather than two different kinds of it.
+            default:        cols[0] = cols[1] = last;   break;
+        }
+        for (int i = 0; i < 2; ++i)
+        {
+            outRowCol[i][0] = rows[i];
+            outRowCol[i][1] = cols[i];
+        }
+    }
+
     int RunFromSocket(BlockPlan const& plan, size_t from, unsigned bit,
                       std::vector<size_t>* outRun, bool* junction)
     {

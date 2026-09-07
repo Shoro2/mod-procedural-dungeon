@@ -34,7 +34,7 @@
 //   cl /std:c++17 /EHsc /W4 /O2 /I src tests\blockplan_harness.cpp
 //      src\generator\PDBlockPlan.cpp src\generator\PDv2WalkGrid.cpp
 //      src\generator\PDv2LinkState.cpp src\generator\PDv2DecorPlan.cpp
-//      src\generator\PDv2PackDraw.cpp
+//      src\generator\PDv2PackDraw.cpp src\generator\PDv2AmbushPlan.cpp
 //      /Fe:pdblock.exe
 
 // MSVC deprecates std::fopen in favour of fopen_s, which is a Microsoft
@@ -45,6 +45,7 @@
 #endif
 
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2AmbushPlan.h"
 #include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
 #include "generator/PDv2LinkState.h"
@@ -2003,6 +2004,100 @@ namespace
                           msg, seed);
                 }
 
+                // Round B / B5: the ambush plan over that same chain. At
+                // chance 100 the coin is off and what is left is a statement
+                // about WHERE a spot may sit - and the candidate set is
+                // re-derived here from the harness's own RoomAtEndOf, never
+                // from the SpineRunInto BuildAmbushPlan itself walks, so a bug
+                // in that walk cannot hide behind its own output.
+                {
+                    // Which rooms each corridor block reaches through its own
+                    // sockets, computed once for the layout. A corridor lies on
+                    // the run between two chain rooms exactly when it reaches
+                    // BOTH of them: consecutive chain rooms are joined by
+                    // exactly one run (asserted above), so there is no second
+                    // way to reach both. Loop-strip cells reach only their loop
+                    // room (RoomAtEndOf ends the walk at an attachment entered
+                    // from the strip side), chest stubs are skipped outright,
+                    // and a pocket corridor reaches its host and its pocket -
+                    // none of the three can qualify.
+                    std::vector<std::set<int>> reach(plan.blocks.size());
+                    for (size_t at = 0; at < plan.blocks.size(); ++at)
+                    {
+                        PlacedBlock const& c = plan.blocks[at];
+                        if (c.roomId >= 0 || c.role == BlockRole::CorridorDeadEnd) continue;
+                        for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                        {
+                            if (!(c.socketMask & bit)) continue;
+                            int const end = RoomAtEndOf(plan, at, bit, attachments);
+                            if (end >= 0) reach[at].insert(end);
+                        }
+                    }
+
+                    // The engine will hand BuildAmbushPlan the plan's own seed,
+                    // exactly like the decor, critter and patrol draws.
+                    std::vector<AmbushSpot> const hot = BuildAmbushPlan(plan, 100, plan.effectiveSeed);
+                    std::vector<AmbushSpot> const twice = BuildAmbushPlan(plan, 100, plan.effectiveSeed);
+                    bool determ = hot.size() == twice.size();
+                    for (size_t s = 0; determ && s < hot.size(); ++s)
+                    {
+                        determ = hot[s].blockIndex == twice[s].blockIndex &&
+                                 hot[s].bx == twice[s].bx && hot[s].by == twice[s].by &&
+                                 hot[s].segment == twice[s].segment;
+                    }
+                    Check(determ, "two ambush plans from the same seed differ", seed);
+                    Check(BuildAmbushPlan(plan, 0, plan.effectiveSeed).empty(),
+                          "an ambush spot appeared at chance 0", seed);
+
+                    int prevBoss = 0;
+                    for (int k = 1; k <= N; ++k)
+                    {
+                        // The harness's own boss formula, the one the checks
+                        // above use - not BossChainIndex.
+                        int const bossAt = (2 * k * (wantChain - 1) + N) / (2 * N);
+                        std::set<size_t> segRun;
+                        for (int step = prevBoss + 1; step <= bossAt; ++step)
+                        {
+                            for (size_t at = 0; at < plan.blocks.size(); ++at)
+                            {
+                                if (reach[at].count(chainBlock[static_cast<size_t>(step - 1)]) != 0 &&
+                                    reach[at].count(chainBlock[static_cast<size_t>(step)]) != 0)
+                                {
+                                    segRun.insert(at);
+                                }
+                            }
+                        }
+
+                        int spotsHere = 0;
+                        for (AmbushSpot const& s : hot)
+                        {
+                            if (s.segment != k) continue;
+                            ++spotsHere;
+                            Check(s.blockIndex < plan.blocks.size(),
+                                  "an ambush spot indexes past the plan", seed);
+                            if (s.blockIndex >= plan.blocks.size()) continue;
+                            Check(plan.blocks[s.blockIndex].bx == s.bx &&
+                                  plan.blocks[s.blockIndex].by == s.by,
+                                  "an ambush spot's coordinates are not its own block's", seed);
+                            std::snprintf(msg, sizeof(msg),
+                                          "segment %d's ambush spot is not a corridor on one of that segment's spine runs", k);
+                            Check(segRun.count(s.blockIndex) != 0, msg, seed);
+                        }
+                        std::snprintf(msg, sizeof(msg),
+                                      "segment %d has %d ambush spot(s) at chance 100, want %d",
+                                      k, spotsHere, segRun.empty() ? 0 : 1);
+                        Check(spotsHere == (segRun.empty() ? 0 : 1), msg, seed);
+                        prevBoss = bossAt;
+                    }
+
+                    for (AmbushSpot const& s : hot)
+                    {
+                        std::snprintf(msg, sizeof(msg),
+                                      "an ambush spot carries segment %d, outside 1..%d", s.segment, N);
+                        Check(s.segment >= 1 && s.segment <= N, msg, seed);
+                    }
+                }
+
                 // Pockets: host is an ordinary spine room, one pocket per host,
                 // in the host's segment - and physically what the fields claim:
                 // with the HOST removed, a flood from the pocket reaches no
@@ -3060,6 +3155,143 @@ namespace
         return true;
     }
 
+    // Round B / B5: the ambush plan, pinned. It draws on its OWN stream
+    // (layoutSeed ^ PD_AMBUSH_SEED_MIX), which is exactly why it needs a pin
+    // of its own: the layout freeze, the two chain pins and the spawn-draw
+    // pins are blind to it by construction, so nothing else in this file
+    // would notice an ambush corridor moving.
+    //
+    // Chance 100 so the pin states WHERE the spots are rather than how the
+    // coin fell. Format: `bx,by,segment;` per spot, in segment order.
+    // Captured by RUNNING `pdblock --batch` and reading the "the ambush plan
+    // moved" message, never by reasoning about the value.
+    char const* const PD_AMBUSH_PLAN_PIN = "262,261,1;";
+
+    // The shipped default of V2.Ambush.Chance. Mirrored here rather than
+    // exported from the generator on purpose: the chance is an operator key
+    // read live from the .conf, not a layout input, so the generator must not
+    // own a default for it - the batch's yield line just needs to report
+    // against the number the server ships with.
+    int const PD_AMBUSH_DEFAULT_CHANCE_PCT = 50;
+
+    std::string AmbushPinString(std::vector<AmbushSpot> const& spots)
+    {
+        std::string got;
+        for (AmbushSpot const& s : spots)
+        {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%d,%d,%d;", s.bx, s.by, s.segment);
+            got += buf;
+        }
+        return got;
+    }
+
+    bool CheckAmbushPlanPinned(std::string& why)
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(MakeCfg(12345u, 5), &plan))
+        {
+            why = "the pinned ambush plan could not generate a layout";
+            return false;
+        }
+        std::string const got = AmbushPinString(BuildAmbushPlan(plan, 100, plan.effectiveSeed));
+        if (got.empty())
+        {
+            // A pin that reads "" would go on passing after the plan stopped
+            // producing anything at all - the one failure a string compare
+            // alone cannot tell from success.
+            why = "the pinned ambush plan is empty at chance 100";
+            return false;
+        }
+        if (got != PD_AMBUSH_PLAN_PIN)
+        {
+            why = "the ambush plan moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    // Round B / B3-B5: the doorway table the barrier seals, and the socket
+    // mirror it seals the other half through. Both used to live inside
+    // PDv2InstanceScript.cpp - a lambda and an anonymous namespace - where no
+    // harness could reach them (B3-B5 Task 2 review, Important 1). A kit
+    // change, a SOCKET_* renumber or a transposed row/col would have shipped a
+    // portcullis standing in a wall; now it turns this batch red.
+    //
+    // Not "captured by running": this table is a fixed geometric fact of the
+    // 8x8 cell block, so it is written out by hand from the kit's own layout
+    // and the two implementations have to agree with IT, not the other way
+    // round.
+    bool CheckLaneCellsPinned(std::string& why)
+    {
+        struct Row
+        {
+            unsigned bit;
+            unsigned opposite;
+            int      cells[2][2];   // (row, col) x 2
+            char const* name;
+        };
+        Row const rows[4] = {
+            { SOCKET_N, SOCKET_S, { { 0, 3 }, { 0, 4 } }, "N" },
+            { SOCKET_S, SOCKET_N, { { 7, 3 }, { 7, 4 } }, "S" },
+            { SOCKET_W, SOCKET_E, { { 3, 0 }, { 4, 0 } }, "W" },
+            { SOCKET_E, SOCKET_W, { { 3, 7 }, { 4, 7 } }, "E" },
+        };
+        char buf[192];
+        for (Row const& r : rows)
+        {
+            int got[2][2] = { { -1, -1 }, { -1, -1 } };
+            LaneCellsForSocket(r.bit, got);
+            for (int i = 0; i < 2; ++i)
+            {
+                if (got[i][0] != r.cells[i][0] || got[i][1] != r.cells[i][1])
+                {
+                    std::snprintf(buf, sizeof(buf),
+                                  "lane cell %d of socket %s is (%d,%d), want (%d,%d)",
+                                  i, r.name, got[i][0], got[i][1], r.cells[i][0], r.cells[i][1]);
+                    why = buf;
+                    return false;
+                }
+            }
+            if (OppositeSocket(r.bit) != r.opposite)
+            {
+                std::snprintf(buf, sizeof(buf), "OppositeSocket(%s) is %u, want %u",
+                              r.name, OppositeSocket(r.bit), r.opposite);
+                why = buf;
+                return false;
+            }
+            if (OppositeSocket(OppositeSocket(r.bit)) != r.bit)
+            {
+                std::snprintf(buf, sizeof(buf), "OppositeSocket does not round trip on %s", r.name);
+                why = buf;
+                return false;
+            }
+            // The mirror's lane cells sit on the FACING edge, which is what
+            // makes the two halves of a sealed doorway one lane: the pinned
+            // axis flips from 0 to last (or back) and the free axis is
+            // untouched.
+            int opp[2][2] = { { -1, -1 }, { -1, -1 } };
+            LaneCellsForSocket(OppositeSocket(r.bit), opp);
+            bool const vertical = (r.bit == SOCKET_N || r.bit == SOCKET_S);
+            for (int i = 0; i < 2; ++i)
+            {
+                int const pinnedAxis = vertical ? opp[i][0] : opp[i][1];
+                int const freeAxis = vertical ? opp[i][1] : opp[i][0];
+                int const wantPinned = (vertical ? r.cells[i][0] : r.cells[i][1]) == 0
+                                     ? PD_CELLS_PER_BLOCK - 1 : 0;
+                if (pinnedAxis != wantPinned || freeAxis != (vertical ? r.cells[i][1] : r.cells[i][0]))
+                {
+                    std::snprintf(buf, sizeof(buf),
+                                  "socket %s's mirror lane cell %d is (%d,%d) - not the facing edge",
+                                  r.name, i, opp[i][0], opp[i][1]);
+                    why = buf;
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
     int RunDecorBatch(int count)
     {
         // Rooms is the one config axis that changes what a plan is made of:
@@ -3808,6 +4040,20 @@ namespace
             bool const ok = CheckLoopChainPinned(why);
             Check(ok, why.c_str(), 12348u);
         }
+        {
+            // B5's own stream: no other pin in this file can see it move.
+            // Same two-statements shape for the same reason.
+            std::string why;
+            bool const ok = CheckAmbushPlanPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // Seed-free: the doorway table and the socket mirror are geometry,
+            // not a draw.
+            std::string why;
+            bool const ok = CheckLaneCellsPinned(why);
+            Check(ok, why.empty() ? "the lane-cell table moved" : why.c_str(), 0);
+        }
         // A tenth of the batch, over thirteen (rooms, bossRooms, branches,
         // detourChancePct) combos: the spine properties are STRUCTURAL and
         // hold per seed, so the sample size only decides how much of the draw
@@ -3876,6 +4122,11 @@ namespace
         // geometry has to fit as well - so the summary reports what the sample
         // actually produced rather than what the config asked for.
         int loopRoomsSeen = 0, segmentsSeen = 0, loopLayouts = 0;
+        // B5 yield, on the same denominator: how many boss segments across the
+        // batch drew an ambush at the shipped default (V2.Ambush.Chance 50).
+        // A chance, not a quota - and a segment with no spine corridor at all
+        // cannot carry one however the coin falls.
+        int ambushesSeen = 0;
         bool sawLayout = false;
 
         for (int i = 0; i < count; ++i)
@@ -3996,17 +4247,28 @@ namespace
             }
             loopRoomsSeen += loopsHere;
             segmentsSeen += std::max(1, cfg.bossRooms);
+            ambushesSeen += static_cast<int>(
+                BuildAmbushPlan(plan, PD_AMBUSH_DEFAULT_CHANCE_PCT, plan.effectiveSeed).size());
             ++loopLayouts;
             minPockets = (!sawLayout || pocketsHere < minPockets) ? pocketsHere : minPockets;
             maxPockets = (pocketsHere > maxPockets) ? pocketsHere : maxPockets;
             sawLayout = true;
         }
 
+        // Statistical over the whole sample, exactly like sawPocket and
+        // sawDetour above: at chance 50 over the mandated 500 seeds a zero
+        // here means the draw is dead code, not that the coin was unlucky.
+        // Guarded by sawLayout so `--batch 0` says nothing rather than lying.
+        Check(!sawLayout || ambushesSeen > 0,
+              "no seed in the sample drew an ambush at the default chance - the ambush draw is dead code", 0);
+
         if (longestPath) std::printf("longest room-to-room path: %d cells\n", longestPath);
         std::printf("blocks per layout: %d..%d\n", minBlocks, maxBlocks);
         std::printf("pockets per layout: %d..%d\n", minPockets, maxPockets);
         std::printf("loop rooms: %d of %d segments carry one (%d layouts)\n",
                     loopRoomsSeen, segmentsSeen, loopLayouts);
+        std::printf("ambushes: %d of %d segments at the default chance %d%%\n",
+                    ambushesSeen, segmentsSeen, PD_AMBUSH_DEFAULT_CHANCE_PCT);
         std::printf("largest manifest  : %d bytes (budget 2048)\n", static_cast<int>(maxManifest));
         std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
         std::printf("%s\n", g_failures == 0 ? "ALL CHECKS PASS" : "FAILURES");
