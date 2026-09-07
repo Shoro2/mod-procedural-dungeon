@@ -27,6 +27,7 @@
 #include "generator/PDv2WalkGrid.h"
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
 
 class Creature;
@@ -190,6 +191,24 @@ namespace PDungeon
         // whatever landed the blow, which may be a pet or nothing at all.
         void OnMobDied(Creature* creature, Unit* killer);
 
+        // Round B / B1. A player died on this map: ZoneScript hook, reached
+        // through GetInstanceScript() from Unit::setDeathState - before any
+        // corpse or ghost exists. Only records the death; the resurrect runs
+        // on the 1 Hz tick (RespawnPending), never inside the death itself.
+        void OnUnitDeath(Unit* unit) override;
+
+        // The player clicked an altar: binds the run's respawn point to it.
+        // False for a GameObject that is not one of this instance's altars.
+        bool BindAltar(Player* player, ObjectGuid const& altarGuid);
+
+        // True while a death is waiting for its tick; the release veto in
+        // PDClientLink reads it so a quick 'release spirit' cannot beat the
+        // tick to the graveyard.
+        bool HasPendingRespawn(ObjectGuid const& playerGuid) const
+        {
+            return _pendingRespawn.find(playerGuid) != _pendingRespawn.end();
+        }
+
     private:
         void SpawnFromPlan(BlockPlan const& plan);
 
@@ -226,6 +245,22 @@ namespace PDungeon
         // reward, not a look: deliberately NOT behind Decor.Enable. Shares
         // the decor GUID list so one teardown owns every summoned object.
         void SpawnDeadEndChests(BlockPlan const& plan);
+
+        // Round B / B1. One altar per altar room (IsAltarRoom), in chain
+        // order, on a walkable cell beside the room's entry anchor. The
+        // respawn spot itself is the entry anchor. Same guard and teardown
+        // as the decor.
+        struct Altar
+        {
+            int chainIndex = 0;
+            float x = 0.0f;         // the respawn spot (entry anchor), world
+            float y = 0.0f;
+            float z = 0.0f;
+            ObjectGuid guid;        // the altar GameObject; empty when none could be seated
+        };
+        void SpawnAltars(BlockPlan const& plan);
+        void RespawnPending();
+        Altar const* RespawnAltarFor(ObjectGuid const& playerGuid) const;
 
         // Summons ONE dungeon mob: the floor plane, the disabled gravity, the
         // tag copied off `proto`, the run's affix auras and their spawn-time
@@ -264,6 +299,10 @@ namespace PDungeon
         bool     _runDirty = false;
         uint64   _leaderGuid = 0;               // the character that opened this run
         std::vector<uint16> _roomAlive;         // per room, index-aligned with the spawn draw
+        std::vector<Altar> _altars;                              // chain order; [0] = the entrance's
+        std::unordered_map<ObjectGuid, size_t> _altarByGuid;     // altar GO -> index into _altars
+        std::unordered_map<ObjectGuid, size_t> _boundAltar;      // player -> index into _altars
+        std::unordered_map<ObjectGuid, uint32> _pendingRespawn;  // player -> getMSTime() at death
         std::vector<ObjectGuid> _voidZones;     // friendly ground-hazard carriers; pruned each tick
         uint32   _fallCheckTimer = 0;
         float    _entranceX = 0.0f;

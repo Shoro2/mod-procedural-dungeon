@@ -49,8 +49,8 @@
 -- it and then fail to also re-run).
 --
 -- The DELETE below names every entry individually rather than a BETWEEN
--- range: this file's rows are not contiguous (910048-910049, 910058-910059,
--- 910067-910069, 910078-910099 are unused gaps in the reserved block), and
+-- range: this file's rows are not contiguous (910048-910049, 910059,
+-- 910067-910069, 910077-910099 are unused gaps in the reserved block), and
 -- an explicit list can never claim a gap id some later addition might use
 -- for something else. Same discipline as mod_pdungeon_prop_displays.sql.
 --
@@ -133,6 +133,7 @@
 DELETE FROM `gameobject_template` WHERE `entry` IN (
     910040, 910041, 910042, 910043, 910044, 910045, 910046, 910047,
     910050, 910051, 910052, 910053, 910054, 910055, 910056, 910057,
+    910058,
     910060, 910061, 910062, 910063, 910064, 910065, 910066,
     910070, 910071, 910072, 910073, 910074, 910075, 910076
 );
@@ -174,4 +175,10 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 (910073, 5, 7311, 'PD Skeleton',            1.0,  0, 0, ''),
 (910074, 5, 7312, 'PD Skeleton Alt',        1.0,  0, 0, ''),
 (910075, 5,  293, 'PD Bone Pile',           1.0,  0, 0, ''),
-(910076, 5, 7225, 'PD Coffin',              1.0,  0, 0, '');
+(910076, 5, 7225, 'PD Coffin',              1.0,  0, 0, ''),
+-- Round B / B1: the respawn altar. type 10 GOOBER so OnGossipHello fires on
+-- click (GameObject::Use, no GO_FLAG_NOT_SELECTABLE); display 7355 Altar01.m2
+-- resolves in GameObjectDisplayInfo.dbc, has a collision model in
+-- GameObjectModels.dtree, and is the display of the stock 'WotLK Light Altar'
+-- (gameobject_template 190741) - the three-way check this file's header asks for.
+(910058, 10, 7355, 'Altar of Return', 1, 0, 0, 'go_pdungeon_altar');

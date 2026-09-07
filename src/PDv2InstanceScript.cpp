@@ -37,6 +37,7 @@
 #include "TemporarySummon.h"
 #include "WorldSession.h"
 
+#include <algorithm>
 #include <cmath>
 
 namespace PDungeon
@@ -182,6 +183,9 @@ namespace PDungeon
             // it. Ambient life, same guard, own GUID list and own teardown.
             SpawnCritters(*plan, decorPositions);
             SpawnDeadEndChests(*plan);
+            // Needs the walk grid EnsureWalkGrid built above: an altar is only
+            // ever seated on a cell that grid calls floor.
+            SpawnAltars(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -565,6 +569,15 @@ namespace PDungeon
             }
         }
         _decorGuids.clear();
+
+        // The altars ARE decor GUIDs, so the loop above already deleted the
+        // objects; what is left here is the run's memory of them. Cleared
+        // with everything else: a rebuilt dungeon must not hand a player a
+        // respawn point in a room that no longer exists.
+        _altars.clear();
+        _altarByGuid.clear();
+        _boundAltar.clear();
+        _pendingRespawn.clear();
 
         // Critters are creatures, not GameObjects: DespawnOrUnsummon is their
         // teardown path, the same one _spawnedGuids uses above, not the
@@ -1171,43 +1184,222 @@ namespace PDungeon
 
     void PDv2InstanceScript::SpawnDeadEndChests(BlockPlan const& plan)
     {
-        // One Shifting Cache (GO_CHEST, native loot table) on the junction
-        // square of every dead-end stub - the stub's whole reason to exist.
-        // NOT gated on Decor.Enable: the chest is a reward, not a look, and
-        // the dungeon must not lose loot to a cosmetics switch. Torn down by
-        // the same DespawnAll as everything else this instance stands up.
-        uint32 placed = 0;
+        // One Shifting Cache (GO_CHEST, native loot table) per dead-end stub,
+        // on its junction square - the stub's whole reason to exist - and per
+        // loop room (B0b), on the kit's chest anchor: a loop is a detour off
+        // the straight run, so it has to pay for the walk the same way a stub
+        // does. NOT gated on Decor.Enable: the chest is a reward, not a look,
+        // and the dungeon must not lose loot to a cosmetics switch. Torn down
+        // by the same DespawnAll as everything else this instance stands up.
+        uint32 stubs = 0;
+        uint32 loops = 0;
         for (PlacedBlock const& b : plan.blocks)
         {
-            if (b.role != BlockRole::CorridorDeadEnd)
+            // Exclusive by construction: the planner validates that a loop
+            // room is a Room block (PDBlockPlan.cpp, "a loop room carries the
+            // wrong role or fields"), never a corridor.
+            bool const isStub = b.role == BlockRole::CorridorDeadEnd;
+            bool const isLoopRoom = b.detourOf >= 0;
+            if (!isStub && !isLoopRoom)
             {
                 continue;
             }
+
             // The kit pins the stub's chest anchor to the block centre (the
             // junction square), so the position is a constant of the format
-            // rather than a lookup that could go stale.
+            // rather than a lookup that could go stale. A loop room is a room
+            // chunk and publishes a real chest anchor instead - one the kit
+            // put clear of the walls and of the socket track.
+            double u = PD_BLOCK_SIZE_YD / 2.0;
+            double v = PD_BLOCK_SIZE_YD / 2.0;
+            if (isLoopRoom)
+            {
+                RoomAnchors const* anchors = sPDv2Mgr->RoomAnchorsFor(b.chunkId);
+                if (anchors && anchors->hasChest)
+                {
+                    u = anchors->chest.u;
+                    v = anchors->chest.v;
+                }
+                else
+                {
+                    // The block centre is walkable in every room variant, so
+                    // the reward is still reachable - it just stands on the
+                    // track instead of beside it.
+                    LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} publishes no chest anchor - "
+                                     "the loop room's cache stands on the block centre",
+                             instance->GetInstanceId(), b.chunkId);
+                }
+            }
+
             float x = 0.0f, y = 0.0f, z = 0.0f;
-            sPDv2Mgr->BlockToWorld(b.bx, b.by,
-                                   PD_BLOCK_SIZE_YD / 2.0f, PD_BLOCK_SIZE_YD / 2.0f,
-                                   x, y, z);
+            sPDv2Mgr->BlockToWorld(b.bx, b.by, u, v, x, y, z);
             GameObject* go = instance->SummonGameObject(
                 GO_CHEST, x, y, z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
             if (!go)
             {
-                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the "
-                                  "dead-end chest (missing gameobject_template "
-                                  "{}?)",
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon a cache "
+                                  "(missing gameobject_template {}?)",
                           instance->GetInstanceId(), uint32(GO_CHEST));
                 continue;
             }
             _decorGuids.push_back(go->GetGUID());
-            ++placed;
+            if (isStub)
+            {
+                ++stubs;
+            }
+            else
+            {
+                ++loops;
+            }
         }
-        if (placed)
+        if (stubs || loops)
         {
-            LOG_INFO(PD_LOG, "PDv2: instance {} placed {} dead-end chest(s)",
-                     instance->GetInstanceId(), placed);
+            LOG_INFO(PD_LOG, "PDv2: instance {} placed {} dead-end chest(s) and "
+                             "{} loop-room chest(s)",
+                     instance->GetInstanceId(), stubs, loops);
         }
+    }
+
+    void PDv2InstanceScript::SpawnAltars(BlockPlan const& plan)
+    {
+        _altars.clear();
+        _altarByGuid.clear();
+        _boundAltar.clear();
+        _pendingRespawn.clear();
+
+        std::vector<PlacedBlock const*> rooms;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (IsAltarRoom(b))
+            {
+                rooms.push_back(&b);
+            }
+        }
+        // Chain order, so _altars[0] is always the entrance's: an unbound
+        // player respawns at the front of the dungeon, not at whichever room
+        // the plan happened to emit first.
+        std::sort(rooms.begin(), rooms.end(), [](PlacedBlock const* a, PlacedBlock const* b)
+        {
+            return a->chainIndex < b->chainIndex;
+        });
+
+        WalkGrid const* grid = GetWalkGrid();
+        uint32 placed = 0;
+        for (PlacedBlock const* b : rooms)
+        {
+            RoomAnchors const* anchors = sPDv2Mgr->RoomAnchorsFor(b->chunkId);
+            if (!anchors || !anchors->hasEntry)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} publishes no entry anchor - "
+                                 "no altar in chain room {}",
+                         instance->GetInstanceId(), b->chunkId, b->chainIndex);
+                continue;
+            }
+
+            Altar altar;
+            altar.chainIndex = b->chainIndex;
+            sPDv2Mgr->BlockToWorld(b->bx, b->by, anchors->entry.u, anchors->entry.v,
+                                   altar.x, altar.y, altar.z);
+
+            // The altar stands one cell beside the entry anchor, off the socket
+            // track (the block's centre row and column), on a cell the walk
+            // grid calls floor - checked in WORLD coordinates through the same
+            // conversion SplitOnDeath trusts, so no axis assumption is made.
+            int const entryRow = static_cast<int>(anchors->entry.u / PD_CELL_SIZE_YD);
+            int const entryCol = static_cast<int>(anchors->entry.v / PD_CELL_SIZE_YD);
+            int const tries[4][2] = { { -1, 0 }, { 0, -1 }, { 0, 1 }, { 1, 0 } };   // N, W, E, S
+            bool seated = false;
+            for (auto const& t : tries)
+            {
+                int const row = entryRow + t[0];
+                int const col = entryCol + t[1];
+                if (row < 0 || col < 0 || row >= PD_CELLS_PER_BLOCK || col >= PD_CELLS_PER_BLOCK)
+                {
+                    continue;
+                }
+                if (row == PD_CELLS_PER_BLOCK / 2 || col == PD_CELLS_PER_BLOCK / 2)
+                {
+                    continue;       // the socket track: the one line every player walks
+                }
+                float ax = 0.0f, ay = 0.0f, az = 0.0f;
+                sPDv2Mgr->BlockToWorld(b->bx, b->by, (row + 0.5) * PD_CELL_SIZE_YD,
+                                       (col + 0.5) * PD_CELL_SIZE_YD, ax, ay, az);
+                if (grid)
+                {
+                    int gcx = 0, gcy = 0;
+                    WorldToCell(ax, ay, gcx, gcy);
+                    GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                    if (!grid->At(cell.x, cell.y))
+                    {
+                        continue;
+                    }
+                }
+                float const facing = std::atan2(altar.y - ay, altar.x - ax);
+                GameObject* go = instance->SummonGameObject(GO_ALTAR, ax, ay, az, facing,
+                                                            0.0f, 0.0f, 0.0f, 0.0f, 0);
+                if (!go)
+                {
+                    LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the altar "
+                                      "(missing gameobject_template {}?)",
+                              instance->GetInstanceId(), uint32(GO_ALTAR));
+                    break;
+                }
+                _decorGuids.push_back(go->GetGUID());
+                altar.guid = go->GetGUID();
+                _altarByGuid[go->GetGUID()] = _altars.size();
+                seated = true;
+                ++placed;
+                break;
+            }
+            if (!seated)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} found no cell for the altar in chain room {} "
+                                 "- the room keeps its respawn spot without an altar",
+                         instance->GetInstanceId(), b->chainIndex);
+            }
+            _altars.push_back(altar);
+        }
+        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} altar(s) in {} altar room(s)",
+                 instance->GetInstanceId(), placed, uint32(_altars.size()));
+    }
+
+    bool PDv2InstanceScript::BindAltar(Player* player, ObjectGuid const& altarGuid)
+    {
+        auto const it = _altarByGuid.find(altarGuid);
+        if (!player || it == _altarByGuid.end())
+        {
+            return false;
+        }
+        auto const bound = _boundAltar.find(player->GetGUID());
+        if (bound != _boundAltar.end() && bound->second == it->second)
+        {
+            sPDv2UILink->SendNotice(player, "This altar is already yours.");
+            return true;
+        }
+        _boundAltar[player->GetGUID()] = it->second;
+        sPDv2UILink->SendNotice(player, "Altar bound. If you fall, you return here.");
+        LOG_DEBUG(PD_LOG, "PDv2: {} bound the altar of chain room {}",
+                  player->GetName(), _altars[it->second].chainIndex);
+        return true;
+    }
+
+    PDv2InstanceScript::Altar const* PDv2InstanceScript::RespawnAltarFor(ObjectGuid const& playerGuid) const
+    {
+        auto const bound = _boundAltar.find(playerGuid);
+        if (bound != _boundAltar.end() && bound->second < _altars.size())
+        {
+            return &_altars[bound->second];
+        }
+        // Nothing bound yet (or a binding the rebuild outlived): the entrance
+        // room's altar, which is _altars[0] by the chain sort above.
+        return _altars.empty() ? nullptr : &_altars[0];
+    }
+
+    void PDv2InstanceScript::OnUnitDeath(Unit* /*unit*/)
+    {
+        // Task 3 fills this in: record the death in _pendingRespawn and let
+        // the 1 Hz tick resurrect. Empty until then, deliberately - the core
+        // is still inside Unit::Kill here and nothing may resurrect from it.
     }
 
     void PDv2InstanceScript::CatchFallers()

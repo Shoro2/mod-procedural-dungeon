@@ -36,7 +36,11 @@ namespace PDungeon
         GO_CHEST         = 910030,
         GO_SHRINE        = 910031,
         GO_EXIT_PORTAL   = 910032,
-        GO_ENTRANCE_DECO = 910033
+        GO_ENTRANCE_DECO = 910033,
+        // Round B (2026-09-03): gameplay objects in the 910050+ band that
+        // mod_pdungeon_templates_fix.sql owns. 910059's row lands with B3.
+        GO_ALTAR         = 910058,  // B1: respawn altar, type 10, display 7355
+        GO_BARRIER       = 910059   // B3: boss-room barrier
     };
 
     enum PDCreatureEntries : uint32
