@@ -18,6 +18,9 @@
 #ifndef MOD_PDUNGEON_V2_SPAWN_ANCHORS_H
 #define MOD_PDUNGEON_V2_SPAWN_ANCHORS_H
 
+#include "PDv2WorldMath.h"
+
+#include <cmath>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -31,6 +34,12 @@
 // chest (chest) and B2's spawn placement (boss, spawns) need. A scanner like
 // its sibling, for the same reason: one generated writer, no JSON dependency.
 // Engine-free: the harness proves it against kit_meta.json.
+//
+// Round B / B2 added PlanSpawnPoints at the bottom: given one room's anchors
+// and the roles of the picks that room drew, WHERE each pick stands. Pure
+// geometry - it draws nothing, so it can never move a layout - and it lives
+// here rather than in the instance script so the harness can pin it and sweep
+// every chunk the kit ships.
 namespace PDungeon
 {
     struct SpawnAnchor
@@ -231,6 +240,64 @@ namespace PDungeon
             p = json.find('{', close);
         }
         return true;
+    }
+
+    // One planned stand, block-local (FLPD-BLOCK-1). The v2 prefix is not
+    // decoration: `PDungeon::SpawnPoint` and `PDungeon::PlannedSpawn` are BOTH
+    // taken by the v1 tile generator (PDGenTypes.h, PDWorldBuilder.h), and the
+    // engine glue includes those headers beside this one, so either plain name
+    // is a redefinition that only the worldserver build would catch.
+    struct PDv2SpawnPoint
+    {
+        double u = 0.0;
+        double v = 0.0;
+    };
+
+    int const SPAWN_ROLE_MELEE = 0;
+    int const SPAWN_ROLE_CASTER = 1;
+    int const SPAWN_ROLE_BOSS = 2;
+
+    // Where the picks of one room stand (Round B / B2). Boss room: the first
+    // pick IS the boss (PDv2PackMgr's contract) and takes the boss anchor.
+    // Every other pick takes the first unused spawn anchor whose kit role
+    // matches (melee/caster; boss rooms publish "elite", which matches
+    // anything), then the first unused anchor of any role, then - overflow
+    // only, reachable by raising the conf - the legacy 12 yd circle around
+    // the block centre, angle by pick index. Deterministic, no draw.
+    inline std::vector<PDv2SpawnPoint> PlanSpawnPoints(RoomAnchors const& a, bool bossRoom,
+                                                       std::vector<int> const& roles)
+    {
+        std::vector<PDv2SpawnPoint> out;
+        std::vector<bool> used(a.spawns.size(), false);
+        int const count = static_cast<int>(roles.size());
+        for (int i = 0; i < count; ++i)
+        {
+            if (i == 0 && bossRoom && a.hasBoss)
+            {
+                out.push_back({ a.boss.u, a.boss.v });
+                continue;
+            }
+            char const* want = roles[static_cast<size_t>(i)] == SPAWN_ROLE_CASTER ? "caster" : "melee";
+            int pick = -1;
+            for (size_t k = 0; k < a.spawns.size() && pick < 0; ++k)
+            {
+                if (!used[k] && (a.spawns[k].role == want || a.spawns[k].role == "elite")) pick = static_cast<int>(k);
+            }
+            for (size_t k = 0; k < a.spawns.size() && pick < 0; ++k)
+            {
+                if (!used[k]) pick = static_cast<int>(k);
+            }
+            if (pick >= 0)
+            {
+                used[static_cast<size_t>(pick)] = true;
+                out.push_back({ a.spawns[static_cast<size_t>(pick)].u, a.spawns[static_cast<size_t>(pick)].v });
+                continue;
+            }
+            double const mid = PD_BLOCK_SIZE_YD / 2.0;
+            double const angle = 2.0 * 3.14159265358979 * i / count;
+            out.push_back({ mid + std::cos(angle) * 12.0, mid + std::sin(angle) * 12.0 });
+        }
+        return out;
     }
 }
 

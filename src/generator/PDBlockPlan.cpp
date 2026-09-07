@@ -865,12 +865,15 @@ namespace PDungeon
     int AltCountFor(BlockRole role)
     {
         // Mirrors ALT_COUNT in 48_gen_t1_blockkit.py: rooms and straight
-        // corridors ship a second look (blob outline / S-curve), everything
-        // else has exactly one. The harness proves every combination against
-        // the shipped chunk-meta SQL, which is what keeps this table honest.
+        // corridors ship a second look (blob outline / S-curve), the ordinary
+        // room a third one on top, everything else has exactly one. The
+        // harness proves every combination against the shipped chunk-meta
+        // SQL, which is what keeps this table honest.
         switch (role)
         {
+            // Round B / B2: the 33 yd platform (alt 2) is Room-only.
             case BlockRole::Room:
+                return 3;
             case BlockRole::RoomEntrance:
             case BlockRole::RoomBoss:
             case BlockRole::CorridorStraight:

@@ -1318,24 +1318,28 @@ namespace
     // regenerates a different dungeon.
     void RunLayoutFreezeCheck()
     {
-        // Re-pinned 2026-09-03 for B0b's loop rooms: one Chance per boss
-        // segment now enters the stream BEFORE any chain step, so every
-        // layout moves whatever the draws then decide. PD_LAYOUT_VERSION
-        // stays 3 - nothing is deployed. The pin before this one was
-        // 383 / E;0eeda3ad (B0b task 1, the shortcut draw withdrawn), the B0
-        // pin 363 / E;a5019024, the v2 pin 571 / E;85fc0e4c, the v1 pin
-        // 551 / E;13df5510.
+        // Re-pinned for B2's third Room look: AltCountFor(Room) is 3, so the
+        // room's alt draw maps one unchanged raw value onto 0..2 instead of
+        // 0..1 and this layout's two spine rooms became alt 2 (chunk 4011).
+        // The manifest keeps its LENGTH - a four-digit id either way - and
+        // only the CRC moves, which is exactly why the trailer is pinned
+        // beside the byte count. PD_LAYOUT_VERSION stays 3 (spec decision 10;
+        // nothing is deployed). The pin before this one was 403 / E;c1478940
+        // (B0b's loop rooms: one Chance per boss segment before any chain
+        // step), before that 383 / E;0eeda3ad (B0b task 1, the shortcut draw
+        // withdrawn), the B0 pin 363 / E;a5019024, the v2 pin
+        // 571 / E;85fc0e4c, the v1 pin 551 / E;13df5510.
         uint32_t const PINNED_SEED = 12345u;
         int const PINNED_ROOMS = 5;
         size_t const PINNED_BYTES = 403;
-        char const* const PINNED_TRAILER = "E;c1478940\n";
+        char const* const PINNED_TRAILER = "E;6576f540\n";
         // The failure message names the pin this one REPLACED, so whoever
         // reads it can tell a fresh move from the B0b re-roll. Kept as
         // constants beside the live pin: the message used to pair the current
         // byte count with the previous trailer, which read as a third value
         // that never existed.
-        size_t const PREVIOUS_BYTES = 383;
-        char const* const PREVIOUS_TRAILER = "E;0eeda3ad";
+        size_t const PREVIOUS_BYTES = 403;
+        char const* const PREVIOUS_TRAILER = "E;c1478940";
 
         BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
         cfg.bossRooms = 1;
@@ -1374,9 +1378,10 @@ namespace
     // Structure first - every (role, mask, alt) the planner can emit must have
     // a walk mask in the shipped SQL, or a dungeon would generate a chunkId the
     // server cannot path over (the "0 masks = mobs stand still" failure, but
-    // per block). Then non-vacuity over real seeds: both alternates of a
-    // family and at least one dead end must actually OCCUR, or the draws are
-    // dead code the batch quietly stopped exercising.
+    // per block). Then non-vacuity over real seeds: every alternate a family
+    // ships (the Room's third one included) and at least one dead end must
+    // actually OCCUR, or the draws are dead code the batch quietly stopped
+    // exercising.
     void RunPhase2Checks(int seeds)
     {
         // Rooms ship all 15 masks; straight corridors the two facing pairs;
@@ -1387,10 +1392,14 @@ namespace
         for (int base : themeBases)
         for (unsigned m = 1; m <= 15; ++m)
         {
-            for (int alt = 0; alt < AltCountFor(BlockRole::Room); ++alt)
+            // Round B / B2: each ROLE is bounded by its OWN alt count, not by
+            // the room's. The three no longer agree - the 33 yd platform is
+            // Room-only - and sweeping the entrance and the boss up to the
+            // room's count would demand ids the kit never ships.
+            for (BlockRole role : { BlockRole::Room, BlockRole::RoomEntrance,
+                                    BlockRole::RoomBoss })
             {
-                for (BlockRole role : { BlockRole::Room, BlockRole::RoomEntrance,
-                                        BlockRole::RoomBoss })
+                for (int alt = 0; alt < AltCountFor(role); ++alt)
                 {
                     int const id = base + alt * 1000 + static_cast<int>(role) * 100
                                  + static_cast<int>(m);
@@ -1423,6 +1432,7 @@ namespace
         }
 
         bool sawAltRoom = false;
+        bool sawAlt2Room = false;
         bool sawAltStraight = false;
         bool sawDeadEnd = false;
         for (int i = 0; i < seeds; ++i)
@@ -1450,6 +1460,11 @@ namespace
                                         b.role == BlockRole::RoomEntrance ||
                                         b.role == BlockRole::RoomBoss;
                     if (isRoom) sawAltRoom = true;
+                    // The third look is Room-only, so it needs its own
+                    // witness: sawAltRoom is already true from an alt-1
+                    // entrance or boss and would hide an alt-2 draw that
+                    // never happens.
+                    if (b.role == BlockRole::Room && b.alt == 2) sawAlt2Room = true;
                     if (b.role == BlockRole::CorridorStraight) sawAltStraight = true;
                 }
             }
@@ -1460,6 +1475,7 @@ namespace
                           "stub pass is dead code", 0);
         Check(sawAltRoom, "no seed produced an alt-1 room - the alternate draw "
                           "is dead code", 0);
+        Check(sawAlt2Room, "no seed produced an alt-2 (33 yd) room", 0);
         Check(sawAltStraight, "no seed produced an S-curve corridor", 0);
     }
 
@@ -2991,20 +3007,24 @@ namespace
     // change, that is the change being noticed, not the pin being wrong -
     // update it in the same commit as the draw-order comment.
     //
-    // Re-captured 2026-09-03 for B0b's loop rooms: the per-segment detour
-    // Chance draws land before the first chain step, so the seed-12345 layout
-    // moved again and both pins with it. (Earlier that day, B0b task 1: the
-    // pocket's forward-cut draw was withdrawn. 2026-09-02, Round B: the chain
-    // generator replaced scatter + MST.)
+    // Re-captured for B2's third Room look: the seed-12345 layout's two spine
+    // rooms are now alt 2 (chunk 4011, the 33 yd platform), so their walk
+    // masks - and with them the classes both plans place on - changed, and
+    // the single decor/critter stream then shifts every LATER block too, which
+    // is why blocks whose chunkId did not move appear in the diff as well.
+    // (2026-09-03, B0b's loop rooms: the per-segment detour Chance draws land
+    // before the first chain step. Earlier that day, B0b task 1: the pocket's
+    // forward-cut draw was withdrawn. 2026-09-02, Round B: the chain generator
+    // replaced scatter + MST.)
     //
     // CAPTURE PROCEDURE, every time: run `pdblock --decor-batch` (seed 12345,
     // 5 rooms, the shipped fixtures) and paste the value out of the "plan
     // moved" failure message - never by reasoning about what it should be -
     // and only once every change that can move these streams has landed.
     char const* const PD_DECOR_PLAN_PIN =
-        "258,257,1,910020,18.333333,12.500000,3.141593;258,257,4,910050,56.666666,20.833333,0.000000;258,257,5,910051,10.000000,20.833333,3.141593;258,257,5,910051,56.666666,29.166666,0.000000;258,257,6,910054,29.166666,10.000000,4.712389;258,257,7,910055,10.000000,45.833333,3.141593;258,257,10,910060,18.333333,10.000000,3.926991;258,257,10,910060,48.333333,56.666666,0.785398;258,257,11,910062,10.000000,56.666666,2.356194;258,257,11,910062,56.666666,10.000000,5.497787;259,258,3,910020,45.833333,18.333333,4.712389;258,259,9,910052,26.666666,45.833333,3.141593;258,259,12,910063,26.666666,26.666666,3.926991;259,259,1,910020,56.666666,29.166666,0.000000;259,259,4,910050,45.833333,56.666666,1.570796;259,259,8,910056,45.833333,10.000000,4.712389;259,259,13,910070,29.166666,45.833333,0.000000;259,259,13,910070,45.833333,20.833333,0.000000;260,259,9,910052,26.666666,45.833333,3.141593;261,259,9,910052,26.666666,4.166667,3.141593;258,260,3,910020,4.166667,26.666666,4.712389;260,260,9,910052,26.666666,54.166666,3.141593;260,260,12,910063,26.666666,26.666666,3.926991;261,260,1,910020,56.666666,45.833333,0.000000;261,260,1,910020,20.833333,10.000000,4.712389;261,260,1,910020,10.000000,20.833333,3.141593;261,260,4,910050,26.666666,62.500000,3.141593;261,260,5,910051,56.666666,12.500000,0.000000;261,260,7,910055,10.000000,45.833333,3.141593;261,260,8,910056,4.166667,26.666666,4.712389;261,260,11,910062,10.000000,56.666666,2.356194;261,260,13,910070,29.166666,20.833333,0.000000;262,260,3,910020,26.666666,4.166667,3.141593;262,260,9,910052,62.500000,26.666666,4.712389;258,261,1,910020,29.166666,10.000000,4.712389;258,261,1,910020,18.333333,12.500000,3.141593;258,261,1,910020,29.166666,56.666666,1.570796;258,261,5,910051,56.666666,29.166666,0.000000;258,261,5,910051,10.000000,54.166666,3.141593;258,261,6,910054,45.833333,56.666666,1.570796;258,261,7,910055,20.833333,56.666666,1.570796;258,261,10,910060,10.000000,56.666666,2.356194;258,261,11,910062,48.333333,56.666666,0.785398;258,261,11,910062,56.666666,10.000000,5.497787;258,261,13,910070,20.833333,20.833333,0.000000;258,261,13,910070,45.833333,29.166666,0.000000;258,261,13,910070,20.833333,45.833333,0.000000;262,261,3,910020,45.833333,31.666666,1.570796;260,262,1,910020,4.166667,26.666666,4.712389;260,262,1,910020,10.000000,54.166666,3.141593;260,262,1,910020,10.000000,12.500000,3.141593;260,262,6,910054,10.000000,20.833333,3.141593;260,262,7,910055,29.166666,10.000000,4.712389;260,262,8,910056,20.833333,56.666666,1.570796;260,262,10,910060,56.666666,10.000000,5.497787;261,262,3,910020,26.666666,45.833333,3.141593;261,262,9,910052,26.666666,54.166666,3.141593;262,262,1,910020,26.666666,4.166667,3.141593;262,262,2,910021,20.833333,56.666666,1.570796;262,262,2,910021,10.000000,20.833333,3.141593;262,262,7,910055,56.666666,29.166666,0.000000;262,262,10,910060,18.333333,10.000000,3.926991;262,262,11,910062,10.000000,56.666666,2.356194;262,262,13,910070,29.166666,12.500000,0.000000;262,262,14,910073,29.166666,20.833333,0.000000;262,262,14,910073,45.833333,29.166666,0.000000;262,262,14,910073,29.166666,45.833333,0.000000;260,263,3,910020,4.166667,26.666666,4.712389;260,263,9,910052,12.500000,26.666666,4.712389";
+        "258,257,1,910020,18.333333,12.500000,3.141593;258,257,4,910050,56.666666,20.833333,0.000000;258,257,5,910051,10.000000,20.833333,3.141593;258,257,5,910051,56.666666,29.166666,0.000000;258,257,6,910054,29.166666,10.000000,4.712389;258,257,7,910055,10.000000,45.833333,3.141593;258,257,10,910060,18.333333,10.000000,3.926991;258,257,10,910060,48.333333,56.666666,0.785398;258,257,11,910062,10.000000,56.666666,2.356194;258,257,11,910062,56.666666,10.000000,5.497787;259,258,3,910020,45.833333,18.333333,4.712389;258,259,9,910052,26.666666,45.833333,3.141593;258,259,12,910063,26.666666,26.666666,3.926991;259,259,1,910020,26.666666,62.500000,3.141593;259,259,4,910050,4.166667,26.666666,4.712389;259,259,7,910055,12.500000,26.666666,4.712389;259,259,11,910062,48.333333,18.333333,5.497787;259,259,11,910062,18.333333,18.333333,3.926991;259,259,13,910070,29.166666,20.833333,0.000000;259,259,13,910070,29.166666,45.833333,0.000000;260,259,9,910052,26.666666,45.833333,3.141593;258,260,3,910020,20.833333,26.666666,4.712389;260,260,3,910020,26.666666,54.166666,3.141593;260,260,9,910052,62.500000,26.666666,4.712389;260,260,12,910063,26.666666,26.666666,3.926991;261,260,1,910020,18.333333,45.833333,3.141593;261,260,1,910020,12.500000,26.666666,4.712389;261,260,1,910020,26.666666,12.500000,3.141593;261,260,4,910050,48.333333,29.166666,0.000000;261,260,6,910054,26.666666,54.166666,3.141593;261,260,7,910055,18.333333,20.833333,3.141593;261,260,10,910060,18.333333,48.333333,2.356194;261,260,11,910062,48.333333,18.333333,5.497787;261,260,11,910062,18.333333,18.333333,3.926991;261,260,13,910070,29.166666,45.833333,0.000000;262,260,3,910020,62.500000,26.666666,4.712389;258,261,1,910020,29.166666,10.000000,4.712389;258,261,1,910020,18.333333,12.500000,3.141593;258,261,1,910020,29.166666,56.666666,1.570796;258,261,5,910051,56.666666,29.166666,0.000000;258,261,5,910051,10.000000,54.166666,3.141593;258,261,6,910054,45.833333,56.666666,1.570796;258,261,7,910055,20.833333,56.666666,1.570796;258,261,10,910060,10.000000,56.666666,2.356194;258,261,11,910062,48.333333,56.666666,0.785398;258,261,11,910062,56.666666,10.000000,5.497787;258,261,13,910070,20.833333,20.833333,0.000000;258,261,13,910070,45.833333,29.166666,0.000000;258,261,13,910070,20.833333,45.833333,0.000000;262,261,3,910020,45.833333,31.666666,1.570796;260,262,1,910020,29.166666,10.000000,4.712389;260,262,1,910020,10.000000,54.166666,3.141593;260,262,1,910020,10.000000,45.833333,3.141593;260,262,6,910054,20.833333,56.666666,1.570796;260,262,7,910055,56.666666,20.833333,0.000000;260,262,8,910056,56.666666,12.500000,0.000000;260,262,10,910060,56.666666,10.000000,5.497787;261,262,3,910020,26.666666,45.833333,3.141593;261,262,9,910052,26.666666,54.166666,3.141593;262,262,1,910020,26.666666,4.166667,3.141593;262,262,2,910021,20.833333,56.666666,1.570796;262,262,2,910021,10.000000,20.833333,3.141593;262,262,7,910055,56.666666,29.166666,0.000000;262,262,10,910060,18.333333,10.000000,3.926991;262,262,11,910062,10.000000,56.666666,2.356194;262,262,13,910070,29.166666,12.500000,0.000000;262,262,14,910073,29.166666,20.833333,0.000000;262,262,14,910073,45.833333,29.166666,0.000000;262,262,14,910073,29.166666,45.833333,0.000000;260,263,3,910020,4.166667,26.666666,4.712389;260,263,9,910052,12.500000,26.666666,4.712389";
     char const* const PD_CRITTER_PLAN_PIN =
-        "259,259,1,32428,45.833333,45.833333;259,259,1,32428,12.500000,29.166666;259,259,2,23086,29.166666,12.500000;261,260,1,32428,45.833333,29.166666;261,260,2,23086,20.833333,29.166666;258,261,1,32428,29.166666,45.833333;258,261,2,23086,45.833333,45.833333;258,261,2,23086,45.833333,29.166666;258,261,3,2110,29.166666,20.833333;260,261,4,26525,29.166666,29.166666;262,261,4,26525,29.166666,29.166666;262,261,4,26525,54.166666,29.166666;260,262,2,23086,20.833333,29.166666;260,262,2,23086,29.166666,29.166666;262,262,1,32428,45.833333,20.833333;262,262,2,23086,20.833333,20.833333;262,262,2,23086,45.833333,45.833333";
+        "259,259,1,32428,29.166666,45.833333;259,259,1,32428,29.166666,29.166666;259,259,2,23086,29.166666,20.833333;261,260,1,32428,29.166666,29.166666;261,260,2,23086,29.166666,20.833333;258,261,1,32428,29.166666,45.833333;258,261,2,23086,45.833333,45.833333;258,261,2,23086,45.833333,29.166666;258,261,3,2110,29.166666,20.833333;260,261,4,26525,29.166666,29.166666;262,261,4,26525,29.166666,29.166666;262,261,4,26525,54.166666,29.166666;260,262,2,23086,20.833333,29.166666;260,262,2,23086,29.166666,29.166666;262,262,1,32428,45.833333,20.833333;262,262,2,23086,20.833333,20.833333;262,262,2,23086,45.833333,45.833333";
 
     bool CheckDecorPlanPinned(std::string& why)
     {
@@ -3955,6 +3975,53 @@ namespace
         return s;
     }
 
+    // Round B / B2: WHERE the picks of one room stand. PlanSpawnPoints is
+    // pure geometry over the anchors above - it draws nothing - so a pin
+    // states the placement contract the instance script spawns on, and the
+    // sweep below proves the whole kit satisfies it rather than four chunks.
+    //
+    // The role vectors are the shipped shape of a pack: an ordinary room asks
+    // for four melee and one caster, a boss room for the boss itself (pick 0,
+    // PDv2PackMgr's contract) and two adds.
+    std::vector<int> RoomSpawnRoles()
+    {
+        return { SPAWN_ROLE_MELEE, SPAWN_ROLE_MELEE, SPAWN_ROLE_MELEE,
+                 SPAWN_ROLE_MELEE, SPAWN_ROLE_CASTER };
+    }
+
+    std::vector<int> BossSpawnRoles()
+    {
+        return { SPAWN_ROLE_BOSS, SPAWN_ROLE_MELEE, SPAWN_ROLE_MELEE };
+    }
+
+    std::string SpawnPointsString(std::vector<PDv2SpawnPoint> const& points)
+    {
+        char buf[64];
+        std::string s;
+        for (PDv2SpawnPoint const& p : points)
+        {
+            std::snprintf(buf, sizeof(buf), "%.4f,%.4f;", p.u, p.v);
+            s += buf;
+        }
+        return s;
+    }
+
+    // CAPTURE PROCEDURE, every time: run `pdblock --batch` and paste the
+    // value out of the "the spawn points of chunk N moved" failure message,
+    // never by reasoning about what it should be. 12015 is the 50 yd room
+    // (theme 2, alt 0) on its anchor ring, 12215 the boss room whose first
+    // pick takes the boss anchor, 4015 the new 33 yd room (theme 1, alt 2) on
+    // the scaled ring, and 13015 the blob room (theme 2, alt 1), whose
+    // anchors follow the outline rather than the ring.
+    char const* const PD_SPAWN_POINTS_PIN_12015 =
+        "25.3333,25.3333;25.3333,41.3333;41.3333,25.3333;41.3333,41.3333;33.3333,21.3333;";
+    char const* const PD_SPAWN_POINTS_PIN_12215 =
+        "33.3333,33.3333;25.3333,25.3333;25.3333,41.3333;";
+    char const* const PD_SPAWN_POINTS_PIN_4015 =
+        "28.0000,28.0000;28.0000,38.6667;38.6667,28.0000;38.6667,38.6667;33.3333,25.3333;";
+    char const* const PD_SPAWN_POINTS_PIN_13015 =
+        "20.8333,20.8333;20.8333,45.8333;45.8333,20.8333;45.8333,45.8333;12.5000,37.5000;";
+
     // How many sockets a chunk id's low two digits open. The kit's mask is
     // four bits (N, E, S, W); a corridor's anchor set has one arm per bit.
     int SocketCountOf(int mask)
@@ -3976,6 +4043,11 @@ namespace
         int roomChunks = 0;
         int corridorChunks = 0;
         int deadEndChunks = 0;
+        // Round B / B2: how many chunks of each room role the spawn-point
+        // sweep below actually walked, checked against role x alt x mask at
+        // the end. A sweep that silently stopped covering the new alt would
+        // otherwise pass by saying nothing.
+        int planned[3] = { 0, 0, 0 };
         for (auto const& kv : g_kit)
         {
             int const id = kv.first;
@@ -4037,8 +4109,47 @@ namespace
             {
                 Check(c.typed.spawns.empty(), "the entrance chunk publishes spawn anchors", static_cast<uint32_t>(id));
             }
+
+            // B2's placement, on EVERY room-role chunk the kit ships - role x
+            // alt x mask, both themes - not just the four pinned ones: a pick
+            // planted on a non-walkable cell is a mob that stands in the void
+            // or inside a wall, and only the sweep can find the one mask that
+            // does it. The entrance publishes no spawn anchors at all, so it
+            // is also the only geometry here that walks the 12 yd overflow
+            // circle.
+            std::vector<int> const roles = (role == 2) ? BossSpawnRoles() : RoomSpawnRoles();
+            std::vector<PDv2SpawnPoint> const points = PlanSpawnPoints(c.typed, role == 2, roles);
+            Check(points.size() == roles.size(),
+                  "PlanSpawnPoints returned a different number of points than picks",
+                  static_cast<uint32_t>(id));
+            ++planned[role];
+            for (PDv2SpawnPoint const& p : points)
+            {
+                int const prow = static_cast<int>(p.u / PD_CELL_SIZE_YD);
+                int const pcol = static_cast<int>(p.v / PD_CELL_SIZE_YD);
+                bool const on = prow >= 0 && pcol >= 0 &&
+                                prow < PD_CELLS_PER_BLOCK && pcol < PD_CELLS_PER_BLOCK &&
+                                c.classes.size() == 64 &&
+                                c.classes[static_cast<size_t>(prow * PD_CELLS_PER_BLOCK + pcol)] == 'W';
+                Check(on, "a planned spawn point is not on a walkable cell of its chunk",
+                      static_cast<uint32_t>(id));
+            }
         }
         Check(roomChunks > 0, "no room chunk in kit_meta.json", 0);
+        // Completeness of the sweep, not a sample of it: 15 masks in each of
+        // the two theme namespaces, times the alts that role ships. This is
+        // the check that goes red if the kit ever stops shipping the third
+        // Room look while AltCountFor still promises it.
+        for (int r = 0; r <= 2; ++r)
+        {
+            int const want = AltCountFor(static_cast<BlockRole>(r)) * 15 * 2;
+            char msg[160];
+            std::snprintf(msg, sizeof(msg),
+                          "the spawn-point sweep covered %d chunks of room role %d, "
+                          "the kit ships %d (alts x masks x themes)",
+                          planned[r], r, want);
+            Check(planned[r] == want, msg, 0);
+        }
         // Non-vacuity: the two corridor rules above are silent on an empty
         // set, and a kit that stopped shipping corridors would pass them.
         Check(corridorChunks > 0, "no multi-socket corridor chunk in kit_meta.json", 0);
@@ -4056,6 +4167,63 @@ namespace
         };
         pin(12015, PD_ROOM_ANCHOR_PIN_12015);
         pin(12215, PD_ROOM_ANCHOR_PIN_12215);
+
+        auto pinPoints = [&](int id, bool bossRoom, std::vector<int> const& roles, char const* want)
+        {
+            auto it = g_kit.find(id);
+            if (it == g_kit.end()) { Check(false, "pinned chunk missing from kit_meta.json", static_cast<uint32_t>(id)); return; }
+            std::string const got = SpawnPointsString(PlanSpawnPoints(it->second.typed, bossRoom, roles));
+            if (got != want)
+            {
+                std::string const why = "the spawn points of chunk " + std::to_string(id) + " moved: " + got;
+                Check(false, why.c_str(), static_cast<uint32_t>(id));
+            }
+        };
+        pinPoints(12015, false, RoomSpawnRoles(), PD_SPAWN_POINTS_PIN_12015);
+        pinPoints(12215, true, BossSpawnRoles(), PD_SPAWN_POINTS_PIN_12215);
+        pinPoints(4015, false, RoomSpawnRoles(), PD_SPAWN_POINTS_PIN_4015);
+        pinPoints(13015, false, RoomSpawnRoles(), PD_SPAWN_POINTS_PIN_13015);
+
+        // Overflow, the path only a raised V2.SpawnsPerRoom reaches and the
+        // four pins never walk: 12015 publishes six spawn anchors, so eight
+        // picks must still come back as eight points - the six anchors first,
+        // then the legacy 12 yd circle around the block centre for the last
+        // two, angle by pick index over the count.
+        {
+            auto it = g_kit.find(12015);
+            if (it == g_kit.end())
+            {
+                Check(false, "pinned chunk missing from kit_meta.json", 12015u);
+            }
+            else
+            {
+                RoomAnchors const& a = it->second.typed;
+                Check(a.spawns.size() == 6, "chunk 12015 no longer publishes six spawn anchors", 12015u);
+                std::vector<int> const many(8, SPAWN_ROLE_MELEE);
+                std::vector<PDv2SpawnPoint> const points = PlanSpawnPoints(a, false, many);
+                Check(points.size() == 8, "the overflow plan did not return one point per pick", 12015u);
+                if (points.size() == 8 && a.spawns.size() == 6)
+                {
+                    for (size_t i = 0; i < 6; ++i)
+                    {
+                        bool onAnchor = false;
+                        for (SpawnAnchor const& s : a.spawns)
+                        {
+                            if (s.u == points[i].u && s.v == points[i].v) onAnchor = true;
+                        }
+                        Check(onAnchor, "an overflow plan left a published anchor unused", 12015u);
+                    }
+                    double const mid = PD_BLOCK_SIZE_YD / 2.0;
+                    for (size_t i = 6; i < 8; ++i)
+                    {
+                        double const angle = 2.0 * 3.14159265358979 * static_cast<double>(i) / 8.0;
+                        Check(std::fabs(points[i].u - (mid + std::cos(angle) * 12.0)) < 1e-9 &&
+                              std::fabs(points[i].v - (mid + std::sin(angle) * 12.0)) < 1e-9,
+                              "an overflow spawn point is not on the 12 yd circle", 12015u);
+                    }
+                }
+            }
+        }
     }
 
     int RunBatch(int count, int rooms)
