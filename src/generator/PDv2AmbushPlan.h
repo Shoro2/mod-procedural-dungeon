@@ -60,9 +60,12 @@ namespace PDungeon
     // every candidate is a corridor the player has to walk through.
     //
     // The Chance is drawn for a segment that has no run block at all (two
-    // bosses landing on the same chain index) exactly as for one that has: the
-    // draw sequence must depend on the boss COUNT alone, never on the geometry,
-    // or one shifted corridor would move every later segment's roll.
+    // bosses landing on the same chain index) exactly as for one that has: a
+    // segment's chance draw is never skipped for want of geometry, or one
+    // shifted corridor would move every later segment's roll. The pick after
+    // it is the one place the geometry does reach the stream - UniformInt
+    // returns lo WITHOUT drawing at lo >= hi (PDRandom.h:41-46), so the pick
+    // draws only where a segment offers two or more candidates.
     std::vector<AmbushSpot> BuildAmbushPlan(BlockPlan const& plan, int chancePct, uint32_t layoutSeed);
 }
 

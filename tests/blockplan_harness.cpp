@@ -3172,6 +3172,12 @@ namespace
     // read live from the .conf, not a layout input, so the generator must not
     // own a default for it - the batch's yield line just needs to report
     // against the number the server ships with.
+    //
+    // That number is OWNED in two places, and this mirror has to be re-read
+    // against both if either moves: src/PDv2Mgr.cpp:120-121 (LoadConfig's
+    // GetOption fallback) and conf/mod_procedural_dungeon.conf.dist:623 (the
+    // shipped line). Nothing here goes red when they drift - the yield line
+    // would simply report against the old number.
     int const PD_AMBUSH_DEFAULT_CHANCE_PCT = 50;
 
     std::string AmbushPinString(std::vector<AmbushSpot> const& spots)
@@ -3206,6 +3212,56 @@ namespace
         if (got != PD_AMBUSH_PLAN_PIN)
         {
             why = "the ambush plan moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    // The SECOND ambush pin, and the only one that can see the coin. Every
+    // other ambush check in this file runs at chance 0 or 100, and
+    // PDRandom::Chance draws NOTHING at either (PDRandom.h:58-69) - so between
+    // them they pin WHERE a spot lands and say nothing at all about the draw
+    // sequence around it.
+    //
+    // This one runs at a mid chance on a FOUR-boss layout, so Chance is drawn
+    // four times and the pick is drawn wherever a segment offers two or more
+    // candidates. A regression in the draw ORDER - a chance skipped for a
+    // segment with no geometry, a pick taken when the coin said no, the two
+    // swapped - moves this string and nothing else in the file.
+    //
+    // The 50 is a literal and deliberately NOT PD_AMBUSH_DEFAULT_CHANCE_PCT:
+    // this pin is about the draw sequence at a mid chance, and an operator
+    // changing what the server ships with must not turn the batch red.
+    //
+    // Captured by RUNNING `pdblock --batch` and reading the "the mid-chance
+    // ambush plan moved" message, never by reasoning about the value.
+    char const* const PD_AMBUSH_PLAN_PIN_MID = "258,262,1;261,262,2;";
+
+    bool CheckAmbushPlanMidPinned(std::string& why)
+    {
+        // Four bosses on four rooms: the largest boss count the game math ever
+        // asks for (GameBossRooms(30)) and the shortest layout that carries it,
+        // so all four segments are short enough to differ in candidate count.
+        BlockCfg cfg = MakeCfg(12345u, 4);
+        cfg.bossRooms = 4;
+        BlockPlan plan;
+        if (!GenerateBlockPlan(cfg, &plan))
+        {
+            why = "the mid-chance ambush pin could not generate a layout";
+            return false;
+        }
+        std::string const got = AmbushPinString(BuildAmbushPlan(plan, 50, plan.effectiveSeed));
+        if (got.empty())
+        {
+            // Same trap as the pin above: at a mid chance an empty result is a
+            // legal SHAPE, but not for this seed - it means the draw stopped
+            // producing, which a string compare against "" would call a pass.
+            why = "the mid-chance ambush plan is empty";
+            return false;
+        }
+        if (got != PD_AMBUSH_PLAN_PIN_MID)
+        {
+            why = "the mid-chance ambush plan moved: " + got;
             return false;
         }
         return true;
@@ -4045,6 +4101,14 @@ namespace
             // Same two-statements shape for the same reason.
             std::string why;
             bool const ok = CheckAmbushPlanPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // The mid-chance twin of the pin above - the only check in the
+            // file that runs where Chance actually draws. Same two-statements
+            // shape for the same argument-evaluation-order reason.
+            std::string why;
+            bool const ok = CheckAmbushPlanMidPinned(why);
             Check(ok, why.c_str(), 12345u);
         }
         {

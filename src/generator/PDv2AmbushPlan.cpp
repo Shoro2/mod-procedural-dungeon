@@ -58,8 +58,10 @@ namespace PDungeon
             int const bossAt = BossChainIndex(len, plan.config.bossRooms, k);
 
             // Drawn FIRST and unconditionally, before the geometry is even
-            // looked at (see the header): the sequence depends on the boss
-            // count alone.
+            // looked at (see the header): a segment's chance draw is never
+            // skipped for want of geometry. The pick below is the one draw the
+            // geometry can reach, and only where there are two or more
+            // candidates - UniformInt(0, 0) returns without drawing.
             bool const wants = rng.Chance(chancePct);
 
             // Every corridor between the previous boss room (or the entrance)
