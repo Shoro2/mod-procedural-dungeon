@@ -264,6 +264,15 @@ namespace PDungeon
     // anything), then the first unused anchor of any role, then - overflow
     // only, reachable by raising the conf - the legacy 12 yd circle around
     // the block centre, angle by pick index. Deterministic, no draw.
+    //
+    // "elite" is a MATCH for any role, not a fallback after one: it is tried in
+    // the same pass as the exact role, so on a chunk that published an elite
+    // anchor BEFORE a caster one, a caster pick would take the elite and the
+    // caster anchor would go to whoever asks next. Unreachable on the shipped
+    // kit - across all 244 chunks no chunk mixes "elite" with "melee"/"caster"
+    // (ordinary rooms publish 4x melee + 2x caster, boss rooms 4x elite) - and
+    // recorded here so a future kit that does mix them is a known case rather
+    // than a surprise; the fix would be a two-pass match, exact role first.
     inline std::vector<PDv2SpawnPoint> PlanSpawnPoints(RoomAnchors const& a, bool bossRoom,
                                                        std::vector<int> const& roles)
     {

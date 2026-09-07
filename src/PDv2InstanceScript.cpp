@@ -81,6 +81,15 @@ namespace PDungeon
         // pins both, so the two must not drift apart.
         float const SPAWN_SPREAD_YD = 12.0f;
 
+        // How far SpawnFromPlan may look for floor when the point a vetoed
+        // pick falls back to - the chunk's entry anchor, or the block centre -
+        // is itself off the grid. Two cells (16.67 yd) is PDv2CreatureAI's
+        // SNAP_RADIUS_CELLS, the same "a position rarely sits dead on a
+        // walkable cell centre" tolerance, and it stays inside the room a
+        // fallback belongs to. Nothing walkable within it means the fallback
+        // stands where it was, which is what this code did before B2.
+        int const SPAWN_FALLBACK_SNAP_CELLS = 2;
+
         // How close a critter may land to a prop before SpawnCritters drops
         // it rather than summon it. A scatter decor rule and the critter rule
         // both call CollectScatter on the SAME block, on two independent RNG
@@ -1150,6 +1159,18 @@ namespace PDungeon
             // the kit's boss anchor, which is the arena centre. The draw above
             // is untouched: PlanSpawnPoints reads anchors and roles only, it
             // draws nothing and it cannot move a pick.
+            //
+            // The "same three values" above is the whole mapping, so it is
+            // asserted rather than asserted-in-prose: SPAWN_ROLE_* are plain
+            // ints in generator/PDv2SpawnAnchors.h, PACK_ROLE_* an enum in
+            // generator/PDv2PackDraw.h, and neither header includes the other
+            // (both are engine-free and must stay independent). This is the
+            // translation unit that sees both, so this is where the mirror can
+            // be made self-checking.
+            static_assert(SPAWN_ROLE_MELEE == PACK_ROLE_MELEE, "spawn/pack melee role drifted");
+            static_assert(SPAWN_ROLE_CASTER == PACK_ROLE_CASTER, "spawn/pack caster role drifted");
+            static_assert(SPAWN_ROLE_BOSS == PACK_ROLE_BOSS, "spawn/pack boss role drifted");
+
             std::vector<int> roles;
             roles.reserve(picks.size());
             for (SpawnPick const& pick : picks)
@@ -1179,6 +1200,23 @@ namespace PDungeon
                 // stands beside it), so that is where a vetoed pick goes; a
                 // chunk without one falls back to the block centre, which is
                 // walkable in every room variant the kit ships.
+                //
+                // Why the circle path never gets here: LoadChunkMeta writes
+                // _walkMasks[chunkId] and _chunkRoomAnchors[chunkId] from the
+                // SAME row in the same iteration, so a chunk with no anchors
+                // has no walk mask either, BuildWalkGrid fails on it and `grid`
+                // is null - the veto and the overflow circle cannot meet.
+                //
+                // That same-row property is also the ONLY reason the entry
+                // anchor is floor at all: the kit derives it as a walkable cell
+                // centre of that very mask, i.e. the argument is about the
+                // kit's mask, not about the grid this instance composed. A
+                // hand-edited chunk_meta row breaks the tie, and then the
+                // fallback would stack every vetoed pick of the room on a point
+                // in the void the veto exists to prevent. So the fallback is
+                // grid-checked too and snapped to the nearest walkable cell;
+                // when the grid is null or nothing walkable is within reach,
+                // the un-snapped point stands, exactly as before.
                 if (grid)
                 {
                     int gcx = 0, gcy = 0;
@@ -1191,10 +1229,27 @@ namespace PDungeon
                                                onEntry ? anchors->entry.u : mid,
                                                onEntry ? anchors->entry.v : mid,
                                                x, y, z);
+
+                        int fcx = 0, fcy = 0;
+                        WorldToCell(x, y, fcx, fcy);
+                        GridPoint const fallbackCell = grid->LocalFromGlobalCell(fcx, fcy);
+                        GridPoint snapped;
+                        if (!grid->At(fallbackCell.x, fallbackCell.y) &&
+                            NearestWalkable(*grid, fallbackCell.x, fallbackCell.y,
+                                            SPAWN_FALLBACK_SNAP_CELLS, snapped))
+                        {
+                            int scx = 0, scy = 0;
+                            grid->GlobalFromLocalCell(snapped, scx, scy);
+                            double wx = 0.0, wy = 0.0;
+                            CellCentreToWorld(scx, scy, wx, wy);
+                            x = static_cast<float>(wx);
+                            y = static_cast<float>(wy);
+                        }
+
                         if (vetoedChunks.insert(b.chunkId).second)
                         {
                             LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} planned a spawn point "
-                                             "the walk grid calls void - that room's vetoed "
+                                             "the walk grid calls void - that chunk's vetoed "
                                              "picks stand on its {} instead",
                                      instance->GetInstanceId(), b.chunkId,
                                      onEntry ? "entry anchor" : "block centre");

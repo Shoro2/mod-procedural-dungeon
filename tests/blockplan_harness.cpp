@@ -3007,11 +3007,22 @@ namespace
     // change, that is the change being noticed, not the pin being wrong -
     // update it in the same commit as the draw-order comment.
     //
-    // Re-captured for B2's third Room look: the seed-12345 layout's two spine
-    // rooms are now alt 2 (chunk 4011, the 33 yd platform), so their walk
-    // masks - and with them the classes both plans place on - changed, and
-    // the single decor/critter stream then shifts every LATER block too, which
-    // is why blocks whose chunkId did not move appear in the diff as well.
+    // Re-captured for B2's third Room look, and the pin itself says WHY the
+    // diff is wider than "the two rooms that became alt 2 moved":
+    // AltCountFor(Room) went 2 -> 3, so the alt draw is UniformInt(0, 2) where
+    // it was UniformInt(0, 1). The raw word is the same one - only the mapping
+    // moved, % 3 instead of % 2 - and that re-rolls a Room block's alt with
+    // probability 2/3, so SEVERAL rooms changed chunkId, not only the two that
+    // came out alt 2 (chunk 4011, the 33 yd platform). Each of those moved on
+    // its OWN new walk mask, which is what both plans place against: three
+    // rooms here (259,259 / 261,260 / 260,262). The other four blocks in the
+    // diff are corridors (261,259 / 258,260 / 260,260 / 262,260), whose
+    // chunkIds cannot move at all because AltCountFor is untouched for their
+    // roles - those four moved through a LOCAL shift of the shared
+    // decor/critter stream, and that shift cancels out again rather than
+    // running to the end of the layout: every block from 258,261 on is
+    // byte-identical, and 260,262 moved while sitting between unmoved
+    // neighbours on both sides.
     // (2026-09-03, B0b's loop rooms: the per-segment detour Chance draws land
     // before the first chain step. Earlier that day, B0b task 1: the pocket's
     // forward-cut draw was withdrawn. 2026-09-02, Round B: the chain generator
