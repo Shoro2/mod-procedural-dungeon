@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <utility>
 #include <vector>
 
@@ -68,6 +69,16 @@ namespace PDungeon
         // signal, which a plausible-looking undead would hide.
         uint32 const PLACEHOLDER_CREATURE = 29402;   // Ironwool Mammoth
 
+        // The radius of the OVERFLOW ring, and nothing else since Round B / B2.
+        // Creatures stand on the spawn anchors the kit publishes per chunk
+        // (PlanSpawnPoints, PDv2SpawnAnchors.h); this circle around the block
+        // centre is what is left for the two cases that have no anchor to
+        // stand on: a chunk whose SQL row carries no typed anchors at all
+        // (an unapplied mod_pdungeon_chunk_meta.sql, or an older kit), and the
+        // picks past the six an ordinary room publishes, which only a raised
+        // V2.SpawnsPerRoom / V2.BossRoomAdds can produce. PlanSpawnPoints
+        // hard-codes the same 12.0 for its own overflow tail - the harness
+        // pins both, so the two must not drift apart.
         float const SPAWN_SPREAD_YD = 12.0f;
 
         // How close a critter may land to a prop before SpawnCritters drops
@@ -1097,6 +1108,34 @@ namespace PDungeon
         uint32 spawned = 0;
         uint32 affixedMobs = 0;
         double const mid = PD_BLOCK_SIZE_YD / 2.0;
+
+        // The placement this used to do for EVERY pick, kept verbatim for the
+        // chunk that publishes no typed anchors: a small fixed pattern around
+        // the block centre. Deliberately NOT random - the same plan must
+        // produce the same dungeon, and an unseeded draw here would break that
+        // quietly. PlanSpawnPoints reproduces the identical ring for the picks
+        // an anchored room runs out of anchors for.
+        auto circlePoints = [mid](size_t count) -> std::vector<PDv2SpawnPoint>
+        {
+            std::vector<PDv2SpawnPoint> out;
+            out.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+            {
+                double const angle = 2.0 * 3.14159265358979 *
+                                     static_cast<double>(i) / static_cast<double>(count);
+                out.push_back({ mid + std::cos(angle) * SPAWN_SPREAD_YD,
+                                mid + std::sin(angle) * SPAWN_SPREAD_YD });
+            }
+            return out;
+        };
+
+        // The instance's own walk grid vetoes a point that is not floor, the
+        // same way SplitOnDeath vetoes a child's offset - and one warning per
+        // CHUNK, not per creature, because a chunk whose anchors disagree with
+        // its walk mask would otherwise write one line per mob per run.
+        WalkGrid const* grid = GetWalkGrid();
+        std::set<int> vetoedChunks;
+
         for (size_t r = 0; r < roomBlocks.size() && r < spawns.size(); ++r)
         {
             PlacedBlock const& b = *roomBlocks[r];
@@ -1104,17 +1143,64 @@ namespace PDungeon
             std::vector<SpawnPick> const& picks = spawns[r].picks;
             int const count = static_cast<int>(picks.size());
 
-            for (int i = 0; i < count; ++i)
+            // Round B / B2: WHERE this room's picks stand. The roles go in in
+            // pick order (PACK_ROLE_* and SPAWN_ROLE_* are the same three
+            // values), and one point comes back per pick, so `points[i]`
+            // belongs to `picks[i]` and the boss - pick 0 of a boss room - gets
+            // the kit's boss anchor, which is the arena centre. The draw above
+            // is untouched: PlanSpawnPoints reads anchors and roles only, it
+            // draws nothing and it cannot move a pick.
+            std::vector<int> roles;
+            roles.reserve(picks.size());
+            for (SpawnPick const& pick : picks)
             {
-                // A small fixed pattern around the block centre. Deliberately
-                // NOT random: the same plan must produce the same dungeon, and
-                // an unseeded draw here would break that quietly.
-                double const angle = 2.0 * 3.14159265358979 * i / count;
-                double const du = std::cos(angle) * SPAWN_SPREAD_YD;
-                double const dv = std::sin(angle) * SPAWN_SPREAD_YD;
+                roles.push_back(static_cast<int>(pick.role));
+            }
+
+            RoomAnchors const* anchors = sPDv2Mgr->RoomAnchorsFor(b.chunkId);
+            std::vector<PDv2SpawnPoint> const points =
+                anchors ? PlanSpawnPoints(*anchors, isBossRoom, roles)
+                        : circlePoints(roles.size());
+
+            for (int i = 0; i < count && i < static_cast<int>(points.size()); ++i)
+            {
+                PDv2SpawnPoint const& point = points[static_cast<size_t>(i)];
 
                 float x = 0.0f, y = 0.0f, z = 0.0f;
-                sPDv2Mgr->BlockToWorld(b.bx, b.by, mid + du, mid + dv, x, y, z);
+                sPDv2Mgr->BlockToWorld(b.bx, b.by, point.u, point.v, x, y, z);
+
+                // An anchor is a kit constant and the walk grid is what this
+                // instance actually composed, so the two can disagree - a kit
+                // published against an older mask, or an overflow ring point
+                // that falls outside a 33 yd room's platform. Gravity is off on
+                // this map, so a mob seated off the floor hovers over the void
+                // for ever: unreachable, unkillable, and holding the room's
+                // counter open. The entry anchor is provably floor (the altar
+                // stands beside it), so that is where a vetoed pick goes; a
+                // chunk without one falls back to the block centre, which is
+                // walkable in every room variant the kit ships.
+                if (grid)
+                {
+                    int gcx = 0, gcy = 0;
+                    WorldToCell(x, y, gcx, gcy);
+                    GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                    if (!grid->At(cell.x, cell.y))
+                    {
+                        bool const onEntry = anchors && anchors->hasEntry;
+                        sPDv2Mgr->BlockToWorld(b.bx, b.by,
+                                               onEntry ? anchors->entry.u : mid,
+                                               onEntry ? anchors->entry.v : mid,
+                                               x, y, z);
+                        if (vetoedChunks.insert(b.chunkId).second)
+                        {
+                            LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} planned a spawn point "
+                                             "the walk grid calls void - that room's vetoed "
+                                             "picks stand on its {} instead",
+                                     instance->GetInstanceId(), b.chunkId,
+                                     onEntry ? "entry anchor" : "block centre");
+                        }
+                    }
+                }
 
                 PDv2MobData proto;
                 proto.role = picks[i].role;
