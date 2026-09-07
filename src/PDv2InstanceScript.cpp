@@ -228,6 +228,21 @@ namespace PDungeon
         sPDv2UILink->SendCfg(player);
     }
 
+    // A logout sends the player home from OnPlayerBeforeLogout, and that far
+    // teleport takes them off this map (Player.cpp:1569-1571) BEFORE the core's
+    // own RepopAtGraveyard for a dead character (WorldSession.cpp:633-637) - so
+    // the pending death has to be forgotten here, or the release veto in
+    // PDClientLink would still answer "wait" for someone the dungeon no longer
+    // has, and the logout-while-dead path stops being the core's (design
+    // 2026-09-03 §B1.2).
+    void PDv2InstanceScript::OnPlayerLeave(Player* player)
+    {
+        if (player)
+        {
+            _pendingRespawn.erase(player->GetGUID());
+        }
+    }
+
     // Ground-effect carriers must decorate, not fight.
     //
     // Several stock kit spells drop a "void zone": a creature with no AI whose

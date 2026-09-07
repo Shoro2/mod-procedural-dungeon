@@ -147,6 +147,11 @@ namespace PDungeon
         void Initialize() override { }
         void Update(uint32 diff) override;
         void OnPlayerEnter(Player* player) override;
+
+        // Round B / B1. Forgets a player's pending respawn when they leave
+        // this map - the .cpp says which core ordering makes that necessary.
+        void OnPlayerLeave(Player* player) override;
+
         // Disarms unselectable summons (void zones) so they decorate instead of
         // damaging - see the .cpp for why this is scoped to this map.
         void OnCreatureCreate(Creature* creature) override;
