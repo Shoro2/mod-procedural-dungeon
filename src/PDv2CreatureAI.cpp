@@ -27,6 +27,7 @@
 #include "ScriptMgr.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <list>
 
 namespace PDungeon
@@ -306,37 +307,47 @@ namespace PDungeon
         // A stale run, the same shape UpdateGridChase carries and for the same
         // reason: an evade, a knockback or a crowd-control effect can end the
         // motion without a MovementInform, and the flag alone would then hold
-        // the beat still for ever.
+        // the beat still for ever. The BEAT survives it: a creature thrown off
+        // its route rejoins the route below, exactly as it does after an evade.
         if (_followingPath &&
             me->GetMotionMaster()->GetCurrentMovementGeneratorType() != POINT_MOTION_TYPE)
         {
             StopWaypointRun(false);
-            _patrolActive = false;
+            _patrolRejoin = true;
         }
         if (_followingPath)
         {
             return;     // a leg is live; MovementInform owns the next decision
         }
 
+        // Where the creature actually stands, snapped to floor. The first plan
+        // and every rejoin both start from it, so the snap is taken once - and
+        // refused once: walking from a cell the grid does not call floor is the
+        // same mistake whichever of the two is about to happen.
+        GridPoint const cell = CellOf(*grid, me->GetPositionX(), me->GetPositionY());
+        GridPoint here;
+        if (!NearestWalkable(*grid, cell.x, cell.y, SNAP_RADIUS_CELLS, here))
+        {
+            // Hold and ask again in 500 ms - the same refusal the chase makes.
+            return;
+        }
+
         if (!_patrolActive)
         {
-            // ONE A* per beat. `here` is where the creature actually stands -
-            // never where it spawned - so the first plan, the plan after an
-            // evade and the plan after a knockback are all this same code.
-            GridPoint const here = CellOf(*grid, me->GetPositionX(), me->GetPositionY());
-            GridPoint const goal = grid->LocalFromGlobalCell(_mob->patrolGoalCellX,
-                                                             _mob->patrolGoalCellY);
-            GridPoint a, b;
-            if (!NearestWalkable(*grid, here.x, here.y, SNAP_RADIUS_CELLS, a) ||
-                !NearestWalkable(*grid, goal.x, goal.y, SNAP_RADIUS_CELLS, b))
+            // ONE A* FOR THE WHOLE RUN, and this is the only place a path is
+            // ever written into _patrolRoute. The beat a patroller is handed on
+            // its first idle tick is the beat it keeps: every later
+            // interruption rejoins that route rather than replacing it with a
+            // shorter one (design 2026-09-03 §B4.4).
+            GridPoint const goalCell = grid->LocalFromGlobalCell(_mob->patrolGoalCellX,
+                                                                 _mob->patrolGoalCellY);
+            GridPoint goal;
+            if (!NearestWalkable(*grid, goalCell.x, goalCell.y, SNAP_RADIUS_CELLS, goal))
             {
-                // Off the walkable surface at one end or the other. Hold and
-                // ask again in 500 ms rather than walk at a cell the grid does
-                // not call floor - the same refusal the chase makes.
                 return;
             }
             std::vector<GridPoint> path;
-            if (!FindGridPath(*grid, a, b, path))
+            if (!FindGridPath(*grid, here, goal, path))
             {
                 return;
             }
@@ -349,26 +360,109 @@ namespace PDungeon
             }
             _patrolRoute = path;
             _patrolActive = true;
+            // Planned FROM here, so index 0 is already under our feet and
+            // there is nothing to rejoin.
+            _patrolRejoin = false;
+        }
+
+        std::vector<GridPoint> leg;
+        if (_patrolRejoin)
+        {
+            _patrolRejoin = false;
+
+            // REJOIN, NEVER RE-PLAN. An evade is the ordinary end of a
+            // patroller's fight - there is no distance leash - so re-planning
+            // from the evade point to the goal would make the stretch between
+            // those two the whole beat for the rest of the run, and a patroller
+            // pulled near the goal would end up shuffling on the spot. Design
+            // §B4.4 asks for the other thing: get back onto the route at the
+            // NEAREST waypoint by grid distance and carry on from there.
+            size_t best = _patrolRoute.size();
+            int bestDist = 0;
+            for (size_t i = 0; i < _patrolRoute.size(); ++i)
+            {
+                // Manhattan on cells: the A* is 4-neighbour, so this IS its
+                // metric, and ranking needs no square root.
+                int const dist = std::abs(_patrolRoute[i].x - here.x) +
+                                 std::abs(_patrolRoute[i].y - here.y);
+                if (best < _patrolRoute.size() && dist >= bestDist)
+                {
+                    continue;   // cannot beat what we have; skip the line test
+                }
+                // The way back on has to be floor cell by cell: the leg is
+                // walked with MovePoint(generatePath = false), so an unchecked
+                // straight line is a walk across the void.
+                if (!GridLineWalkable(*grid, here, _patrolRoute[i]))
+                {
+                    continue;
+                }
+                best = i;
+                bestDist = dist;
+            }
+
+            if (best >= _patrolRoute.size())
+            {
+                // Nothing on the beat can be reached in a straight line from
+                // here. Give the route up and let the next tick plan a fresh
+                // one, which is exactly what this did before rejoining existed
+                // - so the fallback can never be worse than the old behaviour.
+                _patrolActive = false;
+                return;
+            }
+
+            leg.push_back(here);
+            for (size_t i = best; i < _patrolRoute.size(); ++i)
+            {
+                if (i == best && _patrolRoute[i] == here)
+                {
+                    continue;   // already standing on the waypoint we rejoin at
+                }
+                leg.push_back(_patrolRoute[i]);
+            }
+            if (leg.size() < 2)
+            {
+                // Standing on the far END of the beat, which IS the end of a
+                // lap - so turn around the way MovementInform would have. The
+                // whole route is walked back, never a stub of it.
+                std::reverse(_patrolRoute.begin(), _patrolRoute.end());
+                leg = _patrolRoute;
+            }
+        }
+        else
+        {
+            // A COPY. StartWaypointRun takes ownership of what it is handed and
+            // StopWaypointRun clears it, but _patrolRoute has to survive both -
+            // it is the beat, and _waypoints is only the leg being walked.
+            leg = _patrolRoute;
         }
 
         // Out of combat the patrol WALKS: it is meant to be seen coming down a
         // corridor, not to sprint. JustEngagedWith puts it back on run speed
         // the moment it pulls.
         me->SetWalk(true);
-        // A COPY. StartWaypointRun takes ownership of what it is handed and
-        // StopWaypointRun clears it, but _patrolRoute has to survive both -
-        // it is the beat, and _waypoints is only the leg being walked.
-        std::vector<GridPoint> run = _patrolRoute;
-        StartWaypointRun(std::move(run), *grid);
+        StartWaypointRun(std::move(leg), *grid);
+        if (!_followingPath)
+        {
+            // The runner refused the leg (fewer than two waypoints). Nothing
+            // else on that path clears _patrolActive, so without this the same
+            // doomed leg would be retried every 500 ms for the rest of the run.
+            _patrolActive = false;
+        }
     }
 
     void PDv2MobAI::ResumePatrol()
     {
-        // Re-plan from wherever we stand rather than pick the old leg back up:
-        // after an evade the creature is almost never on one of its own
-        // waypoints, and StartWaypointRun's contract is that index 0 is the
-        // cell under its feet.
-        _patrolActive = false;
+        // THE BEAT SURVIVES THE FIGHT. This used to drop the route and let the
+        // next tick re-plan from here to the goal, and because an evade is how
+        // every patroller's fight ends (there is no leash), the beat then
+        // collapsed to "evade point -> goal" permanently. So the route is left
+        // exactly as it is and the next tick walks back onto it at the nearest
+        // waypoint it has a walkable line to (design 2026-09-03 §B4.4); the
+        // end-of-run reversal then restores the full lap.
+        //
+        // _patrolActive is deliberately NOT cleared. With no beat yet it is
+        // already false, and UpdatePatrol plans the first one exactly as before.
+        _patrolRejoin = true;
         _patrolTimer = 0;
         StopWaypointRun(false);
     }

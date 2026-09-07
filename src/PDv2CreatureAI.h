@@ -108,18 +108,24 @@ namespace PDungeon
         void StopWaypointRun(bool resumeChase);
 
         // Round B / B4, the out-of-combat half of a patroller's life. The
-        // route is planned ONCE per beat - an A* from wherever the creature
-        // stands to the goal cell its spawn tag carries - and then walked back
-        // and forth, reversed by MovementInform at either end. Everything the
-        // chase already owns is reused: the same grid, the same 500 ms
-        // decision interval, the same waypoint runner and the same snap radius,
-        // because a patrol that agreed with the chase about walkable ground
-        // only approximately would eventually step off the world.
+        // route is planned ONCE, on the first idle tick - an A* from where the
+        // creature stands to the goal cell its spawn tag carries - and then
+        // walked back and forth for the rest of the run, reversed by
+        // MovementInform at either end. Everything the chase already owns is
+        // reused: the same grid, the same 500 ms decision interval, the same
+        // waypoint runner and the same snap radius, because a patrol that
+        // agreed with the chase about walkable ground only approximately would
+        // eventually step off the world.
+        //
+        // ONCE is load-bearing. _patrolRoute is never re-planned once it holds
+        // a beat: a fight that ends anywhere but on the route is rejoined (see
+        // ResumePatrol), not answered with a shorter beat.
         void UpdatePatrol(uint32 diff);
-        // Drops the current beat and asks for a fresh one on the next tick.
+        // Ends the current LEG and asks the next tick to rejoin the beat.
         // Called after an evade (and from JustReachedHome): the creature is
-        // rarely standing on one of its own waypoints by then, so the route it
-        // had is no longer a route it can walk from here.
+        // rarely standing on one of its own waypoints by then, so the leg it
+        // was walking is no longer a leg it can walk from here - but the BEAT
+        // still is, which is why the route itself survives untouched.
         void ResumePatrol();
 
         // Reads the creature's rows once and keeps only what this run's
@@ -158,6 +164,11 @@ namespace PDungeon
         bool _holding = false;      // a caster that has planted itself at range
         bool _hasCalled = false;    // affix 1 already shouted for THIS fight
         bool _patrolActive = false; // _patrolRoute holds a beat worth walking
+        // B4. The next patrol tick has to REJOIN the beat rather than start a
+        // leg from _patrolRoute[0]: something moved the creature off its route
+        // (an evade, which is how every patroller's fight ends, or a
+        // knockback). Set by ResumePatrol, cleared by the tick that acts on it.
+        bool _patrolRejoin = false;
     };
 }
 
