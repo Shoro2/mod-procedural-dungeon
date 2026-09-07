@@ -3549,17 +3549,65 @@ namespace
         return s;
     }
 
+    // How many sockets a chunk id's low two digits open. The kit's mask is
+    // four bits (N, E, S, W); a corridor's anchor set has one arm per bit.
+    int SocketCountOf(int mask)
+    {
+        int n = 0;
+        for (int bit = 1; bit <= 8; bit <<= 1)
+        {
+            if (mask & bit)
+            {
+                ++n;
+            }
+        }
+        return n;
+    }
+
     void RunTypedAnchorChecks()
     {
         if (g_kit.empty()) return;
         int roomChunks = 0;
+        int corridorChunks = 0;
+        int deadEndChunks = 0;
         for (auto const& kv : g_kit)
         {
             int const id = kv.first;
             int const role = (id % 1000) / 100;
-            if (role > 2) continue;                     // corridors publish only an entry
-            ++roomChunks;
             KitChunk const& c = kv.second;
+            if (role > 2)
+            {
+                // Corridors are NOT anchor-less - a claim this comment made
+                // until the Task 1 review caught it. 48's anchors_for gives a
+                // corridor (roles 3..6: straight, corner, T, cross) one
+                // "patrol" spawn per OPEN socket, on that arm's far cell, and
+                // a dead-end stub (role 7, always a single socket) a chest on
+                // its junction square with no spawn at all. B4's patrol
+                // routes and B1's loop-room chest both stand on these, so
+                // they are pinned here rather than assumed.
+                if (role >= 3 && role <= 6 && SocketCountOf(id % 100) >= 2)
+                {
+                    ++corridorChunks;
+                    int patrols = 0;
+                    for (SpawnAnchor const& p : c.typed.spawns)
+                    {
+                        if (p.role == "patrol")
+                        {
+                            ++patrols;
+                        }
+                    }
+                    Check(patrols >= 2, "a corridor chunk publishes fewer than two patrol anchors",
+                          static_cast<uint32_t>(id));
+                }
+                if (role == 7)
+                {
+                    ++deadEndChunks;
+                    Check(c.typed.hasChest, "a dead-end chunk publishes no chest anchor",
+                          static_cast<uint32_t>(id));
+                }
+                continue;
+            }
+            ++roomChunks;
             Check(c.typed.hasEntry, "a room chunk publishes no entry anchor", static_cast<uint32_t>(id));
             if (!c.typed.hasEntry) continue;
             int const row = static_cast<int>(c.typed.entry.u / PD_CELL_SIZE_YD);
@@ -3585,6 +3633,10 @@ namespace
             }
         }
         Check(roomChunks > 0, "no room chunk in kit_meta.json", 0);
+        // Non-vacuity: the two corridor rules above are silent on an empty
+        // set, and a kit that stopped shipping corridors would pass them.
+        Check(corridorChunks > 0, "no multi-socket corridor chunk in kit_meta.json", 0);
+        Check(deadEndChunks > 0, "no dead-end chunk in kit_meta.json", 0);
         auto pin = [&](int id, char const* want)
         {
             auto it = g_kit.find(id);

@@ -18,7 +18,7 @@
 #ifndef MOD_PDUNGEON_V2_SPAWN_ANCHORS_H
 #define MOD_PDUNGEON_V2_SPAWN_ANCHORS_H
 
-#include <cstdlib>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -53,6 +53,69 @@ namespace PDungeon
 
     namespace SpawnAnchorDetail
     {
+        // Locale-proof fixed-format number reader: optional sign, digits,
+        // optional '.', digits. No exponent - the kit writes plain decimals
+        // and nothing else. std::strtod would do the same, but its decimal
+        // point follows the C locale, and a worldserver whose locale was set
+        // elsewhere would then read the entry anchor's 29.166666 as 29 and
+        // seat the altar a third of a block off. The identical reasoning (and
+        // the identical scanner) sits in PDv2DecorPlan.cpp's ReadNumber; this
+        // header cannot call it because it must stay engine-free and
+        // header-only.
+        inline bool ReadNumberAt(std::string const& json, size_t at, size_t limit,
+                                 double& out, size_t& after)
+        {
+            size_t p = at;
+            while (p < limit && (json[p] == ' ' || json[p] == '\t' ||
+                                 json[p] == '\n' || json[p] == '\r'))
+            {
+                ++p;
+            }
+
+            bool negative = false;
+            if (p < limit && (json[p] == '+' || json[p] == '-'))
+            {
+                negative = json[p] == '-';
+                ++p;
+            }
+
+            bool anyDigit = false;
+            double whole = 0.0;
+            while (p < limit && json[p] >= '0' && json[p] <= '9')
+            {
+                whole = whole * 10.0 + static_cast<double>(json[p] - '0');
+                anyDigit = true;
+                ++p;
+            }
+
+            double frac = 0.0;
+            double scale = 1.0;
+            if (p < limit && json[p] == '.')
+            {
+                ++p;
+                while (p < limit && json[p] >= '0' && json[p] <= '9')
+                {
+                    frac = frac * 10.0 + static_cast<double>(json[p] - '0');
+                    scale *= 10.0;
+                    anyDigit = true;
+                    ++p;
+                }
+            }
+
+            if (!anyDigit)
+            {
+                return false;
+            }
+
+            out = whole + frac / scale;
+            if (negative)
+            {
+                out = -out;
+            }
+            after = p;
+            return true;
+        }
+
         // The number after `key":` between `from` and `limit`; false if absent.
         inline bool ReadNumberAfter(std::string const& json, size_t from, size_t limit,
                                     char const* key, double& out, size_t& after)
@@ -67,15 +130,9 @@ namespace PDungeon
             {
                 return false;
             }
-            char const* begin = json.c_str() + colon + 1;
-            char* end = nullptr;
-            out = std::strtod(begin, &end);
-            if (end == begin)
-            {
-                return false;
-            }
-            after = static_cast<size_t>(end - json.c_str());
-            return true;
+            // `limit` is the object's closing brace: a number can never run
+            // past it, so the scan is bounded by the object it belongs to.
+            return ReadNumberAt(json, colon + 1, limit, out, after);
         }
 
         // One {"u":..,"v":..,"z":..[,"role":".."]} object whose '{' is at `open`.
