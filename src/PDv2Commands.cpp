@@ -203,9 +203,17 @@ private:
                                  cfg.rooms, cfg.bossRooms, cfg.fieldBlocks,
                                  cfg.originBX, cfg.originBY, cfg.branches, cfg.detourChancePct);
         // 0 here means mod_pdungeon_chunk_meta.sql never reached the world DB
-        // - the one failure that makes every mob stand still.
-        handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded",
-                                 uint32(sPDv2Mgr->WalkMaskCount()));
+        // - the one failure that makes every mob stand still. The second count
+        // is the same rows decoded a second time with their KINDS kept (Round
+        // B / B1 - what the altars stand on). Both maps are filled from one
+        // row in one loop, so the two numbers MUST match: a malformed `anchors`
+        // blob is logged at load and stored empty rather than dropped, so it
+        // never shrinks the second count. They are printed side by side so a
+        // later change that splits the two load paths shows up on this line
+        // instead of in game as rooms that quietly grew no altar.
+        handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded, {} with typed anchors",
+                                 uint32(sPDv2Mgr->WalkMaskCount()),
+                                 uint32(sPDv2Mgr->RoomAnchorChunkCount()));
         // The same failure class, one table over: 0 packs means
         // mod_pdungeon_packs.sql never landed and every room falls back to the
         // placeholder creature; 0 affixes means mod_pdungeon_affixes.sql did

@@ -445,6 +445,7 @@ namespace PDungeon
     {
         _walkMasks.clear();
         _chunkAnchors.clear();
+        _chunkRoomAnchors.clear();
         _chunkProps.clear();
 
         // Highest kit version wins per chunk id: rows are read in ascending
@@ -511,6 +512,21 @@ namespace PDungeon
             }
             _chunkAnchors[chunkId] = std::move(anchors);
 
+            // Round B / B1: the same text, decoded a second time with the
+            // KINDS kept. Not derived from the flat list - that one has
+            // deliberately thrown the kinds away - and stored for every chunk
+            // so a corridor answers an empty RoomAnchors rather than nullptr
+            // for the wrong reason. A malformed blob is reported and whatever
+            // the scanner got is stored as it stands - every reader gates on
+            // the has* flags, so a half-decoded row degrades to "no entry for
+            // that chunk" exactly like a missing anchor.
+            RoomAnchors typed;
+            if (!DecodeRoomAnchors(anchorText, typed))
+            {
+                LOG_ERROR(PD_LOG, "PDv2: chunk {} has a malformed typed anchors field", chunkId);
+            }
+            _chunkRoomAnchors[chunkId] = std::move(typed);
+
             // The structural props ride the same column. A malformed list is
             // reported and dropped like a malformed anchor list - the block
             // simply stands undecorated, nothing else depends on it.
@@ -549,6 +565,12 @@ namespace PDungeon
     {
         auto it = _chunkAnchors.find(chunkId);
         return it == _chunkAnchors.end() ? nullptr : &it->second;
+    }
+
+    RoomAnchors const* PDv2Mgr::RoomAnchorsFor(int chunkId) const
+    {
+        auto it = _chunkRoomAnchors.find(chunkId);
+        return it == _chunkRoomAnchors.end() ? nullptr : &it->second;
     }
 
     std::vector<KitProp> const* PDv2Mgr::PropsFor(int chunkId) const

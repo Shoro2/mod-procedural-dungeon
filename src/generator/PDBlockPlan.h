@@ -139,6 +139,16 @@ namespace PDungeon
     int ChainLength(BlockPlan const& plan);
     int SegmentOf(BlockPlan const& plan, PlacedBlock const& block);
 
+    // Round B / B1: an altar (the run's respawn point) stands in the entrance
+    // and in every PD_ALTAR_EVERY_N_ROOMS-th spine room by chain index.
+    // Pockets and loop rooms carry chainIndex -1 and never qualify.
+    constexpr int PD_ALTAR_EVERY_N_ROOMS = 5;
+
+    inline bool IsAltarRoom(PlacedBlock const& block)
+    {
+        return block.chainIndex >= 0 && block.chainIndex % PD_ALTAR_EVERY_N_ROOMS == 0;
+    }
+
     // Deterministic: the same cfg always yields the same plan on any compiler,
     // because every draw goes through PDRandom's hand-rolled helpers.
     // Returns false only when maxTries layouts in a row failed validation.

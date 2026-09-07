@@ -21,6 +21,7 @@
 #include "generator/PDBlockPlan.h"
 #include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
+#include "generator/PDv2SpawnAnchors.h"
 #include "generator/PDv2WorldMath.h"
 
 #include <array>
@@ -253,6 +254,12 @@ namespace PDungeon
         // different kits. The decor planner keeps its props clear of these.
         std::vector<DecorAnchor> const* AnchorsFor(int chunkId) const;
 
+        // The same row's anchors with their KINDS kept (entry, boss, chest,
+        // spawns) - what the altar, the loop-room chest and B2's spawn
+        // placement read. nullptr for a chunk the SQL does not know.
+        RoomAnchors const* RoomAnchorsFor(int chunkId) const;
+        size_t RoomAnchorChunkCount() const { return _chunkRoomAnchors.size(); }
+
         // The chunk's structural GameObject props (fountain, cave-in, ...),
         // or nullptr - most corridors have none. Same lifetime and source as
         // the anchors: one chunk-meta row, decoded once at load.
@@ -286,6 +293,7 @@ namespace PDungeon
         std::unordered_map<uint32_t, PDv2AccountState> _accounts;
         std::unordered_map<int, std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK>> _walkMasks;
         std::unordered_map<int, std::vector<DecorAnchor>> _chunkAnchors;
+        std::unordered_map<int, RoomAnchors> _chunkRoomAnchors;
         std::unordered_map<int, std::vector<KitProp>> _chunkProps;
         std::vector<DecorRule> _decorRules;
         std::vector<CritterRule> _critterRules;

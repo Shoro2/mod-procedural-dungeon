@@ -49,6 +49,7 @@
 #include "generator/PDv2GameMath.h"
 #include "generator/PDv2LinkState.h"
 #include "generator/PDv2PackDraw.h"
+#include "generator/PDv2SpawnAnchors.h"
 #include "generator/PDv2WalkGrid.h"
 
 #include <algorithm>
@@ -204,6 +205,10 @@ namespace
         std::vector<DecorAnchor> anchors;
         std::vector<KitProp> props;
         int declaredProps = 0;      // kit_meta's own "goProps" count
+        // Round B / B1: the same anchors span, decoded with its KINDS kept.
+        // The flat list above stays what the decor clearance reads.
+        std::string anchorsJson;
+        RoomAnchors typed;
     };
 
     std::map<int, KitChunk> g_kit;
@@ -258,6 +263,8 @@ namespace
                 std::string const span = blob.substr(anc, end - anc);
                 DecodeAnchorList(span, chunk.anchors);
                 DecodePropList(span, chunk.props);
+                chunk.anchorsJson = span;
+                DecodeRoomAnchors(span, chunk.typed);
             }
 
             size_t const gp = blob.find("\"goProps\"", at);
@@ -1873,6 +1880,20 @@ namespace
                 // has its own per-combo assertion, and hanging the batch-wide
                 // one off it would make it true by construction.
                 if (loops > 0) sawDetour = true;
+
+                // Round B / B1: the altar rooms are the entrance and every
+                // fifth spine room; pockets and loop rooms never carry one.
+                int altars = 0;
+                bool entranceHasAltar = false;
+                for (PlacedBlock const& b : plan.blocks)
+                {
+                    if (!IsAltarRoom(b)) continue;
+                    ++altars;
+                    Check(b.chainIndex >= 0, "an altar room is not a spine room", seed);
+                    if (b.role == BlockRole::RoomEntrance) entranceHasAltar = true;
+                }
+                Check(entranceHasAltar, "the entrance has no altar", seed);
+                Check(altars == (wantChain - 1) / PD_ALTAR_EVERY_N_ROOMS + 1, "altar count is not floor((L-1)/5)+1", seed);
 
                 // Spine adjacency (spec 7.1 invariant 3, final review M2):
                 // consecutive chain rooms are joined by EXACTLY one corridor
@@ -3500,6 +3521,85 @@ namespace
         std::printf("\n");
     }
 
+    // Round B / B1: the typed anchors the altar (and B2's spawn placement)
+    // stand on. Every room-role chunk publishes an entry on a walkable cell,
+    // the entry is the first point of the flat list (AnchorsFor[0] - the
+    // order 48 emits), boss rooms publish a boss, rooms a chest and spawns.
+    // Pinned on two chunks, captured by running: paste the value out of the
+    // "typed anchors ... moved" failure message, never by reasoning about
+    // what it should be. 12015 is an ordinary room (no boss, a chest, six
+    // spawns), 12215 a boss room (boss + chest + four elites).
+    char const* const PD_ROOM_ANCHOR_PIN_12015 =
+        "E29.1667,29.1667;C45.3333,45.3333;S25.3333,25.3333,melee;S25.3333,41.3333,melee;S41.3333,25.3333,melee;S41.3333,41.3333,melee;S33.3333,21.3333,caster;S33.3333,45.3333,caster;";
+    char const* const PD_ROOM_ANCHOR_PIN_12215 =
+        "E29.1667,29.1667;B33.3333,33.3333;C45.3333,33.3333;S25.3333,25.3333,elite;S25.3333,41.3333,elite;S41.3333,25.3333,elite;S41.3333,41.3333,elite;";
+
+    std::string RoomAnchorsString(RoomAnchors const& a)
+    {
+        char buf[96];
+        std::string s;
+        if (a.hasEntry) { std::snprintf(buf, sizeof(buf), "E%.4f,%.4f;", a.entry.u, a.entry.v); s += buf; }
+        if (a.hasBoss)  { std::snprintf(buf, sizeof(buf), "B%.4f,%.4f;", a.boss.u, a.boss.v); s += buf; }
+        if (a.hasChest) { std::snprintf(buf, sizeof(buf), "C%.4f,%.4f;", a.chest.u, a.chest.v); s += buf; }
+        for (SpawnAnchor const& p : a.spawns)
+        {
+            std::snprintf(buf, sizeof(buf), "S%.4f,%.4f,%s;", p.u, p.v, p.role.c_str());
+            s += buf;
+        }
+        return s;
+    }
+
+    void RunTypedAnchorChecks()
+    {
+        if (g_kit.empty()) return;
+        int roomChunks = 0;
+        for (auto const& kv : g_kit)
+        {
+            int const id = kv.first;
+            int const role = (id % 1000) / 100;
+            if (role > 2) continue;                     // corridors publish only an entry
+            ++roomChunks;
+            KitChunk const& c = kv.second;
+            Check(c.typed.hasEntry, "a room chunk publishes no entry anchor", static_cast<uint32_t>(id));
+            if (!c.typed.hasEntry) continue;
+            int const row = static_cast<int>(c.typed.entry.u / PD_CELL_SIZE_YD);
+            int const col = static_cast<int>(c.typed.entry.v / PD_CELL_SIZE_YD);
+            bool const inside = row >= 0 && col >= 0 && row < PD_CELLS_PER_BLOCK && col < PD_CELLS_PER_BLOCK;
+            Check(inside && c.classes.size() == 64 && c.classes[static_cast<size_t>(row * PD_CELLS_PER_BLOCK + col)] == 'W',
+                  "a room chunk's entry anchor is not on a walkable cell", static_cast<uint32_t>(id));
+            Check(!c.anchors.empty() && c.anchors[0].u == c.typed.entry.u && c.anchors[0].v == c.typed.entry.v,
+                  "the entry anchor is not the first point of the flat anchor list", static_cast<uint32_t>(id));
+            if (role == 2)
+            {
+                Check(c.typed.hasBoss, "a boss chunk publishes no boss anchor", static_cast<uint32_t>(id));
+                Check(c.typed.spawns.size() >= 2, "a boss chunk publishes fewer than two spawn anchors", static_cast<uint32_t>(id));
+            }
+            if (role == 0)
+            {
+                Check(c.typed.hasChest, "a room chunk publishes no chest anchor", static_cast<uint32_t>(id));
+                Check(c.typed.spawns.size() >= 5, "a room chunk publishes fewer than five spawn anchors", static_cast<uint32_t>(id));
+            }
+            if (role == 1)
+            {
+                Check(c.typed.spawns.empty(), "the entrance chunk publishes spawn anchors", static_cast<uint32_t>(id));
+            }
+        }
+        Check(roomChunks > 0, "no room chunk in kit_meta.json", 0);
+        auto pin = [&](int id, char const* want)
+        {
+            auto it = g_kit.find(id);
+            if (it == g_kit.end()) { Check(false, "pinned chunk missing from kit_meta.json", static_cast<uint32_t>(id)); return; }
+            std::string const got = RoomAnchorsString(it->second.typed);
+            if (got != want)
+            {
+                std::string const why = "the typed anchors of chunk " + std::to_string(id) + " moved: " + got;
+                Check(false, why.c_str(), static_cast<uint32_t>(id));
+            }
+        };
+        pin(12015, PD_ROOM_ANCHOR_PIN_12015);
+        pin(12215, PD_ROOM_ANCHOR_PIN_12215);
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
@@ -3508,6 +3608,7 @@ namespace
         RunGameMathChecks();
         RunChainMathChecks();
         RunLayoutFreezeCheck();
+        RunTypedAnchorChecks();
         {
             // Two statements, not one call: argument evaluation order is
             // unspecified, and why.c_str() must not be taken before
