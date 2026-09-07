@@ -49,7 +49,7 @@
 -- it and then fail to also re-run).
 --
 -- The DELETE below names every entry individually rather than a BETWEEN
--- range: this file's rows are not contiguous (910048-910049, 910059,
+-- range: this file's rows are not contiguous (910048-910049,
 -- 910067-910069, 910077-910099 are unused gaps in the reserved block), and
 -- an explicit list can never claim a gap id some later addition might use
 -- for something else. Same discipline as mod_pdungeon_prop_displays.sql.
@@ -133,7 +133,7 @@
 DELETE FROM `gameobject_template` WHERE `entry` IN (
     910040, 910041, 910042, 910043, 910044, 910045, 910046, 910047,
     910050, 910051, 910052, 910053, 910054, 910055, 910056, 910057,
-    910058,
+    910058, 910059,
     910060, 910061, 910062, 910063, 910064, 910065, 910066,
     910070, 910071, 910072, 910073, 910074, 910075, 910076
 );
@@ -181,4 +181,15 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 -- resolves in GameObjectDisplayInfo.dbc, has a collision model in
 -- GameObjectModels.dtree, and is the display of the stock 'WotLK Light Altar'
 -- (gameobject_template 190741) - the three-way check this file's header asks for.
-(910058, 10, 7355, 'Altar of Return', 1, 0, 0, 'go_pdungeon_altar');
+(910058, 10, 7355, 'Altar of Return', 1, 0, 0, 'go_pdungeon_altar'),
+-- Round B / B3: the boss-room barrier. type 5 GENERIC because that is the
+-- only GameObject class measured to block a player on map 760; opened by
+-- Delete(), never by state. Display 7482 Vr_Portcullis.m2 spans 16.3 yd at
+-- scale 1 (the lane is 16.67), so size 1.1 overlaps the flanking wall band.
+-- Stock precedent for the display, read out of the world DB: 186612/186694
+-- 'Giant Portcullis' and 192173/195437 'Doodad_VR_Portcullis01' (all type 0
+-- DOOR) - ours is type 5 for the blocking reason above, so it is never
+-- clickable and satisfies nobody's objective, the same argument the clutter
+-- ids above make. No ScriptName: the barrier is opened by the instance
+-- script, and a GENERIC object cannot be used by a player anyway.
+(910059, 5, 7482, 'Sealed Portcullis', 1.1, 0, 0, '');

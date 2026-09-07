@@ -563,7 +563,8 @@ ProceduralDungeon.V2.Decor.Enable = 1
 #
 #                     Patrol and ambush mobs never count towards it either:
 #                     they are risk on the road, not progress.
-#        Default:     50 (0 = the first kill opens it, 100 = clear it all)
+#        Default:     50 (0 = never sealed - the barrier opens the moment it is
+#                     placed, since no kill is required; 100 = clear it all)
 #
 
 ProceduralDungeon.V2.Barrier.Pct = 50

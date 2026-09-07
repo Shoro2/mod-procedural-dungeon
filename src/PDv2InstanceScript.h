@@ -283,6 +283,25 @@ namespace PDungeon
         };
         void SpawnAltars(BlockPlan const& plan);
 
+        // Round B / B3. One sealed portcullis per boss segment, standing in
+        // the boss room's own doorway - the cell inside the entry edge that
+        // segment's corridor run arrives through, found with the SAME walk the
+        // validator proved the spine with. Called after SpawnAltars so the
+        // walk grid EnsureWalkGrid built is there to be cut: the GameObject
+        // stops the PLAYER, and the four lane cells taken out of the grid stop
+        // the CREATURES, which ignore GameObject collision entirely.
+        struct Barrier
+        {
+            int segment = 0;                // k; the boss room is chain b_k
+            ObjectGuid guid;                // the portcullis, empty once opened
+            std::vector<GridPoint> cells;   // the four lane cells it seals
+            float x = 0.0f;                 // where it stands, for the hint radius
+            float y = 0.0f;
+            bool open = false;
+            bool hinted = false;
+        };
+        void SpawnBarriers(BlockPlan const& plan);
+
         // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
         // is safe: everyone recorded there who is still on this map and still
         // dead comes back alive at RespawnAltarFor's spot with resurrection
@@ -315,10 +334,22 @@ namespace PDungeon
         void MarkRunDirty() { _runDirty = true; }
 
         // Round B / B3. A segment's kill counter moved: re-decide whether that
-        // segment's barrier may fall. Empty until B3's own task fills it in -
-        // OnMobDied calls it from the counter block, so the call site and the
-        // ordering it depends on are settled here rather than retro-fitted.
+        // segment's barrier may fall. OnMobDied calls it from the counter
+        // block - the numerator moves, then the barrier is asked, before
+        // MarkRunDirty - and SpawnBarriers calls it once per barrier it
+        // places, which is what opens a segment that plans no trash at all.
         void EvaluateBarrier(int segment);
+
+        // Drops the portcullis: deletes the GameObject, hands the four lane
+        // cells back to the walk grid and says so to everyone in the dungeon.
+        // `why` goes to the log only. Idempotent - an open barrier is left
+        // alone, so a second threshold hit costs nothing.
+        void OpenBarrier(Barrier& barrier, char const* why);
+
+        // 1 Hz. A closed barrier explains itself ONCE, to whoever walks up to
+        // it: a wall with no stated reason reads as a broken dungeon, and the
+        // number it names is the only place a player learns what is left.
+        void HintBarriers();
 
         // Flips walkability on a handful of grid cells, in place - the grid's
         // OWN (local) coordinates, the shape LocalFromGlobalCell returns. B3's
@@ -364,6 +395,11 @@ namespace PDungeon
         // a segment whose only room is its boss would otherwise never open.
         std::vector<uint32> _segmentPlanned;
         std::vector<uint32> _segmentKilled;
+        // One entry per boss segment that got a portcullis, in segment order.
+        // An opened barrier STAYS in here with `open` set: it is the record
+        // that this segment's threshold was already met, and the rebuild - not
+        // the opening - is what forgets it.
+        std::vector<Barrier> _barriers;
         std::vector<Altar> _altars;                              // chain order; [0] = the entrance's
         std::unordered_map<ObjectGuid, size_t> _altarByGuid;     // altar GO -> index into _altars
         std::unordered_map<ObjectGuid, size_t> _boundAltar;      // player -> index into _altars

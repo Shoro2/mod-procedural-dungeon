@@ -35,6 +35,7 @@
 #include "Player.h"
 #include "Position.h"
 #include "SpellMgr.h"
+#include "StringFormat.h"
 #include "TemporarySummon.h"
 #include "Timer.h"
 #include "WorldSession.h"
@@ -78,6 +79,12 @@ namespace PDungeon
         // cell over", which is all this needs to be.
         double const CRITTER_DECOR_CLEAR_YD = 2.0;
 
+        // Round B / B3: how close a player has to come to a closed barrier
+        // before it tells them why it is closed. 12 yd is a bit less than two
+        // cells (8.33 yd each), so the hint fires when the portcullis fills
+        // the screen and not from the far end of the corridor run.
+        float const BARRIER_HINT_YD = 12.0f;
+
         // Where a Lil' Bro's two children land relative to the corpse. That
         // module's own offsets, mirrored (DungeonChallengeScripts.cpp:877-878);
         // the second child takes the negatives.
@@ -93,6 +100,22 @@ namespace PDungeon
             uint32 entry;
             int    weight;
         };
+
+        // The socket on the far side of the same block edge. A barrier seals
+        // BOTH sides of one doorway, so the neighbour's own doorway - the one
+        // facing ours - is the other half of the lane. 0 for anything that is
+        // not a single socket bit.
+        unsigned OppositeSocket(unsigned bit)
+        {
+            switch (bit)
+            {
+                case SOCKET_N:  return SOCKET_S;
+                case SOCKET_S:  return SOCKET_N;
+                case SOCKET_W:  return SOCKET_E;
+                case SOCKET_E:  return SOCKET_W;
+                default:        return 0;
+            }
+        }
 
         BonusMat const BONUS_MATS[5] = {
             { 920100, 60 },     // Forgotten Shard
@@ -179,6 +202,11 @@ namespace PDungeon
             _roomIsBoss.clear();
             _segmentPlanned.clear();
             _segmentKilled.clear();
+            // The portcullis GameObjects themselves went with _decorGuids in
+            // DespawnAll, and the grid holes they cut go with the grid the
+            // rebuild throws away - what is left here is the run's memory of
+            // which segment was already paid for.
+            _barriers.clear();
             MarkRunDirty();
         }
 
@@ -201,6 +229,10 @@ namespace PDungeon
             // Needs the walk grid EnsureWalkGrid built above: an altar is only
             // ever seated on a cell that grid calls floor.
             SpawnAltars(*plan);
+            // After SpawnFromPlan, which is what filled _segmentPlanned: a
+            // barrier is evaluated the moment it is placed, and a segment
+            // whose denominator is zero has to open right there.
+            SpawnBarriers(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -1093,14 +1125,133 @@ namespace PDungeon
                  uint32(_run.lootMultX100), affixedMobs, uint32(_runAffixes.size()));
     }
 
-    void PDv2InstanceScript::EvaluateBarrier(int /*segment*/)
+    void PDv2InstanceScript::EvaluateBarrier(int segment)
     {
-        // Round B / B3 fills this in: compare _segmentKilled[segment] against
-        // _segmentPlanned[segment] x V2.Barrier.Pct and drop the segment's
-        // portcullis when the threshold is met. Declared and called now so the
-        // ORDER is settled by the task that owns the counters - the numerator
-        // moves in OnMobDied before MarkRunDirty, and the barrier is asked
-        // right after it, never on a timer that could read a stale count.
+        // Segment 0 is the entrance and has no barrier; anything below that is
+        // a corridor's -1 and never reaches here from OnMobDied's guard.
+        if (segment < 1 || _barriers.empty())
+        {
+            return;
+        }
+
+        size_t const seg = static_cast<size_t>(segment);
+        uint32 const planned = seg < _segmentPlanned.size() ? _segmentPlanned[seg] : 0;
+        uint32 const killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+        uint32 const pct = static_cast<uint32>(sPDv2Mgr->GetConfig().barrierPct);
+
+        for (Barrier& barrier : _barriers)
+        {
+            if (barrier.segment != segment || barrier.open)
+            {
+                continue;
+            }
+            if (planned == 0)
+            {
+                // The denominator excludes the boss room's own pack, so a
+                // segment whose ONLY room is its boss plans nothing - the
+                // single-boss-segment softlock (design §B3.1). It opens on
+                // sight rather than never.
+                OpenBarrier(barrier, "its segment plans no trash in front of the boss");
+            }
+            else if (killed * 100 >= planned * pct)
+            {
+                // Integers on purpose: the same comparison the hint's own
+                // ceiling is derived from, so the two can never disagree about
+                // whether one more kill is needed.
+                OpenBarrier(barrier, "the segment's kill threshold was met");
+            }
+        }
+    }
+
+    void PDv2InstanceScript::OpenBarrier(Barrier& barrier, char const* why)
+    {
+        if (barrier.open)
+        {
+            return;
+        }
+        barrier.open = true;
+
+        // Delete(), not a door state: type 5 GENERIC has no open state to set,
+        // and the whole point of the choice is that its collision is the one
+        // shape measured to stop a player on this map. The portcullis simply
+        // stops existing.
+        if (GameObject* go = instance->GetGameObject(barrier.guid))
+        {
+            go->Delete();
+        }
+        _decorGuids.erase(std::remove(_decorGuids.begin(), _decorGuids.end(), barrier.guid),
+                          _decorGuids.end());
+        barrier.guid.Clear();
+
+        // ...and the creatures get their lane back. Nothing is re-pathed: the
+        // AI re-decides inside 500 ms on its own.
+        SetCellsWalkable(barrier.cells, true);
+
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+        {
+            sPDv2UILink->SendNotice(it->GetSource(), "The barrier to the boss falls.");
+        }
+
+        size_t const seg = static_cast<size_t>(barrier.segment);
+        uint32 const planned = seg < _segmentPlanned.size() ? _segmentPlanned[seg] : 0;
+        uint32 const killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+        LOG_INFO(PD_LOG, "PDv2: instance {} opened the barrier of segment {} - {} "
+                         "({}/{} planned kills, threshold {}%)",
+                 instance->GetInstanceId(), barrier.segment, why, killed, planned,
+                 sPDv2Mgr->GetConfig().barrierPct);
+    }
+
+    void PDv2InstanceScript::HintBarriers()
+    {
+        if (_barriers.empty())
+        {
+            return;
+        }
+
+        uint32 const pct = static_cast<uint32>(sPDv2Mgr->GetConfig().barrierPct);
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Barrier& barrier : _barriers)
+        {
+            if (barrier.open || barrier.hinted)
+            {
+                continue;
+            }
+
+            size_t const seg = static_cast<size_t>(barrier.segment);
+            uint32 const planned = seg < _segmentPlanned.size() ? _segmentPlanned[seg] : 0;
+            uint32 const killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+
+            // The ceiling of planned x pct / 100 is the kill count that first
+            // satisfies EvaluateBarrier's >=, so this number is what the
+            // player actually still owes - never one less, never one more. It
+            // is floored at 1: a closed barrier by definition still wants a
+            // kill, and "0 more must fall" in front of a wall is a bug report.
+            uint32 const needAll = (planned * pct + 99) / 100;
+            uint32 const needed = needAll > killed ? needAll - killed : 1;
+
+            for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+            {
+                Player* player = it->GetSource();
+                if (!player || !player->IsInWorld())
+                {
+                    continue;
+                }
+                // 2D: the dungeon is one floor plane, and a Z term would only
+                // add the height of a jump.
+                float const dx = player->GetPositionX() - barrier.x;
+                float const dy = player->GetPositionY() - barrier.y;
+                if (dx * dx + dy * dy > BARRIER_HINT_YD * BARRIER_HINT_YD)
+                {
+                    continue;
+                }
+                sPDv2UILink->SendNotice(player, Acore::StringFormat(
+                    "The barrier holds - {} more of this segment's foes must fall.", needed));
+                // Everyone standing there is told, and then never again for
+                // this barrier: it is a signpost, not an alarm.
+                barrier.hinted = true;
+            }
+        }
     }
 
     void PDv2InstanceScript::SetCellsWalkable(std::vector<GridPoint> const& cells, bool walkable)
@@ -1499,6 +1650,167 @@ namespace PDungeon
                  instance->GetInstanceId(), placed, uint32(_altars.size()));
     }
 
+    void PDv2InstanceScript::SpawnBarriers(BlockPlan const& plan)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        if (!_gridReady)
+        {
+            // Not a reason to skip the portcullis: the GameObject still stops
+            // the PLAYER, which is the mechanic the run is measured on. Only
+            // the creature half is lost here - and a dungeon whose walk grid
+            // failed to build has no creature pathing to lose in the first
+            // place, because that grid IS the navigation on this map.
+            LOG_WARN(PD_LOG, "PDv2: instance {} has no walk grid - its barriers will hold "
+                             "players back but not creatures",
+                     instance->GetInstanceId());
+        }
+
+        // (row, col) of the two cells a block's doorway occupies on the edge a
+        // socket bit names, appended as walk-grid cells. Row 0 is the north
+        // edge and col 0 the west one - the kit's own mask layout - and the
+        // doorway is the two centre cells, 3 and 4, of the other axis.
+        auto laneCells = [this](PlacedBlock const& block, unsigned edge,
+                                std::vector<GridPoint>& out)
+        {
+            int const lo = PD_CELLS_PER_BLOCK / 2 - 1;
+            int const hi = PD_CELLS_PER_BLOCK / 2;
+            int const last = PD_CELLS_PER_BLOCK - 1;
+            int rows[2] = { lo, hi };
+            int cols[2] = { lo, hi };
+            switch (edge)
+            {
+                case SOCKET_N:  rows[0] = rows[1] = 0;      break;
+                case SOCKET_S:  rows[0] = rows[1] = last;   break;
+                case SOCKET_W:  cols[0] = cols[1] = 0;      break;
+                case SOCKET_E:  cols[0] = cols[1] = last;   break;
+                default:        return;
+            }
+            for (int i = 0; i < 2; ++i)
+            {
+                out.push_back(_grid.LocalFromGlobalCell(
+                    block.bx * PD_CELLS_PER_BLOCK + cols[i],
+                    block.by * PD_CELLS_PER_BLOCK + rows[i]));
+            }
+        };
+
+        int const chainLen = ChainLength(plan);
+        int const bossRooms = std::max(1, plan.config.bossRooms);
+        uint32 placed = 0;
+        for (int k = 1; k <= bossRooms; ++k)
+        {
+            // The same walk the validator proved the spine with, so the run a
+            // barrier seals and the run the plan is valid for are one run.
+            // `run` comes back in walking order, so its LAST block is the
+            // corridor that touches the boss room's doorway.
+            int const bossChain = BossChainIndex(chainLen, plan.config.bossRooms, k);
+            std::vector<size_t> run;
+            unsigned const bit = SpineRunInto(plan, bossChain, &run);
+            if (!bit || run.empty())
+            {
+                // A boss sitting on the entrance itself (chain 0), or a join
+                // that is not one straight run. Neither has a single doorway
+                // to seal, so that segment stays open - a missing barrier is a
+                // shortcut, never a softlock.
+                LOG_WARN(PD_LOG, "PDv2: instance {} found no single entry run into boss {} "
+                                 "(chain room {}) - segment {} gets no barrier",
+                         instance->GetInstanceId(), k, bossChain, k);
+                continue;
+            }
+
+            PlacedBlock const* boss = nullptr;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                // Last match, the way SpineRunInto picks it. chainIndex is set
+                // on spine rooms only (pockets carry branchOf, loop rooms
+                // detourOf), so there is exactly one of these anyway.
+                if (b.chainIndex == bossChain)
+                {
+                    boss = &b;
+                }
+            }
+            if (!boss)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} has no chain room {} to bar - "
+                                 "segment {} gets no barrier",
+                         instance->GetInstanceId(), bossChain, k);
+                continue;
+            }
+            PlacedBlock const& neighbour = plan.blocks[run.back()];
+
+            // BOTH sides of the edge. Creatures snap to a cell within two of
+            // their own, so sealing only the boss block's half would leave the
+            // corridor cell next to it as a legal step across the doorway.
+            std::vector<GridPoint> cells;
+            laneCells(*boss, bit, cells);
+            laneCells(neighbour, OppositeSocket(bit), cells);
+            if (cells.size() != 4)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} could not name the lane cells of "
+                                 "socket {} into chain room {} - segment {} gets no barrier",
+                         instance->GetInstanceId(), bit, bossChain, k);
+                continue;
+            }
+
+            // One cell INSIDE the boss block, on that edge, at the lane
+            // centre - the doorway's own square. u runs along the row axis and
+            // v along the column axis, the same reading SpawnAltars uses for
+            // the kit's anchors.
+            double const nearEdge = PD_CELL_SIZE_YD / 2.0;                      // 4.1667
+            double const farEdge = PD_BLOCK_SIZE_YD - PD_CELL_SIZE_YD / 2.0;    // 62.5
+            double const lane = PD_BLOCK_SIZE_YD / 2.0;                         // 33.3333
+            double u = lane;
+            double v = lane;
+            // Two conf keys, not two constants: which radian value stands the
+            // model across the lane depends on how the m2 is authored, and the
+            // operator calibrates it in game with `.reload config`.
+            float orientation = cfg.barrierOrientNS;
+            switch (bit)
+            {
+                case SOCKET_N:  u = nearEdge;   orientation = cfg.barrierOrientNS;  break;
+                case SOCKET_S:  u = farEdge;    orientation = cfg.barrierOrientNS;  break;
+                case SOCKET_W:  v = nearEdge;   orientation = cfg.barrierOrientEW;  break;
+                case SOCKET_E:  v = farEdge;    orientation = cfg.barrierOrientEW;  break;
+                default:        break;      // unreachable: the lane cells above already agreed
+            }
+
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            sPDv2Mgr->BlockToWorld(boss->bx, boss->by, u, v, x, y, z);
+            GameObject* go = instance->SummonGameObject(GO_BARRIER, x, y, z, orientation,
+                                                        0.0f, 0.0f, 0.0f, 0.0f, 0);
+            if (!go)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the barrier "
+                                  "(missing gameobject_template {}?)",
+                          instance->GetInstanceId(), uint32(GO_BARRIER));
+                continue;
+            }
+            // The decor list owns the object, so one teardown deletes
+            // everything this instance stood up; _barriers only remembers what
+            // the object MEANS.
+            _decorGuids.push_back(go->GetGUID());
+
+            Barrier barrier;
+            barrier.segment = k;
+            barrier.guid = go->GetGUID();
+            barrier.cells = cells;
+            barrier.x = x;
+            barrier.y = y;
+            _barriers.push_back(barrier);
+            SetCellsWalkable(cells, false);
+            ++placed;
+
+            // Asked once, right here. A segment whose rooms in front of the
+            // boss plan no trash at all (design 2026-09-03 §B3.1) has to open
+            // before anyone walks up to it: no kill will ever come to ask
+            // again, and a sealed lane with nothing behind it to clear is the
+            // softlock this whole denominator is shaped to avoid.
+            EvaluateBarrier(k);
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} barrier(s) for {} boss segment(s)",
+                 instance->GetInstanceId(), placed, uint32(bossRooms));
+    }
+
     bool PDv2InstanceScript::BindAltar(Player* player, ObjectGuid const& altarGuid)
     {
         auto const it = _altarByGuid.find(altarGuid);
@@ -1701,6 +2013,10 @@ namespace PDungeon
             // then sent on to their altar, so the altar is the teleport that
             // lands last and the ordering never leaves a corpse in the void.
             RespawnPending();
+            // Round B / B3. After the respawn, so a player who just landed at
+            // an altar is measured where they actually are; a barrier only
+            // ever talks, so its place in the tick is free.
+            HintBarriers();
             EvictDisconnected();
             TickVoidZones();
 
