@@ -24,6 +24,7 @@
 #include "PDv2PackMgr.h"
 #include "Position.h"
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2AmbushPlan.h"
 #include "generator/PDv2WalkGrid.h"
 
 #include <cstdint>
@@ -319,6 +320,43 @@ namespace PDungeon
         // adding or retuning a patroller cannot move one pick of the room draw.
         void SpawnPatrols(BlockPlan const& plan);
 
+        // Round B / B5. One corridor per boss segment may be armed with an
+        // ambush: the player who walks into it is stunned for two seconds and
+        // a handful of mobs appear around them.
+        //
+        // WHICH corridor is a pure function of the layout and one chance, so
+        // it is decided in the engine-free planner (BuildAmbushPlan) that the
+        // harness pins; nothing here rolls anything about the geometry. What
+        // this half owns is the arming: the block centre in world coordinates,
+        // the corridor's own socket mask (which IS its axis, and therefore the
+        // direction the mobs are placed along) and the creatures the spot will
+        // spawn - drawn ONCE at build time on the ambush's own stream, so the
+        // same seed springs the same ambush and a trap that fires costs no
+        // draw at the moment the player is already busy being stunned.
+        struct Ambush
+        {
+            AmbushSpot spot;
+            float x = 0.0f;             // the corridor block's centre, world
+            float y = 0.0f;
+            float z = 0.0f;
+            unsigned socketMask = 0;    // that block's sockets = the corridor axis
+            std::vector<SpawnPick> picks;
+            bool armed = true;          // fires once, then stays spent until a rebuild
+        };
+        void SpawnAmbushPlan(BlockPlan const& plan);
+
+        // AMBUSH_SCAN_MS. Every armed spot against every player in the
+        // instance, flat 2D distance against V2.Ambush.RadiusYd. Its own
+        // cadence rather than the 1 Hz branch's: a player runs 7 yd/s, so a
+        // 9 yd radius is crossed in well under two seconds and a one-second
+        // scan would let someone walk through an armed corridor untouched.
+        void TickAmbushes();
+
+        // Disarms the spot, stuns the player, says so, and puts the stored
+        // picks on the floor around them - grid-vetoed, because the corridor
+        // is 66.67 yd wide and its walkable lane is 8.3 yd of that.
+        void FireAmbush(Ambush& ambush, Player* player);
+
         // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
         // is safe: everyone recorded there who is still on this map and still
         // dead comes back alive at RespawnAltarFor's spot with resurrection
@@ -417,12 +455,18 @@ namespace PDungeon
         // that this segment's threshold was already met, and the rebuild - not
         // the opening - is what forgets it.
         std::vector<Barrier> _barriers;
+        // Round B / B5. One entry per armed corridor, in segment order. A
+        // sprung ambush STAYS in here with `armed` cleared - that is the record
+        // that this corridor is spent - and the rebuild, not the firing, is
+        // what forgets it. Same shape and same reasoning as _barriers.
+        std::vector<Ambush> _ambushes;
         std::vector<Altar> _altars;                              // chain order; [0] = the entrance's
         std::unordered_map<ObjectGuid, size_t> _altarByGuid;     // altar GO -> index into _altars
         std::unordered_map<ObjectGuid, size_t> _boundAltar;      // player -> index into _altars
         std::unordered_map<ObjectGuid, uint32> _pendingRespawn;  // player -> getMSTime() at death
         std::vector<ObjectGuid> _voidZones;     // friendly ground-hazard carriers; pruned each tick
         uint32   _fallCheckTimer = 0;
+        uint32   _ambushTimer = 0;      // accumulates toward AMBUSH_SCAN_MS
         float    _entranceX = 0.0f;
         float    _entranceY = 0.0f;
         float    _entranceZ = 0.0f;

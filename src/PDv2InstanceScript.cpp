@@ -101,6 +101,42 @@ namespace PDungeon
         // neighbouring segments' seeds one apart.
         uint32 const PD_SEGMENT_SEED_STEP = 0x9E3779B1u;
 
+        // Round B / B5: how often the armed corridors are measured against the
+        // players standing in the dungeon. Four times a second, not the 1 Hz
+        // branch's once: a player runs at about 7 yd/s, so the default 9 yd
+        // radius is crossed in under three seconds and a one-second scan would
+        // let somebody walk through an armed corridor untouched. A DBC-free
+        // area trigger is impossible on this map (the id comes from the
+        // client), so an own timer in Update IS the trigger.
+        uint32 const AMBUSH_SCAN_MS = 250;
+
+        // Where an ambush's mobs land relative to the player it fires on:
+        // along the corridor's own axis and across it, in yards. 6 yd along
+        // puts two in front and two behind - close enough to be an ambush, far
+        // enough not to spawn inside the player - and 4 yd across is about half
+        // a grid cell to either side. Whether either offset is actually floor
+        // is not assumed: FireAmbush vetoes every one of them against the walk
+        // grid and falls back to the player's own cell.
+        //
+        // FOUR of them for a key that allows up to eight mobs. Past the fourth
+        // the pattern repeats, which is exactly what V2.Ambush.Mobs' own 0..8
+        // clamp is documented to mean ("more than eight would stack them inside
+        // each other").
+        struct AmbushOffset
+        {
+            float along;
+            float across;
+        };
+
+        size_t const AMBUSH_OFFSET_COUNT = 4;
+
+        AmbushOffset const AMBUSH_OFFSETS[AMBUSH_OFFSET_COUNT] = {
+            {  6.0f,  4.0f },
+            {  6.0f, -4.0f },
+            { -6.0f,  4.0f },
+            { -6.0f, -4.0f }
+        };
+
         // Where a Lil' Bro's two children land relative to the corpse. That
         // module's own offsets, mirrored (DungeonChallengeScripts.cpp:877-878);
         // the second child takes the negatives.
@@ -207,6 +243,10 @@ namespace PDungeon
             // rebuild throws away - what is left here is the run's memory of
             // which segment was already paid for.
             _barriers.clear();
+            // ...and which corridors were already sprung (design §B5.4: "spots
+            // rebuilt with the run"). A rebuild re-arms every one of them,
+            // which is the whole difference between a trap and a one-off.
+            _ambushes.clear();
             MarkRunDirty();
         }
 
@@ -233,11 +273,16 @@ namespace PDungeon
             // barrier is evaluated the moment it is placed, and a segment
             // whose denominator is zero has to open right there.
             SpawnBarriers(*plan);
-            // Last, and after the barriers on purpose: a patroller belongs to
-            // the segment a barrier defines, and it walks the run that barrier
-            // seals - reading them in that order is what keeps the two from
-            // drifting apart.
+            // After the barriers on purpose: a patroller belongs to the segment
+            // a barrier defines, and it walks the run that barrier seals -
+            // reading them in that order is what keeps the two from drifting
+            // apart.
             SpawnPatrols(*plan);
+            // Last. Nothing is summoned here - the ambush only ARMS a corridor
+            // and remembers what it will spawn - so it has nothing to race, but
+            // it belongs at the end of the same guard as everything else the
+            // rebuild tears down.
+            SpawnAmbushPlan(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -1961,6 +2006,229 @@ namespace PDungeon
                  instance->GetInstanceId(), placed, uint32(bossRooms));
     }
 
+    void PDv2InstanceScript::SpawnAmbushPlan(BlockPlan const& plan)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        PDv2AccountState const account = sPDv2Mgr->GetAccountState(_accountId);
+
+        // WHICH corridors, decided entirely in the engine-free planner. The
+        // chance is read LIVE (design 2026-09-03 §B5.1): an operator turning
+        // V2.Ambush.Chance re-arms the next run rather than re-rolling a layout
+        // an account already owns, which is why it is not a plan input.
+        std::vector<AmbushSpot> const spots =
+            BuildAmbushPlan(plan, cfg.ambushChancePct, plan.effectiveSeed);
+
+        double const mid = PD_BLOCK_SIZE_YD / 2.0;
+        for (AmbushSpot const& spot : spots)
+        {
+            if (spot.blockIndex >= plan.blocks.size())
+            {
+                // BuildAmbushPlan indexes the plan it was handed, so this is a
+                // contract check rather than a branch a plan can reach - but an
+                // out-of-range read here would be a crash, not a missing trap.
+                LOG_WARN(PD_LOG, "PDv2: instance {} got an ambush spot outside the plan "
+                                 "(block {} of {}) - segment {} gets no ambush",
+                         instance->GetInstanceId(), uint32(spot.blockIndex),
+                         uint32(plan.blocks.size()), spot.segment);
+                continue;
+            }
+
+            Ambush ambush;
+            ambush.spot = spot;
+            // The corridor's OWN sockets are its axis: a straight N|S piece
+            // runs north-south whatever else is around it, and FireAmbush reads
+            // nothing else to decide which way to place the mobs.
+            ambush.socketMask = plan.blocks[spot.blockIndex].socketMask;
+            sPDv2Mgr->BlockToWorld(spot.bx, spot.by, mid, mid, ambush.x, ambush.y, ambush.z);
+
+            // ONE synthetic room's worth of trash, drawn here and stored - not
+            // at the moment the trap fires. Two reasons, and the second is the
+            // load-bearing one: the draw is seeded, so a spot that is rolled at
+            // build time springs the same creatures every time this seed is
+            // entered; and the firing tick is the one place in the run where
+            // the player is already stunned and the server has no business
+            // doing anything it could have done minutes earlier.
+            SpawnSelectInputs in;
+            RoomRequest room;
+            room.roomIndex = 0;
+            room.isBoss = false;
+            in.rooms.push_back(room);
+            in.spawnsPerRoom = cfg.ambushMobs;
+            in.bossRoomAdds = 0;
+            // Everything else exactly as SpawnFromPlan fills it, so an ambush
+            // draws from the same pools, the same band and the same unlock as
+            // the dungeon's own trash. affixPct is copied for the SHAPE of the
+            // stream only: the draw rolls `affixed` per pick either way, and
+            // §B5.3 gives the ambush no affix - proto.affixMask staying 0 below
+            // is what says so.
+            in.casterPct = account.cfgCasterPct;
+            in.affixPct = cfg.affixPct;
+            in.bandMin = account.cfgBandMin;
+            in.unlockedDlvl = static_cast<int>(account.dlvl);
+
+            std::vector<RoomSpawns> out;
+            uint32 const seed = plan.effectiveSeed ^ PD_AMBUSH_SEED_MIX ^
+                                (static_cast<uint32>(spot.segment) * PD_SEGMENT_SEED_STEP);
+            if (sPDv2PackMgr->SelectSpawns(seed, in, out) && !out.empty() &&
+                !out[0].picks.empty())
+            {
+                ambush.picks = out[0].picks;
+            }
+            else if (cfg.ambushMobs > 0)
+            {
+                // The same degradation the room draw takes when the pack SQL
+                // was never applied: placeholder mammoths rather than a trap
+                // that stuns and then does nothing.
+                ambush.picks.assign(static_cast<size_t>(cfg.ambushMobs),
+                                    SpawnPick{ PLACEHOLDER_CREATURE, PACK_ROLE_MELEE, 0 });
+            }
+
+            _ambushes.push_back(ambush);
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} armed {} corridor(s) with an ambush "
+                         "(chance {}%, {} mob(s) each)",
+                 instance->GetInstanceId(), uint32(_ambushes.size()),
+                 cfg.ambushChancePct, cfg.ambushMobs);
+    }
+
+    void PDv2InstanceScript::TickAmbushes()
+    {
+        if (_ambushes.empty())
+        {
+            return;
+        }
+
+        float const radius = sPDv2Mgr->GetConfig().ambushRadiusYd;
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Ambush& ambush : _ambushes)
+        {
+            if (!ambush.armed)
+            {
+                continue;
+            }
+            for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+            {
+                Player* player = it->GetSource();
+                // A dead player does not spring a trap: the corpse run back
+                // through the corridor is not the moment to spend the one
+                // ambush this segment gets.
+                if (!player || !player->IsInWorld() || !player->IsAlive())
+                {
+                    continue;
+                }
+                // 2D, like the barrier hint and for the same reason: the
+                // dungeon is one floor plane and a Z term would only measure
+                // the height of a jump.
+                if (player->GetExactDist2d(ambush.x, ambush.y) > radius)
+                {
+                    continue;
+                }
+                FireAmbush(ambush, player);
+                // Spent. Whoever walked in first is the one it fires on, and
+                // the rest of this player list has nothing left to trigger.
+                break;
+            }
+        }
+    }
+
+    void PDv2InstanceScript::FireAmbush(Ambush& ambush, Player* player)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        // DISARMED FIRST, before anything below can fail. The scan runs four
+        // times a second and the player is standing in the radius for seconds:
+        // a spot left armed through a failed summon would stun them again on
+        // the next tick, and again after that.
+        ambush.armed = false;
+
+        if (cfg.ambushStunSpell)
+        {
+            // The PLAYER is the caster (design §B5.3): AddAura with a matching
+            // caster and target is the shape that gives the client a real stun
+            // with a debuff icon, and the default 20170 is aura-only with a
+            // flat 2 s duration, so it releases itself and no code here has to
+            // remember to take it off.
+            player->AddAura(cfg.ambushStunSpell, player);
+        }
+        sPDv2UILink->SendNotice(player, "Ambush!");
+
+        // Along the corridor and across it, in WORLD coordinates. The block
+        // frame's u runs south and v runs east (PDv2WorldMath.h: x = MAX -
+        // (by*BLOCK + u), y = MAX - (bx*BLOCK + v)), so u is the world X axis
+        // and v the world Y axis, up to a sign that a symmetric ± pattern does
+        // not care about. A corridor with a north or south socket therefore
+        // runs along world X, and anything else along world Y.
+        //
+        // A corner piece answers both readings; this takes the N|S one and lets
+        // the grid veto sort out the offsets that land in the wall, because
+        // "which of the two halves of an L is the player in" is a question the
+        // block plan cannot answer and the walk grid can.
+        bool const alongWorldX = (ambush.socketMask & (SOCKET_N | SOCKET_S)) != 0;
+
+        WalkGrid const* grid = GetWalkGrid();
+        uint32 born = 0;
+        for (size_t i = 0; i < ambush.picks.size(); ++i)
+        {
+            AmbushOffset const& offset = AMBUSH_OFFSETS[i % AMBUSH_OFFSET_COUNT];
+            float cx = player->GetPositionX() +
+                       (alongWorldX ? offset.along : offset.across);
+            float cy = player->GetPositionY() +
+                       (alongWorldX ? offset.across : offset.along);
+
+            // The same veto SplitOnDeath uses on a child's offset, for the same
+            // reason: gravity is off, so a mob placed past the platform edge
+            // hovers over the void for ever - unreachable, unkillable and
+            // permanently in combat with the player who sprang the trap. The
+            // walk grid is the only thing on this server that knows where floor
+            // is, so it decides; the player's own feet are the fallback,
+            // because the player is provably standing on floor.
+            if (grid)
+            {
+                int gcx = 0, gcy = 0;
+                WorldToCell(cx, cy, gcx, gcy);
+                GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                if (!grid->At(cell.x, cell.y))
+                {
+                    cx = player->GetPositionX();
+                    cy = player->GetPositionY();
+                }
+            }
+
+            PDv2MobData proto;
+            proto.role = ambush.picks[i].role;
+            proto.casterSpellId = ambush.picks[i].casterSpellId;
+            // In no room and in no counter: an ambush is risk on the road, not
+            // progress (design §B5.3, the same exemption the patrol carries).
+            // affixMask is left 0 - "no affix" - even though the draw rolled
+            // the flag.
+            proto.roomIndex = PD_ROOM_NONE;
+            proto.countsForRun = false;
+
+            // Z from the SPOT, never from the player: ambush.z is the floor
+            // plane this corridor was placed at, and a player caught mid-jump
+            // must not hand four gravity-less mobs a permanent hover.
+            Creature* c = SpawnTaggedMob(ambush.picks[i].entry, proto, cx, cy, ambush.z);
+            if (!c)
+            {
+                continue;
+            }
+            ++born;
+
+            // The whole point of the trap: they are already on the player when
+            // the stun ends, rather than waiting to be noticed.
+            if (CreatureAI* ai = c->AI())
+            {
+                ai->AttackStart(player);
+            }
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} sprang the ambush of segment {} in block "
+                         "({}, {}) on {} - {} mob(s), stun spell {}",
+                 instance->GetInstanceId(), ambush.spot.segment, ambush.spot.bx,
+                 ambush.spot.by, player->GetName(), born, cfg.ambushStunSpell);
+    }
+
     bool PDv2InstanceScript::BindAltar(Player* player, ObjectGuid const& altarGuid)
     {
         auto const it = _altarByGuid.find(altarGuid);
@@ -2186,6 +2454,20 @@ namespace PDungeon
         else
         {
             _fallCheckTimer -= diff;
+        }
+
+        // Round B / B5, on its own cadence and AFTER the 1 Hz branch. A player
+        // the respawn just teleported to an altar is measured where they now
+        // are rather than where they died, which is the only ordering that
+        // cannot spring a trap at a position the player no longer occupies.
+        // Accumulating rather than counting down: the map ticks at 10 ms, so
+        // the remainder above 250 is a fraction of one tick and dropping it
+        // costs nothing.
+        _ambushTimer += diff;
+        if (_ambushTimer >= AMBUSH_SCAN_MS)
+        {
+            _ambushTimer = 0;
+            TickAmbushes();
         }
     }
 }
