@@ -322,8 +322,8 @@ Everything above is the approved design and stands. This section records where t
 says something more specific, or something else, than §2–§9 — B1–B4 are written from this document,
 so the code wins here and the text above is history.
 
-**The info line prints `pockets {} | shortcut {}%`,** not §5's `branches {} | loop {}%`. Same two
-values, named after what they do; `tools/pd_testlauf_runde28.md` and the operator ritual quote the
+**The info line prints `pockets {} | detour {}%`** (since B0b; before that `shortcut {}%`), not §5's
+`branches {} | loop {}%`. Same two values, named after what they do; `tools/pd_testlauf_runde28.md` and the operator ritual quote the
 code's wording.
 
 **The host clamp is `(total − 1 − N) / 2` with `N = max(1, bossRooms)`,** not §2's `(rooms − 1) / 2`.
@@ -349,7 +349,7 @@ only). `ValidateBlockPlan` additionally enforces, from the sockets, on every gen
   leading to non-stub blocks;
 - **spine adjacency** — consecutive chain rooms are joined by exactly one corridor run;
 - **pocket physics** — the rooms a pocket's corridors actually reach are exactly its declared host
-  (once) and, if it declares one, its shortcut target (once);
+  (once); the shortcut half of this rule was withdrawn with B0b;
 - **chain length** — `chainLen == max(2, rooms + bossRooms) − pockets`;
 - every interior spine position that is not a boss carries `BlockRole::Room`.
 
