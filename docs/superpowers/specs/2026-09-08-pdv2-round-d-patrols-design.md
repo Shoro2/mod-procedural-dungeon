@@ -1,7 +1,9 @@
 # PDv2 Round D — patrols that walk like guards: lane-following planner, one patrol per corridor, formations; no spawn hover
 
 **Date** 2026-09-08 · **Branch** `claude/pdv2-round-c-0cf92ad4` (continues on the Round C branch; tip `55a09ce`) ·
-**Status** design, decided with the operator in chat on 2026-09-08 (three choices below), not implemented.
+**Status** **implemented T1 2026-09-08, commits `e75fc3e` (D3) / `616d59d` (D1) / `1dc9179` (D2)** on that
+branch (tip now `1dc9179`); decided with the operator in chat on 2026-09-08 (three choices below).
+T2 owed — the operator run in `C:\wowstuff\ForgottenLand2.0\tools\pd_testlauf_runde30.md`.
 
 Source: the operator's retest after the patrol fix `55a09ce`: *"pats laufen von raum zu raum, aber in einer
 geraden linie durch ecken von häusern und objekte hindurch. können wir da irgendwie pathfinding

@@ -21,8 +21,14 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > state; B1's clickable Altars of Return are gone.
 > A **sealed portcullis** (GO 910059) holds each boss doorway - the walk grid is cut on both
 > sides, so creatures stop at it too - until that segment's PLANNED non-boss kills reach
-> `V2.Barrier.Pct`. One **patroller** walks the corridor run in front of every boss room and
-> rejoins its existing beat after an evade rather than re-planning a shorter one. And with
+> `V2.Barrier.Pct`. Since Round D **every corridor between two chain rooms carries one
+> patrol** - a **single file** of 1, 2 or 3 melee creatures (2 from difficulty
+> `V2.Patrol.Size2Diff`, 3 from `V2.Patrol.Size3Diff`), the leader walking a **corridor-only**
+> beat from doorway to doorway and the others following it at `V2.Patrol.FollowDistYd` per rank.
+> The beat is planned by the patrol's own path finder: **axis-aligned legs down the lane centre**
+> that pay for a turn, for hugging a wall and for a cell carrying a prop, so a patrol no longer
+> cuts through house corners or furniture. It rejoins that existing beat after an evade rather
+> than re-planning a shorter one, and a file whose leader dies dissolves and holds. And with
 > `V2.Ambush.Chance` one corridor per segment is an **ambush**: step into that corridor
 > block and it springs once - a 2 s stun and `V2.Ambush.Mobs` creatures. The trigger is the
 > block, not a radius (Round C removed `V2.Ambush.RadiusYd`: a 9 yd disc could be walked
