@@ -554,9 +554,16 @@ namespace PDungeon
         // either, and a retry would do nothing but log the same error once a
         // second for the rest of the run. One error line per room clear is the
         // honest cost of a layout that outgrew the wire.
+        //
+        // The pair is {run generation, cleared-room count}. Only the second
+        // half moves during a run; the first is what makes a REBUILD - same
+        // instance, new run, count back to 0 - a change the tick can see
+        // (_clearedSent says why the count alone cannot).
         {
             std::lock_guard<std::mutex> guard(_lock);
-            _clearedSent[player->GetGUID()] = script ? script->RoomsClearedCount() : 0;
+            _clearedSent[player->GetGUID()] =
+                script ? std::make_pair(script->RunGeneration(), script->RoomsClearedCount())
+                       : std::make_pair(uint32_t(0), uint32_t(0));
         }
 
         // The SAME origin SendMap shifts its blocks by. The addon keys its
@@ -702,7 +709,13 @@ namespace PDungeon
         // other line in this function - the instance script is only ever moved
         // from there (OnMobDied), so this needs no more synchronisation than
         // the run state above it does.
-        uint32_t const clearedCount = script->RoomsClearedCount();
+        //
+        // Both halves of the K record, and both read outside the player loop:
+        // the generation changes only when this instance rebuilds, the count
+        // only when a room falls, so neither can move between two players of
+        // the same tick.
+        std::pair<uint32_t, uint32_t> const clearedKey(script->RunGeneration(),
+                                                       script->RoomsClearedCount());
 
         Map::PlayerList const& players = script->instance->GetPlayers();
         for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
@@ -717,14 +730,15 @@ namespace PDungeon
 
             // The K set is a complete statement, so it is restated only when
             // the thing it describes MOVED: once per room clear per player,
-            // not once per second. A player with no record - just walked in,
-            // or the client link just reset - is told once, which is also what
-            // repaints a map that a /reload emptied.
+            // not once per second, plus exactly once more after every rebuild.
+            // A player with no record - just walked in, or the client link just
+            // reset - is told once, which is also what repaints a map that a
+            // /reload emptied.
             bool stale = true;
             {
                 std::lock_guard<std::mutex> guard(_lock);
                 auto const sent = _clearedSent.find(player->GetGUID());
-                stale = sent == _clearedSent.end() || sent->second != clearedCount;
+                stale = sent == _clearedSent.end() || sent->second != clearedKey;
             }
             if (stale)
             {

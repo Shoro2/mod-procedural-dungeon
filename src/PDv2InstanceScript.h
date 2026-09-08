@@ -256,6 +256,16 @@ namespace PDungeon
         // protocol it could silently fall out of step with.
         uint32 RoomsClearedCount() const { return _run.roomsCleared; }
 
+        // ...and the OTHER half of that change detector. The counter above
+        // only counts rooms emptied by kills, so it cannot tell a rebuild
+        // apart from the run it replaced when both stand at 0 - and the K
+        // payload does differ there, because it also carries rooms that
+        // spawned nothing. This number is bumped by the rebuild itself, so a
+        // link that records the pair always resends for a new run
+        // (C7 Task 1 review, minor 2). Starts at 1, so a record written with
+        // no script at all - {0, 0} - can never look like a real one.
+        uint32 RunGeneration() const { return _runGeneration; }
+
     private:
         void SpawnFromPlan(BlockPlan const& plan);
 
@@ -491,6 +501,13 @@ namespace PDungeon
         // simply fires on the next one.
         void TickFinale();
 
+        // The grid veto every other placement in this file takes, applied to
+        // one finale spot. Moves (x, y) onto the nearest walkable cell centre
+        // when the cell it names is not floor; leaves it where it was when
+        // there is no grid or nothing walkable within SPAWN_FALLBACK_SNAP_CELLS.
+        // `what` names the object in the log line ("Chromie", "cache", "portal").
+        void VetoFinaleSpot(float& x, float& y, char const* what) const;
+
         void RollBonusLoot(Unit* killer);
         void DespawnAll();
         void EnsureWalkGrid(BlockPlan const& plan);
@@ -565,6 +582,12 @@ namespace PDungeon
         // went with _spawnedGuids and _decorGuids in DespawnAll, and this is
         // the run's memory that the beat already played.
         Finale _finale;
+        // Round C / C7 review fold. Which run of THIS instance is standing:
+        // bumped once by the rebuild branch, never reset, and read only by the
+        // UI link's K record (RunGeneration says why). 1, not 0, so "no script"
+        // is a value it cannot take. It wraps after 4 billion rebuilds of one
+        // instance, which no instance survives.
+        uint32   _runGeneration = 1;
         std::unordered_map<ObjectGuid, uint32> _pendingRespawn;  // player -> getMSTime() at death
         std::vector<ObjectGuid> _voidZones;     // friendly ground-hazard carriers; pruned each tick
         uint32   _fallCheckTimer = 0;

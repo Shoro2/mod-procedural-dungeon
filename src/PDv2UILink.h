@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>      // std::pair - the K record's {generation, count}
 
 class Map;
 class Player;
@@ -170,17 +171,29 @@ namespace PDungeon
         std::mutex _lock;
         std::unordered_map<uint32_t, PanelClient> _clients;
 
-        // Round C / C7. What each client was last told the cleared-room COUNT
-        // was, so the 1 Hz tick can restate the K set exactly once per room
-        // clear instead of once per second. A missing entry means "never
-        // told", which sends - so dropping one is how a resend is forced.
+        // Round C / C7. What each client was last told, as the pair
+        // {run generation, cleared-room COUNT}, so the 1 Hz tick can restate
+        // the K set exactly once per room clear instead of once per second. A
+        // missing entry means "never told", which sends - so dropping one is
+        // how a resend is forced.
+        //
+        // The COUNT alone would not be enough, and the corner is real: the
+        // count is _run.roomsCleared, which only counts rooms emptied BY
+        // KILLS, while the K payload also carries rooms that spawned nothing.
+        // A rebuild resets the count to 0, so a player whose record was
+        // already 0 - told before the first room fell - would keep the
+        // previous layout's green blocks until the next kill. The generation
+        // is bumped by the rebuild itself, so a new run ALWAYS resends
+        // (C7 Task 1 review, minor 2). It starts at 1 in the script, which is
+        // why the "no script" record of {0, 0} can never collide with a real
+        // one.
         //
         // Keyed by the CHARACTER, not by the account like _clients above: this
         // is a fact about one client's map rather than about a panel, the tick
         // has the Player in hand, and it is the only per-character thing the
         // link remembers - which is why it is its own map and not a field in
         // PanelClient.
-        std::unordered_map<ObjectGuid, uint32_t> _clearedSent;
+        std::unordered_map<ObjectGuid, std::pair<uint32_t, uint32_t>> _clearedSent;
     };
 }
 

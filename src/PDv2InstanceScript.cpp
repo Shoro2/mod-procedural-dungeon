@@ -200,6 +200,11 @@ namespace PDungeon
         // The 1 Hz branch is what measures it, so a line lands at the first
         // tick at or after its deadline: the spacing is four seconds plus at
         // most one tick's phase, never less than four.
+        //
+        // It spaces the LINES only. The whole beat, measured from the last
+        // boss's death: Chromie and the cache at 0 s, the three lines at ~4,
+        // ~8 and ~12 s, and the portal on the very next tick after the third
+        // line, ~13 s (TickFinale says why it is not a fourth 4 s beat).
         uint32 const FINALE_STEP_MS = 4000;
 
         // Where the three objects stand, relative to the arena centre the last
@@ -213,6 +218,22 @@ namespace PDungeon
         float const FINALE_CHROMIE_OFFSET_X_YD = 6.0f;
         float const FINALE_CACHE_OFFSET_Y_YD = 4.0f;
         float const FINALE_PORTAL_OFFSET_X_YD = -6.0f;
+
+        // -pi/2, and MEASURED rather than derived: at orientation 0.0f the
+        // operator reported the dead-end cache standing "90 Grad nach rechts"
+        // (T2 2026-09-08), and 220a295 answered it by summoning those at a
+        // fixed 4.712389f = 3*pi/2 = -pi/2 normalised. GO 910068 carries the
+        // SAME display 259, so if that quarter turn is a property of the model
+        // and not a one-off scene choice, the finale cache needs it too. It is
+        // therefore subtracted from the angle to the arena centre rather than
+        // replacing it: the chest still faces inward, one model-forward
+        // correction later. Written as the literal radian and not float(M_PI)/2
+        // because M_PI is not portably visible through <cmath> on MSVC.
+        //
+        // T2 OBSERVABLE, not a proof: runde29 §C8 asks whether the cache faces
+        // the middle of the room or is turned 90 degrees, and the answer is
+        // what decides whether this term stays.
+        float const FINALE_CACHE_MODEL_FACING_OFFSET = -1.5707964f;
 
         // Chromie's three lines, spoken in order. English like every other
         // module text; authored in design §C8.2 and quoted verbatim, so an
@@ -334,6 +355,14 @@ namespace PDungeon
             // exists. Whole-struct assignment rather than field by field, so a
             // field added to Finale later cannot be forgotten here.
             _finale = Finale{};
+            // Round C / C7 review fold, and the one thing in this block that
+            // is NOT a reset: the run generation counts UP. Every other line
+            // here throws away what the previous run knew; this one is how the
+            // UI link learns that it happened, so that a client whose K record
+            // says "0 rooms cleared" is told again rather than keeping the old
+            // layout's green blocks (RunGeneration says why the count alone is
+            // not enough).
+            ++_runGeneration;
             MarkRunDirty();
         }
 
@@ -823,7 +852,15 @@ namespace PDungeon
         // Facing the centre, all three of them: GetAngle is the angle FROM
         // this position TO the one named, so an object standing off-centre and
         // asked for the angle to the centre looks inward at the players.
-        Position chromiePos(x + FINALE_CHROMIE_OFFSET_X_YD, y, z, 0.0f);
+        //
+        // Each spot is grid-vetoed first (VetoFinaleSpot says why), and the
+        // veto runs on the POSITION, before the angle is taken: a snapped spot
+        // one cell over still has to look at the centre, not at where it used
+        // to stand.
+        float chromieX = x + FINALE_CHROMIE_OFFSET_X_YD;
+        float chromieY = y;
+        VetoFinaleSpot(chromieX, chromieY, "Chromie");
+        Position chromiePos(chromieX, chromieY, z, 0.0f);
         chromiePos.SetOrientation(chromiePos.GetAngle(x, y));
 
         Creature* chromie = instance->SummonCreature(NPC_CHROMIE, chromiePos);
@@ -858,11 +895,17 @@ namespace PDungeon
         // are the quaternion, and an all-zero quaternion is not a facing -
         // SummonGameObject rebuilds the rotation from this angle about +Z, the
         // same reasoning SpawnDeadEndChests spells out.
-        float const cacheX = x + FINALE_CHROMIE_OFFSET_X_YD;
-        float const cacheY = y + FINALE_CACHE_OFFSET_Y_YD;
+        float cacheX = x + FINALE_CHROMIE_OFFSET_X_YD;
+        float cacheY = y + FINALE_CACHE_OFFSET_Y_YD;
+        VetoFinaleSpot(cacheX, cacheY, "cache");
         Position const cachePos(cacheX, cacheY, z, 0.0f);
+        // ...and one quarter turn back off that angle, because display 259
+        // does not point where its orientation says it does
+        // (FINALE_CACHE_MODEL_FACING_OFFSET carries the measurement).
+        float const cacheFacing = Position::NormalizeOrientation(
+            cachePos.GetAngle(x, y) + FINALE_CACHE_MODEL_FACING_OFFSET);
         if (GameObject* cache = instance->SummonGameObject(
-                GO_REWARD_CHEST, cacheX, cacheY, z, cachePos.GetAngle(x, y),
+                GO_REWARD_CHEST, cacheX, cacheY, z, cacheFacing,
                 0.0f, 0.0f, 0.0f, 0.0f, 0))
         {
             _decorGuids.push_back(cache->GetGUID());
@@ -884,9 +927,66 @@ namespace PDungeon
         _finale.y = y;
         _finale.z = z;
 
+        // "chain index", not "chain room": the number is _checkpointChain, the
+        // position IN the chain, while the LOG_WARN on the entrance fallback
+        // above prints _checkpointRoom under the words "checkpoint room". Two
+        // similar phrases carrying two different numbers is how a reader
+        // misreads the honest `-1` this line shows on that fallback path as a
+        // bug (C8 review, minor 6).
         LOG_INFO(PD_LOG, "PDv2: instance {} finale staged at ({:.1f}, {:.1f}, {:.1f}) - "
-                         "chain room {}, first line in {} ms",
+                         "chain index {}, first line in {} ms",
                  instance->GetInstanceId(), x, y, z, _checkpointChain, FINALE_STEP_MS);
+    }
+
+    void PDv2InstanceScript::VetoFinaleSpot(float& x, float& y, char const* what) const
+    {
+        // The same veto SpawnFromPlan's room pass, SpawnPatrols' spawn point
+        // and SplitOnDeath's child offsets take, applied to the three finale
+        // spots as well (C8 review, minor 5). On the shipped kit the risk is
+        // low: the checkpoint spot the offsets hang off is itself vetoed, all
+        // 60 room_boss chunks are floor across the whole centre quad, and a
+        // 33 yd arena has 16.67 yd of floor either side of centre against a
+        // worst-case 7.21 yd offset. The ENTRANCE fallback has no such
+        // guarantee, and the failure mode there is silent - a GameObject does
+        // not fall and Chromie has gravity off, so all three would simply
+        // hover over the void with nothing in the log.
+        WalkGrid const* grid = GetWalkGrid();
+        if (!grid)
+        {
+            return;
+        }
+
+        int gcx = 0, gcy = 0;
+        WorldToCell(x, y, gcx, gcy);
+        GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+        if (grid->At(cell.x, cell.y))
+        {
+            return;
+        }
+
+        GridPoint snapped;
+        if (!NearestWalkable(*grid, cell.x, cell.y, SPAWN_FALLBACK_SNAP_CELLS, snapped))
+        {
+            // The offset stands, which is exactly what this code did before
+            // the veto existed - a reward standing over the void is still
+            // better than no reward, and the line below is what tells the
+            // operator which of the three to look for.
+            LOG_WARN(PD_LOG, "PDv2: instance {} finale {} stands on a void cell and found no "
+                             "floor within {} cell(s) - it stays where it was",
+                     instance->GetInstanceId(), what, SPAWN_FALLBACK_SNAP_CELLS);
+            return;
+        }
+
+        int scx = 0, scy = 0;
+        grid->GlobalFromLocalCell(snapped, scx, scy);
+        double wx = 0.0, wy = 0.0;
+        CellCentreToWorld(scx, scy, wx, wy);
+        x = static_cast<float>(wx);
+        y = static_cast<float>(wy);
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} moved the finale {} onto cell ({}, {}) - "
+                         "its offset landed off the walk grid",
+                 instance->GetInstanceId(), what, snapped.x, snapped.y);
     }
 
     void PDv2InstanceScript::TickFinale()
@@ -929,7 +1029,16 @@ namespace PDungeon
             // everyone who finished the boss is standing in it. LANG_UNIVERSAL
             // so both factions read it.
             chromie->Say(CHROMIE_LINES[_finale.step], LANG_UNIVERSAL);
-            _finale.nextAtMs += FINALE_STEP_MS;
+            // The portal follows the LAST line by one tick, not by a fourth
+            // beat: leaving the deadline where it is makes step 3 already due,
+            // so it fires on the next 1 Hz tick (design §C8.3). Advancing it
+            // here unconditionally would put the portal at ~16 s and leave
+            // four silent seconds after the last line, which reads as "did it
+            // break?" - so only the gaps BETWEEN lines get the four seconds.
+            if (_finale.step + 1 < CHROMIE_LINE_COUNT)
+            {
+                _finale.nextAtMs += FINALE_STEP_MS;
+            }
             ++_finale.step;
             return;
         }
@@ -937,10 +1046,19 @@ namespace PDungeon
         // The way home, and the last beat. -6 yd on x puts it on the opposite
         // side of the arena centre from Chromie and her cache, so the players
         // walk past the reward to reach it.
-        float const portalX = _finale.x + FINALE_PORTAL_OFFSET_X_YD;
-        Position const portalPos(portalX, _finale.y, _finale.z, 0.0f);
+        //
+        // Vetoed here rather than in StartFinale, and that costs nothing: the
+        // only thing that moves the walk grid during a run is a barrier
+        // opening, which only ever ADDS walkable cells (SetCellsWalkable), so
+        // a spot that was floor 13 seconds ago is still floor. Doing it here
+        // keeps the portal's position in one place instead of storing a fourth
+        // and fifth float on Finale.
+        float portalX = _finale.x + FINALE_PORTAL_OFFSET_X_YD;
+        float portalY = _finale.y;
+        VetoFinaleSpot(portalX, portalY, "portal");
+        Position const portalPos(portalX, portalY, _finale.z, 0.0f);
         if (GameObject* portal = instance->SummonGameObject(
-                GO_AZEALIA_PORTAL, portalX, _finale.y, _finale.z,
+                GO_AZEALIA_PORTAL, portalX, portalY, _finale.z,
                 portalPos.GetAngle(_finale.x, _finale.y), 0.0f, 0.0f, 0.0f, 0.0f, 0))
         {
             _decorGuids.push_back(portal->GetGUID());
@@ -957,7 +1075,7 @@ namespace PDungeon
 
             LOG_INFO(PD_LOG, "PDv2: instance {} opened the portal to Azealia at "
                              "({:.1f}, {:.1f}, {:.1f})",
-                     instance->GetInstanceId(), portalX, _finale.y, _finale.z);
+                     instance->GetInstanceId(), portalX, portalY, _finale.z);
         }
         else
         {
