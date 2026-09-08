@@ -4133,6 +4133,230 @@ namespace
         }
     }
 
+    // --- Round C / C6: a boss appears at most once per run -----------------
+    //
+    // The evidence this check exists for is a real run, not a hypothesis: the
+    // host log of 2026-09-08 02:06 (`Server_2026-09-08_02_06_43.log:890` and
+    // `:943`) spawned entry 29620 'Dreadlord Mal'Ganis' in BOTH boss rooms of
+    // instance 5. Nothing was broken - the draw was one independent uniform
+    // pick per boss room over the whole role-2 pool, so a repeat was the
+    // design (`.superpowers/sdd/c-research-bosses-triangles.md` §1.5).
+    //
+    // The five entries below ARE the live role-2 pool, taken from
+    // `pdungeon_pack_members WHERE role = 2` on 2026-09-08 (research §1.4):
+    // 84288 Dralak, 84289 Lord Maltrion, 84290 Mor'Kar (pack 3), 25352
+    // Scourge Overlord (pack 4), 29620 Dreadlord Mal'Ganis (pack 5). Five is
+    // what makes this fixture able to say anything at all: the rule binds
+    // only while the pool holds MORE distinct bosses than the run has boss
+    // rooms, and the game math asks for up to four (`GameBossRooms(30)`), so
+    // a three-boss fixture would go vacuous exactly where the rule matters
+    // most.
+    //
+    // Packs 4 and 5 carry no trash member here. That costs the boss draw
+    // nothing - the boss slot is exempt from theming and always draws from
+    // the role-2 pool across every pack (PDv2PackDraw.h) - and it keeps
+    // `trashPackIds` the same two-pack list the theme fixture uses, so this
+    // fixture differs from it in the boss pool ALONE.
+    PackPools BossDrawPackPools()
+    {
+        PackPools pools = ThemeCoherencePackPools();
+        pools.boss = {
+            {3, 84288, PACK_ROLE_BOSS}, {3, 84289, PACK_ROLE_BOSS},
+            {3, 84290, PACK_ROLE_BOSS}, {4, 25352, PACK_ROLE_BOSS},
+            {5, 29620, PACK_ROLE_BOSS},
+        };
+        return pools;
+    }
+
+    // The room list the ENGINE builds from a plan: rooms only, in plan order,
+    // the entrance skipped because an arriving player must not already be in
+    // combat (`PDv2InstanceScript.cpp:1059-1070`). Reproduced here rather
+    // than called, because that file includes DatabaseEnv.h and can never
+    // link into this harness - the same reason CheckRoomThemeCoherent
+    // re-implements the slicing.
+    SpawnSelectInputs RoomsOfPlan(BlockPlan const& plan)
+    {
+        SpawnSelectInputs in;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.roomId < 0 || b.role == BlockRole::RoomEntrance)
+            {
+                continue;
+            }
+            RoomRequest room;
+            room.roomIndex = static_cast<int>(in.rooms.size());
+            room.isBoss = b.role == BlockRole::RoomBoss;
+            in.rooms.push_back(room);
+        }
+        // The shipped knobs, matching FixedSpawnInputs() above, so the two
+        // spawn-draw fixtures differ in their POOLS and their room list and
+        // not in the numbers that steer the stream.
+        in.spawnsPerRoom = 5;
+        in.bossRoomAdds = 2;
+        in.casterPct = 40;
+        in.bandMin = 76;
+        in.affixPct = 40;
+        return in;
+    }
+
+    // The first pick of every boss room, in room order. Same slicing as
+    // PDv2PackMgr::SelectSpawns and as RunPackThemeChecks above: a boss room
+    // is 1 + bossRoomAdds picks and the boss is its FIRST one, which is the
+    // slot the instance script keys run completion on.
+    std::vector<uint32_t> BossPicksOf(std::vector<SpawnPick> const& flat,
+                                      SpawnSelectInputs const& in)
+    {
+        std::vector<uint32_t> picks;
+        size_t cursor = 0;
+        for (RoomRequest const& room : in.rooms)
+        {
+            int const trashWanted = room.isBoss ? in.bossRoomAdds : in.spawnsPerRoom;
+            size_t const got = static_cast<size_t>(trashWanted + (room.isBoss ? 1 : 0));
+            size_t const end = (cursor + got <= flat.size()) ? cursor + got : flat.size();
+            if (room.isBoss && cursor < end)
+            {
+                picks.push_back(flat[cursor].entry);
+            }
+            cursor = end;
+        }
+        return picks;
+    }
+
+    // Over a tenth of the batch, on real generated layouts: no boss entry may
+    // appear twice in one run WHILE the pool allows it. `layoutsChecked` is
+    // the non-vacuity counter - a fixture or a generator change that stopped
+    // producing multi-boss layouts would otherwise turn this whole check into
+    // a silent pass.
+    void RunBossNoRepeatChecks(int seeds, int& layoutsChecked)
+    {
+        PackPools const pools = BossDrawPackPools();
+        // Two, three and four boss rooms: 2 is what the operator's own run
+        // had, 4 is the most the game math ever asks for (`GameBossRooms(30)`)
+        // and also where a lost rule is most visible, and the room counts are
+        // the shortest layouts that carry each.
+        struct BossCombo { int rooms; int bossRooms; };
+        BossCombo const combos[] = { { 5, 2 }, { 6, 3 }, { 4, 4 } };
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 1u;
+            for (BossCombo const& combo : combos)
+            {
+                BlockCfg cfg = MakeCfg(seed, combo.rooms);
+                cfg.bossRooms = combo.bossRooms;
+                BlockPlan plan;
+                if (!GenerateBlockPlan(cfg, &plan))
+                {
+                    // A layout that will not generate is RunBatch's business,
+                    // not this check's - failing it here would report the same
+                    // problem twice under a name that hides it.
+                    continue;
+                }
+
+                SpawnSelectInputs const in = RoomsOfPlan(plan);
+                std::vector<SpawnPick> flat;
+                if (!PDv2SelectSpawns(plan.effectiveSeed, in, pools, flat))
+                {
+                    Check(false, "the boss no-repeat draw refused to select", seed);
+                    continue;
+                }
+
+                std::vector<uint32_t> const bossPicks = BossPicksOf(flat, in);
+                // The rule binds only while the pool has MORE distinct bosses
+                // than the run has boss rooms. Below that, repeats are the
+                // designed fallback, and asserting distinctness would be
+                // asserting the opposite of the contract.
+                if (bossPicks.size() < 2 || pools.boss.size() <= bossPicks.size())
+                {
+                    continue;
+                }
+                ++layoutsChecked;
+
+                for (size_t a = 0; a + 1 < bossPicks.size(); ++a)
+                {
+                    for (size_t b = a + 1; b < bossPicks.size(); ++b)
+                    {
+                        char msg[192];
+                        std::snprintf(msg, sizeof msg,
+                                      "boss %u was drawn twice in one run (rooms %d, boss rooms %d, "
+                                      "boss slots %d and %d of %d, pool %d)",
+                                      bossPicks[a], combo.rooms, combo.bossRooms,
+                                      static_cast<int>(a), static_cast<int>(b),
+                                      static_cast<int>(bossPicks.size()),
+                                      static_cast<int>(pools.boss.size()));
+                        Check(bossPicks[a] != bossPicks[b], msg, seed);
+                    }
+                }
+            }
+        }
+    }
+
+    // The pinned no-repeat draw. Four boss rooms out of a five-boss pool is
+    // the tightest the rule ever runs - only one entry is left un-drawn - so
+    // a rule that filters the wrong way, filters one draw too late, or falls
+    // back to the full pool while fresh entries remain all move this string.
+    //
+    // It is also where the OLD draw's failure is loudest: four independent
+    // uniform picks out of five come back pairwise distinct only
+    // 5*4*3*2 / 5^4 = 19.2 % of the time, which is why this config, and not
+    // the batch alone, is what the rule was written against.
+    //
+    // Captured by RUNNING `pdblock --batch` and reading the "the pinned boss
+    // draw moved" message, never by reasoning about the value. The pre-C6
+    // draw answered "29620,84289,25352,84289;" on this very config - 84289
+    // Lord Maltrion in boss slots 1 AND 3 - which is the failure this rule
+    // was written against, measured rather than argued.
+    char const* const PD_BOSS_NOREPEAT_PIN = "29620,84289,84290,25352;";
+
+    bool CheckBossNoRepeatPinned(std::string& why)
+    {
+        // The same layout PD_AMBUSH_PLAN_PIN_MID uses: four bosses on four
+        // rooms, the largest boss count the game math ever asks for and the
+        // shortest layout that carries it.
+        BlockCfg cfg = MakeCfg(12345u, 4);
+        cfg.bossRooms = 4;
+        BlockPlan plan;
+        if (!GenerateBlockPlan(cfg, &plan))
+        {
+            why = "the boss no-repeat pin could not generate a layout";
+            return false;
+        }
+
+        SpawnSelectInputs const in = RoomsOfPlan(plan);
+        std::vector<SpawnPick> flat;
+        if (!PDv2SelectSpawns(plan.effectiveSeed, in, BossDrawPackPools(), flat))
+        {
+            why = "the pinned boss draw refused to select";
+            return false;
+        }
+
+        std::vector<uint32_t> const bossPicks = BossPicksOf(flat, in);
+        std::string got;
+        for (size_t i = 0; i < bossPicks.size(); ++i)
+        {
+            if (i > 0)
+            {
+                got += ',';
+            }
+            got += std::to_string(bossPicks[i]);
+        }
+        got += ';';
+
+        // A shape check before the string compare: if this layout ever stops
+        // carrying four boss rooms the pin would still compare equal to some
+        // shorter string, and the tightest case would silently stop running.
+        if (bossPicks.size() != 4)
+        {
+            why = "the pinned layout no longer has four boss rooms: " + got;
+            return false;
+        }
+        if (got != PD_BOSS_NOREPEAT_PIN)
+        {
+            why = "the pinned boss draw moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
     // Round B: the field the ENGINE runs, over the engine's real configuration
     // space rather than a diagonal of it. The fixed 8x8 batch never exercised
     // a shrunken field at all, and the first version of this sweep walked
@@ -5043,6 +5267,29 @@ namespace
             std::string why;
             bool const ok = CheckEligibleTrashPackFilter(why);
             Check(ok, why.empty() ? "eligible trash pack filter failed" : why.c_str(), 0);
+        }
+        {
+            // Round C / C6. Same tenth-of-the-batch reasoning as the theme
+            // checks: no-repeat is a property of ONE run's boss rooms, so the
+            // sample size only decides how much of the draw space is walked.
+            //
+            // The counter is not decoration: the check quietly skips every
+            // layout whose boss rooms are not outnumbered by the pool, so
+            // "0 failures" over 0 examined layouts would read exactly like a
+            // pass.
+            int bossNoRepeatLayouts = 0;
+            RunBossNoRepeatChecks(count / 10 + 1, bossNoRepeatLayouts);
+            Check(bossNoRepeatLayouts > 0,
+                  "no layout in the sample had two or more boss rooms with a pool big "
+                  "enough to forbid a repeat - the boss no-repeat check is vacuous", 0);
+        }
+        {
+            // The tightest case, pinned. Same two-statements-not-one-call
+            // shape as every other pin here, for the same
+            // argument-evaluation-order reason.
+            std::string why;
+            bool const ok = CheckBossNoRepeatPinned(why);
+            Check(ok, why.c_str(), 12345u);
         }
 
         // The city cap must hold like the mine cap - its ids are one digit

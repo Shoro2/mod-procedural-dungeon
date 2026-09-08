@@ -19,6 +19,8 @@
 
 #include "PDRandom.h"
 
+#include <algorithm>
+
 namespace PDungeon
 {
     namespace
@@ -148,7 +150,11 @@ namespace PDungeon
         //                   The boss pick ignores the room's pack: it always
         //                   draws from the role-2 pool across ALL packs, so
         //                   a room's theme never constrains which boss can
-        //                   appear
+        //                   appear. Since Round C / C6 it draws over the
+        //                   bosses this run has not used yet while the pool
+        //                   is larger than the run's boss rooms - still
+        //                   EXACTLY ONE draw per boss room, so the stream's
+        //                   shape is unchanged and only the drawn range moves
         //   per trash slot  one caster/melee Chance, one weighted entry pick
         //                   - from the room's pack if it has a member of the
         //                   wanted role, from the merged pool otherwise (the
@@ -269,6 +275,33 @@ namespace PDungeon
         }
         out.reserve(wanted);
 
+        // Round C / C6: no boss twice in one run - while the pool has MORE
+        // distinct bosses than there are boss rooms. A run asking for more
+        // boss rooms than bosses exist falls back to repeats once the fresh
+        // ones are used up. One draw per boss room either way, so the stream
+        // keeps its shape; only the pool the draw ranges over shrinks.
+        //
+        // Why the rule exists: the host run of 2026-09-08 02:06 put entry
+        // 29620 'Dreadlord Mal'Ganis' in both of its boss rooms, because the
+        // pick was independent per room over the whole role-2 pool. Pinned in
+        // the harness as PD_BOSS_NOREPEAT_PIN, whose pre-C6 value
+        // ("29620,84289,25352,84289;") carries the same repeat.
+        //
+        // `bossRoomsTotal` counts the whole RUN, not what is left, and the
+        // gate is against that total rather than the remaining rooms on
+        // purpose: a shrinking gate would let a five-room / five-boss run
+        // filter for its first four rooms and then repeat, which is a worse
+        // rule than never filtering at all.
+        size_t bossRoomsTotal = 0;
+        for (RoomRequest const& room : in.rooms)
+        {
+            if (room.isBoss)
+            {
+                ++bossRoomsTotal;
+            }
+        }
+        std::vector<uint32_t> drawnBosses;
+
         for (RoomRequest const& room : in.rooms)
         {
             int const trashWanted = room.isBoss ? bossAdds : perRoom;
@@ -318,7 +351,50 @@ namespace PDungeon
                 // packId 0, not roomPackId: the boss slot is exempt from
                 // theming (see this task's own comment above the pack draw),
                 // so it never carries the room's pack id.
-                emit(bosses.empty() ? bossStandIn : WeightedPick(bosses, rng), true, 0, out);
+                //
+                // Round C / C6: the pool this draws from is the FRESH one -
+                // the bosses this run has not used yet - while the run has
+                // fewer boss rooms than the pool has entries. Exactly one
+                // WeightedPick either way, so the stream's shape is the same
+                // as before the rule; only the range it draws over changes,
+                // which does re-roll which boss a stored seed puts where.
+                PackMember const* pick = bossStandIn;
+                // `fresh` is declared HERE and not inside the branch below on
+                // purpose: WeightedPick hands back a POINTER INTO the pool it
+                // was given, and `emit` reads through it. A `fresh` scoped to
+                // the inner block would be destroyed before that read - a
+                // use-after-free the optimiser is free to turn into a wrong
+                // entry rather than into a crash.
+                std::vector<PackMember> fresh;
+                if (!bosses.empty())
+                {
+                    if (bosses.size() > bossRoomsTotal)
+                    {
+                        for (PackMember const& m : bosses)
+                        {
+                            if (std::find(drawnBosses.begin(), drawnBosses.end(), m.entry) == drawnBosses.end())
+                            {
+                                fresh.push_back(m);
+                            }
+                        }
+                    }
+                    // `fresh` stays in `bosses` order, and a plain vector +
+                    // std::find is all this needs: the determinism contract
+                    // forbids unordered containers, and the pool is five
+                    // entries.
+                    //
+                    // The empty-`fresh` fallback covers both ways of getting
+                    // here - the gate said no (a pool no larger than the run's
+                    // boss rooms), or the gate said yes and every entry has
+                    // already been drawn - and in both the full pool answers,
+                    // because a repeated boss beats an empty boss room.
+                    pick = fresh.empty() ? WeightedPick(bosses, rng) : WeightedPick(fresh, rng);
+                    if (pick)
+                    {
+                        drawnBosses.push_back(pick->entry);
+                    }
+                }
+                emit(pick, true, 0, out);
             }
             // EXACTLY ONE carrier per room, always - no longer a percentage.
             //
