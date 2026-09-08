@@ -48,6 +48,23 @@
 -- INSERT list - it never needs restoring because nothing after it can wipe
 -- it and then fail to also re-run).
 --
+-- *** EXCEPTION: 910030 'Shifting Cache' (Round C / C3) ***
+-- 910030 is a 910000-910033 id, so by the rule just above it would be
+-- fixed where it is declared: mod_pdungeon_templates.sql:26 and
+-- mod_pdungeon_phase2.sql:20 (both carry it with the broken Data0 = 0).
+-- Both are deliberately left UNTOUCHED, comments included. The updater
+-- gates every file on its own content hash, so editing either one at all
+-- re-applies it, and a re-applied mod_pdungeon_templates.sql runs its wide
+-- DELETE 910000-910099 while THIS file - whose hash would be unchanged -
+-- does not re-run to put 910040-910099 back: that is exactly the landmine
+-- this file exists to defuse, armed by the very edit meant to fix a chest.
+-- Adding the row here instead changes only this file, which is the one
+-- place that runs last on every database: after the wide DELETE on a fresh
+-- one, and alone on a database that already has everything else. The two
+-- declaring copies keep their old values; the row below is the one that
+-- survives on both kinds of database, and it is the row to edit from now
+-- on. Do NOT "tidy" this by moving 910030 back to its declaring files.
+--
 -- The DELETE below names every entry individually rather than a BETWEEN
 -- range: this file's rows are not contiguous (910048-910049,
 -- 910067-910069, 910077-910099 are unused gaps in the reserved block), and
@@ -131,6 +148,7 @@
 -- ----------------------------------------------------------------------------
 
 DELETE FROM `gameobject_template` WHERE `entry` IN (
+    910030,
     910040, 910041, 910042, 910043, 910044, 910045, 910046, 910047,
     910050, 910051, 910052, 910053, 910054, 910055, 910056, 910057,
     910058, 910059,
@@ -138,6 +156,19 @@ DELETE FROM `gameobject_template` WHERE `entry` IN (
     910070, 910071, 910072, 910073, 910074, 910075, 910076
 );
 INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`, `Data0`, `Data1`, `ScriptName`) VALUES
+-- the loop-room / pocket cache (Round C / C3: lock 57 so the client's
+-- Opening cast accepts it). A GAMEOBJECT_TYPE_CHEST is never looted through
+-- GameObject::Use() - it has no case 3 - only through the client's Opening
+-- cast, and Spell::CheckCast rejects a lockless GO outright:
+--   if (!lockId) return SPELL_FAILED_BAD_TARGETS;
+-- (azerothcore-wotlk src/server/game/Spells/Spell.cpp:6339-6346). With the
+-- shipped Data0 = 0 the cast died there and clicking the cache did nothing
+-- at all - no loot window, no error, no log line. Lock 57 is the classic
+-- "anyone can open it" treasure lock (Lock.dbc 57: LOCKTYPE_OPEN and
+-- LOCKTYPE_TREASURE, skill requirement 0), which is what all 1356 lootable
+-- chests in this world DB use, FL's own 800000-800003 included, and what
+-- all 15 stock rows sharing displayId 259 (TreasureChest01) use.
+(910030, 3, 259, 'Shifting Cache', 1, 57, 910030, ''),
 -- kit props
 (910040, 5, 92040, 'PD Fountain', 1, 0, 0, ''),
 (910041, 5, 5073, 'PD Rock Column', 1.7, 0, 0, ''),
@@ -193,3 +224,7 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 -- ids above make. No ScriptName: the barrier is opened by the instance
 -- script, and a GENERIC object cannot be used by a player anyway.
 (910059, 5, 7482, 'Sealed Portcullis', 1.1, 0, 0, '');
+
+-- Chest data beyond the INSERT's column list: Data3 = consumable (one loot per spawn),
+-- Data2 = restock 0. Without Data3 the cache refilled every tick (Round C research 1.3).
+UPDATE `gameobject_template` SET `Data2` = 0, `Data3` = 1 WHERE `entry` = 910030;

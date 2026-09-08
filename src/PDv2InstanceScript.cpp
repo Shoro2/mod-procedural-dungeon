@@ -1718,8 +1718,15 @@ namespace PDungeon
 
             float x = 0.0f, y = 0.0f, z = 0.0f;
             sPDv2Mgr->BlockToWorld(b.bx, b.by, u, v, x, y, z);
+            // -pi/2: "90 Grad nach rechts" (T2 2026-09-08); WoW orientation is
+            // counter-clockwise. The four zeros after it are the quaternion, and
+            // an all-zero quaternion is not a facing: Map::SummonGameObject hands
+            // this angle and that quat to GameObject::Create, which relocates the
+            // object with the angle and then calls SetWorldRotation, which rebuilds
+            // the rotation from the orientation about +Z whenever the quat's
+            // magnitude is zero. So this literal alone decides the facing.
             GameObject* go = instance->SummonGameObject(
-                GO_CHEST, x, y, z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+                GO_CHEST, x, y, z, 4.712389f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
             if (!go)
             {
                 LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon a cache "
