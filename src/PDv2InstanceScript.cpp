@@ -873,15 +873,14 @@ namespace PDungeon
             return;
         }
 
-        // Gravity off for the same reason every other summon on this map has
-        // it off: the server has no terrain here, so Map::GetHeight answers
-        // INVALID_HEIGHT and anything with gravity falls through the floor the
-        // client draws (SpawnTaggedMob says it at length). Nothing else of
-        // SpawnTaggedMob applies - she is NOT a run mob: no PDv2MobData, so
-        // she cannot move a counter, cannot be scaled, cannot be affixed and
-        // cannot be split. Her template makes her unattackable in the first
-        // place; the missing tag is what makes that structural.
-        chromie->SetDisableGravity(true);
+        // No gravity flag, for the same reason no other summon on this map
+        // carries one any more (Round D / D3, SpawnTaggedMob says it at
+        // length): the core strips it on the first movement update and until
+        // then it is a visible hover, while nothing falls without it. Nothing
+        // else of SpawnTaggedMob applies - she is NOT a run mob: no
+        // PDv2MobData, so she cannot move a counter, cannot be scaled, cannot
+        // be affixed and cannot be split. Her template makes her unattackable
+        // in the first place; the missing tag is what makes that structural.
         chromie->SetHomePosition(chromie->GetPositionX(), chromie->GetPositionY(),
                                  chromie->GetPositionZ(), chromie->GetOrientation());
 
@@ -1209,33 +1208,47 @@ namespace PDungeon
 
         c->SetHomePosition(x, y, z, 0.0f);
 
-        // Gravity OFF, and this is not cosmetic: the server has no terrain
-        // here, so Map::GetHeight answers INVALID_HEIGHT and every creature is
-        // permanently "above nothing" - they fall through the platforms the
-        // client draws (operator report 2026-08-06). Disabling gravity pins
-        // them to the floor plane the kit was generated at, which is the only
-        // floor the server knows. Movement is unaffected: the walk grid drives
-        // it and every waypoint carries the same Z.
+        // NO SetDisableGravity(true) here, and the absence is the fix (Round D
+        // / D3). Until 2026-09-08 every summon on this map set it, on the
+        // theory that a creature with gravity would fall through the platforms
+        // only the client draws. The operator's T2 report of 2026-09-08 - some
+        // mobs hover at spawn and stand normally after a pull or a reset - is
+        // that flag and nothing else: the hover IS the levitation, and the pull
+        // is what removes it.
         //
-        // MEASURED CAVEAT, Round C (2026-09-08), recorded and deliberately NOT
-        // acted on in this commit: the flag does not survive. None of these
-        // templates has a `creature_template_movement` row, so
-        // CreatureMovementData defaults apply (Creature.cpp:60-62) with
-        // Flight = None, and Creature::UpdateMovementFlags then takes its else
-        // branch and calls SetDisableGravity(false) on anything levitating
-        // (Creature.cpp:3474-3475). It runs from Unit::ProcessTerrainStatusUpdate
-        // (Unit.cpp:4473-4476) whenever position data is refreshed, and the only
-        // opt-out - CREATURE_FLAG_EXTRA_NO_MOVE_FLAGS_UPDATE (Creature.cpp:3452)
-        // - is not set on any of them (flags_extra = 0, measured). So this line
-        // is cosmetic TODAY and the mobs stay at floorZ for a different reason:
-        // the server never simulates creature gravity, and with no height data
-        // UpdateAllowedPositionZ leaves Z alone (Object.cpp:1610). Fixing it
-        // properly means a creature_template_movement row with
-        // Flight = DisableGravity - a data change with its own SQL file and its
-        // own test, which is Round D's, not this fix's. `.pdungeon v2 patrol`
-        // and the D4 debug line both print `levitating`, which is where the
-        // claim above can be checked in game instead of argued about.
-        c->SetDisableGravity(true);
+        // The core drops the flag on its own, on the FIRST movement update.
+        // None of these templates has a `creature_template_movement` row, so
+        // CreatureMovementData's defaults apply (Creature.cpp:60-62) with
+        // Flight = None, IsFlightAllowed() is false (CreatureData.h:141-144),
+        // and Creature::UpdateMovementFlags takes its else branch
+        // (Creature.cpp:3460, 3470) to call SetDisableGravity(false) on
+        // anything levitating (Creature.cpp:3475-3476). The one opt-out,
+        // CREATURE_FLAG_EXTRA_NO_MOVE_FLAGS_UPDATE (Creature.cpp:3452), is set
+        // on none of them (flags_extra = 0, measured). The path there is the
+        // creature's first step: Unit::Update drives the spline (Unit.cpp:635
+        // -> UpdateSplineMovement :695 -> UpdateSplinePosition :727) into
+        // Creature::SetPosition (Creature.cpp:3287-3292), and
+        // Map::CreatureRelocation refreshes the position data (Map.cpp:834 ->
+        // Unit::ProcessPositionDataChanged Unit.cpp:4467-4470 ->
+        // ProcessTerrainStatusUpdate :4473-4476). A respawn strips it too
+        // (Creature.cpp:2004). So the flag only ever lived from the summon to
+        // the first leg - visible as the hover, gone after the first move.
+        //
+        // Nothing falls without it. The server does not simulate creature
+        // gravity: the only downward motion is MotionMaster::MoveFall
+        // (MotionMaster.cpp:689), which this module never issues - the core's
+        // callers are the corpse fall (Creature.cpp:1981-1986, gated on
+        // IsFlying()/IsHovering()), a vehicle exit (Unit.cpp:15855), totems, a
+        // SmartScript action and fly/levitate aura removal
+        // (SpellAuraEffects.cpp:3446-3447) - and on this map it would bail out
+        // anyway, because GetMapHeight answers INVALID_HEIGHT with no terrain
+        // and no vmaps and MoveFall returns on that (MotionMaster.cpp:695-701).
+        // Creature::Update (Creature.cpp:706) samples no ground height per
+        // tick either: the only GetFloorZ() on this path sits inside
+        // UpdateMovementFlags (Creature.cpp:3455), which Update does not call.
+        // And UpdateAllowedPositionZ leaves Z alone without height data
+        // (Object.cpp:1610, the `max_z > INVALID_HEIGHT` gate). The mob stands
+        // at the floorZ this function was handed, flag or no flag.
 
         // The tag is what makes this creature a PDv2 mob for every other hook
         // in the module. GetDefault here (it creates), Get everywhere else (it
@@ -2190,12 +2203,12 @@ namespace PDungeon
                 continue;
             }
 
-            // The same two lines every dungeon spawn gets, and for the same
-            // reason: the server has no terrain on this map, so Map::GetHeight
-            // answers INVALID_HEIGHT and a creature with gravity would fall
-            // through the floor the client draws.
+            // The home position every dungeon spawn gets, and - since Round D
+            // / D3 - no gravity flag beside it: the core strips that on the
+            // first movement update anyway, until then it shows as a hover,
+            // and a critter stands at floorZ without it (SpawnTaggedMob cites
+            // the core lines).
             c->SetHomePosition(x, y, z, static_cast<float>(spot.orientation));
-            c->SetDisableGravity(true);
 
             // NO PDv2MobData tag, deliberately. The tag is the module's own
             // definition of "this is a dungeon mob": without it, OnMobDied

@@ -1498,9 +1498,11 @@ namespace PDungeon
         // empirically in the same run as the fix: the idle slot should read
         // IDLE with wander 0.0 - a summon has no `creature` row, so
         // RANDOM_MOTION_TYPE is downgraded at creation (Creature.cpp:569-571)
-        // and nothing can wander this mob off the grid - and `levitating 0`
-        // despite SpawnTaggedMob's SetDisableGravity(true) is the latent H5
-        // defect that same report recorded (see the spawn comment there).
+        // and nothing can wander this mob off the grid - and `levitating 0`,
+        // which since Round D / D3 is simply the truth: no module summon sets
+        // the gravity flag any more, because the core stripped it on the first
+        // movement update and until then it was the operator's spawn hover
+        // (the SpawnTaggedMob comment cites the core lines).
         if (_mob && _mob->isPatrol && !_dbgSlotLogged && PatrolDebug())
         {
             _dbgSlotLogged = true;
