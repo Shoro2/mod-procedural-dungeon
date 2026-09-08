@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <cstdlib>
+#include <limits>
 #include <list>
 
 namespace PDungeon
@@ -39,9 +40,14 @@ namespace PDungeon
         // only when the straight line is blocked and no run is active.
         uint32 const REPATH_INTERVAL_MS = 500;
 
-        // Cells searched around a live position for walkable ground, ~2 cells
-        // = up to ~16 yd. Anything further off the surface is not a position
-        // to walk to but one to refuse - a target mid-jump over the void.
+        // Cells searched around a live position for walkable ground. MEASURED,
+        // not estimated: a cell is PD_BLOCK_SIZE_YD / PD_CELLS_PER_BLOCK =
+        // 8.33 yd, so 2 cells is up to 16.7 yd per axis (23.6 yd at a ring
+        // corner, since NearestWalkable searches square rings). Anything
+        // further off the surface is not a position to walk to but one to
+        // refuse - a target mid-jump over the void. The snap can therefore
+        // MOVE a start cell by that much, which is why StartWaypointRun walks
+        // to waypoint 0 rather than assuming the creature stands on it.
         int const SNAP_RADIUS_CELLS = 2;
 
         PDv2InstanceScript* GetV2Instance(Creature* creature)
@@ -210,12 +216,19 @@ namespace PDungeon
     void PDv2MobAI::StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid)
     {
         _waypoints = std::move(waypoints);
-        _waypointIndex = 1; // index 0 is the cell the creature stands on
         if (_waypoints.size() < 2)
         {
             _followingPath = false;
             return;
         }
+        // Index 0 is the planner's SNAPPED start cell, not necessarily the one
+        // under our feet: both producers snap before they plan (the patrol
+        // through NearestWalkable, the chase through PlanApproach), and the
+        // snap may move the start by up to SNAP_RADIUS_CELLS. When it did, the
+        // first leg IS the walk into that cell and nobody else ever line-checks
+        // it; only when we already stand in the cell is index 0 skipped.
+        GridPoint const standing = CellOf(grid, me->GetPositionX(), me->GetPositionY());
+        _waypointIndex = (standing == _waypoints[0]) ? 1 : 0;
         _followingPath = true;
         MoveToWaypoint(_waypointIndex, grid);
     }
@@ -377,6 +390,12 @@ namespace PDungeon
             // pulled near the goal would end up shuffling on the spot. Design
             // §B4.4 asks for the other thing: get back onto the route at the
             // NEAREST waypoint by grid distance and carry on from there.
+            //
+            // A rejoin is WALKED, not flown: a waypoint further than this is not
+            // "nearby" whatever the line test says (research A4: the old rejoin
+            // was an uncapped beeline of up to ~530 yd).
+            int const REJOIN_MAX_CELLS = 4;
+
             size_t best = _patrolRoute.size();
             int bestDist = 0;
             for (size_t i = 0; i < _patrolRoute.size(); ++i)
@@ -385,6 +404,10 @@ namespace PDungeon
                 // metric, and ranking needs no square root.
                 int const dist = std::abs(_patrolRoute[i].x - here.x) +
                                  std::abs(_patrolRoute[i].y - here.y);
+                if (dist > REJOIN_MAX_CELLS)
+                {
+                    continue;   // too far to be one straight leg, cap first
+                }
                 if (best < _patrolRoute.size() && dist >= bestDist)
                 {
                     continue;   // cannot beat what we have; skip the line test
@@ -402,30 +425,69 @@ namespace PDungeon
 
             if (best >= _patrolRoute.size())
             {
-                // Nothing on the beat can be reached in a straight line from
-                // here. Give the route up and let the next tick plan a fresh
-                // one, which is exactly what this did before rejoining existed
-                // - so the fallback can never be worse than the old behaviour.
-                _patrolActive = false;
-                return;
-            }
-
-            leg.push_back(here);
-            for (size_t i = best; i < _patrolRoute.size(); ++i)
-            {
-                if (i == best && _patrolRoute[i] == here)
+                // Nothing on the beat is within a straight, SHORT walk. Walk
+                // the GRID back onto it instead of giving the route up: the old
+                // fallback dropped the beat here, and the next tick's fresh
+                // plan then collapsed it to "here -> goal" for the rest of the
+                // run - the very thing rejoining exists to prevent. The route
+                // itself is still never re-planned; only the way back onto it
+                // is, and that A* is paid at most once per fight.
+                size_t nearest = 0;
+                int nearestDist = std::numeric_limits<int>::max();
+                for (size_t i = 0; i < _patrolRoute.size(); ++i)
                 {
-                    continue;   // already standing on the waypoint we rejoin at
+                    int const d = std::abs(_patrolRoute[i].x - here.x) +
+                                  std::abs(_patrolRoute[i].y - here.y);
+                    if (d < nearestDist)
+                    {
+                        nearestDist = d;
+                        nearest = i;
+                    }
                 }
-                leg.push_back(_patrolRoute[i]);
+                std::vector<GridPoint> back;
+                if (_patrolRoute.empty() ||
+                    !FindGridPath(*grid, here, _patrolRoute[nearest], back))
+                {
+                    // No beat at all, or off its component entirely (a barrier
+                    // closed between us and it). The old fallback: give the
+                    // route up and let the next tick plan a fresh one.
+                    _patrolActive = false;
+                    return;
+                }
+                SimplifyGridPath(*grid, back);
+                leg = back;                 // here ... _patrolRoute[nearest]
+                for (size_t i = nearest + 1; i < _patrolRoute.size(); ++i)
+                {
+                    leg.push_back(_patrolRoute[i]);
+                }
+                if (leg.size() < 2)
+                {
+                    // The nearest waypoint is the far END of the beat and we
+                    // stand on it: that IS the end of a lap, so turn around the
+                    // way MovementInform would have.
+                    std::reverse(_patrolRoute.begin(), _patrolRoute.end());
+                    leg = _patrolRoute;
+                }
             }
-            if (leg.size() < 2)
+            else
             {
-                // Standing on the far END of the beat, which IS the end of a
-                // lap - so turn around the way MovementInform would have. The
-                // whole route is walked back, never a stub of it.
-                std::reverse(_patrolRoute.begin(), _patrolRoute.end());
-                leg = _patrolRoute;
+                leg.push_back(here);
+                for (size_t i = best; i < _patrolRoute.size(); ++i)
+                {
+                    if (i == best && _patrolRoute[i] == here)
+                    {
+                        continue;   // already standing on the waypoint we rejoin at
+                    }
+                    leg.push_back(_patrolRoute[i]);
+                }
+                if (leg.size() < 2)
+                {
+                    // Standing on the far END of the beat, which IS the end of a
+                    // lap - so turn around the way MovementInform would have. The
+                    // whole route is walked back, never a stub of it.
+                    std::reverse(_patrolRoute.begin(), _patrolRoute.end());
+                    leg = _patrolRoute;
+                }
             }
         }
         else

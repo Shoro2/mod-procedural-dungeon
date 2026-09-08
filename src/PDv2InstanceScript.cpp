@@ -2018,6 +2018,10 @@ namespace PDungeon
         int const bossRooms = std::max(1, plan.config.bossRooms);
         double const mid = PD_BLOCK_SIZE_YD / 2.0;
         uint32 placed = 0;
+        // EnsureWalkGrid ran before this (see the run set-up), so this is the
+        // same grid the patroller's own AI will walk on - which is the point:
+        // the spawn point is vetoed by exactly the thing that has to accept it.
+        WalkGrid const* grid = GetWalkGrid();
         for (int k = 1; k <= bossRooms; ++k)
         {
             // The SAME walk SpawnBarriers made, with the same argument, so the
@@ -2106,6 +2110,35 @@ namespace PDungeon
             PlacedBlock const& start = plan.blocks[run.back()];
             float x = 0.0f, y = 0.0f, z = 0.0f;
             sPDv2Mgr->BlockToWorld(start.bx, start.by, mid, mid, x, y, z);
+
+            // The block CENTRE is cell (4,4) of that corridor, and a corridor
+            // mask whose (4,4) is void seats the patroller off the grid from
+            // birth - its first leg is then a straight line nobody checked
+            // (research A5). The same veto SpawnFromPlan's fallback takes since
+            // f92146f: if the centre is not floor, snap to the nearest walkable
+            // cell within SPAWN_FALLBACK_SNAP_CELLS and stand on that cell's
+            // centre. With no grid, or nothing walkable that close, the block
+            // centre stands - exactly what this did before.
+            if (grid)
+            {
+                int gcx = 0, gcy = 0;
+                WorldToCell(x, y, gcx, gcy);
+                GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                GridPoint snapped;
+                if (!grid->At(cell.x, cell.y) &&
+                    NearestWalkable(*grid, cell.x, cell.y, SPAWN_FALLBACK_SNAP_CELLS, snapped))
+                {
+                    int scx = 0, scy = 0;
+                    grid->GlobalFromLocalCell(snapped, scx, scy);
+                    double wx = 0.0, wy = 0.0;
+                    CellCentreToWorld(scx, scy, wx, wy);
+                    x = static_cast<float>(wx);
+                    y = static_cast<float>(wy);
+                    LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} has a void block centre - "
+                                     "segment {}'s patroller starts on cell ({}, {}) instead",
+                             instance->GetInstanceId(), start.chunkId, k, snapped.x, snapped.y);
+                }
+            }
 
             PDv2MobData proto;
             proto.role = PACK_ROLE_MELEE;
