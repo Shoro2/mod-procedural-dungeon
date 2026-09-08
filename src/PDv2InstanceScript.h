@@ -404,10 +404,12 @@ namespace PDungeon
 
         // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
         // is safe: everyone recorded there who is still on this map and still
-        // dead comes back alive with resurrection sickness, at the entrance
-        // or the furthest cleared boss hall - computed, never chosen (Round C
-        // / C5; B1's clickable altars are gone). Called after CatchFallers, so
-        // a death below the floor is pulled onto the map before it is sent on.
+        // dead comes back alive at full health and WITHOUT resurrection
+        // sickness (ResurrectPlayer's applySickness is false - operator, T2
+        // 2026-09-08), at the entrance or the furthest cleared boss hall -
+        // computed, never chosen (Round C / C5; B1's clickable altars are
+        // gone). Called after CatchFallers, so a death below the floor is
+        // pulled onto the map before it is sent on.
         void RespawnPending();
 
         // Round C / C5. The checkpoint's world position: the arena centre of

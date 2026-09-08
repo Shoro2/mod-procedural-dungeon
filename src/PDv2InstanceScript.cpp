@@ -2957,14 +2957,19 @@ namespace PDungeon
                 continue;               // gone, or someone else resurrected them
             }
 
-            // Alive, full health, resurrection sickness scaled by level (the
-            // core's own rule inside ResurrectPlayer); no durability loss.
+            // Alive, full health and NO resurrection sickness: the second
+            // parameter of Player::ResurrectPlayer(float restore_percent,
+            // bool applySickness) IS the sickness switch - false returns
+            // early at src/server/game/Entities/Player/Player.cpp:4446,
+            // before the CastSpell(this, 15007) at :4460 that would apply
+            // it. Dying in a run costs neither the sickness (operator, T2
+            // 2026-09-08) nor durability.
             // SpawnCorpseBones is a no-op when the player never released, and
             // when they did it only clears the ghost flag and re-saves the
             // auras - it never writes the position, so dying in here can
             // never be what stores a character on this map.
             uint32 const waitedMs = GetMSTimeDiffToNow(entry.second);
-            player->ResurrectPlayer(1.0f, true);
+            player->ResurrectPlayer(1.0f, false);
             player->SpawnCorpseBones();
 
             // Where to (Round C / C5): the furthest cleared boss hall, else
@@ -2981,7 +2986,7 @@ namespace PDungeon
             if (CheckpointSpot(cx, cy, cz))
             {
                 player->TeleportTo(instance->GetId(), cx, cy, cz + 2.0f, 0.0f);
-                sPDv2UILink->SendNotice(player, "You return to the last boss's hall, weakened.");
+                sPDv2UILink->SendNotice(player, "You return to the last boss's hall.");
                 LOG_INFO(PD_LOG, "PDv2: {} returned alive to the hall of chain room {} in "
                                  "instance {} after {} ms",
                          player->GetName(), _checkpointChain, instance->GetInstanceId(), waitedMs);
@@ -2989,7 +2994,7 @@ namespace PDungeon
             else if (_haveEntrance)
             {
                 player->TeleportTo(instance->GetId(), _entranceX, _entranceY, _entranceZ + 2.0f, 0.0f);
-                sPDv2UILink->SendNotice(player, "You return to the entrance, weakened.");
+                sPDv2UILink->SendNotice(player, "You return to the entrance.");
                 LOG_INFO(PD_LOG, "PDv2: {} returned alive to the entrance of instance {} "
                                  "after {} ms",
                          player->GetName(), instance->GetInstanceId(), waitedMs);
