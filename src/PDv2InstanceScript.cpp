@@ -191,6 +191,41 @@ namespace PDungeon
             { 920103,  4 },     // Forgotten Core
             { 920104,  1 }      // Forgotten Relic
         };
+
+        // Round C / C8, the finale's clock. Four seconds is long enough to
+        // read a line of chat and short enough that nobody walks off before
+        // the portal is up; design §C8.2 names it, so it is a constant and not
+        // a conf key - the beat is authored, not tuned per realm.
+        //
+        // The 1 Hz branch is what measures it, so a line lands at the first
+        // tick at or after its deadline: the spacing is four seconds plus at
+        // most one tick's phase, never less than four.
+        uint32 const FINALE_STEP_MS = 4000;
+
+        // Where the three objects stand, relative to the arena centre the last
+        // boss died in. Chromie and the cache share the +x side so the player
+        // finds both in one glance, the portal takes the -x side so nobody
+        // walks into it while looting; 6 yd clears a player's own body and
+        // stays well inside the smallest arena the kit ships (a 33 yd room is
+        // 16.67 yd of floor either side of its centre). Deliberately axis
+        // offsets and not a ring: the finale is staged for a player standing
+        // in the middle of the room, and an axis reads as a line-up.
+        float const FINALE_CHROMIE_OFFSET_X_YD = 6.0f;
+        float const FINALE_CACHE_OFFSET_Y_YD = 4.0f;
+        float const FINALE_PORTAL_OFFSET_X_YD = -6.0f;
+
+        // Chromie's three lines, spoken in order. English like every other
+        // module text; authored in design §C8.2 and quoted verbatim, so an
+        // edit here is a content change and belongs in the spec first.
+        // No creature_text rows and no Talk(): the module has never had either,
+        // and three lines do not justify a DB table plus a locale pipeline.
+        uint32 const CHROMIE_LINE_COUNT = 3;
+
+        char const* const CHROMIE_LINES[CHROMIE_LINE_COUNT] = {
+            "Well, that took you long enough! The timeways are humming again.",
+            "Take what the Depths owe you - you have earned every bit of it.",
+            "When you are ready, step through. Azealia is waiting."
+        };
     }
 
     PDv2InstanceScript::PDv2InstanceScript(InstanceMap* map) : InstanceScript(map)
@@ -288,6 +323,17 @@ namespace PDungeon
             // rebuilt with the run"). A rebuild re-arms every one of them,
             // which is the whole difference between a trap and a one-off.
             _ambushes.clear();
+            // Round C / C8. Chromie, her cache and the portal went with
+            // _spawnedGuids and _decorGuids in DespawnAll above; this is the
+            // state machine that was walking them, and it has to go too. Note
+            // which rebuild reason usually gets here: `runFinished` - a
+            // completed run is re-entered, so the ordinary way the finale ends
+            // is that somebody walks back in and the dungeon re-populates
+            // (design §C8.4). A finale still mid-line when that happens is cut
+            // off, which is correct: the room it was staged in no longer
+            // exists. Whole-struct assignment rather than field by field, so a
+            // field added to Finale later cannot be forgotten here.
+            _finale = Finale{};
             MarkRunDirty();
         }
 
@@ -731,6 +777,200 @@ namespace PDungeon
         // Nobody is teleported out. The dungeon stays walkable after its last
         // boss because farming it is the point (01 §8) - the way out is the way
         // the player came in.
+        //
+        // Round C / C8 adds a way out that is OFFERED rather than taken: the
+        // finale's portal is a click, so the decision above is untouched. Last
+        // in FinishRun on purpose - the reward, the toast, the chat lines and
+        // the history row are what completing a run means, and none of them
+        // may wait on a summon.
+        StartFinale();
+    }
+
+    void PDv2InstanceScript::StartFinale()
+    {
+        // The last boss's own hall: OnMobDied moved the checkpoint onto the
+        // room it just cleared before it called FinishRun, so this reads the
+        // arena centre of the boss room with the HIGHEST chainIndex that is
+        // dead - which, when the bosses are killed in chain order, is the one
+        // the players are standing in. Killed out of order it is not: the
+        // checkpoint only ever moves forward (OnMobDied says why), so a run
+        // whose second boss fell before its first stages the finale in boss
+        // 2's hall. Accepted - "the furthest hall the run reached" is a
+        // defensible place for the reward to stand, and the alternative would
+        // be a second, contradictory notion of "last".
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        if (!CheckpointSpot(x, y, z))
+        {
+            // No boss room to stand in. Only reachable when the run was
+            // completed without a tagged boss kill moving the checkpoint -
+            // a GM finishing a run by hand, or a layout whose boss room lost
+            // its pack - so it is a warning, not a normal branch, and the
+            // entrance is the one position this script always knows.
+            if (!_haveEntrance)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} completed with neither a checkpoint nor "
+                                 "an entrance - no finale", instance->GetInstanceId());
+                return;
+            }
+            x = _entranceX;
+            y = _entranceY;
+            z = _entranceZ;
+            LOG_WARN(PD_LOG, "PDv2: instance {} completed with no cleared boss hall "
+                             "(checkpoint room {}) - the finale is staged at the entrance",
+                     instance->GetInstanceId(), _checkpointRoom);
+        }
+
+        // Facing the centre, all three of them: GetAngle is the angle FROM
+        // this position TO the one named, so an object standing off-centre and
+        // asked for the angle to the centre looks inward at the players.
+        Position chromiePos(x + FINALE_CHROMIE_OFFSET_X_YD, y, z, 0.0f);
+        chromiePos.SetOrientation(chromiePos.GetAngle(x, y));
+
+        Creature* chromie = instance->SummonCreature(NPC_CHROMIE, chromiePos);
+        if (!chromie)
+        {
+            LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon Chromie "
+                              "(missing creature_template {}?) - no finale",
+                      instance->GetInstanceId(), uint32(NPC_CHROMIE));
+            return;
+        }
+
+        // Gravity off for the same reason every other summon on this map has
+        // it off: the server has no terrain here, so Map::GetHeight answers
+        // INVALID_HEIGHT and anything with gravity falls through the floor the
+        // client draws (SpawnTaggedMob says it at length). Nothing else of
+        // SpawnTaggedMob applies - she is NOT a run mob: no PDv2MobData, so
+        // she cannot move a counter, cannot be scaled, cannot be affixed and
+        // cannot be split. Her template makes her unattackable in the first
+        // place; the missing tag is what makes that structural.
+        chromie->SetDisableGravity(true);
+        chromie->SetHomePosition(chromie->GetPositionX(), chromie->GetPositionY(),
+                                 chromie->GetPositionZ(), chromie->GetOrientation());
+
+        // _spawnedGuids, not _decorGuids: she is a creature, and that list is
+        // the one DespawnAll walks with DespawnOrUnsummon. It looks up each
+        // GUID and never reads a tag, so an untagged creature in it is torn
+        // down exactly like a tagged one.
+        _spawnedGuids.push_back(chromie->GetGUID());
+
+        // The cache, beside her rather than behind her: 4 yd on +y from her
+        // own spot, still facing the centre. The four zeros after the angle
+        // are the quaternion, and an all-zero quaternion is not a facing -
+        // SummonGameObject rebuilds the rotation from this angle about +Z, the
+        // same reasoning SpawnDeadEndChests spells out.
+        float const cacheX = x + FINALE_CHROMIE_OFFSET_X_YD;
+        float const cacheY = y + FINALE_CACHE_OFFSET_Y_YD;
+        Position const cachePos(cacheX, cacheY, z, 0.0f);
+        if (GameObject* cache = instance->SummonGameObject(
+                GO_REWARD_CHEST, cacheX, cacheY, z, cachePos.GetAngle(x, y),
+                0.0f, 0.0f, 0.0f, 0.0f, 0))
+        {
+            _decorGuids.push_back(cache->GetGUID());
+        }
+        else
+        {
+            // Chromie still speaks and the portal still opens: a missing chest
+            // costs the reward, not the way home.
+            LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the finale cache "
+                              "(missing gameobject_template {}?)",
+                      instance->GetInstanceId(), uint32(GO_REWARD_CHEST));
+        }
+
+        _finale.active = true;
+        _finale.step = 0;
+        _finale.nextAtMs = getMSTime() + FINALE_STEP_MS;
+        _finale.chromie = chromie->GetGUID();
+        _finale.x = x;
+        _finale.y = y;
+        _finale.z = z;
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} finale staged at ({:.1f}, {:.1f}, {:.1f}) - "
+                         "chain room {}, first line in {} ms",
+                 instance->GetInstanceId(), x, y, z, _checkpointChain, FINALE_STEP_MS);
+    }
+
+    void PDv2InstanceScript::TickFinale()
+    {
+        if (!_finale.active)
+        {
+            return;
+        }
+
+        // Signed difference, not `getMSTime() >= nextAtMs`: getMSTime() is a
+        // uint32 of milliseconds since start-up and wraps every 49.7 days, and
+        // a plain `>=` across that wrap would park the finale for another 49
+        // days. This is the same wrap-safe reading GetMSTimeDiffToNow gives
+        // the rest of the module, written as a deadline rather than an age.
+        if (static_cast<int32>(getMSTime() - _finale.nextAtMs) < 0)
+        {
+            return;
+        }
+
+        if (_finale.step < CHROMIE_LINE_COUNT)
+        {
+            Creature* chromie = instance->GetCreature(_finale.chromie);
+            if (!chromie)
+            {
+                // She is in _spawnedGuids, and DespawnAll - its only caller
+                // being the rebuild, which resets this struct in the same
+                // block - is the only thing in the module that takes her off
+                // the map. So this is a guard against a core-side despawn
+                // nobody has seen rather than a path a player can walk into;
+                // it is loud because if it ever fires, the cause is worth the
+                // log line.
+                LOG_WARN(PD_LOG, "PDv2: instance {} lost Chromie before line {} - "
+                                 "the finale ends here",
+                         instance->GetInstanceId(), _finale.step + 1);
+                _finale.active = false;
+                return;
+            }
+
+            // Say, not Yell: the dungeon is one room wide at this point and
+            // everyone who finished the boss is standing in it. LANG_UNIVERSAL
+            // so both factions read it.
+            chromie->Say(CHROMIE_LINES[_finale.step], LANG_UNIVERSAL);
+            _finale.nextAtMs += FINALE_STEP_MS;
+            ++_finale.step;
+            return;
+        }
+
+        // The way home, and the last beat. -6 yd on x puts it on the opposite
+        // side of the arena centre from Chromie and her cache, so the players
+        // walk past the reward to reach it.
+        float const portalX = _finale.x + FINALE_PORTAL_OFFSET_X_YD;
+        Position const portalPos(portalX, _finale.y, _finale.z, 0.0f);
+        if (GameObject* portal = instance->SummonGameObject(
+                GO_AZEALIA_PORTAL, portalX, _finale.y, _finale.z,
+                portalPos.GetAngle(_finale.x, _finale.y), 0.0f, 0.0f, 0.0f, 0.0f, 0))
+        {
+            _decorGuids.push_back(portal->GetGUID());
+
+            // The OpenBarrier pattern: one notice per player on the map. It is
+            // a notice and not a chat line because the addon paints those as
+            // raid warnings since C7, which is what makes a portal appearing
+            // behind the player impossible to miss.
+            Map::PlayerList const& players = instance->GetPlayers();
+            for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+            {
+                sPDv2UILink->SendNotice(it->GetSource(), "A portal to Azealia opens.");
+            }
+
+            LOG_INFO(PD_LOG, "PDv2: instance {} opened the portal to Azealia at "
+                             "({:.1f}, {:.1f}, {:.1f})",
+                     instance->GetInstanceId(), portalX, _finale.y, _finale.z);
+        }
+        else
+        {
+            // Nobody is stranded by this: the dungeon stays walkable and the
+            // way the player came in is still open (01 §8).
+            LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the portal to Azealia "
+                              "(missing gameobject_template {}?)",
+                      instance->GetInstanceId(), uint32(GO_AZEALIA_PORTAL));
+        }
+
+        // Spent either way. The finale plays once per run, and the rebuild -
+        // not this line - is what lets the next run play it again.
+        _finale.active = false;
     }
 
     void PDv2InstanceScript::DespawnAll()
@@ -1046,9 +1286,9 @@ namespace PDungeon
         SpawnSelectInputs inputs;
         // Round B / B3 and Round C / C5: the per-room facts a barrier's
         // arithmetic and the respawn checkpoint need, taken in the same pass
-        // and in the same order, so `roomIndex` means one thing in all six
-        // vectors. `roomBlocks` is discarded at the end of this function -
-        // these are what survives it.
+        // and in the same order, so `roomIndex` means one thing in every
+        // vector keyed by it. `roomBlocks` is discarded at the end of this
+        // function - these are what survives it.
         _roomSegment.clear();
         _roomIsBoss.clear();
         _roomSpot.clear();
@@ -1084,13 +1324,24 @@ namespace PDungeon
                 double const mid = PD_BLOCK_SIZE_YD / 2.0;
                 sPDv2Mgr->BlockToWorld(b.bx, b.by, mid, mid, spot.x, spot.y, spot.z);
                 // Grid-vetoed like a spawn point, and NOT as a formality.
-                // Measured over the shipped chunk-meta masks: all 60
-                // room_boss chunks are floor at the centre cell (4, 4) - so
-                // the CHECKPOINT itself always stands on the arena floor,
-                // even the 33 yd platform's - but 15 of the 90 room chunks
-                // are not: theme 2's alt-1 room, 13001-13015, carries a 2x2
-                // VOID in the middle of the block. There the veto is
-                // load-bearing, and it finds floor on ring 1.
+                //
+                // `mid` is half a block, i.e. exactly 4 * PD_CELL_SIZE_YD, so
+                // this point is not the centre OF a cell - it is the corner
+                // where (3,3), (3,4), (4,3) and (4,4) meet, and which of the
+                // four WorldToCell names is decided by the float BlockToWorld
+                // narrows to (SpawnPatrols carries the measurement, and the
+                // same one-cell reading applies here).
+                //
+                // That distinction costs nothing on the masks the kit ships,
+                // because all four answer the same way in every chunk that can
+                // be a checkpoint. Measured over the shipped chunk-meta walk
+                // masks: in all 60 room_boss chunks all four cells are floor -
+                // so the CHECKPOINT itself always stands on the arena floor,
+                // even the 33 yd platform's - while in 15 of the 90 room
+                // chunks all four are VOID: theme 2's alt-1 room, 13001-13015,
+                // carries a 2x2 hole in the middle of the block, and it is
+                // exactly this quad. There the veto is load-bearing whichever
+                // of the four the float names, and it finds floor on ring 1.
                 if (WalkGrid const* grid = GetWalkGrid())
                 {
                     int gcx = 0, gcy = 0;
@@ -1101,7 +1352,8 @@ namespace PDungeon
                     // nothing on this platform.
                     GridPoint snapped;
                     if (!grid->At(cell.x, cell.y) &&
-                        NearestWalkable(*grid, cell.x, cell.y, 2, snapped))
+                        NearestWalkable(*grid, cell.x, cell.y, SPAWN_FALLBACK_SNAP_CELLS,
+                                        snapped))
                     {
                         grid->GlobalFromLocalCell(snapped, gcx, gcy);
                         double wx = 0.0, wy = 0.0;
@@ -1263,9 +1515,9 @@ namespace PDungeon
                 // for ever: unreachable, unkillable, and holding the room's
                 // counter open. The entry anchor is provably floor (it is the
                 // cell every walk into the room arrives on), so that is where
-                // a vetoed pick goes; a
-                // chunk without one falls back to the block centre, which is
-                // walkable in every room variant the kit ships.
+                // a vetoed pick goes; a chunk without one falls back to the
+                // block centre, which is walkable in every room variant the
+                // kit ships.
                 //
                 // Why the circle path never gets here: LoadChunkMeta writes
                 // _walkMasks[chunkId] and _chunkRoomAnchors[chunkId] from the
@@ -2718,6 +2970,11 @@ namespace PDungeon
             // their checkpoint is measured where they actually are; a barrier
             // only ever talks, so its place in the tick is free.
             HintBarriers();
+            // Round C / C8. After the barrier hint and before the eviction
+            // sweep, because both of those talk to players and the finale's
+            // own notice belongs in the same second as the line that earned
+            // it. Inert on every tick of every run that has not finished.
+            TickFinale();
             EvictDisconnected();
             TickVoidZones();
 

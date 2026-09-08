@@ -452,6 +452,45 @@ namespace PDungeon
         void SetCellsWalkable(std::vector<GridPoint> const& cells, bool walkable);
 
         void FinishRun();
+
+        // Round C / C8. The run's closing beat, and the module's only piece of
+        // staged theatre: Chromie and the reward cache appear the moment the
+        // last boss falls, she speaks three lines, and the portal home opens
+        // behind the third.
+        //
+        // A state machine and not a chain of timed callbacks because the
+        // instance script already owns a 1 Hz tick and nothing here needs to
+        // be finer than that - `step` is which beat comes next and `nextAtMs`
+        // is when it is due, so the whole thing survives a save/load of
+        // nothing at all and costs one comparison a second while it runs.
+        //
+        // `x, y, z` is the arena centre the finale is staged around, copied
+        // once at the start: `_roomSpot[_checkpointRoom]` can be re-derived at
+        // any later tick, but a rebuild would have emptied it, and the three
+        // objects must stand in a fixed relation to each other rather than to
+        // whatever the run state says four seconds later.
+        struct Finale
+        {
+            bool active = false;        // false once the portal is up, and before it starts
+            uint32 step = 0;            // 0-2 = the lines, 3 = the portal
+            uint32 nextAtMs = 0;        // getMSTime() deadline of `step`
+            ObjectGuid chromie;         // the speaker; she is in _spawnedGuids
+            float x = 0.0f;             // the arena centre the three objects ring
+            float y = 0.0f;
+            float z = 0.0f;
+        };
+
+        // Called at the end of FinishRun, so it runs after OnMobDied moved the
+        // checkpoint onto the boss room that just fell. Summons Chromie and
+        // the cache and arms the first line; does nothing that can fail the
+        // run if either summon fails.
+        void StartFinale();
+
+        // 1 Hz, after HintBarriers. One beat per tick at most: the deadline is
+        // a schedule, not a budget, so a step that comes due between ticks
+        // simply fires on the next one.
+        void TickFinale();
+
         void RollBonusLoot(Unit* killer);
         void DespawnAll();
         void EnsureWalkGrid(BlockPlan const& plan);
@@ -485,8 +524,8 @@ namespace PDungeon
 
         // Round C / C5. Four more per-room facts, taken in the SAME pass and
         // the same order as the three above, so `roomIndex` still means one
-        // thing in all seven. `roomBlocks` is discarded at the end of
-        // SpawnFromPlan - these are what survives it, and they are what
+        // thing in every vector keyed by it. `roomBlocks` is discarded at the
+        // end of SpawnFromPlan - these are what survives it, and they are what
         // replaced B1's altars: the respawn point is COMPUTED from the run's
         // own state rather than clicked.
         struct RoomSpot
@@ -519,6 +558,13 @@ namespace PDungeon
         // that this corridor is spent - and the rebuild, not the firing, is
         // what forgets it. Same shape and same reasoning as _barriers.
         std::vector<Ambush> _ambushes;
+        // Round C / C8. Inert until the last boss dies and inert again once
+        // the portal is up, so the 1 Hz branch pays one bool for it on every
+        // other tick of every other run. The rebuild resets it whole, the same
+        // way it resets _barriers and _ambushes - the three objects themselves
+        // went with _spawnedGuids and _decorGuids in DespawnAll, and this is
+        // the run's memory that the beat already played.
+        Finale _finale;
         std::unordered_map<ObjectGuid, uint32> _pendingRespawn;  // player -> getMSTime() at death
         std::vector<ObjectGuid> _voidZones;     // friendly ground-hazard carriers; pruned each tick
         uint32   _fallCheckTimer = 0;
