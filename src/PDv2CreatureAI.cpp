@@ -462,9 +462,20 @@ namespace PDungeon
                 }
                 if (leg.size() < 2)
                 {
-                    // The nearest waypoint is the far END of the beat and we
-                    // stand on it: that IS the end of a lap, so turn around the
-                    // way MovementInform would have.
+                    // KEPT although it cannot fire today: it mirrors the `else`
+                    // branch's guard below, and one of the two really is
+                    // reachable. Why this one is not - a waypoint under our own
+                    // feet has Manhattan distance 0, so it is inside the cap and
+                    // its line test is the single walkable cell we stand on;
+                    // that candidate is therefore always accepted and routes us
+                    // to the `else`. Reaching HERE needs every waypoint refused,
+                    // hence nearestDist >= 1, hence `back` has at least two
+                    // points. Loosen the candidate loop's cap or its line gate
+                    // and that stops being true, so the guard stays rather than
+                    // leaving a one-point leg for StartWaypointRun to drop.
+                    // What it does when it fires: the nearest waypoint is the
+                    // far END of the beat and we stand on it, which IS the end
+                    // of a lap - turn around the way MovementInform would have.
                     std::reverse(_patrolRoute.begin(), _patrolRoute.end());
                     leg = _patrolRoute;
                 }

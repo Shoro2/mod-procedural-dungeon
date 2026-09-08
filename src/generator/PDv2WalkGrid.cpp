@@ -213,6 +213,12 @@ namespace PDungeon
     // at every minor-axis transition, which is how the patroller walked
     // through walls (Round C research A1). Public because it is also the
     // creature AI's chase gate (see the header).
+    //
+    // `sx` / `sy` are -1 on a ZERO delta (the ternaries below ask `>`, not
+    // `>=`), which is harmless only because that axis never steps: every read
+    // of `sx` sits behind `nx < ax` and every read of `sy` behind `ny < ay`.
+    // Move a `grid.At(x + sx, ...)` out of those branches and the -1 becomes a
+    // read one cell off the line.
     bool GridLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b)
     {
         if (!grid.At(a.x, a.y))

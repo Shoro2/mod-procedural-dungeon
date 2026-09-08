@@ -756,13 +756,21 @@ namespace
         {
             WalkGrid const g = GridFromMask(kv.second.data());
             for (int ay = 0; ay < g.height; ++ay)
+            {
                 for (int ax = 0; ax < g.width; ++ax)
                 {
-                    if (!g.At(ax, ay)) continue;
+                    if (!g.At(ax, ay))
+                    {
+                        continue;
+                    }
                     for (int by = 0; by < g.height; ++by)
+                    {
                         for (int bx = 0; bx < g.width; ++bx)
                         {
-                            if (!g.At(bx, by)) continue;
+                            if (!g.At(bx, by))
+                            {
+                                continue;
+                            }
                             GridPoint const a{ ax, ay }, b{ bx, by };
                             bool const ok = GridLineWalkable(g, a, b);
                             bool const legacy = LegacyLineWalkable(g, a, b);
@@ -780,9 +788,88 @@ namespace
                                 ++rejectedByFix;
                             }
                         }
+                    }
                 }
+            }
         }
         Check(rejectedByFix > 0, "the legacy sampler approved nothing the supercover test rejects (vacuous)", 0);
+    }
+
+    // The corner half of the supercover rule, on geometry a kit rebuild cannot
+    // move (Round C / C1 Task 1 review, Important 2).
+    //
+    // CheckSupercover above cannot see that half at all: its sampled reference
+    // rounds with `floor(f + 0.5)`, which at an exact corner names the UPPER
+    // cell only, so it is strictly LOOSER than the DDA there and can never
+    // object to a corner rule that is dropped, widened or narrowed. Until this
+    // table existed the only thing between such a change and a green batch was
+    // PD_SUPERCOVER_PAIRS_PIN - and a pin's documented failure mode is to be
+    // re-captured by whoever moved the kit.
+    //
+    // Each case is an 8x8 grid, walkable everywhere except the cells it names,
+    // with the verdict written out by hand from the geometry rather than read
+    // off a run: a corner tie needs equal 2-adic valuation of |dx| and |dy|, so
+    // a 45 degree line ties at EVERY step and a 3:1 line (|dx| = 1, |dy| = 3)
+    // ties exactly once, at t = 1/2. Every blocked cell below is one the
+    // segment only ever STRADDLES - none of them lies on the supercover path -
+    // so a case that flips can only have flipped because the corner rule did.
+    struct CornerCase
+    {
+        char const* name;
+        GridPoint a;
+        GridPoint b;
+        std::vector<GridPoint> blocked;
+        bool expected;
+    };
+
+    void CheckCornerRule()
+    {
+        std::vector<CornerCase> const cases = {
+            // 45 degrees: (0,0) -> (3,3) ties at (0.5,0.5), (1.5,1.5) and
+            // (2.5,2.5). The first tie straddles (1,0) and (0,1); the cells
+            // actually entered are the diagonal (0,0) (1,1) (2,2) (3,3).
+            { "45 deg with both straddling cells open must be APPROVED",
+              { 0, 0 }, { 3, 3 }, {}, true },
+            { "45 deg with the x-side straddling cell (1,0) blocked must be REFUSED",
+              { 0, 0 }, { 3, 3 }, { { 1, 0 } }, false },
+            { "45 deg with the y-side straddling cell (0,1) blocked must be REFUSED",
+              { 0, 0 }, { 3, 3 }, { { 0, 1 } }, false },
+            // 3:1, one tie and it is at t = 1/2 exactly: (0,0) -> (1,3) enters
+            // (0,0) (0,1), crosses the corner at (0.5,1.5) straddling (1,1) and
+            // (0,2), then enters (1,2) (1,3). Neither straddling cell is on
+            // that path.
+            { "3:1 crossing a corner at t = 1/2 with both straddling cells open must be APPROVED",
+              { 0, 0 }, { 1, 3 }, {}, true },
+            { "3:1 at t = 1/2 with the x-side straddling cell (1,1) blocked must be REFUSED",
+              { 0, 0 }, { 1, 3 }, { { 1, 1 } }, false },
+            { "3:1 at t = 1/2 with the y-side straddling cell (0,2) blocked must be REFUSED",
+              { 0, 0 }, { 1, 3 }, { { 0, 2 } }, false },
+            // Axis-aligned: no tie is possible (a tie needs steps left on BOTH
+            // axes), so a one-cell-wide corridor has to stay walkable. This is
+            // the case a "test both neighbours on every step" reading of the
+            // corner rule breaks, and no pin in this file would notice.
+            { "a horizontal line along an open row walled on both sides must be APPROVED",
+              { 0, 4 }, { 7, 4 },
+              { { 0, 3 }, { 1, 3 }, { 2, 3 }, { 3, 3 }, { 4, 3 }, { 5, 3 }, { 6, 3 }, { 7, 3 },
+                { 0, 5 }, { 1, 5 }, { 2, 5 }, { 3, 5 }, { 4, 5 }, { 5, 5 }, { 6, 5 }, { 7, 5 } },
+              true },
+            { "a vertical line along an open column walled on both sides must be APPROVED",
+              { 4, 0 }, { 4, 7 },
+              { { 3, 0 }, { 3, 1 }, { 3, 2 }, { 3, 3 }, { 3, 4 }, { 3, 5 }, { 3, 6 }, { 3, 7 },
+                { 5, 0 }, { 5, 1 }, { 5, 2 }, { 5, 3 }, { 5, 4 }, { 5, 5 }, { 5, 6 }, { 5, 7 } },
+              true },
+        };
+
+        for (CornerCase const& c : cases)
+        {
+            std::vector<uint8_t> mask(PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK, 1);
+            for (GridPoint const& p : c.blocked)
+            {
+                mask[static_cast<size_t>(p.y) * PD_CELLS_PER_BLOCK + p.x] = 0;
+            }
+            WalkGrid const g = GridFromMask(mask.data());
+            Check(GridLineWalkable(g, c.a, c.b) == c.expected, c.name, 0);
+        }
     }
 
     // Forward (block-local, the spawn path) and inverse (world -> cell, the AI
@@ -4454,18 +4541,40 @@ namespace
         return cfg;
     }
 
-    // `blocks,rooms,boss;`, the three numbers the worldserver printed for this
-    // run (Server_2026-09-08_09_49_57.log:952 - "spawned 76 creature(s) in 16
-    // room(s) (2 boss) from a 49-block plan"). `rooms` is counted the way
-    // SpawnFromPlan counts it into _run.roomsTotal
+    // `blocks,rooms,boss;bytes;E;crc;`. The first three are the numbers the
+    // worldserver printed for this run (Server_2026-09-08_09_49_57.log:952 -
+    // "spawned 76 creature(s) in 16 room(s) (2 boss) from a 49-block plan");
+    // `rooms` is counted the way SpawnFromPlan counts it into _run.roomsTotal
     // (PDv2InstanceScript.cpp:1034-1045, :1099): every block with a roomId
-    // EXCEPT the entrance, loop rooms included. Captured by RUNNING.
-    char const* const PD_OPERATOR_PLAN_PIN = "49,16,2;";
+    // EXCEPT the entrance, loop rooms included.
+    //
+    // The manifest byte count and CRC trailer are the same instrument
+    // RunLayoutFreezeCheck uses, added here for the reason that check exists
+    // (Round C / C1 Task 3 review, Important 2): three counts do not detect a
+    // layout that keeps its block, room and boss totals and rearranges
+    // everything, and this pin is the ONLY guard on the promise that an
+    // account which already owns a dungeon gets the same one back on the next
+    // restore. EmitManifest(plan, 1) writes one `B;bx;by;chunkId;0;mask` line
+    // per block sorted by (by, bx) plus a CRC32 over the whole body, so length
+    // + trailer is a byte identity for the placed layout. seq 1, matching
+    // RunLayoutFreezeCheck; the seq goes into the head line, so it is part of
+    // the CRC. Captured by RUNNING.
+    char const* const PD_OPERATOR_PLAN_PIN = "49,16,2;1081;E;2ae1a357;";
 
     // `k:waypoints:cells;` per boss segment - the simplified waypoint count and
-    // the raw A* cell count of the beat SpawnPatrols hands segment k. Captured
-    // by RUNNING.
-    char const* const PD_OPERATOR_PATROL_PIN = "1:13:121;2:13:138;";
+    // the raw A* cell count of the beat SpawnPatrols hands segment k, planned
+    // on the grid WITH both barriers sealed, the way the engine plans it.
+    //
+    // The pin before this one was `1:13:121;2:13:138;`, measured on the OPEN
+    // grid, and adding the barriers moved it. Segment 2 is unchanged cell for
+    // cell - it never touches a sealed doorway - while segment 1's A* walks a
+    // DIFFERENT route of the same 121 cells around one, which the simplifier
+    // renders in 12 waypoints instead of 13. Same endpoints either way, cell
+    // (27,27) to cell (3,43): a 4-neighbour A* on a staircase always has an
+    // equal-length alternative, so the barrier did not lengthen the beat, it
+    // moved which staircase wins. The engine plans on the sealed grid, so the
+    // sealed numbers are the ones worth pinning. Captured by RUNNING.
+    char const* const PD_OPERATOR_PATROL_PIN = "1:12:121;2:13:138;";
 
     // `chance50:<n>;chance100:<bx,by,seg;...>`. At the shipped default this
     // layout arms NOTHING - the two Chance(50) coins came up 70 and 94
@@ -4538,26 +4647,43 @@ namespace
             }
         }
         {
-            char buf[64];
-            std::snprintf(buf, sizeof buf, "%u,%d,%d;",
-                          static_cast<unsigned>(plan.blocks.size()), rooms, boss);
+            // The manifest's own bytes, not a summary of them: EmitManifest
+            // ends in "E;%08x\n", so the last 11 characters are the trailer and
+            // the newline is dropped to keep the pin one line.
+            std::string const manifest = EmitManifest(plan, 1);
+            std::string trailer =
+                manifest.size() >= 11 ? manifest.substr(manifest.size() - 11) : manifest;
+            if (!trailer.empty() && trailer.back() == '\n')
+            {
+                trailer.pop_back();
+            }
+            char buf[128];
+            std::snprintf(buf, sizeof buf, "%u,%d,%d;%u;%s;",
+                          static_cast<unsigned>(plan.blocks.size()), rooms, boss,
+                          static_cast<unsigned>(manifest.size()), trailer.c_str());
             std::string const msg =
                 std::string("the operator's layout moved: ") + buf +
-                " - the worldserver logged 49,16,2; for this account on 2026-09-08";
+                " - the worldserver logged 49,16,2; for this account on 2026-09-08, "
+                "and the manifest of that layout was " + PD_OPERATOR_PLAN_PIN;
             Check(std::string(buf) == PD_OPERATOR_PLAN_PIN, msg.c_str(), PD_OPERATOR_SEED);
         }
 
         {
             // plan.effectiveSeed, never cfg.seed - the engine passes that one
-            // (PDv2InstanceScript.cpp:2205), and on a layout that needed a retry
-            // the two differ and the spots would come off a stream the run never
-            // used.
+            // (PDv2InstanceScript.cpp:2210-2211), and on a layout that needed a
+            // retry the two differ and the spots would come off a stream the
+            // run never used.
+            //
+            // The 50 is a LITERAL, for the reason PD_AMBUSH_PLAN_PIN_MID states
+            // above: an operator moving what the server ships with must not turn
+            // the batch red, and the label below hard-codes "chance50:" anyway,
+            // so a constant here would print a number drawn at some other
+            // chance under a label that says 50.
             std::string got = "chance50:";
             char buf[64];
             std::snprintf(buf, sizeof buf, "%u;",
                           static_cast<unsigned>(
-                              BuildAmbushPlan(plan, PD_AMBUSH_DEFAULT_CHANCE_PCT,
-                                              plan.effectiveSeed).size()));
+                              BuildAmbushPlan(plan, 50, plan.effectiveSeed).size()));
             got += buf;
             got += "chance100:";
             for (AmbushSpot const& spot : BuildAmbushPlan(plan, 100, plan.effectiveSeed))
@@ -4595,12 +4721,98 @@ namespace
         int const bossRooms = std::max(1, plan.config.bossRooms);
         std::string beats;
 
+        // SEALED, the way the run set-up seals it: SpawnBarriers runs to
+        // completion for every segment BEFORE SpawnPatrols is called
+        // (PDv2InstanceScript.cpp:306, :311), so the grid a patroller plans its
+        // first beat on already has both portcullises down. Sealing it here is
+        // not decoration - it is the only way this pin can claim to be the beat
+        // the engine hands out.
+        //
+        // What a barrier seals is the DOORWAY into boss room k and nothing
+        // else: LaneCellsForSocket names the two lane cells on the boss block's
+        // entry edge, and the same two on the neighbouring corridor's opposite
+        // edge, because a creature snapping within two cells could otherwise
+        // step straight across (:1956-1957, :2004). It does NOT seal a boss
+        // room's exit, which is why segment 2's beat - out of the corridor in
+        // front of boss 2, back to boss room 1 - has a route from the start:
+        // SpineRunInto answers with the ENTRY socket, boss 1 sits mid-chain,
+        // and the patroller approaches it from the far side.
+        //
+        // EvaluateBarrier(k) can lift a barrier immediately at spawn time, but
+        // only for a segment that planned no trash at all; this layout spawned
+        // 76 creatures in 16 rooms, so neither of its two is in that case.
+        {
+            size_t sealed = 0;
+            for (int k = 1; k <= bossRooms; ++k)
+            {
+                int const bossChain = BossChainIndex(chainLen, plan.config.bossRooms, k);
+                std::vector<size_t> run;
+                unsigned const bit = SpineRunInto(plan, bossChain, &run);
+                if (!bit || run.empty() ||
+                    (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W))
+                {
+                    continue;   // the engine skips the barrier here too (:1908-1930)
+                }
+                PlacedBlock const* bossBlock = nullptr;
+                for (PlacedBlock const& b : plan.blocks)
+                {
+                    if (b.chainIndex == bossChain)
+                    {
+                        bossBlock = &b;     // last match, the way SpineRunInto picks it
+                    }
+                }
+                if (!bossBlock)
+                {
+                    continue;
+                }
+                struct Side { PlacedBlock const* block; unsigned edge; };
+                Side const sides[2] = { { bossBlock, bit },
+                                        { &plan.blocks[run.back()], OppositeSocket(bit) } };
+                for (Side const& s : sides)
+                {
+                    int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+                    LaneCellsForSocket(s.edge, cells);
+                    for (int i = 0; i < 2; ++i)
+                    {
+                        // (row, col) -> (x = col, y = row), the one translation
+                        // SpawnBarriers' laneCells lambda does (:1883-1894).
+                        GridPoint const p = grid.LocalFromGlobalCell(
+                            s.block->bx * PD_CELLS_PER_BLOCK + cells[i][1],
+                            s.block->by * PD_CELLS_PER_BLOCK + cells[i][0]);
+                        if (grid.InBounds(p.x, p.y))
+                        {
+                            // A doorway lane cell is floor on both sides by
+                            // construction - that is what makes it a doorway.
+                            // If the (row, col) -> (x, y) translation above were
+                            // swapped, this is where it would show: the seal
+                            // would land on the wall band beside the lane and
+                            // the beats below would move for a reason that has
+                            // nothing to do with barriers.
+                            Check(grid.At(p.x, p.y),
+                                  "a barrier lane cell of the operator's layout was already "
+                                  "unwalkable before it was sealed - the lane cell mapping is wrong",
+                                  PD_OPERATOR_SEED);
+                            grid.cells[static_cast<size_t>(p.y) * grid.width + p.x] = 0;
+                            ++sealed;
+                        }
+                    }
+                }
+            }
+            // Two boss segments, two lane cells on each of the two sides. A
+            // silent 0 here would mean the beats below were planned on the open
+            // layout after all, which is the mistake this block exists to fix.
+            Check(sealed == static_cast<size_t>(bossRooms) * 4,
+                  "the operator's barriers sealed a different number of lane cells than "
+                  "four per boss segment - the beats below are no longer the engine's",
+                  PD_OPERATOR_SEED);
+        }
+
         for (int k = 1; k <= bossRooms; ++k)
         {
             char buf[64];
 
             // SpawnPatrols' own derivation, line for line
-            // (PDv2InstanceScript.cpp:2032-2075): the beat runs from the LAST
+            // (PDv2InstanceScript.cpp:2038-2072): the beat runs from the LAST
             // corridor of the spine run into boss k - the block its portcullis
             // stands next to - back to chain room k-1, which for the first
             // segment is the entrance (chain index 0).
@@ -4644,7 +4856,7 @@ namespace
             WorldToCell(static_cast<float>(sxd), static_cast<float>(syd), scx, scy);
             GridPoint startCell = grid.LocalFromGlobalCell(scx, scy);
 
-            // The spawn-side veto (PDv2InstanceScript.cpp:2124-2141): a corridor
+            // The spawn-side veto (PDv2InstanceScript.cpp:2148-2164): a corridor
             // whose centre cell is void seats the patroller on the nearest
             // walkable cell's CENTRE instead, and the AI then re-derives its
             // cell from that position - which lands back on the same cell.
@@ -4655,7 +4867,7 @@ namespace
                 startCell = snapped;
             }
 
-            // The AI's own snap of where it stands (PDv2CreatureAI.cpp:341-346).
+            // The AI's own snap of where it stands (PDv2CreatureAI.cpp:340-346).
             GridPoint here;
             if (!NearestWalkable(grid, startCell.x, startCell.y, snapCells, here))
             {
@@ -4683,17 +4895,19 @@ namespace
                 continue;
             }
 
-            // On the OPEN layout, deliberately: SpawnBarriers runs first and
-            // seals its doorway cells (SetCellsWalkable(cells, false)), so a
-            // segment-2 patroller whose goal is boss room 1 finds no route at
-            // all until that barrier opens - and holds, by design ("a barrier
-            // that opens later can still turn this into a route",
-            // PDv2CreatureAI.cpp:368-372). The beat pinned here is the one it
-            // ends up walking.
+            // On the SEALED layout - both barriers are already down above, the
+            // way they are when SpawnPatrols runs. Both segments still have a
+            // route, and that is a fact rather than a hope: a barrier seals the
+            // ENTRY doorway of its boss room, segment 1 walks AWAY from boss 1
+            // towards the entrance, and segment 2 walks from the corridor in
+            // front of boss 2 to boss room 1, which it reaches through that
+            // room's unsealed exit socket. A refusal here is therefore a real
+            // finding - the no-route branch (PDv2CreatureAI.cpp:363-366) would
+            // leave that patroller standing still until a barrier lifts.
             std::vector<GridPoint> path;
             if (!FindGridPath(grid, here, goalSnapped, path))
             {
-                Check(false, "the operator's patrol beat has no route on the open layout",
+                Check(false, "the operator's patrol beat has no route with the barriers sealed",
                       PD_OPERATOR_SEED);
                 std::snprintf(buf, sizeof buf, "%d:0:0;", k);
                 beats += buf;
@@ -4739,6 +4953,10 @@ namespace
         RunChainMathChecks();
         RunLayoutFreezeCheck();
         RunTypedAnchorChecks();
+        // Outside the mask guard on purpose: the corner cases are hand-built
+        // 8x8 grids, so they hold the no-corner-cutting rule still even on a
+        // box with no kit staged - which is exactly where the pin below cannot.
+        CheckCornerRule();
         if (!g_masks.empty())
         {
             // Once, not per seed: the supercover test is a property of the KIT
