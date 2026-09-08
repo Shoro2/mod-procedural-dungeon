@@ -76,15 +76,24 @@ namespace PDungeon
         void UpdateAI(uint32 diff) override;
         void MovementInform(uint32 type, uint32 id) override;
 
-        // Round B / B4. The core's evade sends a creature home in a STRAIGHT
-        // LINE (HomeMovementGenerator, MoveTo with pathfinding disabled on a
+        // Round B / B4, REORDERED by Round C's patrol fix. The core's evade
+        // sends a creature home in a STRAIGHT LINE (HomeMovementGenerator on a
         // map with no mmaps), and on this map a straight line crosses the void
-        // - so a patroller pulled halfway down its beat would walk back to its
-        // spawn block through nothing. The override lets the base do the whole
-        // combat stop, then moves the home position to wherever the creature
-        // stands, throws that home walk away and puts the patrol back on the
-        // grid instead. Every other mob keeps the core's behaviour untouched.
+        // - so a patroller pulled halfway down its beat FLEW back to its spawn
+        // block through nothing. The override therefore moves the home position
+        // to wherever the creature stands BEFORE the base call (the base reads
+        // that position two frames later), lets the base do the whole combat
+        // stop, and only then throws the home walk away - motion master AND
+        // spline, because Clear() cannot stop a spline - before putting the
+        // patrol back on the grid. Every other mob keeps the core's behaviour
+        // untouched. The .cpp carries the full trace.
         void EnterEvadeMode(EvadeReason why) override;
+
+        // One line of patrol state for `.pdungeon v2 patrol`, formatted here
+        // rather than in the command so these members stay protected and this
+        // header stays free of Chat.h. A snapshot: it reads, it decides
+        // nothing (the .cpp says what each field proves).
+        std::string PatrolStateLine() const;
 
     protected:
         // One slot-1 spell with its own live timer. A plain vector rather than
@@ -169,6 +178,25 @@ namespace PDungeon
         // (an evade, which is how every patroller's fight ends, or a
         // knockback). Set by ResumePatrol, cleared by the tick that acts on it.
         bool _patrolRejoin = false;
+        // Round C. The chase's own hold latch, the exact shape _holding has for
+        // the caster's plant: an Unreachable verdict STOPS the creature (motion
+        // master, spline and all), and this says it has already been stopped so
+        // the next 500 ms verdict does not stop it a second time. The verdict
+        // itself is still re-taken on every tick - only the clearing is
+        // latched. Cleared wherever the creature is given something to walk to
+        // again (both other verdicts, and JustEngagedWith).
+        bool _chaseHeld = false;
+        // Round C, diagnostics only, all three inert while
+        // V2.Patrol.Debug is 0.
+        //
+        // D4 is once per creature ("the idle slot holds X"), and this is the
+        // "already said it" flag. D5 prints a chase verdict only when the
+        // verdict or the top generator CHANGED, and those two ints are the last
+        // pair it printed - ints rather than the enums so -1 can mean "nothing
+        // yet", which is what makes the first verdict of a fight print.
+        bool _dbgSlotLogged = false;
+        int  _dbgChaseVerdict = -1;
+        int  _dbgChaseTop = -1;
     };
 }
 

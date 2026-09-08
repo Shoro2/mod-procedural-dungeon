@@ -16,6 +16,7 @@
  */
 
 #include "PDv2CreatureAI.h"
+#include "Log.h"
 #include "Map.h"
 #include "MotionMaster.h"
 #include "PDDefines.h"
@@ -25,11 +26,13 @@
 #include "PDv2PackMgr.h"
 #include "Player.h"
 #include "ScriptMgr.h"
+#include "StringFormat.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <limits>
 #include <list>
+#include <string>
 
 namespace PDungeon
 {
@@ -63,6 +66,50 @@ namespace PDungeon
             // is the policy for that, not this conversion.
             return grid.LocalFromGlobalCell(gcx, gcy);
         }
+
+        // Round C. The patrol diagnostics gate, asked on the tick that would
+        // log rather than cached anywhere: the key is read live (PDv2Mgr.cpp),
+        // so an operator who types `.reload config` mid-run starts and stops
+        // the evidence without a restart. Default 0, and the host never turns
+        // it on - see conf/mod_procedural_dungeon.conf.dist.
+        bool PatrolDebug()
+        {
+            return sPDv2Mgr->GetConfig().patrolDebug;
+        }
+
+        // The motion stack's top, in words. The number alone is unreadable in a
+        // log and the enum is not printable, so this is the only place the two
+        // are tied together (MotionMaster.h:37-59). Only the types this map can
+        // actually produce are named; anything else prints as its number, which
+        // is itself the finding.
+        char const* MotionName(MovementGeneratorType type)
+        {
+            switch (type)
+            {
+                case IDLE_MOTION_TYPE:      return "IDLE";
+                case RANDOM_MOTION_TYPE:    return "RANDOM";
+                case CONFUSED_MOTION_TYPE:  return "CONFUSED";
+                case CHASE_MOTION_TYPE:     return "CHASE";
+                case HOME_MOTION_TYPE:      return "HOME";
+                case POINT_MOTION_TYPE:     return "POINT";
+                case FLEEING_MOTION_TYPE:   return "FLEEING";
+                case DISTRACT_MOTION_TYPE:  return "DISTRACT";
+                case FOLLOW_MOTION_TYPE:    return "FOLLOW";
+                case EFFECT_MOTION_TYPE:    return "EFFECT";
+                case NULL_MOTION_TYPE:      return "NULL";
+                default:                    return "OTHER";
+            }
+        }
+
+        char const* ApproachName(ApproachKind kind)
+        {
+            switch (kind)
+            {
+                case ApproachKind::Direct: return "Direct";
+                case ApproachKind::Path:   return "Path";
+                default:                   return "Unreachable";
+            }
+        }
     }
 
     PDv2MobAI::PDv2MobAI(Creature* creature) : ScriptedAI(creature)
@@ -94,6 +141,17 @@ namespace PDungeon
         _holding = false;
         _lineOk = false;
         _lineTimer = 0;
+
+        // Round C, and for exactly the same reason one line up: AttackStart
+        // (UnitAI.cpp:29-33) has just installed a fresh MoveChase, so a
+        // _chaseHeld carried over from the LAST fight's Unreachable hold would
+        // tell UpdateGridChase the creature is already stopped when it is in
+        // fact beelining at the new target.
+        _chaseHeld = false;
+        // The D5 gate is per fight too, so the opening verdict of every pull
+        // prints even when it matches the one the last fight ended on.
+        _dbgChaseVerdict = -1;
+        _dbgChaseTop = -1;
 
         // A fresh fight opens STAGGERED, not with everything ready: each
         // cooldown spell draws its own 1-2 s opening delay. Per FIGHT, not per
@@ -159,44 +217,122 @@ namespace PDungeon
         // has to be re-planned from where the creature now stands.
         if (_mob && _mob->isPatrol)
         {
+            // D3's tail. Since the evade fix this hook is reachable in ONE way
+            // - the zero-length home walk to the cell the creature already
+            // stands on arriving before Clear() pops it - so a line here says
+            // which of the two routes home the run actually took.
+            if (PatrolDebug())
+            {
+                LOG_INFO(PD_LOG, "PDv2 patrol: {} JustReachedHome at ({:.1f},{:.1f},{:.1f}) top {}",
+                         me->GetName(), me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
+                         MotionName(me->GetMotionMaster()->GetCurrentMovementGeneratorType()));
+            }
             ResumePatrol();
         }
     }
 
     void PDv2MobAI::EnterEvadeMode(EvadeReason why)
     {
-        // The base call FIRST, always and for every creature: it is what stops
-        // the combat, drops the threat list, restores the health and adds
-        // UNIT_STATE_EVADE (CreatureAI::_EnterEvadeMode). Nothing below is a
-        // substitute for any of that - it only redirects the walk home.
+        // WHY THE ORDER OF THE NEXT TWENTY LINES IS THE WHOLE FIX (Round C,
+        // after the Round B version flew patrollers across the void on every
+        // evade - measured 2026-09-08).
+        //
+        // The base call is still FIRST for everything it owns: it stops the
+        // combat, drops the threat list, restores the health and sets
+        // UNIT_STATE_EVADE (CreatureAI::_EnterEvadeMode). Nothing here is a
+        // substitute for any of that. But for an ownerless creature it also
+        // LAUNCHES a walk home (CreatureAI.cpp:259 -> MotionMaster::MoveTargetedHome,
+        // MotionMaster.cpp:262-270), and HomeMovementGenerator::_setTargetLocation
+        // reads the home position and starts the spline inside that same call
+        // (HomeMovementGenerator.cpp:62-69). Round B moved the home AFTERWARDS,
+        // two frames too late: the spline was already flying to the SPAWN
+        // block, in a straight unpathed line, across whatever void lay between.
+        //
+        // So home is set BEFORE the base call - then the walk the base queues
+        // is a zero-length walk to the cell the creature already stands on
+        // instead of a flight home - and the spline is stopped EXPLICITLY
+        // afterwards, because Clear() provably cannot: DirectClean's reset
+        // branch (MotionMaster.cpp:163-164) only calls Reset() on the new top,
+        // that top is the static idle singleton, and IdleMovementGenerator's
+        // Reset (IdleMovementGenerator.cpp:31-32) skips StopMoving() whenever
+        // IsStopped() is true - which _setTargetLocation made true one line
+        // after launching the spline, by clearing UNIT_STATE_MOVING
+        // (HomeMovementGenerator.cpp:73; UNIT_STATE_MOVING is UnitDefines.h:217,
+        // IsStopped is Unit.h:1760). Unit::Update drives splines from
+        // UpdateSplineMovement, before and independently of the motion master
+        // (Unit.cpp:635-636), so an unowned spline runs to completion.
+        //
+        // Decide the patrol case BEFORE the base call, because the home write
+        // has to happen there. Alive, because _EnterEvadeMode refuses a dead
+        // creature outright and moving a corpse's home during its own death
+        // would be a second opinion about a transition setDeathState owns; the
+        // base call cannot change that answer either way.
+        bool const patrol = _mob && _mob->isPatrol && me->IsAlive();
+
+        if (patrol)
+        {
+            // HOME IS WHEREVER THE PATROL STANDS.
+            me->SetHomePosition(me->GetPositionX(), me->GetPositionY(),
+                                me->GetPositionZ(), me->GetOrientation());
+
+            if (PatrolDebug())
+            {
+                float hx = 0.0f, hy = 0.0f, hz = 0.0f, ho = 0.0f;
+                me->GetHomePosition(hx, hy, hz, ho);
+                LOG_INFO(PD_LOG, "PDv2 patrol: {} EVADE reason {} at ({:.1f},{:.1f},{:.1f}) "
+                                 "home ({:.1f},{:.1f},{:.1f}) dist {:.1f}",
+                         me->GetName(), uint32(why), me->GetPositionX(), me->GetPositionY(),
+                         me->GetPositionZ(), hx, hy, hz, me->GetExactDist2d(hx, hy));
+            }
+        }
+
         ScriptedAI::EnterEvadeMode(why);
 
-        // Alive, because _EnterEvadeMode refuses a dead creature outright and
-        // clearing a corpse's motion during its own death would be a second
-        // opinion about a transition setDeathState already owns.
-        if (!_mob || !_mob->isPatrol || !me->IsAlive())
+        if (patrol && PatrolDebug())
+        {
+            // The middle line of D3. With the home already moved this reads
+            // "splineFinalized 1" on a creature that had not moved since the
+            // pull, and a short flight otherwise - never the walk back to spawn
+            // Round B produced.
+            LOG_INFO(PD_LOG, "PDv2 patrol: {} after base: top {} splineFinalized {} "
+                             "stopped {} unitState 0x{:X}",
+                     me->GetName(),
+                     MotionName(me->GetMotionMaster()->GetCurrentMovementGeneratorType()),
+                     me->movespline->Finalized() ? 1 : 0, me->IsStopped() ? 1 : 0,
+                     me->GetUnitState());
+        }
+
+        if (!patrol)
         {
             return;
         }
 
-        // HOME IS WHEREVER THE PATROL STANDS. For an ownerless creature the
-        // base call queues a MoveTargetedHome (CreatureAI.cpp:255-259), and
-        // that generator walks a straight line to the home position with
-        // pathfinding disabled - which on map 760 goes through the void,
-        // because there are no mmaps and no terrain for the engine to refuse
-        // over.
-        me->SetHomePosition(me->GetPositionX(), me->GetPositionY(),
-                            me->GetPositionZ(), me->GetOrientation());
-
-        // Throw that walk away. Clear() pops the home generator, whose
-        // Finalize clears UNIT_STATE_EVADE without calling JustReachedHome
-        // (HomeMovementGenerator.cpp:31-42) - so the creature leaves evade
-        // state here rather than at the end of a walk it will never take, and
-        // UpdateProximityAggro is free to look again on the next tick. MoveIdle
-        // is the no-op that follows a Clear down to a static idle generator; it
-        // is there so the motion stack is never left half-described.
+        // Throw the home walk away, spline included. Clear() pops the home
+        // generator, whose Finalize clears UNIT_STATE_EVADE without calling
+        // JustReachedHome (HomeMovementGenerator.cpp:31-42) - so the creature
+        // leaves evade state here rather than at the end of a walk it will
+        // never take, and UpdateProximityAggro is free to look again on the
+        // next tick. StopMoving is what Clear() cannot do: Unit::StopMoving
+        // (Unit.cpp:13056-13073) is gated on movespline->Finalized(), NOT on
+        // UNIT_STATE_MOVING, so it kills the spline the idle generator's Reset
+        // declines to touch. MoveIdle then follows the Clear down to the static
+        // idle generator, so the motion stack is never left half-described.
         me->GetMotionMaster()->Clear();
+        me->StopMoving();
         me->GetMotionMaster()->MoveIdle();
+
+        if (PatrolDebug())
+        {
+            // THE decisive line. Round B read "splineFinalized 0 stopped 1" -
+            // a live spline nothing owned and nothing would stop. It must now
+            // read "splineFinalized 1".
+            LOG_INFO(PD_LOG, "PDv2 patrol: {} after Clear+StopMoving+MoveIdle: top {} "
+                             "splineFinalized {} stopped {}",
+                     me->GetName(),
+                     MotionName(me->GetMotionMaster()->GetCurrentMovementGeneratorType()),
+                     me->movespline->Finalized() ? 1 : 0, me->IsStopped() ? 1 : 0);
+        }
+
         ResumePatrol();
     }
 
@@ -206,11 +342,49 @@ namespace PDungeon
         grid.GlobalFromLocalCell(_waypoints[index], gcx, gcy);
         double wx = 0.0, wy = 0.0;
         CellCentreToWorld(gcx, gcy, wx, wy);
+        // WHAT THE `false` ACTUALLY BUYS, corrected in Round C. It lands on
+        // MovePoint's `generatePath` parameter (MotionMaster.h:242) - the call
+        // IS the one it means - but that flag does not suppress the
+        // PathGenerator in this core: both branches of
+        // PointMovementGenerator::DoInitialize end in `init.MoveTo(i_x, i_y,
+        // i_z, true)` (PointMovementGenerator.cpp:75 and :87), and that `true`
+        // is MoveSplineInit's OWN generatePath (MoveSplineInit.h:104 ->
+        // MoveSplineInit.cpp:221-238), which runs a PathGenerator regardless.
+        //
+        // The leg is a straight line for a different reason, and that reason is
+        // why this is safe rather than merely harmless: map 760 has no mmaps,
+        // so PathGenerator::CalculatePath (PathGenerator.cpp:57-87) takes its
+        // no-navmesh exit into BuildShortcut (:631-645) - a 2-point path whose
+        // NormalizePath (:623-629) leaves Z untouched, because with no terrain
+        // WorldObject::UpdateAllowedPositionZ (Object.cpp:1610) has no height
+        // to clamp to. So every leg is exactly the straight cell-centre to
+        // cell-centre line at floorZ that the grid already proved walkable -
+        // which is the contract StartWaypointRun and the rejoin both rely on.
+        // The `false` stays because it states the intent; if this core ever
+        // gains a navmesh for 760, it is the flag that keeps the leg honest.
         me->GetMotionMaster()->MovePoint(WAYPOINT_MOVE_ID_BASE + static_cast<uint32>(index),
                                          static_cast<float>(wx), static_cast<float>(wy),
                                          sPDv2Mgr->GetConfig().floorZ,
                                          FORCED_MOVEMENT_NONE, 0.0f, 0.0f,
                                          /*generatePath=*/false);
+
+        // D1. One line per leg: where the module thinks it is going and how far
+        // that is. A leg longer than the cell size times a waypoint span is the
+        // "flew off the beat" signature - the grid is 8.33 yd per cell, so a
+        // simplified leg of a few cells is tens of yards and anything in the
+        // hundreds is not a leg at all.
+        if (PatrolDebug() && _mob && _mob->isPatrol)
+        {
+            LOG_INFO(PD_LOG, "PDv2 patrol: {} guid {} leg wp {}/{} cell ({},{}) global ({},{}) "
+                             "-> world ({:.1f},{:.1f},{:.1f}) | me ({:.1f},{:.1f},{:.1f}) "
+                             "| top {} | dist {:.1f}",
+                     me->GetName(), me->GetGUID().GetCounter(), uint32(index),
+                     uint32(_waypoints.size()), _waypoints[index].x, _waypoints[index].y,
+                     gcx, gcy, float(wx), float(wy), sPDv2Mgr->GetConfig().floorZ,
+                     me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
+                     MotionName(me->GetMotionMaster()->GetCurrentMovementGeneratorType()),
+                     me->GetExactDist2d(float(wx), float(wy)));
+        }
     }
 
     void PDv2MobAI::StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid)
@@ -249,6 +423,20 @@ namespace PDungeon
 
     void PDv2MobAI::MovementInform(uint32 type, uint32 id)
     {
+        // D2, BEFORE the guard on purpose: an inform the module drops - wrong
+        // type, a stale _followingPath, a core id below the module's base - is
+        // invisible everywhere else, and "the leg ended and nobody noticed" and
+        // "no leg ever ended" look identical in the log without this line.
+        if (PatrolDebug() && _mob && _mob->isPatrol)
+        {
+            LOG_INFO(PD_LOG, "PDv2 patrol: {} inform type {} ({}) id {} (base {}) following {} "
+                             "idx {}/{} | me ({:.1f},{:.1f},{:.1f})",
+                     me->GetName(), type, MotionName(MovementGeneratorType(type)), id,
+                     uint32(WAYPOINT_MOVE_ID_BASE), _followingPath ? 1 : 0,
+                     uint32(_waypointIndex), uint32(_waypoints.size()),
+                     me->GetPositionX(), me->GetPositionY(), me->GetPositionZ());
+        }
+
         if (type != POINT_MOTION_TYPE || !_followingPath || id < WAYPOINT_MOVE_ID_BASE)
         {
             return;
@@ -540,6 +728,66 @@ namespace PDungeon
         StopWaypointRun(false);
     }
 
+    std::string PDv2MobAI::PatrolStateLine() const
+    {
+        // A SNAPSHOT, for the instant an operator sees a mob where it should
+        // not be. The whole point is that the three explanations the Round C
+        // debug report could not tell apart are one glance apart on this line:
+        //
+        //   walkable 0 + top IDLE  + spline running -> a spline nobody owns
+        //                                              (the evade bug, fixed)
+        //   walkable 0 + top CHASE                  -> the chase is beelining
+        //                                              at an unreachable target
+        //   walkable 1 + following 1                -> the module really did
+        //                                              choose that cell, and
+        //                                              the grid or the planner
+        //                                              is what is wrong
+        //
+        // Nothing here decides anything, and nothing here is cheap to be
+        // clever about: it is typed by hand, once.
+        WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
+        GridPoint cell{ 0, 0 };
+        int walkable = -1;
+        int routeDist = -1;
+        if (grid)
+        {
+            cell = CellOf(*grid, me->GetPositionX(), me->GetPositionY());
+            walkable = grid->At(cell.x, cell.y) ? 1 : 0;
+            // Manhattan on cells, the metric the 4-neighbour A* and the rejoin
+            // both use - so this number is directly comparable with the
+            // rejoin's REJOIN_MAX_CELLS cap.
+            for (GridPoint const& wp : _patrolRoute)
+            {
+                int const d = std::abs(wp.x - cell.x) + std::abs(wp.y - cell.y);
+                if (routeDist < 0 || d < routeDist)
+                {
+                    routeDist = d;
+                }
+            }
+        }
+
+        float hx = 0.0f, hy = 0.0f, hz = 0.0f, ho = 0.0f;
+        me->GetHomePosition(hx, hy, hz, ho);
+        Unit const* victim = me->GetVictim();
+
+        return Acore::StringFormat(
+            "{} entry {} guid {} | pos ({:.0f},{:.0f},{:.0f}) cell ({},{}) walkable {} "
+            "| top {} spline {} stopped {} "
+            "| following {} idx {}/{} route {} nearest {} active {} rejoin {} "
+            "| home ({:.0f},{:.0f}) dist {:.0f} | victim {}",
+            me->GetName(), me->GetEntry(), me->GetGUID().GetCounter(),
+            me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
+            cell.x, cell.y, walkable,
+            MotionName(me->GetMotionMaster()->GetCurrentMovementGeneratorType()),
+            me->movespline->Finalized() ? "finalized" : "RUNNING",
+            me->IsStopped() ? 1 : 0,
+            _followingPath ? 1 : 0, uint32(_waypointIndex), uint32(_waypoints.size()),
+            uint32(_patrolRoute.size()), routeDist, _patrolActive ? 1 : 0,
+            _patrolRejoin ? 1 : 0,
+            hx, hy, me->GetExactDist2d(hx, hy),
+            victim ? victim->GetName() : std::string("none"));
+    }
+
     bool PDv2MobAI::UpdateGridChase(uint32 diff)
     {
         if (_repathTimer > diff)
@@ -571,15 +819,43 @@ namespace PDungeon
         }
 
         std::vector<GridPoint> waypoints;
-        switch (PlanApproach(*grid,
-                             CellOf(*grid, me->GetPositionX(), me->GetPositionY()),
-                             CellOf(*grid, victim->GetPositionX(), victim->GetPositionY()),
-                             SNAP_RADIUS_CELLS, waypoints))
+        ApproachKind const verdict =
+            PlanApproach(*grid,
+                         CellOf(*grid, me->GetPositionX(), me->GetPositionY()),
+                         CellOf(*grid, victim->GetPositionX(), victim->GetPositionY()),
+                         SNAP_RADIUS_CELLS, waypoints);
+
+        // D5. One line per DECISION, and only when the decision or the motion
+        // stack under it changed - so a fight in which nothing moves costs one
+        // line, and the signature that matters (verdict Unreachable with top
+        // CHASE surviving the tick) is impossible to miss. Read BEFORE the
+        // switch acts, because what the branch is about to do is only
+        // interesting against what was there when it decided.
+        if (PatrolDebug())
+        {
+            MovementGeneratorType const top =
+                me->GetMotionMaster()->GetCurrentMovementGeneratorType();
+            if (int(verdict) != _dbgChaseVerdict || int(top) != _dbgChaseTop)
+            {
+                _dbgChaseVerdict = int(verdict);
+                _dbgChaseTop = int(top);
+                GridPoint const meCell = CellOf(*grid, me->GetPositionX(), me->GetPositionY());
+                GridPoint const vicCell =
+                    CellOf(*grid, victim->GetPositionX(), victim->GetPositionY());
+                LOG_INFO(PD_LOG, "PDv2 chase: {} verdict {} victim {} me-cell ({},{}) "
+                                 "victim-cell ({},{}) top {}",
+                         me->GetName(), ApproachName(verdict), victim->GetName(),
+                         meCell.x, meCell.y, vicCell.x, vicCell.y, MotionName(top));
+            }
+        }
+
+        switch (verdict)
         {
             case ApproachKind::Direct:
                 // The straight line is floor the whole way, so the core chase
                 // is safe: with no mmaps its generated path degenerates to
                 // exactly that straight line.
+                _chaseHeld = false;
                 if (_followingPath)
                 {
                     StopWaypointRun(true);
@@ -594,6 +870,7 @@ namespace PDungeon
                 // An active run is left to finish; MovementInform re-decides
                 // the moment it ends. Replanning every tick would make the
                 // mob stutter each time the target strafes a cell.
+                _chaseHeld = false;
                 if (!_followingPath)
                 {
                     StartWaypointRun(std::move(waypoints), *grid);
@@ -602,13 +879,47 @@ namespace PDungeon
 
             case ApproachKind::Unreachable:
             default:
-                // The target is not on walkable ground - mid-air over the
-                // void, or off the layout entirely. Walking toward them would
-                // walk off the world; hold until they land somewhere real or
-                // the fall catcher returns them to the entrance.
+                // The target is not on walkable ground - mid-air over the void,
+                // or off the layout entirely. Walking toward them would walk off
+                // the world, so the creature HOLDS.
+                //
+                // Round C: it now actually holds. Round B only cleared the
+                // module's own flags here, and StopWaypointRun never touches the
+                // motion master - so whenever the ACTIVE slot held the core's
+                // ChaseMovementGenerator (after any Direct verdict above, after
+                // MovementInform's StopWaypointRun(true), or after an
+                // AttackStart the module did not initiate, UnitAI.cpp:29-33) the
+                // chase kept beelining at a target that had since become
+                // unreachable. On map 760 nothing can refuse that beeline:
+                // ChaseMovementGenerator::DispatchSplineToPosition
+                // (TargetedMovementGenerator.cpp:99-149) gets PATHFIND_SHORTCUT
+                // rather than a failure, so `pathFailed` is false and it launches
+                // a straight 2-point spline across the void.
+                //
+                // Three calls, because each one is needed and none substitutes
+                // for another: Clear(false) pops the chase generator (false
+                // because the Reset() it would otherwise run lands on the idle
+                // singleton, whose StopMoving is gated on UNIT_STATE_MOVING and
+                // therefore unreliable - the same trap EnterEvadeMode documents),
+                // StopMoving kills the spline that Clear cannot (Unit.cpp:13056),
+                // and MoveIdle leaves the stack fully described.
+                //
+                // LATCHED, not re-run: the verdict is still re-taken on the
+                // module's own 500 ms cadence, but a creature already standing
+                // still is not cleared and stopped again every tick - that is
+                // what _chaseHeld says, exactly as _holding does for the
+                // caster's plant. Both other verdicts clear it, so the first
+                // tick that has somewhere to walk to moves again.
                 if (_followingPath)
                 {
                     StopWaypointRun(false);
+                }
+                if (!_chaseHeld)
+                {
+                    me->GetMotionMaster()->Clear(false);
+                    me->StopMoving();
+                    me->GetMotionMaster()->MoveIdle();
+                    _chaseHeld = true;
                 }
                 return false;
         }
@@ -799,8 +1110,21 @@ namespace PDungeon
                 // Once per plant, not once per tick: re-clearing the motion
                 // master every 500 ms would restart the spline of a creature
                 // that is already standing still.
+                //
+                // Round C: STOP the spline as well. Clear(false) pops the
+                // generator and, with reset == false, does not even reach
+                // DirectClean's Reset() branch (MotionMaster.cpp:163) - and
+                // that branch is unreliable anyway, because the idle singleton
+                // it lands on skips StopMoving() whenever UNIT_STATE_MOVING is
+                // already clear (IdleMovementGenerator.cpp:31-32). Without the
+                // explicit stop a caster that planted mid-leg or mid-chase kept
+                // GLIDING to its old destination while casting: the spline
+                // survives its generator, because Unit::Update drives it
+                // independently (Unit.cpp:635-636). Lower stakes than the
+                // patrol evade - these destinations are on-grid - same bug.
                 StopWaypointRun(false);
                 me->GetMotionMaster()->Clear(false);
+                me->StopMoving();
                 me->GetMotionMaster()->MoveIdle();
                 _holding = true;
             }
@@ -1028,6 +1352,26 @@ namespace PDungeon
         if (!_mob)
         {
             _mob = me->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY);
+        }
+
+        // D4, once per patroller and here because this is the first tick on
+        // which the tag is reliably present (the constructor's comment says
+        // why). It pins two of the debug report's refuted hypotheses
+        // empirically in the same run as the fix: the idle slot should read
+        // IDLE with wander 0.0 - a summon has no `creature` row, so
+        // RANDOM_MOTION_TYPE is downgraded at creation (Creature.cpp:569-571)
+        // and nothing can wander this mob off the grid - and `levitating 0`
+        // despite SpawnTaggedMob's SetDisableGravity(true) is the latent H5
+        // defect that same report recorded (see the spawn comment there).
+        if (_mob && _mob->isPatrol && !_dbgSlotLogged && PatrolDebug())
+        {
+            _dbgSlotLogged = true;
+            LOG_INFO(PD_LOG, "PDv2 patrol: {} entry {} idle-slot {} defaultMove {} "
+                             "wander {:.1f} canFly {} levitating {}",
+                     me->GetName(), me->GetEntry(),
+                     MotionName(me->GetMotionMaster()->GetMotionSlotType(MOTION_SLOT_IDLE)),
+                     uint32(me->GetDefaultMovementType()), me->GetWanderDistance(),
+                     me->CanFly() ? 1 : 0, me->IsLevitating() ? 1 : 0);
         }
 
         // Before the victim check: an aura burns whoever stands next to it,

@@ -608,6 +608,52 @@ ProceduralDungeon.V2.Barrier.OrientEW = 1.5708
 ProceduralDungeon.V2.Patrol.HealthMult = 300
 
 #
+#    ProceduralDungeon.V2.Patrol.Debug
+#        Description: Round C (2026-09-08): per-leg diagnostics for the
+#                     patrolling creatures, in the worldserver log under
+#                     `module.pdungeon`. 0 = silent, 1 = talkative. OFF
+#                     everywhere but a run somebody is actively watching -
+#                     these lines are per waypoint, per movement inform and per
+#                     evade, which is a lot of log for a dungeon full of mobs
+#                     and no use at all to anyone not hunting a patroller.
+#
+#                     Read LIVE on the tick that would log, so `.reload config`
+#                     both arms and disarms it without a restart and without
+#                     re-rolling anything - turn it on, pull the patroller,
+#                     turn it back off.
+#
+#                     What it prints, all prefixed `PDv2 patrol:` except the
+#                     chase verdict, which is `PDv2 chase:`
+#
+#                       * one line per LEG - the waypoint, its cell, the world
+#                         point, where the creature stands, the top movement
+#                         generator and the distance. A leg is a few cells, and
+#                         a cell is 8.33 yd, so a distance in the hundreds is
+#                         not a leg.
+#                       * one line per movement inform, INCLUDING the ones the
+#                         module drops - that is the only way to see a leg that
+#                         ended without anyone noticing.
+#                       * three lines per EVADE plus one when the creature
+#                         reaches home: position, home, the motion stack, and
+#                         whether the movement spline is finalized. The last of
+#                         the three is the decisive one - `splineFinalized 1`
+#                         is a creature that has actually stopped.
+#                       * one line per patroller on its first tick, naming its
+#                         idle movement slot, its wander distance and whether
+#                         it is levitating.
+#                       * one line per CHASE decision, but only when the
+#                         verdict or the motion stack changed - so a fight in
+#                         which nothing moves costs one line.
+#
+#                     `.pdungeon v2 patrol` (GM) answers the same question for
+#                     RIGHT NOW, one line per patroller, without the log and
+#                     without this key.
+#        Default:     0
+#
+
+ProceduralDungeon.V2.Patrol.Debug = 0
+
+#
 #    ProceduralDungeon.V2.Ambush.Chance
 #        Description: Round B (2026-09-03): percent chance, per boss segment,
 #                     that one of the corridors on the way to its boss room is

@@ -113,6 +113,13 @@ namespace PDungeon
         _config.patrolHealthMultPct = std::max(100, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Patrol.HealthMult", 300));
 
+        // Round C: off. Every AI diagnostic in PDv2CreatureAI.cpp reads this
+        // key on the tick that would log, so `.reload config` both arms and
+        // disarms it mid-run - which is the whole point, because the evidence
+        // it produces is wanted for one pull and not for the rest of the run.
+        _config.patrolDebug = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Patrol.Debug", false);
+
         // B5: a percent roll like the ones above, and a mob count the spawn
         // ring can actually seat (0 disarms the ambush without disarming
         // anything else). V2.Ambush.RadiusYd is gone since Round C / C2 - the

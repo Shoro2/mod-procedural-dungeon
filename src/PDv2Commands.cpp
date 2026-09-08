@@ -19,6 +19,7 @@
 #include "ChatCommand.h"
 #include "PDClientLink.h"
 #include "PDDefines.h"
+#include "PDv2InstanceScript.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
 #include "PDv2UILink.h"
@@ -27,6 +28,8 @@
 #include "generator/PDBlockPlan.h"
 
 #include <sstream>
+#include <string>
+#include <vector>
 
 using namespace Acore::ChatCommands;
 using namespace PDungeon;
@@ -46,9 +49,12 @@ public:
     {
         static ChatCommandTable v2Table =
         {
-            { "gen",   HandleV2GenCommand,   SEC_GAMEMASTER, Console::Yes },
-            { "enter", HandleV2EnterCommand, SEC_GAMEMASTER, Console::No  },
-            { "info",  HandleV2InfoCommand,  SEC_GAMEMASTER, Console::No  }
+            { "gen",    HandleV2GenCommand,    SEC_GAMEMASTER, Console::Yes },
+            { "enter",  HandleV2EnterCommand,  SEC_GAMEMASTER, Console::No  },
+            { "info",   HandleV2InfoCommand,   SEC_GAMEMASTER, Console::No  },
+            // Console::No like its two in-game siblings: the answer is about
+            // the dungeon the CALLER stands in, and a console has no instance.
+            { "patrol", HandleV2PatrolCommand, SEC_GAMEMASTER, Console::No  }
         };
         static ChatCommandTable pdungeonTable =
         {
@@ -191,6 +197,61 @@ private:
                                  sPDv2Mgr->GetConfig().mapId, outcome.x, outcome.y, outcome.z);
         handler->SendSysMessage("pdungeon v2: if the terrain is missing, the client has not "
                                 "loaded this layout's manifest yet.");
+        return true;
+    }
+
+    // A SNAPSHOT of every patroller in the dungeon the caller stands in, taken
+    // the moment they type it - which is the point: the operator sees a mob
+    // somewhere it should not be, types this, and the answer is on screen
+    // before the mob has moved again.
+    //
+    // One line per patroller, formatted by the AI (PDv2MobAI::PatrolStateLine,
+    // which documents what each field proves). It is a companion to
+    // `ProceduralDungeon.V2.Patrol.Debug`, not a replacement: the config key
+    // records what HAPPENED over a whole run in the worldserver log, this
+    // command answers what IS true right now without touching the log at all.
+    static bool HandleV2PatrolCommand(ChatHandler* handler)
+    {
+        if (!RequireEnabled(handler))
+        {
+            return true;
+        }
+
+        Player* player = handler->GetPlayer();
+        if (!player)
+        {
+            return false;
+        }
+
+        // The v2 instance script, not the map id: a GM standing on map 760
+        // outside a generated run has no dungeon to report on, and saying so is
+        // more useful than an empty list.
+        PDv2InstanceScript const* instance =
+            dynamic_cast<PDv2InstanceScript const*>(player->GetInstanceScript());
+        if (!instance)
+        {
+            handler->SendSysMessage("pdungeon v2: you are not standing in a v2 dungeon.");
+            return true;
+        }
+
+        std::vector<std::string> const lines = instance->PatrolSnapshot();
+        if (lines.empty())
+        {
+            handler->SendSysMessage("pdungeon v2: no patroller alive in this dungeon "
+                                    "(one per boss segment; they are killable).");
+            return true;
+        }
+
+        handler->PSendSysMessage("pdungeon v2: {} patroller(s):", uint32(lines.size()));
+        for (std::string const& line : lines)
+        {
+            handler->SendSysMessage(line.c_str());
+        }
+        // Named here rather than in the lines, so the reading of the lines is
+        // one lookup away when this is the first time an operator sees them.
+        handler->SendSysMessage("pdungeon v2: walkable 0 + spline RUNNING = a spline nobody "
+                                "owns; walkable 0 + top CHASE = an unreachable chase; "
+                                "walkable 1 + following 1 = the module chose that cell.");
         return true;
     }
 

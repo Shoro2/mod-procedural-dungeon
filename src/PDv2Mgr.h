@@ -125,6 +125,15 @@ namespace PDungeon
         // on the road, it is loot walking towards the player.
         int         patrolHealthMultPct = 300;
 
+        // Round C. The patrol diagnostics switch, and the only reason the AI
+        // logs anything per leg. OFF by default and expected to stay off
+        // everywhere but a run an operator is actively watching: the lines are
+        // per waypoint, per movement inform and per evade, which is exactly
+        // what someone hunting a patroller wants and exactly what the host
+        // does not. Read live like every other V2 knob, so `.reload config`
+        // arms it on a dungeon that is already being walked.
+        bool        patrolDebug = false;
+
         // B5. Chance per boss segment that one of its corridors is armed, how
         // many mobs the trap spawns, and the stun it opens with (0 = no stun).
         // The chance is read live and is not a layout input - BuildAmbushPlan

@@ -29,6 +29,7 @@
 #include "ObjectMgr.h"
 #include "PDDefines.h"
 #include "PDv2Affixes.h"
+#include "PDv2CreatureAI.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
 #include "PDv2UILink.h"
@@ -1091,6 +1092,37 @@ namespace PDungeon
         _finale.active = false;
     }
 
+    std::vector<std::string> PDv2InstanceScript::PatrolSnapshot() const
+    {
+        std::vector<std::string> lines;
+        for (ObjectGuid const& guid : _spawnedGuids)
+        {
+            Creature* c = instance->GetCreature(guid);
+            if (!c)
+            {
+                continue;   // despawned, or this run was torn down under us
+            }
+            PDv2MobData const* tag = c->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY);
+            if (!tag || !tag->isPatrol)
+            {
+                continue;
+            }
+            PDv2MobAI const* ai = dynamic_cast<PDv2MobAI const*>(c->AI());
+            if (!ai)
+            {
+                // Tagged as a patroller but not carrying this AI: that is a
+                // finding rather than a nuisance, so it gets a line of its own.
+                lines.push_back(Acore::StringFormat(
+                    "{} entry {} guid {} | NO PDv2MobAI attached",
+                    c->GetName(), c->GetEntry(), guid.GetCounter()));
+                continue;
+            }
+            lines.push_back(c->IsAlive() ? ai->PatrolStateLine()
+                                         : "DEAD " + ai->PatrolStateLine());
+        }
+        return lines;
+    }
+
     void PDv2InstanceScript::DespawnAll()
     {
         for (ObjectGuid const& guid : _spawnedGuids)
@@ -1184,6 +1216,25 @@ namespace PDungeon
         // them to the floor plane the kit was generated at, which is the only
         // floor the server knows. Movement is unaffected: the walk grid drives
         // it and every waypoint carries the same Z.
+        //
+        // MEASURED CAVEAT, Round C (2026-09-08), recorded and deliberately NOT
+        // acted on in this commit: the flag does not survive. None of these
+        // templates has a `creature_template_movement` row, so
+        // CreatureMovementData defaults apply (Creature.cpp:60-62) with
+        // Flight = None, and Creature::UpdateMovementFlags then takes its else
+        // branch and calls SetDisableGravity(false) on anything levitating
+        // (Creature.cpp:3474-3475). It runs from Unit::ProcessTerrainStatusUpdate
+        // (Unit.cpp:4473-4476) whenever position data is refreshed, and the only
+        // opt-out - CREATURE_FLAG_EXTRA_NO_MOVE_FLAGS_UPDATE (Creature.cpp:3452)
+        // - is not set on any of them (flags_extra = 0, measured). So this line
+        // is cosmetic TODAY and the mobs stay at floorZ for a different reason:
+        // the server never simulates creature gravity, and with no height data
+        // UpdateAllowedPositionZ leaves Z alone (Object.cpp:1610). Fixing it
+        // properly means a creature_template_movement row with
+        // Flight = DisableGravity - a data change with its own SQL file and its
+        // own test, which is Round D's, not this fix's. `.pdungeon v2 patrol`
+        // and the D4 debug line both print `levitating`, which is where the
+        // claim above can be checked in game instead of argued about.
         c->SetDisableGravity(true);
 
         // The tag is what makes this creature a PDv2 mob for every other hook

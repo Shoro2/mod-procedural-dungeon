@@ -177,6 +177,14 @@ namespace PDungeon
         // this map's own update thread, so there is still no lock.
         WalkGrid const* GetWalkGrid() const { return _gridReady ? &_grid : nullptr; }
 
+        // Round C, for `.pdungeon v2 patrol` and nothing else. One snapshot
+        // line per tagged patroller this instance summoned, in spawn order,
+        // each formatted by the AI itself (PDv2MobAI::PatrolStateLine) - the
+        // walk lives here rather than in the command because _spawnedGuids is
+        // this class's business and `instance` resolves a GUID on the map that
+        // owns it. A patroller that has despawned contributes no line.
+        std::vector<std::string> PatrolSnapshot() const;
+
         // The live run. Read-only for everyone outside this class: the counters
         // are only ever moved by OnMobDied, on this map's own update thread.
         PDv2RunState const& GetRunState() const { return _run; }
