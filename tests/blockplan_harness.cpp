@@ -4347,6 +4347,313 @@ namespace
         }
     }
 
+    // --- the operator's Round B layout, pinned ------------------------------
+    //
+    // Not a synthetic seed. This is EXACTLY the dungeon account 32 walked on
+    // 2026-09-08 - the run whose patroller crossed walls and whose corridors
+    // never sprang, and the run every Round C fix is aimed at. The config is
+    // the account's own row (`acore_characters.pdungeon_account`, research
+    // c-research-patrol-ambush.md section C): layout_seed 2052467817, theme 2,
+    // cfg_rooms 13, gen_boss_rooms 2, gen_field_blocks 8, gen_origin 256/256,
+    // gen_loop_pct 33, gen_branches 2. PDv2Mgr::GeneratePlan builds the same
+    // BlockCfg out of those columns (PDv2Mgr.cpp:148-184), and the retry loop
+    // makes plan.effectiveSeed = cfg.seed + attempt (PDBlockPlan.cpp:1692,
+    // :1866) - so "attempt 0 succeeded" is itself part of what is pinned here.
+    //
+    // Three pins hold this one layout still, because a report that says "the
+    // patrol beat of the operator's run is clean" is worth nothing once the
+    // generator quietly hands that account a different dungeon.
+    uint32_t const PD_OPERATOR_SEED = 2052467817u;
+
+    BlockCfg OperatorCfg()
+    {
+        BlockCfg cfg;
+        cfg.seed = PD_OPERATOR_SEED;
+        cfg.rooms = 13;
+        cfg.bossRooms = 2;
+        cfg.fieldBlocks = 8;
+        cfg.detourChancePct = 33;
+        cfg.originBX = 256;
+        cfg.originBY = 256;
+        cfg.theme = 2;
+        cfg.branches = 2;
+        // maxTries and maxDeadEnds are left at their defaults, which is what
+        // the manager does too - it sets no other field.
+        return cfg;
+    }
+
+    // `blocks,rooms,boss;`, the three numbers the worldserver printed for this
+    // run (Server_2026-09-08_09_49_57.log:952 - "spawned 76 creature(s) in 16
+    // room(s) (2 boss) from a 49-block plan"). `rooms` is counted the way
+    // SpawnFromPlan counts it into _run.roomsTotal
+    // (PDv2InstanceScript.cpp:1034-1045, :1099): every block with a roomId
+    // EXCEPT the entrance, loop rooms included. Captured by RUNNING.
+    char const* const PD_OPERATOR_PLAN_PIN = "49,16,2;";
+
+    // `k:waypoints:cells;` per boss segment - the simplified waypoint count and
+    // the raw A* cell count of the beat SpawnPatrols hands segment k. Captured
+    // by RUNNING.
+    char const* const PD_OPERATOR_PATROL_PIN = "1:13:121;2:13:138;";
+
+    // `chance50:<n>;chance100:<bx,by,seg;...>`. At the shipped default this
+    // layout arms NOTHING - the two Chance(50) coins came up 70 and 94
+    // (research c-research-ambush-trigger.md), which is why the operator saw
+    // no ambush and why the trigger geometry was never actually exercised. At
+    // chance 100 the same layout offers two corridors, so the candidate lists
+    // are populated and only the coin was in the way. Captured by RUNNING.
+    char const* const PD_OPERATOR_AMBUSH_PIN =
+        "chance50:0;chance100:259,259,1;257,258,2;";
+
+    // Why Task 4 replaces the 9 yd disc, in one table (research
+    // c-research-ambush-trigger.md, "Per-kind lane geometry"; measured over the
+    // whole t1b kit by sampling the walk mask at 0.5 yd and maximising a
+    // player's closest approach to the block centre over every socket pair).
+    // NO CODE BELOW DEPENDS ON IT - it is the record of a measurement that
+    // decided a design, kept beside the layout it was measured against.
+    //
+    //   kind                      chunks                best approach   in 9 yd?
+    //   corridor_straight alt 0   2305 2310 12305 12310  8.08 yd         yes - unavoidable
+    //   corridor_straight alt 1   3305 3310 13305 13310  11.43 yd        no - the centre
+    //                             ((4,4) is wall)                        pillar gives a dogleg
+    //   corridor_corner           2403 2406 2409 2412    11.20-11.43 yd  no - and here the
+    //                             + the 124xx twins                      SHORTEST line dodges
+    //   corridor_t                2507 2511 2513 2514    11.20-11.43 yd  no on a turn,
+    //                             + the 125xx twins                      yes straight through
+    //   corridor_cross            2615 12615             11.43 yd        no on a turn,
+    //                                                                    yes straight through
+    //   corridor_dead_end         2701 2702 2704 2708    n/a, one socket  never a candidate
+    //
+    // The 11.2-11.8 yd figures are all one number: the junction square is the
+    // four centre cells, half-width 8.33 yd, so its CORNERS sit at
+    // 8.33 * sqrt(2) = 11.79 yd from the centre, and a turn's geodesic touches
+    // exactly that corner. The square's inscribed disc is 8.33 yd, which is why
+    // a straight-through transit cannot dodge a 9 yd trap and a turn always
+    // can. The two spots of the sibling seed 298623763 are the same story
+    // measured on a real layout: segment 1 at (260,260) - corridor_t NES, chunk
+    // 12507, transit S to N - would have fired at ~0 yd, and segment 2 at
+    // (256,263) - corridor_corner NE, chunk 12403, transit E to N - would NOT,
+    // at 11.79 yd. A trap half the corridor kinds can be walked past is not a
+    // trap, so C2 fires on the player's CELL being in the spot's block instead,
+    // which has no tuning constant and no per-kind behaviour at all.
+
+    // The operator's layout end to end: the plan itself, the patrol beats the
+    // creature AI would walk on it, and the ambush spots it arms.
+    void RunOperatorLayoutChecks()
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(OperatorCfg(), &plan))
+        {
+            Check(false, "the operator's own configuration no longer generates a layout",
+                  PD_OPERATOR_SEED);
+            return;
+        }
+
+        Check(plan.effectiveSeed == PD_OPERATOR_SEED,
+              "the operator's layout now needs a retry - effectiveSeed is no longer the "
+              "stored seed, so the account's dungeon changed under it",
+              PD_OPERATOR_SEED);
+
+        int rooms = 0, boss = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.roomId >= 0 && b.role != BlockRole::RoomEntrance)
+            {
+                ++rooms;
+            }
+            if (b.role == BlockRole::RoomBoss)
+            {
+                ++boss;
+            }
+        }
+        {
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "%u,%d,%d;",
+                          static_cast<unsigned>(plan.blocks.size()), rooms, boss);
+            std::string const msg =
+                std::string("the operator's layout moved: ") + buf +
+                " - the worldserver logged 49,16,2; for this account on 2026-09-08";
+            Check(std::string(buf) == PD_OPERATOR_PLAN_PIN, msg.c_str(), PD_OPERATOR_SEED);
+        }
+
+        {
+            // plan.effectiveSeed, never cfg.seed - the engine passes that one
+            // (PDv2InstanceScript.cpp:2205), and on a layout that needed a retry
+            // the two differ and the spots would come off a stream the run never
+            // used.
+            std::string got = "chance50:";
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "%u;",
+                          static_cast<unsigned>(
+                              BuildAmbushPlan(plan, PD_AMBUSH_DEFAULT_CHANCE_PCT,
+                                              plan.effectiveSeed).size()));
+            got += buf;
+            got += "chance100:";
+            for (AmbushSpot const& spot : BuildAmbushPlan(plan, 100, plan.effectiveSeed))
+            {
+                std::snprintf(buf, sizeof buf, "%d,%d,%d;", spot.bx, spot.by, spot.segment);
+                got += buf;
+            }
+            std::string const msg = "the operator's ambush spots moved: " + got;
+            Check(got == PD_OPERATOR_AMBUSH_PIN, msg.c_str(), PD_OPERATOR_SEED);
+        }
+
+        if (g_masks.empty())
+        {
+            // Same rule as every other walk-grid check in this file: without the
+            // kit metadata a pass would be faked, and a skip is the honest
+            // answer. The two pins above need no masks and have already run.
+            return;
+        }
+
+        WalkGrid grid;
+        std::string gridErr;
+        if (!BuildWalkGrid(plan, MaskFor, &grid, &gridErr))
+        {
+            Check(false, gridErr.empty() ? "the operator's layout has no walk grid"
+                                         : gridErr.c_str(), PD_OPERATOR_SEED);
+            return;
+        }
+
+        // PDv2CreatureAI.cpp:51 (SNAP_RADIUS_CELLS) and
+        // PDv2InstanceScript.cpp:91 (SPAWN_FALLBACK_SNAP_CELLS) are the same 2
+        // for the same reason; the beat below walks through both of them.
+        int const snapCells = 2;
+        double const mid = PD_BLOCK_SIZE_YD / 2.0;
+        int const chainLen = ChainLength(plan);
+        int const bossRooms = std::max(1, plan.config.bossRooms);
+        std::string beats;
+
+        for (int k = 1; k <= bossRooms; ++k)
+        {
+            char buf[64];
+
+            // SpawnPatrols' own derivation, line for line
+            // (PDv2InstanceScript.cpp:2032-2075): the beat runs from the LAST
+            // corridor of the spine run into boss k - the block its portcullis
+            // stands next to - back to chain room k-1, which for the first
+            // segment is the entrance (chain index 0).
+            int const bossChain = BossChainIndex(chainLen, plan.config.bossRooms, k);
+            std::vector<size_t> run;
+            unsigned const entryBit = SpineRunInto(plan, bossChain, &run);
+            int const goalChain =
+                k > 1 ? BossChainIndex(chainLen, plan.config.bossRooms, k - 1) : 0;
+            PlacedBlock const* goal = nullptr;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                // Last match, the way SpineRunInto picks it; chainIndex is -1
+                // on everything that is not a spine room.
+                if (b.chainIndex == goalChain)
+                {
+                    goal = &b;
+                }
+            }
+            if (!entryBit || run.empty() || !goal)
+            {
+                // The worldserver placed two patrollers on this layout
+                // (Server_2026-09-08_09_49_57.log:1008), so neither segment can
+                // legitimately be beatless here.
+                Check(false, "a boss segment of the operator's layout lost its patrol beat",
+                      PD_OPERATOR_SEED);
+                std::snprintf(buf, sizeof buf, "%d:0:0;", k);
+                beats += buf;
+                continue;
+            }
+
+            // float, not double, on purpose: BlockToWorld narrows to float
+            // (PDv2Mgr.cpp:465-475) and the block centre sits EXACTLY on the
+            // boundary between cell 3 and cell 4 (mid = BLOCK/2 = 4 * CELL), so
+            // which cell WorldToCell's floor answers is decided by that
+            // narrowing. Computing it in double here would pin a cell the
+            // engine never uses.
+            PlacedBlock const& start = plan.blocks[run.back()];
+            double sxd = 0.0, syd = 0.0;
+            BlockLocalToWorld(start.bx, start.by, mid, mid, sxd, syd);
+            int scx = 0, scy = 0;
+            WorldToCell(static_cast<float>(sxd), static_cast<float>(syd), scx, scy);
+            GridPoint startCell = grid.LocalFromGlobalCell(scx, scy);
+
+            // The spawn-side veto (PDv2InstanceScript.cpp:2124-2141): a corridor
+            // whose centre cell is void seats the patroller on the nearest
+            // walkable cell's CENTRE instead, and the AI then re-derives its
+            // cell from that position - which lands back on the same cell.
+            GridPoint snapped;
+            if (!grid.At(startCell.x, startCell.y) &&
+                NearestWalkable(grid, startCell.x, startCell.y, snapCells, snapped))
+            {
+                startCell = snapped;
+            }
+
+            // The AI's own snap of where it stands (PDv2CreatureAI.cpp:341-346).
+            GridPoint here;
+            if (!NearestWalkable(grid, startCell.x, startCell.y, snapCells, here))
+            {
+                Check(false, "the operator's patroller stands more than two cells off the "
+                             "walkable surface and can never plan a beat", PD_OPERATOR_SEED);
+                std::snprintf(buf, sizeof buf, "%d:0:0;", k);
+                beats += buf;
+                continue;
+            }
+
+            // The goal is stored as a GLOBAL cell at spawn time and snapped by
+            // the AI, never at spawn (PDv2CreatureAI.cpp:355-361).
+            double gxd = 0.0, gyd = 0.0;
+            BlockLocalToWorld(goal->bx, goal->by, mid, mid, gxd, gyd);
+            int gcx = 0, gcy = 0;
+            WorldToCell(static_cast<float>(gxd), static_cast<float>(gyd), gcx, gcy);
+            GridPoint const goalCell = grid.LocalFromGlobalCell(gcx, gcy);
+            GridPoint goalSnapped;
+            if (!NearestWalkable(grid, goalCell.x, goalCell.y, snapCells, goalSnapped))
+            {
+                Check(false, "the operator's patrol goal is more than two cells off the "
+                             "walkable surface", PD_OPERATOR_SEED);
+                std::snprintf(buf, sizeof buf, "%d:0:0;", k);
+                beats += buf;
+                continue;
+            }
+
+            // On the OPEN layout, deliberately: SpawnBarriers runs first and
+            // seals its doorway cells (SetCellsWalkable(cells, false)), so a
+            // segment-2 patroller whose goal is boss room 1 finds no route at
+            // all until that barrier opens - and holds, by design ("a barrier
+            // that opens later can still turn this into a route",
+            // PDv2CreatureAI.cpp:368-372). The beat pinned here is the one it
+            // ends up walking.
+            std::vector<GridPoint> path;
+            if (!FindGridPath(grid, here, goalSnapped, path))
+            {
+                Check(false, "the operator's patrol beat has no route on the open layout",
+                      PD_OPERATOR_SEED);
+                std::snprintf(buf, sizeof buf, "%d:0:0;", k);
+                beats += buf;
+                continue;
+            }
+            size_t const cells = path.size();
+            SimplifyGridPath(grid, path);
+
+            // The point of the whole block: after Round C's supercover fix
+            // EVERY leg the patroller is handed has to stay on the mask, judged
+            // twice - by the test the engine uses and by the independent
+            // sampled reference that shares no code with it.
+            for (size_t i = 1; i < path.size(); ++i)
+            {
+                Check(GridLineWalkable(grid, path[i - 1], path[i]),
+                      "a patrol leg of the operator's layout crosses an unwalkable cell",
+                      PD_OPERATOR_SEED);
+                Check(SampledLineWalkable(grid, path[i - 1], path[i]),
+                      "a patrol leg of the operator's layout leaves the walk mask "
+                      "(sampled reference)", PD_OPERATOR_SEED);
+            }
+
+            std::snprintf(buf, sizeof buf, "%d:%u:%u;", k,
+                          static_cast<unsigned>(path.size()),
+                          static_cast<unsigned>(cells));
+            beats += buf;
+        }
+
+        std::string const msg = "the operator's patrol beats moved: " + beats;
+        Check(beats == PD_OPERATOR_PATROL_PIN, msg.c_str(), PD_OPERATOR_SEED);
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
@@ -4371,6 +4678,10 @@ namespace
             std::string const msg = std::string("supercover pair counts moved: ") + buf;
             Check(std::string(buf) == PD_SUPERCOVER_PAIRS_PIN, msg.c_str(), 0);
         }
+        // Once, not per seed, and outside the mask guard: this is ONE stored
+        // layout - the operator's - and two of its three pins need no kit at
+        // all.
+        RunOperatorLayoutChecks();
         {
             // Two statements, not one call: argument evaluation order is
             // unspecified, and why.c_str() must not be taken before
