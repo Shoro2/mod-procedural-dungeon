@@ -42,7 +42,17 @@ spawns, B3 barriers (both opened at 18/35, orientation not questioned). B4 and B
   segments, and `MoveToWaypoint` (`src/PDv2CreatureAI.cpp:197-208`) walks them as raw straight
   lines at constant `floorZ` 50 with gravity off. Over the 122 deployed theme-2 masks 1.70 % of the
   approved cell pairs leave the walk mask (1.03 % by more than 2 yd, worst 5.21 yd, 116 of 122 chunks
-  affected). WALK cells are Z 50, WALL cells rise to Z 56, VOID is Z −400 — one defect yields both
+  affected).
+  **Correction, measured after C1 landed** (Task 1 review, exact-rational arithmetic over all 244
+  staged masks — quote this split, not "4014 segments leave the walk mask" or "1.70 %"): of the
+  **301 084** pairs the Bresenham sampler approves, **2 136 (0.71 %) are real excursions** — the
+  segment crosses an unwalkable cell's *interior* — and a further **1 878 are exact-corner grazes**,
+  which the 1/64 sampler flags only because its `double` wobbles at the corner; 2 136 + 1 878 = the
+  4 014 the harness's first failing run reported. The supercover fix removes **9 604** approvals in
+  all: those 2 136 plus **7 468** refused by the no-corner-cutting rule alone, which is a deliberate
+  body-radius tightening rather than a measured wall crossing. The commit message of `4f5b7e0`
+  carries the older reading and cannot be changed; every document quotes the split above instead.
+  WALK cells are Z 50, WALL cells rise to Z 56, VOID is Z −400 — one defect yields both
   "through walls" and "under the map". Secondary: the evade rejoin (`PDv2CreatureAI.cpp:380-401`) is
   an uncapped beeline gated only by that test; the patrol spawn point takes no grid veto; the
   `StartWaypointRun` index-0 comment is wrong after the planner's 16.7 yd snap. Every other user of
@@ -105,7 +115,7 @@ spawns, B3 barriers (both opened at 18/35, orientation not questioned). B4 and B
 | 2 | The evade rejoin is capped: a waypoint qualifies only if the supercover line from the creature's cell is walkable **and** at most 4 cells (33 yd) long; otherwise the creature first walks `FindGridPath` to the nearest route waypoint, then resumes. No beeline longer than that ever exists. |
 | 3 | The patrol spawn point takes the same grid veto `SpawnFromPlan` uses (`NearestWalkable` fallback). |
 | 4 | `StartWaypointRun`'s index-0 contract is made honest: the planner's snapped start cell is the first waypoint and the creature walks to it (no skip). |
-| 5 | Harness: a supercover check over every kit walk mask — for every ordered pair of walkable cells the new test approves, every crossed cell is walkable by construction (asserted), and the count of approved pairs per chunk is pinned; the Bresenham defect cases the research measured (segments leaving the mask) are asserted rejected. A patrol beat pin on the operator's seed 2052467817 (route length, waypoint count) captured by running. |
+| 5 | Harness: a supercover check over every kit walk mask — for every ordered pair of walkable cells the new test approves, every crossed cell is walkable by construction (asserted), and the count of approved pairs is pinned; the Bresenham defect cases the research measured (segments leaving the mask) are asserted rejected. A patrol beat pin on the operator's seed 2052467817 (route length, waypoint count) captured by running. **As built:** the pin is ONE aggregate `approved,rejected;` for the whole kit rather than per chunk — the plan prescribed that string, so the narrowing is sanctioned, and the cost is that a moved pin says "the kit's walkable geometry changed" without naming the chunk. Because the sampled reference is *looser* at an exact corner than the DDA is (`floor(f + 0.5)` names the upper cell only), no kit-derived check can see the no-corner-cutting rule at all; `CheckCornerRule` — eight hand-built 8×8 cases, four APPROVED and four REFUSED, with negative controls run both ways — is the oracle for that half and is the one walk-grid check that also runs on a box with no kit staged. |
 
 ### C2 — ambush trigger (bug)
 
@@ -119,7 +129,7 @@ spawns, B3 barriers (both opened at 18/35, orientation not questioned). B4 and B
 
 | # | Decision |
 |---|---|
-| 1 | 910030 gets `Data0 = 57`, `Data3 = 1` (consumable), `Data2 = 0`, in **both** declaring files (`mod_pdungeon_templates.sql:26`, `mod_pdungeon_phase2.sql:20`) and in the restoring `mod_pdungeon_templates_fix.sql` DELETE/INSERT block, which decides what survives. |
+| 1 | 910030 gets `Data0 = 57`, `Data3 = 1` (consumable), `Data2 = 0`. **As built: in `mod_pdungeon_templates_fix.sql` ONLY** — the two declaring files (`mod_pdungeon_templates.sql:26`, `mod_pdungeon_phase2.sql:20`) are left byte-for-byte untouched on purpose. The updater re-applies any file whose bytes change, and a re-applied `mod_pdungeon_templates.sql` re-runs its wide `DELETE FROM gameobject_template WHERE entry BETWEEN 910000 AND 910099` while the unchanged fix file — the one that restores 910040–910099 — does not re-run behind it. The fix file is the single place that runs last on every database (after the wide DELETE on a fresh one, alone on an existing one), so its copy of 910030 is what survives either way. Consequence to live with: the three rows now differ on purpose, and "tidying" 910030 back into the declaring file arms exactly the landmine the fix file exists to defuse; the fix file's header says so. |
 | 2 | Spawn orientation `4.712389f` (−π/2) for every cache (pocket and loop room). |
 | 3 | The chest keeps its placeholder loot rows (Frostweave, Runic Healing Potion, Frozen Orb); real tables are a later round. |
 
@@ -144,7 +154,7 @@ spawns, B3 barriers (both opened at 18/35, orientation not questioned). B4 and B
 
 | # | Decision |
 |---|---|
-| 1 | Every role-2 member carries **four** rows in `pdungeon_member_spells`: two at `minDiff 1` (slots 1 and 2), one at 50, one at 75. The existing 1/50/75 rows stay; each boss gains a **second base ability** taken from its own pack's already-authored trash spells (same theme, proven to cast on this core): Dralak — a Holy damage/stun ability from pack 3; Lord Maltrion — a shadow/blood bolt from pack 3; Mor'Kar — a poison/nature ability from pack 3; Scourge Overlord — a shadow ability from pack 4; Mal'Ganis — a fire/shadow ability from pack 5. The exact ids are listed in the plan with the identity test (spell name from `Spell.dbc` matches). |
+| 1 | Every role-2 member carries **four** rows in `pdungeon_member_spells`: **two rows at `minDiff 1`**, one at 50, one at 75. (The `slot` column is NOT a position in a rotation and does not order anything: `BuildKit` reads it only to tell the filler apart — `slot == MEMBER_SPELL_SLOT_FILLER` (0) becomes `_fillerSpellId`, everything else is appended to `_kit` in row order, `src/PDv2CreatureAI.cpp:660-681`. Two `minDiff 1` rows is what makes difficulty 1 a two-ability rotation; as shipped both of a boss's base rows simply carry `slot = 1`, which is legal because the primary key is `(entry, spellId)` — `mod_pdungeon_member_spells.sql:229-237`.) The existing 1/50/75 rows stay; each boss gains a **second base ability** taken from its own pack's already-authored trash spells (same theme, proven to cast on this core): Dralak — a Holy damage/stun ability from pack 3; Lord Maltrion — a shadow/blood bolt from pack 3; Mor'Kar — a poison/nature ability from pack 3; Scourge Overlord — a shadow ability from pack 4; Mal'Ganis — a fire/shadow ability from pack 5. The exact ids are listed in the plan with the identity test (spell name from `Spell.dbc` matches). |
 | 2 | No-repeat: the boss draw excludes entries already drawn in this run while the pool has more distinct entries than boss rooms; otherwise repeats are allowed. Implemented in the pure draw (`PDv2PackDraw`), pinned. |
 | 3 | The nathrezim overlap is accepted for now (two models, two names); reskinning Maltrion is a content decision for the loot/content round at the end. |
 

@@ -21,8 +21,10 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > sides, so creatures stop at it too - until that segment's PLANNED non-boss kills reach
 > `V2.Barrier.Pct`. One **patroller** walks the corridor run in front of every boss room and
 > rejoins its existing beat after an evade rather than re-planning a shorter one. And with
-> `V2.Ambush.Chance` one corridor per segment is an **ambush**: a 2 s stun and
-> `V2.Ambush.Mobs` creatures, once. Neither patrol nor ambush moves any counter.
+> `V2.Ambush.Chance` one corridor per segment is an **ambush**: step into that corridor
+> block and it springs once - a 2 s stun and `V2.Ambush.Mobs` creatures. The trigger is the
+> block, not a radius (Round C removed `V2.Ambush.RadiusYd`: a 9 yd disc could be walked
+> past on every corner, T and cross junction). Neither patrol nor ambush moves any counter.
 > Creatures also stand on the kit's **published spawn anchors** now, not on a 12 yd circle
 > around the block centre (that circle survives only as the overflow), and the ordinary room
 > gained a **third size** - a 33.33 yd platform - while the entrance and boss rooms lost their
