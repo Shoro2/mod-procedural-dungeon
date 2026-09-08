@@ -29,6 +29,7 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 class Creature;
@@ -228,6 +229,32 @@ namespace PDungeon
         {
             return _pendingRespawn.find(playerGuid) != _pendingRespawn.end();
         }
+
+        // Round C / C7. The gate the HUD reports on: the LOWEST segment whose
+        // portcullis is still sealed, with that segment's own numbers. False -
+        // and three zeros - means no barrier of this run is closed any more,
+        // which includes a run that never built one.
+        //
+        // `pct` is the RAW progress killed/planned, NOT progress towards the
+        // threshold: the player is meant to watch it climb past the configured
+        // barrierPct and see the wall fall there, and a bar that reads 100 %
+        // while the portcullis still stands is a bug report. A segment that
+        // plans nothing reports 100 because that is what EvaluateBarrier does
+        // with it - it opens on sight (the single-boss-segment case).
+        bool NextClosedBarrier(uint32& planned, uint32& killed, uint32& pct) const;
+
+        // Round C / C7. The block coordinates of every room whose pack is
+        // dead, in the PLAN's own frame - the UI link shifts them into the map
+        // payload's frame with the same origin it shifts the M payload's
+        // blocks by. A room that spawned nothing is cleared from the first
+        // tick, which is also what it looks like to a player standing in it.
+        void ClearedRoomBlocks(std::vector<std::pair<int, int>>& out) const;
+
+        // The run's cleared-room counter, as the wire's change detector: the
+        // K message is a complete set, so "resend it when this moved" is all
+        // the link needs to keep every client's map honest without a delta
+        // protocol it could silently fall out of step with.
+        uint32 RoomsClearedCount() const { return _run.roomsCleared; }
 
     private:
         void SpawnFromPlan(BlockPlan const& plan);

@@ -18,6 +18,8 @@
 #ifndef MOD_PDUNGEON_V2_UI_LINK_H
 #define MOD_PDUNGEON_V2_UI_LINK_H
 
+#include "ObjectGuid.h"
+
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -45,7 +47,13 @@ class Player;
 //                      nothing but where the prefix ends. ~248 bytes per
 //                      client message, which every verb fits many times over
 //   server -> client   addon whisper, prefix "FLPDU", payload "<kind> <fields>"
-//                      C cfg | M map | R run tick | E completion | N notice
+//                      C cfg | M map | K cleared rooms | R run tick |
+//                      E completion | N notice
+//
+// Fields are only ever APPENDED to a payload, never reordered or removed: the
+// addon reads what it knows and drops the tail, so a server that is ahead of a
+// client (or a client of a server) still draws a true, if older, picture. R's
+// three gate fields (Round C / C7) are the first use of that rule.
 //
 // Everything arriving from the panel is untrusted, exactly like any packet: a
 // SET is clamped through the 01 §8 math before it can reach an account row,
@@ -102,13 +110,20 @@ namespace PDungeon
         // `body` is the addon message with the "FLPD\tUI " prefix stripped.
         void HandleClientVerb(Player* player, std::string const& body);
 
-        // The four pushes. Each one is a complete statement of its subject:
+        // The five pushes. Each one is a complete statement of its subject:
         // there is no delta protocol, because a client that missed a delta
         // would be wrong for ever and would never know it.
         void SendCfg(Player* player);
         void SendMap(Player* player);
         void SendRunTick(Player* player);
         void SendNotice(Player* player, std::string const& text);
+
+        // Round C / C7. Which room blocks the party has emptied: "K bx,by;..."
+        // in the M payload's own frame, the WHOLE set every time. `script` may
+        // be nullptr - outside a run, and after a re-roll, the honest answer is
+        // the empty set, and sending it is what wipes the last run's green off
+        // a map that is about to be redrawn.
+        void SendCleared(Player* player, PDv2InstanceScript const* script);
 
         // Completion, once per run, to everyone standing in it.
         void SendEnd(Map* map, PDv2RunReward const& reward);
@@ -130,6 +145,12 @@ namespace PDungeon
         // not persisted, so it must not outlive the login that set it.
         void ForgetAccount(uint32_t accountId);
 
+        // The character-scoped half of the same duty (Round C / C7): what this
+        // client was last told about cleared rooms. Called from the same
+        // logout hook, because a map keyed by GUID that nothing ever erased
+        // would grow for as long as the server runs.
+        void ForgetPlayer(ObjectGuid const& playerGuid);
+
         // One line for `.pdungeon v2 info`.
         std::string DebugLine(uint32_t accountId);
 
@@ -148,6 +169,18 @@ namespace PDungeon
 
         std::mutex _lock;
         std::unordered_map<uint32_t, PanelClient> _clients;
+
+        // Round C / C7. What each client was last told the cleared-room COUNT
+        // was, so the 1 Hz tick can restate the K set exactly once per room
+        // clear instead of once per second. A missing entry means "never
+        // told", which sends - so dropping one is how a resend is forced.
+        //
+        // Keyed by the CHARACTER, not by the account like _clients above: this
+        // is a fact about one client's map rather than about a panel, the tick
+        // has the Player in hand, and it is the only per-character thing the
+        // link remembers - which is why it is its own map and not a field in
+        // PanelClient.
+        std::unordered_map<ObjectGuid, uint32_t> _clearedSent;
     };
 }
 

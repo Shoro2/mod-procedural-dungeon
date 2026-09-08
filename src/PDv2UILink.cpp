@@ -34,6 +34,8 @@
 #include "generator/PDv2WorldMath.h"
 
 #include <sstream>
+#include <utility>
+#include <vector>
 
 namespace PDungeon
 {
@@ -337,6 +339,16 @@ namespace PDungeon
         }
         {
             std::lock_guard<std::mutex> guard(_lock);
+
+            // Round C / C7. A link state that MOVED means this client just
+            // (re)announced itself - a relog or a /reload, either of which
+            // threw the addon's cleared set away with the rest of its Lua
+            // state. Forgetting what it was told is what makes the next
+            // instance tick restate it. Nothing is sent from here: the map
+            // payload those blocks colour has not been re-sent either, and
+            // HELLO - which does send both - is one round trip behind.
+            _clearedSent.erase(player->GetGUID());
+
             auto it = _clients.find(accountId);
             if (it == _clients.end() || !it->second.helloMs)
             {
@@ -350,6 +362,12 @@ namespace PDungeon
     {
         std::lock_guard<std::mutex> guard(_lock);
         _clients.erase(accountId);
+    }
+
+    void PDv2UILink::ForgetPlayer(ObjectGuid const& playerGuid)
+    {
+        std::lock_guard<std::mutex> guard(_lock);
+        _clearedSent.erase(playerGuid);
     }
 
     void PDv2UILink::SendCfg(Player* player)
@@ -505,6 +523,68 @@ namespace PDungeon
         SendAddonWhisper(player, PREFIX_UI_DOWN, payload);
     }
 
+    void PDv2UILink::SendCleared(Player* player, PDv2InstanceScript const* script)
+    {
+        if (!player)
+        {
+            return;
+        }
+
+        // Not gated on the HUD toggle, and deliberately so: this is the map's
+        // second half, and SendMap is not gated either. A client with the HUD
+        // hidden pays a few dozen bytes per room clear and has a true map the
+        // moment it is shown again.
+        auto const plan = sPDv2Mgr->GetPlan(PlanOwnerFor(player));
+        if (!plan || plan->blocks.empty())
+        {
+            return;
+        }
+
+        int minBX = 0, minBY = 0, w = 0, h = 0;
+        PlanBounds(*plan, minBX, minBY, w, h);
+
+        std::vector<std::pair<int, int>> cleared;
+        if (script)
+        {
+            script->ClearedRoomBlocks(cleared);
+        }
+
+        // Recorded BEFORE the budget check below, not after it: the set only
+        // ever grows, so a payload that did not fit will not fit next second
+        // either, and a retry would do nothing but log the same error once a
+        // second for the rest of the run. One error line per room clear is the
+        // honest cost of a layout that outgrew the wire.
+        {
+            std::lock_guard<std::mutex> guard(_lock);
+            _clearedSent[player->GetGUID()] = script ? script->RoomsClearedCount() : 0;
+        }
+
+        // The SAME origin SendMap shifts its blocks by. The addon keys its
+        // cleared set on the strings the M payload gave it, so a K message in
+        // the plan's own frame would paint blocks the party never entered
+        // (research c-research-chest-altar-finale-ui.md 4.3).
+        std::ostringstream out;
+        out << "K ";
+        for (std::pair<int, int> const& block : cleared)
+        {
+            out << (block.first - minBX) << ',' << (block.second - minBY) << ';';
+        }
+
+        // Same ceiling, same wire and the same reasoning as SendMap's: the
+        // room cap puts the worst case at a fraction of the budget, and
+        // "unreachable" is a claim with a date on it.
+        std::string const payload = out.str();
+        if (payload.size() > static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B))
+        {
+            LOG_ERROR(PD_LOG, "PDv2 UI: cleared-room payload for account {} is {} bytes "
+                              "(budget {}) - not sent; the HUD map keeps its old colours",
+                      PlanOwnerFor(player), uint32(payload.size()), PD_GAME_MANIFEST_BUDGET_B);
+            return;
+        }
+
+        SendAddonWhisper(player, PREFIX_UI_DOWN, payload);
+    }
+
     void PDv2UILink::SendRunTick(Player* player)
     {
         uint32_t const accountId = AccountOf(player);
@@ -545,6 +625,17 @@ namespace PDungeon
 
         int const state = run.complete ? 2 : (run.started ? 1 : 0);
 
+        // Round C / C7: the next sealed gate, appended AFTER `state` so an
+        // addon that predates this field set simply drops the tail (there is
+        // no null script to worry about here - SendRunTick returned above
+        // without one). NextClosedBarrier zeroes all three when nothing is
+        // sealed, and three zeros is exactly the wire's "no gate", so its
+        // answer carries no information this payload needs.
+        uint32 segPlanned = 0;
+        uint32 segKilled = 0;
+        uint32 segPct = 0;
+        script->NextClosedBarrier(segPlanned, segKilled, segPct);
+
         std::ostringstream out;
         out << "R " << run.elapsedSec
             << ' ' << run.killed
@@ -555,7 +646,10 @@ namespace PDungeon
             << ' ' << static_cast<uint32>(run.roomsTotal)
             << ' ' << px
             << ' ' << py
-            << ' ' << state;
+            << ' ' << state
+            << ' ' << segPlanned
+            << ' ' << segKilled
+            << ' ' << segPct;
 
         SendAddonWhisper(player, PREFIX_UI_DOWN, out.str());
     }
@@ -604,10 +698,38 @@ namespace PDungeon
             return;
         }
 
+        // Round C / C7. Read once, on the map's own update thread like every
+        // other line in this function - the instance script is only ever moved
+        // from there (OnMobDied), so this needs no more synchronisation than
+        // the run state above it does.
+        uint32_t const clearedCount = script->RoomsClearedCount();
+
         Map::PlayerList const& players = script->instance->GetPlayers();
         for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
         {
-            SendRunTick(it->GetSource());
+            Player* player = it->GetSource();
+            if (!player)
+            {
+                continue;
+            }
+
+            SendRunTick(player);
+
+            // The K set is a complete statement, so it is restated only when
+            // the thing it describes MOVED: once per room clear per player,
+            // not once per second. A player with no record - just walked in,
+            // or the client link just reset - is told once, which is also what
+            // repaints a map that a /reload emptied.
+            bool stale = true;
+            {
+                std::lock_guard<std::mutex> guard(_lock);
+                auto const sent = _clearedSent.find(player->GetGUID());
+                stale = sent == _clearedSent.end() || sent->second != clearedCount;
+            }
+            if (stale)
+            {
+                SendCleared(player, script);
+            }
         }
     }
 
@@ -634,6 +756,11 @@ namespace PDungeon
             if (player->GetMapId() == sPDv2Mgr->GetConfig().mapId)
             {
                 SendMap(player);
+                // Round C / C7, and immediately after the map it colours: a
+                // player who walked in halfway through someone else's run has
+                // no other way to learn which rooms are already empty, and the
+                // tick alone would only ever tell them about the NEXT clear.
+                SendCleared(player, ScriptFor(player));
                 SendRunTick(player);
             }
             return;
@@ -741,6 +868,11 @@ namespace PDungeon
 
             SendCfg(player);
             SendMap(player);
+            // A GEN is refused inside the dungeon (above), so there is no run
+            // to ask - and nullptr is not a shortcut here, it is the answer: a
+            // brand new layout has no cleared rooms, and this empty set is
+            // what scrubs the previous run's green off the map beside it.
+            SendCleared(player, nullptr);
             if (!outcome.pushed)
             {
                 SendNotice(player, "the layout could not be sent to your client (" +
@@ -809,6 +941,9 @@ namespace PDungeon
 // need is an end for its session state: the HUD toggle is deliberately NOT
 // persisted, so it has to die with the login that set it, or a player would
 // find their HUD missing after a relog with nothing anywhere to explain why.
+// Since Round C / C7 the same hook also drops what this character was last
+// told about cleared rooms - a per-GUID map that nothing erased would grow for
+// as long as the server runs, and a relogging player is re-told on HELLO.
 class PDv2UILinkPlayerScript : public PlayerScript
 {
 public:
@@ -822,6 +957,7 @@ public:
             return;
         }
         sPDv2UILink->ForgetAccount(player->GetSession()->GetAccountId());
+        sPDv2UILink->ForgetPlayer(player->GetGUID());
     }
 };
 

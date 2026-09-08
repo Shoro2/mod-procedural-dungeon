@@ -1522,6 +1522,66 @@ namespace PDungeon
         }
     }
 
+    bool PDv2InstanceScript::NextClosedBarrier(uint32& planned, uint32& killed, uint32& pct) const
+    {
+        // Zeroed up front, so a caller that ignores the answer still puts the
+        // wire's own "no gate" value on the wire (PDv2UILink::SendRunTick).
+        planned = 0;
+        killed = 0;
+        pct = 0;
+
+        // SpawnBarriers fills _barriers in segment order and an opened barrier
+        // STAYS in it with `open` set, so the lowest sealed segment is a scan.
+        // Done by comparison rather than by taking the first !open entry
+        // because that ordering is a property of the spawner, not a contract
+        // this getter is entitled to lean on.
+        Barrier const* next = nullptr;
+        for (Barrier const& barrier : _barriers)
+        {
+            if (barrier.open)
+            {
+                continue;
+            }
+            if (!next || barrier.segment < next->segment)
+            {
+                next = &barrier;
+            }
+        }
+
+        if (!next)
+        {
+            return false;
+        }
+
+        size_t const seg = static_cast<size_t>(next->segment);
+        planned = seg < _segmentPlanned.size() ? _segmentPlanned[seg] : 0;
+        killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+
+        // Clamped, and not defensively: _segmentPlanned counts _roomPlanned,
+        // frozen at spawn, while _segmentKilled counts corpses - and a Lil'
+        // Bro split makes more corpses than the draw planned. Without the
+        // clamp that segment's gate line would read past 100 %.
+        pct = planned ? std::min<uint32>(100, killed * 100 / planned) : 100;
+        return true;
+    }
+
+    void PDv2InstanceScript::ClearedRoomBlocks(std::vector<std::pair<int, int>>& out) const
+    {
+        out.clear();
+        for (size_t r = 0; r < _roomAlive.size(); ++r)
+        {
+            // _roomBX/_roomBY are filled in the same pass and the same order
+            // as _roomAlive, so the bound can only bite on a half-built
+            // instance - which is exactly when a caller must get nothing back
+            // rather than a block coordinate that means something else.
+            if (_roomAlive[r] != 0 || r >= _roomBX.size() || r >= _roomBY.size())
+            {
+                continue;
+            }
+            out.push_back(std::make_pair(_roomBX[r], _roomBY[r]));
+        }
+    }
+
     void PDv2InstanceScript::SetCellsWalkable(std::vector<GridPoint> const& cells, bool walkable)
     {
         if (!_gridReady)
