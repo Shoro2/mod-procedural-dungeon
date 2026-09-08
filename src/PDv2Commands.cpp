@@ -205,9 +205,12 @@ private:
         // Round B / B3-B5, the run-shaping keys. They are read live, so this
         // line is the only place an operator can confirm that the
         // `.reload config` they just ran actually reached the module.
-        handler->PSendSysMessage("pdungeon v2: barrier {}% | patrol hp {}% | ambush {}% x{} r{:.1f}",
+        // No ambush radius on this line since Round C / C2: the trap fires on
+        // the corridor block a player stands in, so there is no distance left
+        // for an operator to confirm.
+        handler->PSendSysMessage("pdungeon v2: barrier {}% | patrol hp {}% | ambush {}% x{}",
                                  cfg.barrierPct, cfg.patrolHealthMultPct,
-                                 cfg.ambushChancePct, cfg.ambushMobs, cfg.ambushRadiusYd);
+                                 cfg.ambushChancePct, cfg.ambushMobs);
         // 0 here means mod_pdungeon_chunk_meta.sql never reached the world DB
         // - the one failure that makes every mob stand still. The second count
         // is the same rows decoded a second time with their KINDS kept (Round

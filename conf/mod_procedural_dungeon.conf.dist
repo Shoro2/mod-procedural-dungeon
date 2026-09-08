@@ -617,6 +617,16 @@ ProceduralDungeon.V2.Patrol.HealthMult = 300
 #                     Read live like the decor rules: it is not part of what a
 #                     layout IS, so changing it re-arms the next run rather
 #                     than re-rolling anybody's dungeon.
+#
+#                     WHAT FIRES an armed corridor, since Round C (2026-09-08):
+#                     standing in it. The whole 66.67 yd block is the trigger -
+#                     the player's walk-grid cell is compared against the
+#                     spot's block, and that cell has to be floor - so every
+#                     corridor kind behaves the same and there is no distance
+#                     to tune. Each armed corridor is named in the worldserver
+#                     log at build time with its segment, block, chunk and
+#                     centre, which is how an "it never fired" is checked
+#                     against the layout that was actually walked.
 #        Default:     50
 #
 
@@ -640,9 +650,9 @@ ProceduralDungeon.V2.Ambush.Chance = 50
 #                     ambush fires: the creatures are drawn once and stored
 #                     with the spot, so a .reload config takes effect for the
 #                     next dungeon that is built and leaves a standing run
-#                     alone. Chance is read per build the same way; RadiusYd
-#                     and StunSpell are the two that are read at fire time and
-#                     therefore change a standing run.
+#                     alone. Chance is read per build the same way; StunSpell
+#                     is the only one of the three read at fire time, and
+#                     therefore the only one that changes a standing run.
 #        Default:     4
 #
 
@@ -650,27 +660,23 @@ ProceduralDungeon.V2.Ambush.Mobs = 4
 
 #
 #    ProceduralDungeon.V2.Ambush.RadiusYd
-#        Description: Round B (2026-09-03): how close a player has to come to
-#                     an armed corridor's centre, in yards and measured flat,
-#                     before the ambush fires. A corridor block is 66.67 yd
-#                     across, but only its lane is floor: two cells of 8.333 yd
-#                     each, so 16.67 yd wide and 8.33 yd either side of the
-#                     lane centre. The default of 9.0 therefore clears a player
-#                     hugging the lane wall by 0.67 yd - enough to catch anyone
-#                     walking through, without reaching into the rooms at
-#                     either end, but not a roomy margin: tune it DOWN and a
-#                     player walking the wall can pass an armed corridor
-#                     untouched.
+#        REMOVED in Round C (2026-09-08). The setting no longer exists; a line
+#        left over in a deployed .conf is ignored and can be deleted.
 #
-#                     Never below 1.0 - a 0 would arm a trap the player has to
-#                     stand exactly on. A spot fires once and stays disarmed
-#                     until the run is rebuilt. Read at fire time, so a
-#                     .reload config changes a standing run: every spot still
-#                     armed is scanned at the new radius from the next tick on.
-#        Default:     9.0
+#        It used to say how close a player had to come to an armed corridor's
+#        centre, flat, before the trap fired - default 9.0 yd. That worked on a
+#        straight corridor and nowhere else: the four centre cells of a block
+#        form a junction square of half-width 8.33 yd, so a straight transit
+#        passes its inscribed disc at 8.08 yd, while the shortest walking line
+#        through a corner, a T or a cross hugs the square's corner at
+#        8.33 * sqrt(2) = 11.79 yd and missed the disc entirely - as did the
+#        dogleg around the centre pillar of the alt-1 straight, at 11.43 yd.
+#        Half the corridor kinds in the kit could be walked past.
 #
-
-ProceduralDungeon.V2.Ambush.RadiusYd = 9.0
+#        Widening the radius would have closed the hole with a number that
+#        silently breaks the day the kit's corridor width changes. The trigger
+#        is the corridor BLOCK instead - see V2.Ambush.Chance above.
+#
 
 #
 #    ProceduralDungeon.V2.Ambush.StunSpell

@@ -126,12 +126,13 @@ namespace PDungeon
         int         patrolHealthMultPct = 300;
 
         // B5. Chance per boss segment that one of its corridors is armed, how
-        // many mobs the trap spawns, how close the player has to come, and the
-        // stun it opens with (0 = no stun). The chance is read live and is not
-        // a layout input - BuildAmbushPlan draws on its own stream.
+        // many mobs the trap spawns, and the stun it opens with (0 = no stun).
+        // The chance is read live and is not a layout input - BuildAmbushPlan
+        // draws on its own stream. No radius: since Round C / C2 the trap
+        // fires on the player standing in the corridor BLOCK, which needs no
+        // tuning constant at all (PDv2InstanceScript.h, TickAmbushes).
         int         ambushChancePct = 50;
         int         ambushMobs = 4;
-        float       ambushRadiusYd = 9.0f;
         uint32_t    ambushStunSpell = 20170;
     };
 

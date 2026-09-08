@@ -113,16 +113,14 @@ namespace PDungeon
         _config.patrolHealthMultPct = std::max(100, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Patrol.HealthMult", 300));
 
-        // B5: a percent roll like the ones above; a mob count the spawn ring
-        // can actually seat (0 disarms the ambush without disarming anything
-        // else); and a radius at least a yard wide, because a 0 would arm a
-        // trap the player has to stand exactly on.
+        // B5: a percent roll like the ones above, and a mob count the spawn
+        // ring can actually seat (0 disarms the ambush without disarming
+        // anything else). V2.Ambush.RadiusYd is gone since Round C / C2 - the
+        // trigger is the corridor block and has no radius to read.
         _config.ambushChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Ambush.Chance", 50)));
         _config.ambushMobs = std::min(8, std::max(0, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Ambush.Mobs", 4)));
-        _config.ambushRadiusYd = std::max(1.0f, sConfigMgr->GetOption<float>(
-            "ProceduralDungeon.V2.Ambush.RadiusYd", 9.0f));
         // Unclamped on purpose: 0 means "no stun at all", and any other id is
         // the operator's choice of spell, which this module must not overrule.
         _config.ambushStunSpell = sConfigMgr->GetOption<uint32>(

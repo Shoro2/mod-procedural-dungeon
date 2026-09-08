@@ -836,6 +836,78 @@ namespace
         return true;
     }
 
+    // The derivation Round C / C2 hangs the ambush trigger on: a world
+    // position taken anywhere inside block (bx, by) must divide back to that
+    // block. TickAmbushes fires on `gcx / PD_CELLS_PER_BLOCK == spot.bx &&
+    // gcy / PD_CELLS_PER_BLOCK == spot.by` and on nothing else - there is no
+    // radius left to absorb a mistake here, so a division that stopped naming
+    // the block would either kill every ambush in the dungeon silently or fire
+    // one from the corridor next door.
+    //
+    // BOTH paths, deliberately. The engine hands WorldToCell a Player's float
+    // position, while the arm side computes the centre in double and
+    // BlockToWorld narrows it to float (PDv2Mgr.cpp:465-475). The block centre
+    // sits EXACTLY on the cell 3/4 boundary on both axes (mid = BLOCK/2 =
+    // 4 * CELL), so the two paths may legitimately name different CELLS there
+    // - which is why the patrol beat block below reproduces the narrowing
+    // before it derives a start cell. What must never differ is the BLOCK the
+    // two divide to, because the coarse question is the only one the ambush
+    // trigger asks.
+    void RunBlockDerivationChecks()
+    {
+        double const mid = PD_BLOCK_SIZE_YD / 2.0;
+
+        // Both corners of the block field, the operator's own origin, and one
+        // block of his layout (the ambush pin's segment-1 corridor is (259,259),
+        // inside this range). Block 511 sits at about -17066 yd, so the sign of
+        // x/y is covered as well.
+        struct Blk { int bx; int by; };
+        Blk const blocks[4] = { { 0, 0 }, { 256, 256 }, { 263, 259 }, { 511, 511 } };
+
+        // Block-local (u, v) in yards: the near corner cell, the centre (the
+        // boundary case), the far corner cell, and a point that sits on the
+        // cell 3/4 boundary of one axis only.
+        struct Pt { double u; double v; char const* what; };
+        Pt const points[4] = {
+            { 0.5, 0.5, "(0.5,0.5)" },
+            { mid, mid, "(mid,mid)" },
+            { 66.6, 66.6, "(66.6,66.6)" },
+            { 33.3, 0.5, "(33.3,0.5)" },
+        };
+
+        char msg[192];
+        for (Blk const& b : blocks)
+        {
+            for (Pt const& p : points)
+            {
+                double x = 0.0, y = 0.0;
+                BlockLocalToWorld(b.bx, b.by, p.u, p.v, x, y);
+
+                int gcx = 0, gcy = 0;
+                WorldToCell(x, y, gcx, gcy);
+                std::snprintf(msg, sizeof(msg),
+                              "block (%d,%d) local %s divides to block (%d,%d) - double path",
+                              b.bx, b.by, p.what,
+                              gcx / PD_CELLS_PER_BLOCK, gcy / PD_CELLS_PER_BLOCK);
+                Check(gcx >= 0 && gcy >= 0 &&
+                      gcx / PD_CELLS_PER_BLOCK == b.bx &&
+                      gcy / PD_CELLS_PER_BLOCK == b.by, msg, 0);
+
+                // The narrowing the engine cannot avoid: a Player's position
+                // is a float, and so is everything BlockToWorld hands back.
+                int fcx = 0, fcy = 0;
+                WorldToCell(static_cast<float>(x), static_cast<float>(y), fcx, fcy);
+                std::snprintf(msg, sizeof(msg),
+                              "block (%d,%d) local %s divides to block (%d,%d) - float path",
+                              b.bx, b.by, p.what,
+                              fcx / PD_CELLS_PER_BLOCK, fcy / PD_CELLS_PER_BLOCK);
+                Check(fcx >= 0 && fcy >= 0 &&
+                      fcx / PD_CELLS_PER_BLOCK == b.bx &&
+                      fcy / PD_CELLS_PER_BLOCK == b.by, msg, 0);
+            }
+        }
+    }
+
     void PrintPath(uint32_t seed, int rooms)
     {
         BlockPlan plan;
@@ -4660,6 +4732,10 @@ namespace
 
         RunLinkStateChecks();
         RunGameMathChecks();
+        // Once, not per seed, and before anything that needs a layout: the
+        // block derivation is a property of PDv2WorldMath.h alone, and it is
+        // what Round C / C2's ambush trigger stands on.
+        RunBlockDerivationChecks();
         RunChainMathChecks();
         RunLayoutFreezeCheck();
         RunTypedAnchorChecks();

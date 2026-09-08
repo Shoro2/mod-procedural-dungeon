@@ -335,10 +335,10 @@ namespace PDungeon
         // draw at the moment the player is already busy being stunned.
         struct Ambush
         {
-            AmbushSpot spot;
+            AmbushSpot spot;            // bx/by ARE the trigger since C2
             float x = 0.0f;             // the corridor block's centre, world
-            float y = 0.0f;
-            float z = 0.0f;
+            float y = 0.0f;             // - the arm log's coordinate, not a test
+            float z = 0.0f;             // the corridor's floor plane, where mobs are seated
             unsigned socketMask = 0;    // that block's sockets = the corridor axis
             std::vector<SpawnPick> picks;
             bool armed = true;          // fires once, then stays spent until a rebuild
@@ -346,10 +346,30 @@ namespace PDungeon
         void SpawnAmbushPlan(BlockPlan const& plan);
 
         // AMBUSH_SCAN_MS. Every armed spot against every player in the
-        // instance, flat 2D distance against V2.Ambush.RadiusYd. Its own
-        // cadence rather than the 1 Hz branch's: a player runs 7 yd/s, so a
-        // 9 yd radius is crossed in well under two seconds and a one-second
-        // scan would let someone walk through an armed corridor untouched.
+        // instance. The trigger is the BLOCK, not a disc (Round C / C2):
+        // WorldToCell on the player's position, then gcx / PD_CELLS_PER_BLOCK
+        // and gcy / PD_CELLS_PER_BLOCK against the spot's own bx/by, refined
+        // by the walk grid so a player on the wall band is not "in" the
+        // corridor. Kind-independent and without a tuning constant.
+        //
+        // Round B measured a 9 yd disc around the block centre, and half the
+        // corridor kinds could be walked past: the four centre cells form a
+        // junction square of half-width 8.33 yd, so a straight transit passes
+        // its inscribed disc at 8.08 yd and fires, while a turn's geodesic
+        // hugs the square's CORNER at 8.33 * sqrt(2) = 11.79 yd and never
+        // does - 11.20 to 11.79 yd on every corner, T and cross, and 11.43 yd
+        // on the alt-1 straight whose centre pillar offers a dogleg (research
+        // c-research-ambush-trigger.md, "Per-kind lane geometry"). Widening
+        // the radius past 11.79 would have closed the hole and left a magic
+        // number that breaks the day the kit's corridor width changes; the
+        // block test has nothing to break.
+        //
+        // It keeps its own cadence rather than the 1 Hz branch's, but no
+        // longer because it has to: the disc could be crossed in under two
+        // seconds, while a whole block is 66.67 yd and takes a running player
+        // some nine, so 1 Hz would now catch them too. What 250 ms buys is how
+        // fast the trap SPRINGS once they are in - a one-second scan would let
+        // them walk several yards into the corridor before the stun lands.
         void TickAmbushes();
 
         // Disarms the spot, stuns the player, says so, and puts the stored
@@ -357,8 +377,10 @@ namespace PDungeon
         // block is 66.67 yd across and only its lane is floor: two cells of
         // 8.333 yd (LaneCellsForSocket puts the doorway on columns 3-4 / rows
         // 3-4), so 16.67 yd wide, 8.33 yd of it either side of the lane
-        // centre. That half-width is what the V2.Ambush.RadiusYd default of
-        // 9.0 clears a wall-hugging player by - 0.67 yd, not a roomy margin.
+        // centre. The eight offsets are measured from the PLAYER in x/y and
+        // seated on Ambush::z, which is the corridor's own floor plane -
+        // Ambush::x/y are the block centre and, since C2 dropped the disc,
+        // only what the arm log prints.
         void FireAmbush(Ambush& ambush, Player* player);
 
         // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect

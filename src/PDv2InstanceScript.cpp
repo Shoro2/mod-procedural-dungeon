@@ -2118,14 +2118,33 @@ namespace PDungeon
             float x = 0.0f, y = 0.0f, z = 0.0f;
             sPDv2Mgr->BlockToWorld(start.bx, start.by, mid, mid, x, y, z);
 
-            // The block CENTRE is cell (4,4) of that corridor, and a corridor
-            // mask whose (4,4) is void seats the patroller off the grid from
-            // birth - its first leg is then a straight line nobody checked
-            // (research A5). The same veto SpawnFromPlan's fallback takes since
-            // f92146f: if the centre is not floor, snap to the nearest walkable
-            // cell within SPAWN_FALLBACK_SNAP_CELLS and stand on that cell's
-            // centre. With no grid, or nothing walkable that close, the block
-            // centre stands - exactly what this did before.
+            // The block CENTRE is not one cell: mid = PD_BLOCK_SIZE_YD / 2 is
+            // exactly 4 * PD_CELL_SIZE_YD, the cell 3/4 boundary on BOTH axes,
+            // so the point sits on the corner where (3,3), (3,4), (4,3) and
+            // (4,4) meet. Which of the four WorldToCell's floor answers is
+            // decided by the float BlockToWorld narrows to, and measured over
+            // all 512x512 blocks it is a clean 25 % each (the double path,
+            // which the engine never takes, favours (4,4) at 65 %). The block
+            // itself is never in doubt - all four cells divide back to it.
+            //
+            // A corridor mask whose named cell is void seats the patroller off
+            // the grid from birth, and its first leg is then a straight line
+            // nobody checked (research A5). The same veto SpawnFromPlan's
+            // fallback takes since f92146f: if that cell is not floor, snap to
+            // the nearest walkable cell within SPAWN_FALLBACK_SNAP_CELLS and
+            // stand on its centre. With no grid, or nothing walkable that
+            // close, the block centre stands - exactly what this did before.
+            //
+            // The veto samples the ONE cell the float names, not all four the
+            // patroller's body straddles, and the kit does hold that case:
+            // the alt-1 straights 3305/3310/13305/13310 are floor on three of
+            // the four and carry their centre pillar on the fourth, so the
+            // snap below fires on about a quarter of those blocks and seats
+            // the patroller beside the pillar on the rest. Both outcomes are
+            // floor, which is why this is not a bug - but the body still
+            // overlaps the pillar cell. Widening the veto to all four is a
+            // Round-D candidate, deliberately not done here: it would change
+            // which corridors snap, and nothing measured says they should.
             if (grid)
             {
                 int gcx = 0, gcy = 0;
@@ -2141,9 +2160,18 @@ namespace PDungeon
                     CellCentreToWorld(scx, scy, wx, wy);
                     x = static_cast<float>(wx);
                     y = static_cast<float>(wy);
+                    // Two cells, because they answer two different questions.
+                    // The grid-local one locates the patroller on the layout
+                    // and can be compared with a path dump; the one modulo
+                    // PD_CELLS_PER_BLOCK is the cell IN THE CHUNK, which is
+                    // what the kit's own walk mask is indexed by - the only
+                    // form in which "chunk 3305 seated it beside the pillar"
+                    // can be read off this line without the layout to hand.
                     LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} has a void block centre - "
-                                     "segment {}'s patroller starts on cell ({}, {}) instead",
-                             instance->GetInstanceId(), start.chunkId, k, snapped.x, snapped.y);
+                                     "segment {}'s patroller starts on cell ({}, {}) "
+                                     "instead, chunk cell ({}, {})",
+                             instance->GetInstanceId(), start.chunkId, k, snapped.x, snapped.y,
+                             scx % PD_CELLS_PER_BLOCK, scy % PD_CELLS_PER_BLOCK);
                 }
             }
 
@@ -2276,6 +2304,19 @@ namespace PDungeon
             }
 
             _ambushes.push_back(ambush);
+
+            // Per spot, not just a count. The Round B log printed only how
+            // many corridors were armed, and when the operator reported "no
+            // ambush" that line could not say whether the trap was in the
+            // corridor he walked or two segments away - the plan had to be
+            // regenerated offline to find out (research
+            // c-research-ambush-trigger.md, closing note). The block is what
+            // the trigger now tests, so the block is what this prints.
+            LOG_INFO(PD_LOG, "PDv2: instance {} armed segment {} at block ({},{}) "
+                             "chunk {} centre ({:.1f},{:.1f})",
+                     instance->GetInstanceId(), ambush.spot.segment,
+                     ambush.spot.bx, ambush.spot.by,
+                     plan.blocks[ambush.spot.blockIndex].chunkId, ambush.x, ambush.y);
         }
 
         LOG_INFO(PD_LOG, "PDv2: instance {} armed {} corridor(s) with an ambush "
@@ -2291,7 +2332,10 @@ namespace PDungeon
             return;
         }
 
-        float const radius = sPDv2Mgr->GetConfig().ambushRadiusYd;
+        // Null until the layout's walk grid is built, which is only ever the
+        // case for a run whose kit metadata never loaded. The block test below
+        // stands on its own without it; the grid only refines it.
+        WalkGrid const* grid = GetWalkGrid();
         Map::PlayerList const& players = instance->GetPlayers();
         for (Ambush& ambush : _ambushes)
         {
@@ -2314,12 +2358,37 @@ namespace PDungeon
                 {
                     continue;
                 }
-                // 2D, like the barrier hint and for the same reason: the
-                // dungeon is one floor plane and a Z term would only measure
-                // the height of a jump.
-                if (player->GetExactDist2d(ambush.x, ambush.y) > radius)
+                // The trigger is the BLOCK, not a disc (Round C / C2). A
+                // player cannot cross a corridor block without standing on one
+                // of its cells, whatever the corridor's kind and whichever
+                // pair of sockets they walk between - which is exactly what
+                // the 9 yd disc could not say (header comment on the struct).
+                // Non-negative is part of the test: global cells are
+                // non-negative inside the field, and integer division
+                // truncates towards zero, so a position outside it would
+                // divide to a block it is not in.
+                int gcx = 0, gcy = 0;
+                WorldToCell(player->GetPositionX(), player->GetPositionY(), gcx, gcy);
+                if (gcx < 0 || gcy < 0 ||
+                    gcx / PD_CELLS_PER_BLOCK != ambush.spot.bx ||
+                    gcy / PD_CELLS_PER_BLOCK != ambush.spot.by)
                 {
                     continue;
+                }
+                if (grid)
+                {
+                    // In the block but off its lane: a corridor block is
+                    // 66.67 yd across and only its lane is floor, so a player
+                    // who got onto the wall band (a jump, a knockback, a GM
+                    // drop) is over the corridor rather than in it. 2D
+                    // throughout, like the barrier hint and for the same
+                    // reason - the dungeon is one floor plane and a Z term
+                    // would only measure the height of a jump.
+                    GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                    if (!grid->At(cell.x, cell.y))
+                    {
+                        continue;
+                    }
                 }
                 FireAmbush(ambush, player);
                 // Spent. Whoever walked in first is the one it fires on, and
