@@ -237,12 +237,13 @@ private:
         std::vector<std::string> const lines = instance->PatrolSnapshot();
         if (lines.empty())
         {
-            handler->SendSysMessage("pdungeon v2: no patroller alive in this dungeon "
-                                    "(one per boss segment; they are killable).");
+            handler->SendSysMessage("pdungeon v2: no patrol member alive in this dungeon "
+                                    "(one patrol per corridor between two rooms; they are "
+                                    "killable).");
             return true;
         }
 
-        handler->PSendSysMessage("pdungeon v2: {} patroller(s):", uint32(lines.size()));
+        handler->PSendSysMessage("pdungeon v2: {} patrol creature(s):", uint32(lines.size()));
         for (std::string const& line : lines)
         {
             handler->SendSysMessage(line.c_str());
@@ -252,6 +253,13 @@ private:
         handler->SendSysMessage("pdungeon v2: walkable 0 + spline RUNNING = a spline nobody "
                                 "owns; walkable 0 + top CHASE = an unreachable chase; "
                                 "walkable 1 + following 1 = the module chose that cell.");
+        // Round D / D2. The second field of every line is the role: `leader`
+        // with the two GLOBAL beat cells its tag carries, or `follower k of
+        // guid N`. A follower with top FOLLOW is in formation; top IDLE on a
+        // follower means its leader is gone and the file has dissolved.
+        handler->SendSysMessage("pdungeon v2: role `leader beat (x,y)->(x,y)` walks the beat; "
+                                "`follower k of guid N` walks behind it - top FOLLOW is in "
+                                "formation, top IDLE means its leader is gone.");
         return true;
     }
 
@@ -269,8 +277,15 @@ private:
         // No ambush radius on this line since Round C / C2: the trap fires on
         // the corridor block a player stands in, so there is no distance left
         // for an operator to confirm.
-        handler->PSendSysMessage("pdungeon v2: barrier {}% | patrol hp {}% | ambush {}% x{}",
+        // Round D / D2 appends the file's size ladder to the patrol field:
+        // `x1/2/3@50/75` reads "one creature, two from difficulty 50, three
+        // from 75", and the two numbers are the LIVE keys rather than the
+        // defaults - which is the whole reason this line exists.
+        handler->PSendSysMessage("pdungeon v2: barrier {}% | patrol hp {}% x1/2/3@{}/{} "
+                                 "follow {:.1f} yd | ambush {}% x{}",
                                  cfg.barrierPct, cfg.patrolHealthMultPct,
+                                 cfg.patrolSize2Diff, cfg.patrolSize3Diff,
+                                 cfg.patrolFollowDistYd,
                                  cfg.ambushChancePct, cfg.ambushMobs);
         // 0 here means mod_pdungeon_chunk_meta.sql never reached the world DB
         // - the one failure that makes every mob stand still. The second count

@@ -83,12 +83,26 @@ namespace PDungeon
         // run counter and no barrier - risk on the road, not progress.
         bool   countsForRun = true;
 
-        // B4: this creature walks the spine out of combat. The goal cell is
-        // the far end of its beat in GLOBAL grid cells; the AI plans the
-        // route on its first idle tick and reverses it at either end.
+        // B4: this creature walks a beat out of combat. Since Round D / D2 the
+        // beat is ONE CORRIDOR - both of its ends are doorway lane cells of
+        // that corridor run, in GLOBAL grid cells, and the patrol never enters
+        // a room. The AI plans the route on its first idle tick and reverses it
+        // at either end.
+        //
+        // A patrol is a FILE: pick 0 of the corridor's draw is the LEADER and
+        // carries the two cells; picks 1..n are FOLLOWERS and carry the leader
+        // instead. The two halves are mutually exclusive by construction - an
+        // empty `patrolLeader` IS "this one leads" - because a follower walks
+        // no beat of its own: it follows the creature in front of it, so one
+        // patrol costs one path however many creatures it has (design
+        // 2026-09-08 §D2.3).
         bool   isPatrol = false;
+        int    patrolStartCellX = 0;
+        int    patrolStartCellY = 0;
         int    patrolGoalCellX = 0;
         int    patrolGoalCellY = 0;
+        ObjectGuid patrolLeader;        // empty on the leader itself
+        uint8  patrolRank = 0;          // 0 = leader, k >= 1 = the k-th follower
 
         // Damage Reduce (affix 8) is the one affix a creature cannot answer
         // about itself: the carrier is somebody else, so the verdict costs a
@@ -177,12 +191,31 @@ namespace PDungeon
         // this map's own update thread, so there is still no lock.
         WalkGrid const* GetWalkGrid() const { return _gridReady ? &_grid : nullptr; }
 
+        // Round D / D1-D2. Where this instance's props stand, indexed exactly
+        // like the walk grid's `cells` (1 = at least one prop occupies that
+        // cell), or nullptr while there is no grid or nothing was placed.
+        //
+        // NOT a walkability flag and deliberately not folded into the grid: a
+        // prop is a COST to the patrol planner (FindPatrolPath adds
+        // PatrolCost::propCell for entering one) and nothing at all to the
+        // chase, because a mob squeezing past a brazier to reach a player is
+        // fine and a patrol strolling through one is what the operator
+        // reported. Barriers are not in here - a closed portcullis flips its
+        // lane cells out of the grid itself, which is a wall and not a cost.
+        std::vector<uint8_t> const* PropCells() const
+        {
+            return _propCells.empty() ? nullptr : &_propCells;
+        }
+
         // Round C, for `.pdungeon v2 patrol` and nothing else. One snapshot
-        // line per tagged patroller this instance summoned, in spawn order,
-        // each formatted by the AI itself (PDv2MobAI::PatrolStateLine) - the
-        // walk lives here rather than in the command because _spawnedGuids is
-        // this class's business and `instance` resolves a GUID on the map that
-        // owns it. A patroller that has despawned contributes no line.
+        // line per tagged patrol CREATURE this instance summoned, in spawn
+        // order, each formatted by the AI itself (PDv2MobAI::PatrolStateLine).
+        // Since Round D that is every member of every file, leaders and
+        // followers alike, and the line's own role field is what tells them
+        // apart. The walk lives here rather than in the command because
+        // _spawnedGuids is this class's business and `instance` resolves a GUID
+        // on the map that owns it. A member that has despawned contributes no
+        // line.
         std::vector<std::string> PatrolSnapshot() const;
 
         // The live run. Read-only for everyone outside this class: the counters
@@ -297,6 +330,15 @@ namespace PDungeon
         // first Phase-4 T2 round). Same guard, same teardown as SpawnDecor.
         void SpawnKitProps(BlockPlan const& plan);
 
+        // Round D / D1-D2. Fills _propCells from _decorGuids, so it must run
+        // AFTER SpawnDecor and SpawnKitProps and BEFORE SpawnPatrols (the
+        // spawn-time beat is planned with it) - and it is deliberately built
+        // from the SUMMONED objects rather than from the two plans, because
+        // that is the only list that knows which prop actually made it onto
+        // the map. Barriers are excluded by construction: SpawnBarriers runs
+        // later, and its cells leave the walk grid rather than joining this.
+        void BuildPropCells();
+
         // Ambient life: BuildCritterPlan's spots, summoned as ownerless,
         // tagless creatures. `decorPositions` is SpawnDecor's output for the
         // SAME layout - a critter within CRITTER_DECOR_CLEAR_YD of a prop is
@@ -330,21 +372,25 @@ namespace PDungeon
         };
         void SpawnBarriers(BlockPlan const& plan);
 
-        // Round B / B4. One elite patroller per boss segment: it stands on the
-        // corridor block in front of the boss room - the last block of the
-        // SAME run the barrier seals - and walks that spine back to the
-        // previous boss room (the entrance for segment 1) and forward again.
+        // Round B / B4, REWRITTEN by Round D / D2. ONE patrol per CORRIDOR:
+        // for every chain room i = 1..chainLen-1 the corridor run that leads
+        // into it (SpineRunInto, the same walk the barrier and the validator
+        // make) gets a single file of 1, 2 or 3 creatures by run difficulty.
         //
-        // The beat never crosses a portcullis. Barrier k stands INSIDE boss
-        // room b_k on the edge this corridor touches, and the patroller lives
-        // on the outside of it; barrier k-1 stands on b_{k-1}'s OTHER edge, the
-        // one facing b_{k-2}, and the route reaches b_{k-1} from this side. So
-        // the order against SpawnBarriers is a matter of reading, not of
-        // reachability - it is called after it because a patrol belongs to the
-        // segment a barrier defines.
+        // The beat is CORRIDOR ONLY - doorway to doorway, never into a room -
+        // so a patrol is risk on the road and never a second pack in a room
+        // the player already cleared (design 2026-09-08 §D2.1). Both ends are
+        // read off the run itself: the entry socket SpineRunInto answers is
+        // room i's OWN edge, so the corridor's end of it is OppositeSocket(bit)
+        // on run.back(), exactly as SpawnBarriers seals both halves of that
+        // doorway; the far end is the socket of run.front() that faces room
+        // i-1, which is the step between those two blocks.
         //
-        // Its own RNG stream (PD_PATROL_SEED_MIX, mixed again per segment), so
-        // adding or retuning a patroller cannot move one pick of the room draw.
+        // Its own RNG stream (PD_PATROL_SEED_MIX, mixed again per corridor), so
+        // adding or retuning a patrol cannot move one pick of the room draw.
+        // Called after SpawnBarriers because a sealed portcullis takes its four
+        // lane cells out of the walk grid, and the goal cell of a boss
+        // corridor is one of them - see the snap in the body.
         void SpawnPatrols(BlockPlan const& plan);
 
         // Round B / B5. One corridor per boss segment may be armed with an
@@ -609,6 +655,10 @@ namespace PDungeon
         WalkGrid _grid;
         bool     _gridReady = false;
         bool     _gridTried = false;
+        // Round D / D1-D2, PropCells() says what it means. Sized like
+        // _grid.cells when it is filled and empty otherwise; cleared by the
+        // rebuild together with the objects it describes.
+        std::vector<uint8_t> _propCells;
     };
 }
 

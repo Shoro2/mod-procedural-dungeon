@@ -113,6 +113,19 @@ namespace PDungeon
         _config.patrolHealthMultPct = std::max(100, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Patrol.HealthMult", 300));
 
+        // Round D / D2: both are compared against the run's 1..100 dial, so
+        // they are clamped into that range and into nothing else. The two are
+        // deliberately NOT clamped against each other - PDv2Mgr.h says why.
+        _config.patrolSize2Diff = std::min(100, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Patrol.Size2Diff", 50)));
+        _config.patrolSize3Diff = std::min(100, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Patrol.Size3Diff", 75)));
+        // Never below zero: a negative follow distance is not a formation, it
+        // is MoveFollow aiming at a point on the far side of the leader. Not
+        // clamped from above - a wide file is a look, not a fault.
+        _config.patrolFollowDistYd = std::max(0.0f, sConfigMgr->GetOption<float>(
+            "ProceduralDungeon.V2.Patrol.FollowDistYd", 3.0f));
+
         // Round C: off. Every AI diagnostic in PDv2CreatureAI.cpp reads this
         // key on the tick that would log, so `.reload config` both arms and
         // disarms it mid-run - which is the whole point, because the evidence

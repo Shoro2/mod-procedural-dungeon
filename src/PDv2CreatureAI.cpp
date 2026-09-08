@@ -29,6 +29,10 @@
 #include "StringFormat.h"
 
 #include <algorithm>
+// M_PI, for the follow angle. Safe in this order and only in this order:
+// PDv2CreatureAI.h reaches Define.h first, which defines _USE_MATH_DEFINES on
+// Windows (Define.h:36-38) before anything has pulled <cmath> in.
+#include <cmath>
 #include <cstdlib>
 #include <limits>
 #include <list>
@@ -585,7 +589,14 @@ namespace PDungeon
     void PDv2MobAI::UpdatePatrol(uint32 diff)
     {
         WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
-        if (!grid || !_mob || !_mob->isPatrol || !me->IsAlive())
+        // Round D: rank 0 only. A follower has a leader, not a beat, and
+        // UpdateAI routes it to UpdateFollower - but the guard is repeated here
+        // because this function writes _patrolRoute, and a follower that ever
+        // reached it would plan a second route for a patrol that is supposed to
+        // cost exactly one. `grid` non-null implies `_instance` non-null (the
+        // line above is where it came from), which is what lets the plan below
+        // read PropCells() without a second null test.
+        if (!grid || !_mob || !_mob->isPatrol || _mob->patrolRank || !me->IsAlive())
         {
             return;
         }
@@ -626,7 +637,7 @@ namespace PDungeon
 
         if (!_patrolActive)
         {
-            // ONE A* FOR THE WHOLE RUN, and this is the only place a path is
+            // ONE PLAN FOR THE WHOLE RUN, and this is the only place a path is
             // ever written into _patrolRoute. The beat a patroller is handed on
             // its first idle tick is the beat it keeps: every later
             // interruption rejoins that route rather than replacing it with a
@@ -638,12 +649,33 @@ namespace PDungeon
             {
                 return;
             }
+            // THE PATROL PLANNER, NOT THE CHASE'S (Round D / D1). FindGridPath
+            // is uniform-cost and SimplifyGridPath then merges as far as a
+            // walkable straight line reaches, so the beat came out as diagonals
+            // across rooms and through corridor mouths - and the supercover
+            // test that approves them knows CELLS, not the facades that lean up
+            // to 6.1 yd into a mouth nor the props this module stands on
+            // walkable ground. That is the operator's "durch ecken von häusern
+            // und objekte hindurch". FindPatrolPath pays for a turn, for a cell
+            // with a non-walkable neighbour and for a cell with a prop on it,
+            // so the cheapest route is the lane centre; MergeCollinear then
+            // says that same route in fewer points WITHOUT introducing a
+            // diagonal. The prop map comes from the instance (PropCells(), null
+            // when there are none), which is why this needs _instance and not
+            // just the grid.
+            //
+            // The goal snap above is what makes a SEALED boss corridor plan at
+            // all: SpawnPatrols tagged the true doorway lane cell, and while
+            // that segment's portcullis is closed the barrier has taken it out
+            // of the grid - the snap answers the lane cell one step back, and
+            // the beat grows to the doorway itself on the first plan after the
+            // barrier falls.
             std::vector<GridPoint> path;
-            if (!FindGridPath(*grid, here, goal, path))
+            if (!FindPatrolPath(*grid, here, goal, _instance->PropCells(), path))
             {
                 return;
             }
-            SimplifyGridPath(*grid, path);
+            MergeCollinear(path);
             if (path.size() < 2)
             {
                 // Standing on the goal already. Nothing to walk this tick; a
@@ -710,7 +742,12 @@ namespace PDungeon
                 // plan then collapsed it to "here -> goal" for the rest of the
                 // run - the very thing rejoining exists to prevent. The route
                 // itself is still never re-planned; only the way back onto it
-                // is, and that A* is paid at most once per fight.
+                // is, and that plan is paid at most once per fight.
+                //
+                // Round D: the same planner as the beat, for the same reason -
+                // the walk back onto the route is walked in public down the
+                // same corridor, and a diagonal here would cut the same house
+                // corner the beat now avoids.
                 size_t nearest = 0;
                 int nearestDist = std::numeric_limits<int>::max();
                 for (size_t i = 0; i < _patrolRoute.size(); ++i)
@@ -725,7 +762,8 @@ namespace PDungeon
                 }
                 std::vector<GridPoint> back;
                 if (_patrolRoute.empty() ||
-                    !FindGridPath(*grid, here, _patrolRoute[nearest], back))
+                    !FindPatrolPath(*grid, here, _patrolRoute[nearest],
+                                    _instance->PropCells(), back))
                 {
                     // No beat at all, or off its component entirely (a barrier
                     // closed between us and it). The old fallback: give the
@@ -733,7 +771,7 @@ namespace PDungeon
                     _patrolActive = false;
                     return;
                 }
-                SimplifyGridPath(*grid, back);
+                MergeCollinear(back);
                 leg = back;                 // here ... _patrolRoute[nearest]
                 for (size_t i = nearest + 1; i < _patrolRoute.size(); ++i)
                 {
@@ -806,8 +844,125 @@ namespace PDungeon
         }
     }
 
+    Creature* PDv2MobAI::PatrolLeader() const
+    {
+        if (!_mob || !_mob->patrolRank || !_mob->patrolLeader)
+        {
+            // No rank means this creature IS the leader (or is not in a patrol
+            // at all), and the two halves of the tag are mutually exclusive by
+            // construction - PDv2InstanceScript.h says so at the fields.
+            return nullptr;
+        }
+        // The instance's map, never ObjectAccessor's global lookup: a patrol
+        // lives and dies inside one instance of map 760, and a GUID that has
+        // left it is a GUID this AI must read as "gone".
+        return me->GetMap()->GetCreature(_mob->patrolLeader);
+    }
+
+    void PDv2MobAI::UpdateFollower(uint32 diff)
+    {
+        if (!_mob || !_mob->isPatrol || !_mob->patrolRank || !me->IsAlive())
+        {
+            return;
+        }
+        if (_followTimer > diff)
+        {
+            _followTimer -= diff;
+            return;
+        }
+        _followTimer = REPATH_INTERVAL_MS;
+
+        Creature* leader = PatrolLeader();
+        if (!leader || !leader->IsAlive() || !leader->IsInWorld())
+        {
+            // THE PATROL HAS DISSOLVED (design §D2.3). Hold where it stands
+            // rather than walk anywhere: there is no beat on this creature's
+            // tag to take over - it never carried one - and sending it home
+            // would be the straight unpathed line across the void that Round C
+            // spent itself removing. Latched like the chase's hold, so the stop
+            // is issued once and not twice a second for the rest of the run.
+            if (!_followHeld)
+            {
+                _followHeld = true;
+                me->GetMotionMaster()->Clear();
+                // Clear() cannot stop a spline on its own - the whole argument
+                // is written out in EnterEvadeMode - so the stop is explicit
+                // and MoveIdle follows it down, leaving the motion stack fully
+                // described rather than half.
+                me->StopMoving();
+                me->GetMotionMaster()->MoveIdle();
+                if (PatrolDebug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 patrol: {} guid {} follower {} holds - its leader "
+                                     "is gone or dead",
+                             me->GetName(), me->GetGUID().GetCounter(), uint32(_mob->patrolRank));
+                }
+            }
+            return;
+        }
+        _followHeld = false;
+
+        // THE LEADER'S FIGHT IS THE FILE'S FIGHT. Polled here rather than
+        // shouted from the leader's JustEngagedWith on purpose, and for the
+        // reason the affix's Call for Help is deferred too: AttackStart runs
+        // the target's own JustEngagedWith synchronously, so a leader shouting
+        // at its followers would recurse one stack frame per member, and a
+        // poll costs one pointer read per follower per 500 ms.
+        if (!me->GetVictim())
+        {
+            if (Unit* victim = leader->GetVictim())
+            {
+                if (victim->IsAlive() && me->IsValidAttackTarget(victim))
+                {
+                    AttackStart(victim);
+                    return;
+                }
+            }
+        }
+
+        // SINGLE FILE. The top generator is the "already following" test - a
+        // flag would not notice a knockback or a crowd-control effect taking
+        // the follow away, and MoveFollow itself never de-duplicates
+        // (MotionMaster.cpp:448-469), so re-issuing it every tick would restart
+        // the spline every tick.
+        //
+        // dist x rank, angle pi: follower 1 walks FollowDistYd behind the
+        // leader, follower 2 twice that, both directly behind it - so the file
+        // is one line down the lane and the whole patrol still costs the one
+        // route its leader planned. inheritWalkState and inheritSpeed are the
+        // call's defaults (true): the followers walk while the leader walks its
+        // beat and run when it runs, without this AI tracking either.
+        if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
+        {
+            float const dist = sPDv2Mgr->GetConfig().patrolFollowDistYd *
+                               static_cast<float>(_mob->patrolRank);
+            me->GetMotionMaster()->MoveFollow(leader, dist, float(M_PI));
+            if (PatrolDebug())
+            {
+                LOG_INFO(PD_LOG, "PDv2 patrol: {} guid {} follower {} follows {} at {:.1f} yd "
+                                 "| me ({:.1f},{:.1f}) leader ({:.1f},{:.1f}) dist {:.1f}",
+                         me->GetName(), me->GetGUID().GetCounter(), uint32(_mob->patrolRank),
+                         leader->GetName(), dist, me->GetPositionX(), me->GetPositionY(),
+                         leader->GetPositionX(), leader->GetPositionY(),
+                         me->GetExactDist2d(leader));
+            }
+        }
+    }
+
     void PDv2MobAI::ResumePatrol()
     {
+        // Round D / D2. A FOLLOWER has no route to rejoin - it has a leader to
+        // find again. Both latches are cleared and the timer zeroed, so the
+        // very next tick re-issues the MoveFollow the evade's Clear threw away;
+        // that is the whole of "after an evade a follower re-follows".
+        if (_mob && _mob->patrolRank)
+        {
+            _followTimer = 0;
+            _followHeld = false;
+            StopWaypointRun(false);
+            return;
+        }
+
         // THE BEAT SURVIVES THE FIGHT. This used to drop the route and let the
         // next tick re-plan from here to the goal, and because an evade is how
         // every patroller's fight ends (there is no leash), the beat then
@@ -843,6 +998,14 @@ namespace PDungeon
         // being looked at twice means UpdateAI is not running for this creature
         // at all - the run is not stuck, the AI is.
         //
+        // Round D opens the line with the ROLE, because a patrol is now a file
+        // and the answer to "why is this one standing still" is different for
+        // its two halves. The leader prints the beat its tag carries, in global
+        // cells, so a `route 0` next to a beat that is two real cells apart says
+        // the plan failed rather than that the tag is empty; a follower prints
+        // its rank and its leader's guid, so `.pdungeon v2 patrol` can be read
+        // top to bottom as the files the dungeon actually built.
+        //
         // Nothing here decides anything, and nothing here is cheap to be
         // clever about: it is typed by hand, once.
         WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
@@ -870,12 +1033,28 @@ namespace PDungeon
         me->GetHomePosition(hx, hy, hz, ho);
         Unit const* victim = me->GetVictim();
 
+        // The role and, for a leader, the beat's two ends as the tag carries
+        // them - GLOBAL cells, the same frame `.pdungeon v2 gen`'s block
+        // coordinates divide into and the only frame in which two patrols of
+        // one dungeon can be compared. A follower has no beat of its own, so it
+        // names the creature whose beat it is walking behind instead.
+        std::string role = "no-tag";
+        if (_mob && _mob->isPatrol)
+        {
+            role = _mob->patrolRank
+                 ? Acore::StringFormat("follower {} of guid {}", uint32(_mob->patrolRank),
+                                       _mob->patrolLeader.GetCounter())
+                 : Acore::StringFormat("leader beat ({},{})->({},{})",
+                                       _mob->patrolStartCellX, _mob->patrolStartCellY,
+                                       _mob->patrolGoalCellX, _mob->patrolGoalCellY);
+        }
+
         return Acore::StringFormat(
-            "{} entry {} guid {} | pos ({:.0f},{:.0f},{:.0f}) cell ({},{}) walkable {} "
+            "{} entry {} guid {} | {} | pos ({:.0f},{:.0f},{:.0f}) cell ({},{}) walkable {} "
             "| top {} spline {} stopped {} "
             "| following {} idx {}/{} pending {} route {} nearest {} active {} rejoin {} "
             "| home ({:.0f},{:.0f}) dist {:.0f} | victim {}",
-            me->GetName(), me->GetEntry(), me->GetGUID().GetCounter(),
+            me->GetName(), me->GetEntry(), me->GetGUID().GetCounter(), role,
             me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
             cell.x, cell.y, walkable,
             MotionName(me->GetMotionMaster()->GetCurrentMovementGeneratorType()),
@@ -1533,7 +1712,18 @@ namespace PDungeon
             // pays one branch for this and nothing else.
             if (_mob && _mob->isPatrol)
             {
-                UpdatePatrol(diff);
+                // Round D / D2: which half of a patrol this is. The two are
+                // exclusive by construction (rank 0 = the leader, the only one
+                // carrying a beat), and a follower never walks a grid route -
+                // one patrol, one planned path, however many creatures.
+                if (_mob->patrolRank)
+                {
+                    UpdateFollower(diff);
+                }
+                else
+                {
+                    UpdatePatrol(diff);
+                }
             }
             UpdateProximityAggro(diff);
             return;

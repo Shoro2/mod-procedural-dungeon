@@ -589,23 +589,71 @@ ProceduralDungeon.V2.Barrier.OrientEW = 1.5708
 
 #
 #    ProceduralDungeon.V2.Patrol.HealthMult
-#        Description: Round B (2026-09-03): the health of a segment's patrolling
-#                     creature, in percent of the trash mob it is drawn from -
-#                     applied like every other health lever in this module, on
-#                     top of the difficulty scale.
+#        Description: Round B (2026-09-03): the health of a patrolling creature,
+#                     in percent of the trash mob it is drawn from - applied
+#                     like every other health lever in this module, on top of
+#                     the difficulty scale. EVERY member of a patrol gets it,
+#                     the followers included.
 #
-#                     There is one patroller per boss segment and it walks the
-#                     corridor run between that segment's boss room and the
-#                     previous one. It is meant to be a real fight in a narrow
-#                     place, so values below 100 are refused: a patroller
-#                     softer than the pack it came from is loot walking towards
-#                     the player, not a threat.
+#                     Since Round D (2026-09-08) there is one patrol per
+#                     CORRIDOR - every corridor run between two rooms of the
+#                     chain, not one per boss segment - and it walks that
+#                     corridor doorway to doorway, never into a room. It is
+#                     meant to be a real fight in a narrow place, so values
+#                     below 100 are refused: a patrol softer than the pack it
+#                     came from is loot walking towards the player, not a
+#                     threat.
 #
 #                     Killing it moves no counter and opens no barrier.
 #        Default:     300
 #
 
 ProceduralDungeon.V2.Patrol.HealthMult = 300
+
+#
+#    ProceduralDungeon.V2.Patrol.Size2Diff
+#    ProceduralDungeon.V2.Patrol.Size3Diff
+#        Description: Round D (2026-09-08): where a patrol grows from one
+#                     creature to two and from two to three, on the run's own
+#                     1..100 difficulty dial (the same dial `.pdungeon v2 set
+#                     difficulty` moves). A run at difficulty 49 gets files of
+#                     one, at 50 files of two, at 75 files of three.
+#
+#                     The members walk in SINGLE FILE: pick 0 of the corridor's
+#                     draw leads and walks the planned beat, the others follow
+#                     it at V2.Patrol.FollowDistYd times their rank. That is
+#                     what keeps a bigger patrol from costing more paths - one
+#                     patrol is one route however many creatures it has.
+#
+#                     Read live, but read at SPAWN time: changing either key
+#                     retunes the next dungeon, not the corridor a player is
+#                     standing in. Both are clamped into 1..100 and NOT against
+#                     each other - Size3Diff at or below Size2Diff simply makes
+#                     the two-mob band empty, which is a legitimate thing to
+#                     ask for.
+#        Default:     50 / 75
+#
+
+ProceduralDungeon.V2.Patrol.Size2Diff = 50
+ProceduralDungeon.V2.Patrol.Size3Diff = 75
+
+#
+#    ProceduralDungeon.V2.Patrol.FollowDistYd
+#        Description: Round D (2026-09-08): how far behind the leader the first
+#                     follower of a patrol walks, in yards. Follower k keeps k
+#                     times this distance, so a file of three is 3.0 and 6.0 yd
+#                     long at the default.
+#
+#                     Read live and used on every follow decision, so
+#                     `.reload config` re-spaces the files of a dungeon that is
+#                     already being walked. The corridor lane is 16.67 yd wide,
+#                     so anything up to about 8 yd keeps the whole file inside
+#                     it however the corridor turns. Negative values are
+#                     refused (that would put the follower in front).
+#        Default:     3.0
+#
+
+ProceduralDungeon.V2.Patrol.FollowDistYd = 3.0
 
 #
 #    ProceduralDungeon.V2.Patrol.Debug

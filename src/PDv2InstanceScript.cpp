@@ -379,6 +379,11 @@ namespace PDungeon
             std::vector<Position> decorPositions;
             SpawnDecor(*plan, decorPositions);
             SpawnKitProps(*plan);
+            // Round D / D2. Both prop passes are in, none of the barriers is,
+            // so _decorGuids holds exactly the furniture a patrol has to walk
+            // around - and the map is wanted before SpawnPatrols, which plans
+            // each file's beat with it.
+            BuildPropCells();
             // Reads decorPositions, so it must come after SpawnDecor filled
             // it. Ambient life, same guard, own GUID list and own teardown.
             SpawnCritters(*plan, decorPositions);
@@ -1146,6 +1151,10 @@ namespace PDungeon
             }
         }
         _decorGuids.clear();
+        // Round D. The prop map DESCRIBES those objects, so it dies with them:
+        // a rebuild that kept it would cost the next layout's patrols a turn
+        // around furniture the previous dungeon owned.
+        _propCells.clear();
 
         // A death recorded against the layout being torn down has nothing left
         // to be teleported to, so it is dropped here rather than answered by
@@ -1196,10 +1205,13 @@ namespace PDungeon
                                                  uint32 baseHealthOverride)
     {
         // Exactly ON the floor plane. This used to add 0.5 yd "so a creature is
-        // not spawned inside the floor" - harmless while gravity would have
-        // settled them, but with gravity disabled that offset is a permanent
-        // hover (operator report 2026-08-06: mobs stood slightly in the air
-        // until a pull and evade walked them onto their home position).
+        // not spawned inside the floor", and the offset was a PERMANENT hover:
+        // there is no server-side gravity on this map to settle it (the
+        // paragraph below carries the core lines), so a mob spawned half a yard
+        // up stayed half a yard up until a pull and evade walked it onto its
+        // home position - operator report 2026-08-06. Round D / D3 removed the
+        // gravity flag that made the same mistake a second time; the floor
+        // plane this function is handed is the only Z a summon ever gets.
         Creature* c = instance->SummonCreature(entry, Position(x, y, z, 0.0f));
         if (!c)
         {
@@ -1268,8 +1280,16 @@ namespace PDungeon
         // part of the run's arithmetic" are copied here and nowhere else.
         tag->countsForRun = proto.countsForRun;
         tag->isPatrol = proto.isPatrol;
+        // Round D / D2: the beat's two ends on the leader, the leader on a
+        // follower. Copied unconditionally like everything else here - the
+        // caller decides which half of the pair is filled, and a mob that is
+        // not a patrol carries the zeroes the struct's own defaults gave it.
+        tag->patrolStartCellX = proto.patrolStartCellX;
+        tag->patrolStartCellY = proto.patrolStartCellY;
         tag->patrolGoalCellX = proto.patrolGoalCellX;
         tag->patrolGoalCellY = proto.patrolGoalCellY;
+        tag->patrolLeader = proto.patrolLeader;
+        tag->patrolRank = proto.patrolRank;
 
         // Before the affixes, never after: a Lil' Bro child is a TENTH of its
         // parent that a Big Boy bit then grows by half again, and reversing
@@ -2138,6 +2158,60 @@ namespace PDungeon
         }
     }
 
+    void PDv2InstanceScript::BuildPropCells()
+    {
+        _propCells.clear();
+        if (!_gridReady || _decorGuids.empty())
+        {
+            // No grid means no indexing scheme to hand the planner, and no
+            // props means an all-zero vector the planner would pay for on
+            // every step. PropCells() answers nullptr for both, which
+            // FindPatrolPath reads as "no prop costs anywhere".
+            return;
+        }
+
+        // ONE BYTE PER GRID CELL, the walk grid's own indexing. The planner
+        // reads it with the same (y * width + x) it reads `cells` with, which
+        // is why it is sized from the grid rather than from the plan.
+        _propCells.assign(_grid.cells.size(), 0);
+
+        uint32 marked = 0;
+        for (ObjectGuid const& guid : _decorGuids)
+        {
+            GameObject* go = instance->GetGameObject(guid);
+            if (!go)
+            {
+                // Summoned and already gone (a dead-end chest that was looted
+                // and deleted, a barrier this run opened on the spot). Not a
+                // finding: the object is not standing in the corridor any
+                // more, so the cell it used to hold is free.
+                continue;
+            }
+            int gcx = 0, gcy = 0;
+            WorldToCell(go->GetPositionX(), go->GetPositionY(), gcx, gcy);
+            GridPoint const cell = _grid.LocalFromGlobalCell(gcx, gcy);
+            if (!_grid.InBounds(cell.x, cell.y))
+            {
+                // A prop outside the grid's bounding box cannot be in anyone's
+                // way, and writing it would be an out-of-range store.
+                continue;
+            }
+            size_t const idx = static_cast<size_t>(cell.y) * _grid.width + cell.x;
+            if (!_propCells[idx])
+            {
+                ++marked;
+            }
+            // Not a counter: several props share a cell often enough (a torch
+            // pair, a prop on a decor spot), and the planner asks a yes/no
+            // question. One flag per cell, however many objects stand on it.
+            _propCells[idx] = 1;
+        }
+
+        LOG_DEBUG(PD_LOG, "PDv2: instance {} marked {} prop cell(s) of {} for the "
+                          "patrol planner", instance->GetInstanceId(), marked,
+                  uint32(_propCells.size()));
+    }
+
     void PDv2InstanceScript::SpawnCritters(BlockPlan const& plan,
                                             std::vector<Position> const& decorPositions)
     {
@@ -2474,75 +2548,217 @@ namespace PDungeon
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
         PDv2AccountState const account = sPDv2Mgr->GetAccountState(_accountId);
 
-        int const chainLen = ChainLength(plan);
-        int const bossRooms = std::max(1, plan.config.bossRooms);
-        double const mid = PD_BLOCK_SIZE_YD / 2.0;
-        uint32 placed = 0;
         // EnsureWalkGrid ran before this (see the run set-up), so this is the
-        // same grid the patroller's own AI will walk on - which is the point:
-        // the spawn point is vetoed by exactly the thing that has to accept it.
+        // same grid the patrol's own AI will walk on - which is the point: the
+        // beat is planned, and every spawn point vetoed, by exactly the thing
+        // that has to accept them.
         WalkGrid const* grid = GetWalkGrid();
-        for (int k = 1; k <= bossRooms; ++k)
+
+        // HOW LONG THE FILE IS, one number for the whole dungeon. The dial is
+        // frozen per run (SpawnFromPlan wrote _run.difficulty long before
+        // this), so every corridor of a run gets the same size and an operator
+        // can read the dial off any one patrol. Two live keys, two steps: 1
+        // below Size2Diff, 2 from it, 3 from Size3Diff. Size3Diff <= Size2Diff
+        // is not refused - it only makes the middle band empty, which is a
+        // legitimate thing for an operator to type.
+        int const diff = static_cast<int>(_run.difficulty);
+        int const size = 1 + (diff >= cfg.patrolSize2Diff ? 1 : 0) +
+                             (diff >= cfg.patrolSize3Diff ? 1 : 0);
+
+        // The FIRST of the two doorway cells a socket names, as a GLOBAL cell.
+        // The same translation SpawnBarriers makes - LaneCellsForSocket answers
+        // (row, col) and the cell frame's x axis is the COLUMN one - but global
+        // rather than grid-local, because that is the form the spawn tag
+        // carries and the AI reads back through LocalFromGlobalCell.
+        auto laneCell = [](PlacedBlock const& block, unsigned edge, int& gcx, int& gcy)
         {
-            // The SAME walk SpawnBarriers made, with the same argument, so the
-            // block a patroller starts on is the block its own portcullis
-            // stands next to - one run with one meaning, not two lookups that
-            // could disagree.
-            int const bossChain = BossChainIndex(chainLen, plan.config.bossRooms, k);
+            int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+            LaneCellsForSocket(edge, cells);
+            gcx = block.bx * PD_CELLS_PER_BLOCK + cells[0][1];
+            gcy = block.by * PD_CELLS_PER_BLOCK + cells[0][0];
+        };
+
+        int const chainLen = ChainLength(plan);
+        uint32 patrols = 0;
+        uint32 members = 0;
+        uint32 runs = 0;
+        // EVERY corridor between two rooms, not one per boss segment (Round D /
+        // D2). A dungeon with four chain rooms has three corridors and gets
+        // three patrols, whatever its boss count is - the operator asked for
+        // "ein pat zwischen jedem raum", and a segment boundary is not a
+        // corridor.
+        for (int i = 1; i < chainLen; ++i)
+        {
+            // THE BEAT, DERIVED FROM THE RUN AND NOTHING ELSE
+            //
+            //      room i-1 |###|###|###| room i
+            //               ^A            ^B
+            //               front     back
+            //
+            // SpineRunInto answers `run` in WALKING order (room i-1 -> room i)
+            // and `bit`, the socket on ROOM i's OWN edge that the run arrives
+            // through. So:
+            //
+            //   B (goal)  = the corridor's half of that same doorway, i.e.
+            //               LaneCellsForSocket(OppositeSocket(bit)) on
+            //               run.back() - exactly the pair SpawnBarriers seals
+            //               alongside room i's half.
+            //   A (start) = the doorway of run.front() that faces room i-1.
+            //               SpineRunInto names no socket for that end, so it is
+            //               read off the STEP between those two blocks: the run
+            //               walked from room i-1 into run.front(), so the two
+            //               are neighbours, and bx grows EAST while by grows
+            //               SOUTH (PDBlockPlan.cpp's StepFor is the same table).
+            //
+            // A one-block run has run.front() == run.back(), so A and B are
+            // that single block's two doorways - which is what design §D2.1
+            // asks for, without a special case.
             std::vector<size_t> run;
-            unsigned const entryBit = SpineRunInto(plan, bossChain, &run);
-            if (!entryBit || run.empty())
+            unsigned const bit = SpineRunInto(plan, i, &run);
+            if (!bit || run.empty())
             {
-                // Whatever costs a segment its barrier costs it its patrol too,
-                // and for the same reason: there is no single run to walk.
-                LOG_WARN(PD_LOG, "PDv2: instance {} found no single entry run into boss {} "
-                                 "(chain room {}) - segment {} gets no patrol",
-                         instance->GetInstanceId(), k, bossChain, k);
+                // Two rooms joined directly, or a join that is not one straight
+                // run. Neither is a corridor to patrol, and neither is an
+                // error: it is the same refusal SpawnBarriers makes on the same
+                // walk, for the same reason.
+                LOG_WARN(PD_LOG, "PDv2: instance {} found no single corridor run into chain "
+                                 "room {} - that corridor gets no patrol",
+                         instance->GetInstanceId(), i);
                 continue;
             }
+            if (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W)
+            {
+                // A contract check rather than a branch a plan can reach, made
+                // HERE for the reason SpawnBarriers makes it: LaneCellsForSocket
+                // and OppositeSocket read anything else as SOCKET_E, and a beat
+                // that ends on the wrong edge is a patrol walking into a wall.
+                LOG_WARN(PD_LOG, "PDv2: instance {} could not name the lane cells of socket {} "
+                                 "into chain room {} - that corridor gets no patrol",
+                         instance->GetInstanceId(), bit, i);
+                continue;
+            }
+            ++runs;
 
-            // The far end of the beat: boss k-1 for every segment but the
-            // first, whose predecessor on the chain is the entrance itself
-            // (chain index 0) - the block SegmentOf calls segment 0.
-            int const goalChain = k > 1 ? BossChainIndex(chainLen, plan.config.bossRooms, k - 1) : 0;
-            PlacedBlock const* goal = nullptr;
+            PlacedBlock const* before = nullptr;
             for (PlacedBlock const& b : plan.blocks)
             {
-                // chainIndex is -1 on everything that is not a spine room, so
-                // this can never catch a corridor, a pocket or a loop room;
-                // last match, the way SpineRunInto picks it.
-                if (b.chainIndex == goalChain)
+                // chainIndex is set on spine rooms only (pockets carry
+                // branchOf, loop rooms detourOf), so this can never catch a
+                // corridor; last match, the way SpineRunInto picks it.
+                if (b.chainIndex == i - 1)
                 {
-                    goal = &b;
+                    before = &b;
                 }
             }
-            if (!goal)
+            if (!before)
             {
-                LOG_WARN(PD_LOG, "PDv2: instance {} has no chain room {} to walk back to - "
-                                 "segment {} gets no patrol",
-                         instance->GetInstanceId(), goalChain, k);
+                LOG_WARN(PD_LOG, "PDv2: instance {} has no chain room {} to start the beat at - "
+                                 "the corridor into chain room {} gets no patrol",
+                         instance->GetInstanceId(), i - 1, i);
                 continue;
             }
 
-            // GLOBAL cells, never this grid's local ones: the AI reads the tag
-            // through LocalFromGlobalCell, and the grid origin is a property of
-            // the layout rather than of the creature that walks over it.
-            float gx = 0.0f, gy = 0.0f, gz = 0.0f;
-            sPDv2Mgr->BlockToWorld(goal->bx, goal->by, mid, mid, gx, gy, gz);
-            int goalCellX = 0, goalCellY = 0;
-            WorldToCell(gx, gy, goalCellX, goalCellY);
+            PlacedBlock const& firstBlock = plan.blocks[run.front()];
+            PlacedBlock const& lastBlock = plan.blocks[run.back()];
 
-            // One draw on the patrol's OWN stream, shaped like a single-slot
-            // room with no boss: the pick comes off the same pools, the same
-            // band and the same unlock as the dungeon's trash, because in a
-            // module with no rank and no elite pool an "elite" IS a trash mob
-            // with a bigger bar (design 2026-09-03 §B4.2).
+            // The step from run.front() to room i-1, as a socket bit. One of
+            // the four by construction (RunFromSocket walks block by block, so
+            // the two are neighbours), and the else is the contract check.
+            int const dbx = before->bx - firstBlock.bx;
+            int const dby = before->by - firstBlock.by;
+            unsigned startBit = 0;
+            if (dbx == 0 && dby == -1)
+            {
+                startBit = SOCKET_N;
+            }
+            else if (dbx == 0 && dby == 1)
+            {
+                startBit = SOCKET_S;
+            }
+            else if (dbx == -1 && dby == 0)
+            {
+                startBit = SOCKET_W;
+            }
+            else if (dbx == 1 && dby == 0)
+            {
+                startBit = SOCKET_E;
+            }
+            if (!startBit)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} found chain room {} at ({},{}) not adjacent "
+                                 "to its run's first block ({},{}) - the corridor into chain "
+                                 "room {} gets no patrol",
+                         instance->GetInstanceId(), i - 1, before->bx, before->by,
+                         firstBlock.bx, firstBlock.by, i);
+                continue;
+            }
+
+            int startCellX = 0, startCellY = 0;
+            int goalCellX = 0, goalCellY = 0;
+            laneCell(firstBlock, startBit, startCellX, startCellY);
+            laneCell(lastBlock, OppositeSocket(bit), goalCellX, goalCellY);
+
+            // THE BEAT, PLANNED ONCE HERE - and only for the file's spawn
+            // POSITIONS. The leader plans its own on its first idle tick, with
+            // the same planner over the same grid and the same prop map, so the
+            // two agree by construction instead of by carrying a route through
+            // the spawn tag; and it has to, because the veto below may have
+            // moved it off this cell.
+            //
+            // BOTH ends are snapped, and the goal end is the one that needs it:
+            // SpawnBarriers ran before this, and a boss corridor's portcullis
+            // has already taken the goal's own lane cell OUT of the grid
+            // (SetCellsWalkable(false) on both halves of that doorway). The
+            // snap answers the first walkable cell of the ring around it, which
+            // inside a sealed corridor is the lane one step back - so the beat
+            // ends AT the closed gate instead of failing to plan at all. The
+            // TAG still carries the true doorway cell, which is what lets the
+            // AI's own plan reach the doorway once the barrier falls.
+            std::vector<GridPoint> beat;
+            int spawnCellX = startCellX;
+            int spawnCellY = startCellY;
+            if (grid)
+            {
+                GridPoint const rawStart = grid->LocalFromGlobalCell(startCellX, startCellY);
+                GridPoint const rawGoal = grid->LocalFromGlobalCell(goalCellX, goalCellY);
+                GridPoint from{ 0, 0 };
+                GridPoint to{ 0, 0 };
+                if (NearestWalkable(*grid, rawStart.x, rawStart.y,
+                                    SPAWN_FALLBACK_SNAP_CELLS, from) &&
+                    NearestWalkable(*grid, rawGoal.x, rawGoal.y,
+                                    SPAWN_FALLBACK_SNAP_CELLS, to))
+                {
+                    grid->GlobalFromLocalCell(from, spawnCellX, spawnCellY);
+                    // NOT merged. MergeCollinear is for the AI, which walks
+                    // legs; this wants the CELL CHAIN, because "follower k
+                    // stands k cells behind the leader" is the formation.
+                    if (!FindPatrolPath(*grid, from, to, PropCells(), beat))
+                    {
+                        beat.clear();
+                    }
+                }
+                else
+                {
+                    LOG_WARN(PD_LOG, "PDv2: instance {} found no floor within {} cells of the "
+                                     "beat's ends for the corridor into chain room {} - its "
+                                     "patrol stands on the doorway cell unvetoed",
+                             instance->GetInstanceId(), SPAWN_FALLBACK_SNAP_CELLS, i);
+                }
+            }
+
+            // ONE DRAW PER CORRIDOR, on the patrol's OWN stream, shaped like a
+            // single room with no boss: the picks come off the same pools, the
+            // same band and the same unlock as the dungeon's trash, because in
+            // a module with no rank and no elite pool an "elite" IS a trash mob
+            // with a bigger bar (design 2026-09-03 §B4.2). `size` picks in one
+            // call rather than `size` calls, so the file's members are drawn
+            // from one stream and the seed says what the whole patrol is.
             SpawnSelectInputs in;
             RoomRequest room;
             room.roomIndex = 0;
             room.isBoss = false;
             in.rooms.push_back(room);
-            in.spawnsPerRoom = 1;
+            in.spawnsPerRoom = size;
             in.bossRoomAdds = 0;
             // Melee only. A caster plants itself at range the moment it pulls,
             // and a corridor sentry that never closes is not a patrol.
@@ -2550,133 +2766,136 @@ namespace PDungeon
             // Copied from the room draw for the SHAPE of the stream, not for
             // its result: the draw rolls `affixed` per trash pick either way,
             // and the flag is deliberately dropped below - §B4.2 gives the
-            // patroller no affix, and proto.affixMask staying 0 is what says so.
+            // patrol no affix, and proto.affixMask staying 0 is what says so.
             in.affixPct = cfg.affixPct;
             in.bandMin = account.cfgBandMin;
             in.unlockedDlvl = static_cast<int>(account.dlvl);
 
             std::vector<RoomSpawns> out;
-            uint32 entry = PLACEHOLDER_CREATURE;
             uint32 const seed = plan.effectiveSeed ^ PD_PATROL_SEED_MIX ^
-                                (static_cast<uint32>(k) * PD_SEGMENT_SEED_STEP);
-            if (sPDv2PackMgr->SelectSpawns(seed, in, out) && !out.empty() && !out[0].picks.empty())
+                                (static_cast<uint32>(i) * PD_SEGMENT_SEED_STEP);
+            std::vector<uint32> entries;
+            if (sPDv2PackMgr->SelectSpawns(seed, in, out) && !out.empty())
             {
-                entry = out[0].picks[0].entry;
-            }
-
-            // run is in walking order, so its LAST block is the corridor that
-            // touches the boss room's doorway - the same block SpawnBarriers
-            // seals the far side of.
-            PlacedBlock const& start = plan.blocks[run.back()];
-            float x = 0.0f, y = 0.0f, z = 0.0f;
-            sPDv2Mgr->BlockToWorld(start.bx, start.by, mid, mid, x, y, z);
-
-            // The block CENTRE is not one cell: mid = PD_BLOCK_SIZE_YD / 2 is
-            // exactly 4 * PD_CELL_SIZE_YD, the cell 3/4 boundary on BOTH axes,
-            // so the point sits on the corner where (3,3), (3,4), (4,3) and
-            // (4,4) meet. Which of the four WorldToCell's floor answers is
-            // decided by the float BlockToWorld narrows to, and measured over
-            // all 512x512 blocks it is a clean 25 % each (the double path,
-            // which the engine never takes, favours (4,4) at 65 %). The block
-            // itself is never in doubt - all four cells divide back to it.
-            //
-            // A corridor mask whose named cell is void seats the patroller off
-            // the grid from birth, and its first leg is then a straight line
-            // nobody checked (research A5). The same veto SpawnFromPlan's
-            // fallback takes since f92146f: if that cell is not floor, snap to
-            // the nearest walkable cell within SPAWN_FALLBACK_SNAP_CELLS and
-            // stand on its centre. With no grid, or nothing walkable that
-            // close, the block centre stands - exactly what this did before.
-            //
-            // The veto samples the ONE cell the float names, not all four the
-            // patroller's body straddles, and the kit does hold that case:
-            // the alt-1 straights 3305/3310/13305/13310 are floor on three of
-            // the four and carry their centre pillar on the fourth, so the
-            // snap below fires on about a quarter of those blocks and seats
-            // the patroller beside the pillar on the rest. Both outcomes are
-            // floor, which is why this is not a bug - but the body still
-            // overlaps the pillar cell. Widening the veto to all four is a
-            // Round-D candidate, deliberately not done here: it would change
-            // which corridors snap, and nothing measured says they should.
-            if (grid)
-            {
-                int gcx = 0, gcy = 0;
-                WorldToCell(x, y, gcx, gcy);
-                GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
-                GridPoint snapped;
-                if (!grid->At(cell.x, cell.y) &&
-                    NearestWalkable(*grid, cell.x, cell.y, SPAWN_FALLBACK_SNAP_CELLS, snapped))
+                for (SpawnPick const& pick : out[0].picks)
                 {
-                    int scx = 0, scy = 0;
-                    grid->GlobalFromLocalCell(snapped, scx, scy);
-                    double wx = 0.0, wy = 0.0;
-                    CellCentreToWorld(scx, scy, wx, wy);
-                    x = static_cast<float>(wx);
-                    y = static_cast<float>(wy);
-                    // Two cells, because they answer two different questions.
-                    // The grid-local one locates the patroller on the layout
-                    // and can be compared with a path dump; the one modulo
-                    // PD_CELLS_PER_BLOCK is the cell IN THE CHUNK, which is
-                    // what the kit's own walk mask is indexed by - the only
-                    // form in which "chunk 3305 seated it beside the pillar"
-                    // can be read off this line without the layout to hand.
-                    LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} has a void block centre - "
-                                     "segment {}'s patroller starts on cell ({}, {}) "
-                                     "instead, chunk cell ({}, {})",
-                             instance->GetInstanceId(), start.chunkId, k, snapped.x, snapped.y,
-                             scx % PD_CELLS_PER_BLOCK, scy % PD_CELLS_PER_BLOCK);
+                    entries.push_back(pick.entry);
                 }
             }
-
-            PDv2MobData proto;
-            proto.role = PACK_ROLE_MELEE;
-            // In no room and in no counter: the patrol is risk on the road, not
-            // progress (design §B4.3). PD_ROOM_NONE rather than the tag's 0
-            // default is what keeps OnMobDied from decrementing room 0.
-            proto.roomIndex = PD_ROOM_NONE;
-            proto.countsForRun = false;
-            proto.isPatrol = true;
-            proto.patrolGoalCellX = goalCellX;
-            proto.patrolGoalCellY = goalCellY;
-
-            Creature* c = SpawnTaggedMob(entry, proto, x, y, z);
-            if (!c)
+            // The same degradation the room draw and the ambush take when the
+            // pack SQL was never applied: placeholder mammoths rather than an
+            // empty corridor. It also covers a draw that came back short.
+            while (entries.size() < static_cast<size_t>(size))
             {
-                LOG_WARN(PD_LOG, "PDv2: instance {} could not summon creature {} as the "
-                                 "patroller of segment {}",
-                         instance->GetInstanceId(), entry, k);
-                continue;
+                entries.push_back(PLACEHOLDER_CREATURE);
             }
 
-            // A MULTIPLIER, which is exactly why it cannot go through
-            // baseHealthOverride: that argument is an ABSOLUTE number the
-            // caller has to know in advance (it is how a Lil' Bro child gets
-            // its tenth), and the number this one multiplies - what this run's
-            // difficulty scale already made of the template - does not exist
-            // until SummonCreature has run PDv2Scaling's OnCreatureSelectLevel
-            // (PDv2Scaling.cpp:232-263; gated on the MAP, not on the tag, so it
-            // has fired by the time SpawnTaggedMob returns). The patroller is
-            // therefore a multiple of what this run's trash actually is, never
-            // of the row.
-            //
-            // 64-bit product on purpose. The multiplier is clamped from below
-            // (>= 100) and not from above, so a conf typo of 100000 would wrap
-            // a big bar into a small one in 32 bits - the opposite of what the
-            // key is for.
-            uint64 const scaled = static_cast<uint64>(c->GetMaxHealth()) *
-                                  static_cast<uint64>(cfg.patrolHealthMultPct) / 100;
-            uint64 const capped = std::min<uint64>(
-                scaled, static_cast<uint64>(std::numeric_limits<uint32>::max()));
-            SetDungeonHealth(c, static_cast<uint32>(capped));
-            c->SetFullHealth();
-            // Out of combat it walks; JustEngagedWith puts it back on run speed
-            // the moment it pulls.
-            c->SetWalk(true);
-            ++placed;
+            ObjectGuid leaderGuid;
+            for (int k = 0; k < size; ++k)
+            {
+                // WHERE this member stands. The leader takes the beat's first
+                // cell - the vetoed doorway lane cell - and follower k the k-th
+                // cell along the beat, so the file is already strung out down
+                // the lane on the first frame of the run instead of piling up
+                // on one square and sorting itself out afterwards (design
+                // §D2.4). A beat shorter than the file - a one-block corridor,
+                // or a sealed one - clamps to its last cell, which stacks the
+                // tail for a second; MoveFollow unpicks that on the first tick.
+                int cellX = spawnCellX;
+                int cellY = spawnCellY;
+                if (grid && !beat.empty())
+                {
+                    size_t const idx = std::min(static_cast<size_t>(k), beat.size() - 1);
+                    grid->GlobalFromLocalCell(beat[idx], cellX, cellY);
+                }
+                double wx = 0.0, wy = 0.0;
+                CellCentreToWorld(cellX, cellY, wx, wy);
+
+                PDv2MobData proto;
+                proto.role = PACK_ROLE_MELEE;
+                // In no room and in no counter: a patrol is risk on the road,
+                // not progress (design §B4.3). PD_ROOM_NONE rather than the
+                // tag's 0 default is what keeps OnMobDied from decrementing
+                // room 0.
+                proto.roomIndex = PD_ROOM_NONE;
+                proto.countsForRun = false;
+                proto.isPatrol = true;
+                if (k == 0)
+                {
+                    // GLOBAL cells, never this grid's local ones: the AI reads
+                    // the tag through LocalFromGlobalCell, and the grid origin
+                    // is a property of the layout rather than of the creature
+                    // that walks over it.
+                    proto.patrolStartCellX = startCellX;
+                    proto.patrolStartCellY = startCellY;
+                    proto.patrolGoalCellX = goalCellX;
+                    proto.patrolGoalCellY = goalCellY;
+                }
+                else
+                {
+                    proto.patrolLeader = leaderGuid;
+                    proto.patrolRank = static_cast<uint8>(k);
+                }
+
+                Creature* c = SpawnTaggedMob(entries[static_cast<size_t>(k)], proto,
+                                             static_cast<float>(wx), static_cast<float>(wy),
+                                             cfg.floorZ);
+                if (!c)
+                {
+                    LOG_WARN(PD_LOG, "PDv2: instance {} could not summon creature {} as "
+                                     "member {} of the patrol in the corridor into chain "
+                                     "room {}",
+                             instance->GetInstanceId(), entries[static_cast<size_t>(k)], k, i);
+                    if (k == 0)
+                    {
+                        // No leader, no file. A follower whose tag names an
+                        // empty leader would hold its ground for the rest of
+                        // the run, which is a mob standing in a corridor for no
+                        // reason - so the corridor gets nothing instead.
+                        break;
+                    }
+                    continue;
+                }
+                if (k == 0)
+                {
+                    leaderGuid = c->GetGUID();
+                    ++patrols;
+                }
+
+                // A MULTIPLIER, which is exactly why it cannot go through
+                // baseHealthOverride: that argument is an ABSOLUTE number the
+                // caller has to know in advance (it is how a Lil' Bro child
+                // gets its tenth), and the number this one multiplies - what
+                // this run's difficulty scale already made of the template -
+                // does not exist until SummonCreature has run PDv2Scaling's
+                // OnCreatureSelectLevel (PDv2Scaling.cpp:232-263; gated on the
+                // MAP, not on the tag, so it has fired by the time
+                // SpawnTaggedMob returns). Every member of the file is
+                // therefore a multiple of what this run's trash actually is,
+                // never of the row.
+                //
+                // 64-bit product on purpose. The multiplier is clamped from
+                // below (>= 100) and not from above, so a conf typo of 100000
+                // would wrap a big bar into a small one in 32 bits - the
+                // opposite of what the key is for.
+                uint64 const scaled = static_cast<uint64>(c->GetMaxHealth()) *
+                                      static_cast<uint64>(cfg.patrolHealthMultPct) / 100;
+                uint64 const capped = std::min<uint64>(
+                    scaled, static_cast<uint64>(std::numeric_limits<uint32>::max()));
+                SetDungeonHealth(c, static_cast<uint32>(capped));
+                c->SetFullHealth();
+                // Out of combat it walks; JustEngagedWith puts it back on run
+                // speed the moment it pulls. A follower inherits this from its
+                // leader anyway (MoveFollow's inheritWalkState, default true),
+                // but it also has to be true before the first follow tick.
+                c->SetWalk(true);
+                ++members;
+            }
         }
 
-        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} patroller(s) for {} boss segment(s)",
-                 instance->GetInstanceId(), placed, uint32(bossRooms));
+        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} patrol(s), {} creature(s) for {} "
+                         "corridor run(s)",
+                 instance->GetInstanceId(), patrols, members, runs);
     }
 
     void PDv2InstanceScript::SpawnAmbushPlan(BlockPlan const& plan)

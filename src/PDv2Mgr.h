@@ -125,6 +125,23 @@ namespace PDungeon
         // on the road, it is loot walking towards the player.
         int         patrolHealthMultPct = 300;
 
+        // Round D / D2. Where the single file grows: one creature below
+        // Size2Diff, two from it, three from Size3Diff, measured against the
+        // run's frozen 1..100 difficulty. Read live like everything else here,
+        // and read at SPAWN time only - a `.reload config` retunes the next
+        // dungeon rather than adding a mob to a corridor a player is standing
+        // in. Neither is clamped against the other: Size3Diff <= Size2Diff
+        // merely makes the two-mob band empty, which is a legitimate thing for
+        // an operator to type and not a mistake to refuse.
+        int         patrolSize2Diff = 50;
+        int         patrolSize3Diff = 75;
+        // How far behind the creature in front of it a follower walks, times
+        // its rank - so the file is FollowDistYd, 2x, 3x behind the leader. A
+        // yard value rather than cells: MoveFollow is an engine call and its
+        // range is in yards, and the lane is 16.67 yd wide, so the default 3.0
+        // keeps the whole file inside it however the corridor turns.
+        float       patrolFollowDistYd = 3.0f;
+
         // Round C. The patrol diagnostics switch, and the only reason the AI
         // logs anything per leg. OFF by default and expected to stay off
         // everywhere but a run an operator is actively watching: the lines are
