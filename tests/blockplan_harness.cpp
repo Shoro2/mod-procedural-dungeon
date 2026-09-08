@@ -894,6 +894,396 @@ namespace
         }
     }
 
+    // ------------------------------------------------------------------
+    // Round D / D1 - the patrol planner, on hand-built grids.
+    //
+    // After Round C's patrol fix the operator's complaint was no longer that
+    // the patroller walked THROUGH walls - the supercover test ended that -
+    // but that it walked "in einer geraden linie durch ecken von haeusern und
+    // objekte hindurch". Both halves are outside what a cell mask can see:
+    // SimplifyGridPath's diagonal legs graze the facades that intrude up to
+    // 6.1 yd into a corridor mouth (audit 104), and nothing in the grid knows
+    // that the module itself stood a prop on a walkable cell. FindPatrolPath
+    // answers with axis-aligned legs down the middle of the lane instead, by
+    // charging for a turn, for a cell that touches a wall and for a cell a
+    // prop stands on.
+    //
+    // Hand grids rather than kit masks, for the reason CheckCornerRule gives:
+    // a rule a kit rebuild can move is not a rule. Every expected number below
+    // is derived in the comment beside it, never read off a run.
+    // ------------------------------------------------------------------
+
+    // An 8x8 hand grid from eight row strings, '#' blocked and anything else
+    // walkable, row 0 the north edge and column 0 the west edge - the
+    // orientation BuildWalkGrid lays a kit mask out in, so the picture in the
+    // source reads the way the dungeon does.
+    WalkGrid GridFromRows(char const* const* rows)
+    {
+        std::vector<uint8_t> mask(PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK, 0);
+        for (int y = 0; y < PD_CELLS_PER_BLOCK; ++y)
+        {
+            Check(std::strlen(rows[y]) == static_cast<size_t>(PD_CELLS_PER_BLOCK),
+                  "a hand grid row is not eight cells wide", 0);
+            for (int x = 0; x < PD_CELLS_PER_BLOCK; ++x)
+            {
+                mask[static_cast<size_t>(y) * PD_CELLS_PER_BLOCK + x] =
+                    rows[y][x] == '#' ? 0 : 1;
+            }
+        }
+        return GridFromMask(mask.data());
+    }
+
+    // A prop mask in FindPatrolPath's own indexing: sized like grid.cells,
+    // 1 where a prop stands.
+    std::vector<uint8_t> PropMask(WalkGrid const& grid, std::vector<GridPoint> const& props)
+    {
+        std::vector<uint8_t> mask(grid.cells.size(), 0);
+        for (GridPoint const& p : props)
+        {
+            mask[static_cast<size_t>(p.y) * grid.width + p.x] = 1;
+        }
+        return mask;
+    }
+
+    // Independent re-derivation of what a CELL path costs under PatrolCost:
+    // 10 per cell entered, +30 whenever the direction changes (the first step
+    // is free - a patroller starts with no incoming direction), +20 when the
+    // entered cell has a blocked or out-of-bounds 4-neighbour, +60 when a prop
+    // stands on it. It shares no code with FindPatrolPath's search, which is
+    // the point: the search picks a route, this says what the route costs, and
+    // the two can disagree. -1 means the path is not a chain of single
+    // 4-neighbour steps over walkable cells at all - a finding in itself, since
+    // the planner must never emit one, and the reason the operator pin below
+    // can print a cost the search never told it.
+    int PatrolCellPathCost(WalkGrid const& grid, std::vector<GridPoint> const& path,
+                           std::vector<uint8_t> const* propCells,
+                           PatrolCost const& cost = PatrolCost{})
+    {
+        if (path.empty() || !grid.At(path.front().x, path.front().y))
+        {
+            return -1;
+        }
+        int total = 0;
+        int pdx = 0, pdy = 0;
+        for (size_t i = 1; i < path.size(); ++i)
+        {
+            int const dx = path[i].x - path[i - 1].x;
+            int const dy = path[i].y - path[i - 1].y;
+            if (std::abs(dx) + std::abs(dy) != 1 || !grid.At(path[i].x, path[i].y))
+            {
+                return -1;
+            }
+            total += cost.step;
+            if (i > 1 && (dx != pdx || dy != pdy))
+            {
+                total += cost.turn;
+            }
+            if (!grid.At(path[i].x, path[i].y - 1) || !grid.At(path[i].x + 1, path[i].y) ||
+                !grid.At(path[i].x, path[i].y + 1) || !grid.At(path[i].x - 1, path[i].y))
+            {
+                total += cost.wallAdjacent;
+            }
+            size_t const at = static_cast<size_t>(path[i].y) * grid.width + path[i].x;
+            if (propCells && at < propCells->size() && (*propCells)[at] != 0)
+            {
+                total += cost.propCell;
+            }
+            pdx = dx;
+            pdy = dy;
+        }
+        return total;
+    }
+
+    // Direction changes in a cell path. Only meaningful for unit steps, and
+    // PatrolCellPathCost above is what verifies those.
+    int PatrolTurns(std::vector<GridPoint> const& path)
+    {
+        int turns = 0;
+        for (size_t i = 2; i < path.size(); ++i)
+        {
+            if (path[i].x - path[i - 1].x != path[i - 1].x - path[i - 2].x ||
+                path[i].y - path[i - 1].y != path[i - 1].y - path[i - 2].y)
+            {
+                ++turns;
+            }
+        }
+        return turns;
+    }
+
+    // The contract a patrol leg has to keep, and the whole reason D1 exists:
+    // every leg axis-aligned (dx == 0 or dy == 0 - never a diagonal that cuts
+    // a house corner) and every cell it crosses walkable. Walked cell by cell
+    // here rather than through GridLineWalkable, so an axis-aligned leg is
+    // judged without the DDA it would otherwise be judged by.
+    void CheckPatrolLegs(WalkGrid const& grid, std::vector<GridPoint> const& way,
+                         char const* whatDiagonal, char const* whatUnwalkable,
+                         uint32_t seed)
+    {
+        for (size_t i = 1; i < way.size(); ++i)
+        {
+            int const dx = way[i].x - way[i - 1].x;
+            int const dy = way[i].y - way[i - 1].y;
+            Check(dx == 0 || dy == 0, whatDiagonal, seed);
+            if (dx != 0 && dy != 0)
+            {
+                continue;   // a diagonal has no cells to walk; the Check above said so
+            }
+            int const sx = (dx > 0) - (dx < 0);
+            int const sy = (dy > 0) - (dy < 0);
+            int const steps = std::abs(dx) + std::abs(dy);
+            for (int s = 0; s <= steps; ++s)
+            {
+                Check(grid.At(way[i - 1].x + sx * s, way[i - 1].y + sy * s),
+                      whatUnwalkable, seed);
+            }
+        }
+    }
+
+    void CheckPatrolPlanner()
+    {
+        // Two lane cells wide, walls on both sides - the corridor shape the
+        // whole kit is built from. Used by cases (a), (c) and (d).
+        char const* const laneRows[PD_CELLS_PER_BLOCK] = {
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+        };
+
+        // (a) THE TURN PENALTY. From (3,0) to (4,7) every shortest route is the
+        //     same eight steps - one east, seven south, in any order - so a
+        //     uniform-cost A* may hand back a staircase, and Round B's did.
+        //     Exactly two of those routes carry ONE turn: switch column on the
+        //     first step or on the last. Every lane cell touches the wall
+        //     beside it, so the wall charge is the same 8 * 20 on all of them
+        //     and the turn count is all that is left to choose by:
+        //     8 * 10 + 30 + 8 * 20 = 270 for a one-turn route, +30 for each
+        //     further turn.
+        {
+            WalkGrid const g = GridFromRows(laneRows);
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, path),
+                  "the patrol planner found no route along an open two-cell lane", 0);
+            Check(path.size() == 9,
+                  "the patrol planner lengthened the lane beat - (3,0) to (4,7) is eight "
+                  "steps and a turn penalty must not buy detours", 0);
+            Check(PatrolTurns(path) == 1,
+                  "the patrol planner returned a zigzag down a straight lane - the turn "
+                  "penalty is not biting", 0);
+            Check(PatrolCellPathCost(g, path, nullptr) == 270,
+                  "the lane beat no longer costs 8 * 10 + 30 + 8 * 20 = 270", 0);
+
+            // The equal-length staircase it must have refused: the same eight
+            // steps, two turns, so +30 and nothing gained.
+            std::vector<GridPoint> const zigzag = {
+                { 3, 0 }, { 3, 1 }, { 3, 2 }, { 3, 3 },
+                { 4, 3 }, { 4, 4 }, { 4, 5 }, { 4, 6 }, { 4, 7 } };
+            Check(PatrolCellPathCost(g, zigzag, nullptr) == 300,
+                  "the two-turn staircase of the same length no longer costs 300 - the "
+                  "case above compares against nothing", 0);
+            Check(PatrolCellPathCost(g, path, nullptr) <
+                  PatrolCellPathCost(g, zigzag, nullptr),
+                  "the patrol planner's lane beat is not cheaper than the staircase", 0);
+
+            std::vector<GridPoint> merged = path;
+            MergeCollinear(merged);
+            Check(merged.size() == 3,
+                  "MergeCollinear left a one-turn lane beat with something other than "
+                  "start, corner and goal", 0);
+            Check(merged.front() == path.front() && merged.back() == path.back(),
+                  "MergeCollinear moved an endpoint of the lane beat", 0);
+            CheckPatrolLegs(g, merged,
+                            "a lane beat leg is diagonal",
+                            "a lane beat leg crosses an unwalkable cell", 0);
+        }
+
+        // (b) THE WALL PENALTY. A 6x6 room (x 1..6, y 1..6) with a doorway on
+        //     the west wall at (0,2) and one on the east wall at (7,4), two
+        //     cells apart. The first step has to be east into (1,2) and the
+        //     last east into (7,4), so every 9-step route is E^a S S E^b with
+        //     a >= 1 and b >= 1: two turns, and only WHERE it crosses is free.
+        //     Wall charges: the ring cells x == 1, x == 6, y == 1, y == 6 all
+        //     touch the surrounding wall - except (1,2) and (6,4), whose
+        //     outward neighbour is the doorway - and (7,4) itself, whose east
+        //     neighbour is off the grid.
+        //       a = 1: (1,3) (1,4) (7,4) charged -> 90 + 60 + 60 = 210
+        //       a = 6: (6,2) (6,3) (7,4) charged -> 210
+        //       a = 2..5: (7,4) alone charged    -> 90 + 60 + 20 = 170
+        //     So the crossing runs through the interior, four ways tied at 170
+        //     (the tie is A*'s to break); an 11-step route cannot beat it,
+        //     because two more steps cost 20 before any charge.
+        {
+            char const* const roomRows[PD_CELLS_PER_BLOCK] = {
+                "########",
+                "#......#",
+                ".......#",
+                "#......#",
+                "#.......",
+                "#......#",
+                "#......#",
+                "########",
+            };
+            WalkGrid const g = GridFromRows(roomRows);
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 0, 2 }, { 7, 4 }, nullptr, path),
+                  "the patrol planner found no way across a 6x6 room", 0);
+            Check(path.size() == 10,
+                  "the room crossing is no longer the nine steps its two doorways are "
+                  "apart", 0);
+            Check(PatrolTurns(path) == 2,
+                  "the room crossing takes more than the two turns two offset doorways "
+                  "force", 0);
+            Check(PatrolCellPathCost(g, path, nullptr) == 170,
+                  "the room crossing no longer costs 9 * 10 + 2 * 30 + 20 = 170", 0);
+
+            // The edge-hugging route the wall penalty exists to refuse: down
+            // the west wall first, then along row 4.
+            std::vector<GridPoint> const hugger = {
+                { 0, 2 }, { 1, 2 }, { 1, 3 }, { 1, 4 }, { 2, 4 },
+                { 3, 4 }, { 4, 4 }, { 5, 4 }, { 6, 4 }, { 7, 4 } };
+            Check(PatrolCellPathCost(g, hugger, nullptr) == 210,
+                  "the wall-hugging crossing of the same length no longer costs 210 - "
+                  "the case above compares against nothing", 0);
+
+            for (GridPoint const& p : path)
+            {
+                bool const ring = p.x == 1 || p.x == 6 || p.y == 1 || p.y == 6;
+                bool const forced = (p.x == 1 && p.y == 2) || (p.x == 6 && p.y == 4);
+                Check(!ring || forced,
+                      "the room crossing hugs the wall band instead of using the "
+                      "interior cells", 0);
+            }
+
+            std::vector<GridPoint> merged = path;
+            MergeCollinear(merged);
+            Check(merged.size() == 4,
+                  "MergeCollinear left the two-turn room crossing with something other "
+                  "than start, two corners and goal", 0);
+            CheckPatrolLegs(g, merged,
+                            "a room crossing leg is diagonal",
+                            "a room crossing leg crosses an unwalkable cell", 0);
+        }
+
+        // (c) THE PROP CHARGE, with a way around. The same lane, one prop on
+        //     the west lane cell at (3,4). The east-first route never touches
+        //     column 3 again and stays at 270; the route that stays west until
+        //     the last step pays the prop, 270 + 60 = 330; every two-turn route
+        //     is 300 at best. So the answer is unique, and it is the free lane.
+        {
+            WalkGrid const g = GridFromRows(laneRows);
+            std::vector<uint8_t> const props = PropMask(g, { { 3, 4 } });
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, &props, path),
+                  "the patrol planner found no route along a lane with one prop in it", 0);
+            Check(path.size() == 9,
+                  "dodging one prop cost the lane beat its length", 0);
+            Check(PatrolCellPathCost(g, path, &props) == 270,
+                  "the prop-dodging lane beat no longer costs 270 - it is paying for a "
+                  "prop or for a second turn", 0);
+            for (size_t i = 1; i < path.size(); ++i)
+            {
+                Check(path[i].x == 4,
+                      "the patrol beat walked the propped lane cell with the other lane "
+                      "cell free", 0);
+            }
+
+            std::vector<GridPoint> const throughProp = {
+                { 3, 0 }, { 3, 1 }, { 3, 2 }, { 3, 3 }, { 3, 4 },
+                { 3, 5 }, { 3, 6 }, { 3, 7 }, { 4, 7 } };
+            Check(PatrolCellPathCost(g, throughProp, &props) == 330,
+                  "the propped lane route of the same length no longer costs 330 - the "
+                  "case above compares against nothing", 0);
+        }
+
+        // (d) THE PROP CHARGE, with no way around: both lane cells of row 4
+        //     propped. A prop is a COST, not a wall, so the beat must still
+        //     exist - it simply pays 60 once, 270 + 60 = 330, and keeps its one
+        //     turn. A planner that treated a prop as blocked would answer "no
+        //     route" here and that patrol would stand still for the whole run.
+        {
+            WalkGrid const g = GridFromRows(laneRows);
+            std::vector<uint8_t> const props = PropMask(g, { { 3, 4 }, { 4, 4 } });
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, &props, path),
+                  "a lane propped across its full width became impassable - a prop is a "
+                  "cost, not a wall", 0);
+            Check(path.size() == 9,
+                  "the beat through a fully propped lane row is no longer eight steps", 0);
+            Check(PatrolTurns(path) == 1,
+                  "the beat through a fully propped lane row bought turns it cannot use", 0);
+            Check(PatrolCellPathCost(g, path, &props) == 330,
+                  "the beat through a fully propped lane row no longer costs 270 + 60", 0);
+            bool crossed = false;
+            for (GridPoint const& p : path)
+            {
+                size_t const at = static_cast<size_t>(p.y) * g.width + p.x;
+                if (at < props.size() && props[at] != 0)
+                {
+                    crossed = true;
+                }
+            }
+            Check(crossed,
+                  "the beat through a fully propped lane row crossed no prop at all - the "
+                  "case is vacuous", 0);
+        }
+    }
+
+    // MergeCollinear keeps the endpoints and every turn, and nothing else.
+    // Hand paths, so the rule is stated rather than measured.
+    void CheckMergeCollinear()
+    {
+        {
+            // Three east, two south, one east: two turns, so four waypoints.
+            std::vector<GridPoint> path = {
+                { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 4, 2 } };
+            MergeCollinear(path);
+            Check(path.size() == 4 &&
+                  path[0] == GridPoint{ 0, 0 } && path[1] == GridPoint{ 3, 0 } &&
+                  path[2] == GridPoint{ 3, 2 } && path[3] == GridPoint{ 4, 2 },
+                  "MergeCollinear dropped a turn, invented one, or moved an endpoint", 0);
+        }
+        {
+            // A straight run collapses to its two ends and no further.
+            std::vector<GridPoint> path = { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 } };
+            MergeCollinear(path);
+            Check(path.size() == 2 &&
+                  path[0] == GridPoint{ 0, 0 } && path[1] == GridPoint{ 3, 0 },
+                  "MergeCollinear did not collapse a straight run to its two ends", 0);
+        }
+        {
+            // Degenerate inputs: nothing to merge, nothing to crash on. The AI
+            // hands this function whatever the planner returned, including the
+            // single cell of a from == to beat.
+            std::vector<GridPoint> two = { { 2, 2 }, { 2, 5 } };
+            MergeCollinear(two);
+            Check(two.size() == 2, "MergeCollinear touched a two-point path", 0);
+            std::vector<GridPoint> one = { { 2, 2 } };
+            MergeCollinear(one);
+            Check(one.size() == 1 && one[0] == GridPoint{ 2, 2 },
+                  "MergeCollinear touched a one-point path", 0);
+            std::vector<GridPoint> none;
+            MergeCollinear(none);
+            Check(none.empty(), "MergeCollinear invented a waypoint out of an empty path", 0);
+        }
+        {
+            // The property behind all of it: no three consecutive waypoints of
+            // a merged path may be collinear, or something was kept that is not
+            // a turn. A zigzag - every step a turn - must therefore survive
+            // whole.
+            std::vector<GridPoint> path = {
+                { 0, 0 }, { 1, 0 }, { 1, 1 }, { 2, 1 }, { 2, 2 } };
+            std::vector<GridPoint> const before = path;
+            MergeCollinear(path);
+            Check(path.size() == before.size() &&
+                  std::equal(path.begin(), path.end(), before.begin()),
+                  "MergeCollinear merged a path that turns at every step", 0);
+        }
+    }
+
     // Forward (block-local, the spawn path) and inverse (world -> cell, the AI
     // path) must agree, or creatures would chase mirrored positions. The u/v
     // to row/col pairing below IS the axis mapping - if someone swaps it, this
@@ -4900,20 +5290,32 @@ namespace
     // the CRC. Captured by RUNNING.
     char const* const PD_OPERATOR_PLAN_PIN = "49,16,2;1081;E;2ae1a357;";
 
-    // `k:waypoints:cells;` per boss segment - the simplified waypoint count and
-    // the raw A* cell count of the beat SpawnPatrols hands segment k, planned
-    // on the grid WITH both barriers sealed, the way the engine plans it.
+    // `k:waypoints:cells:cost;` per boss segment - the merged waypoint count,
+    // the raw cell count and the PatrolCost total of the beat SpawnPatrols
+    // hands segment k, planned on the grid WITH both barriers sealed, the way
+    // the engine plans it.
     //
-    // The pin before this one was `1:13:121;2:13:138;`, measured on the OPEN
-    // grid, and adding the barriers moved it. Segment 2 is unchanged cell for
-    // cell - it never touches a sealed doorway - while segment 1's A* walks a
-    // DIFFERENT route of the same 121 cells around one, which the simplifier
-    // renders in 12 waypoints instead of 13. Same endpoints either way, cell
-    // (27,27) to cell (3,43): a 4-neighbour A* on a staircase always has an
-    // equal-length alternative, so the barrier did not lengthen the beat, it
-    // moved which staircase wins. The engine plans on the sealed grid, so the
-    // sealed numbers are the ones worth pinning. Captured by RUNNING.
-    char const* const PD_OPERATOR_PATROL_PIN = "1:12:121;2:13:138;";
+    // Two pins ago it was `1:13:121;2:13:138;` on the OPEN grid; sealing the
+    // barriers moved segment 1 to 12 waypoints over the same 121 cells (a
+    // 4-neighbour A* on a staircase always has an equal-length alternative, so
+    // the barrier did not lengthen the beat, it moved which staircase won).
+    // Round D / D1 moves it again and for a bigger reason: the beat is planned
+    // by FindPatrolPath + MergeCollinear now, not by FindGridPath +
+    // SimplifyGridPath, so the route is no longer the shortest one but the
+    // cheapest one - axis-aligned legs down the lane centre, paying for turns,
+    // for wall-adjacent cells and (in the engine, not here) for props. Both
+    // endpoints are unchanged, cell (27,27) to cell (3,43). The cost field is
+    // new with D1 and is the harness's OWN re-derivation (PatrolCellPathCost),
+    // never a number the planner reported: waypoints and cells alone cannot
+    // tell an axis-aligned beat from a diagonal one of the same length.
+    //
+    // What the measured move says: the CELL counts did not budge (121 and 138),
+    // so on this layout the cheapest beat is still one of the shortest ones -
+    // the corridors offer no detour worth paying for - while the waypoints fell
+    // from 12 to 8 and from 13 to 10. Fewer, longer, axis-aligned legs over the
+    // same ground is exactly the shape the operator asked for. Captured by
+    // RUNNING.
+    char const* const PD_OPERATOR_PATROL_PIN = "1:8:121:2900;2:10:138:3450;";
 
     // `chance50:<n>;chance100:<bx,by,seg;...>`. At the shipped default this
     // layout arms NOTHING - the two Chance(50) coins came up 70 and 94
@@ -5179,7 +5581,7 @@ namespace
                 // legitimately be beatless here.
                 Check(false, "a boss segment of the operator's layout lost its patrol beat",
                       PD_OPERATOR_SEED);
-                std::snprintf(buf, sizeof buf, "%d:0:0;", k);
+                std::snprintf(buf, sizeof buf, "%d:0:0:0;", k);
                 beats += buf;
                 continue;
             }
@@ -5214,7 +5616,7 @@ namespace
             {
                 Check(false, "the operator's patroller stands more than two cells off the "
                              "walkable surface and can never plan a beat", PD_OPERATOR_SEED);
-                std::snprintf(buf, sizeof buf, "%d:0:0;", k);
+                std::snprintf(buf, sizeof buf, "%d:0:0:0;", k);
                 beats += buf;
                 continue;
             }
@@ -5231,7 +5633,7 @@ namespace
             {
                 Check(false, "the operator's patrol goal is more than two cells off the "
                              "walkable surface", PD_OPERATOR_SEED);
-                std::snprintf(buf, sizeof buf, "%d:0:0;", k);
+                std::snprintf(buf, sizeof buf, "%d:0:0:0;", k);
                 beats += buf;
                 continue;
             }
@@ -5245,22 +5647,48 @@ namespace
             // room's unsealed exit socket. A refusal here is therefore a real
             // finding - the no-route branch (PDv2CreatureAI.cpp:363-366) would
             // leave that patroller standing still until a barrier lifts.
+            //
+            // Round D / D1: planned by the PATROL planner, because that is what
+            // the leader plans with now - FindGridPath and SimplifyGridPath
+            // stay, but for the CHASE. `propCells` is null here on purpose: the
+            // prop mask is built from the GameObjects the instance spawned, and
+            // this harness has no engine to spawn them, so the beat below is
+            // the layout's floor - the engine can only ever pay MORE for it.
             std::vector<GridPoint> path;
-            if (!FindGridPath(grid, here, goalSnapped, path))
+            if (!FindPatrolPath(grid, here, goalSnapped, nullptr, path))
             {
                 Check(false, "the operator's patrol beat has no route with the barriers sealed",
                       PD_OPERATOR_SEED);
-                std::snprintf(buf, sizeof buf, "%d:0:0;", k);
+                std::snprintf(buf, sizeof buf, "%d:0:0:0;", k);
                 beats += buf;
                 continue;
             }
             size_t const cells = path.size();
-            SimplifyGridPath(grid, path);
+            // The harness's own re-derivation, on the RAW cell chain (the only
+            // form it is defined for) and before MergeCollinear touches it -
+            // merging changes how many points describe the route, never the
+            // route, so this is the merged beat's cost as well. -1 would mean
+            // the planner emitted something that is not a chain of single
+            // 4-neighbour steps, which the Check below states outright rather
+            // than letting a negative number sail into the pin.
+            int const beatCost = PatrolCellPathCost(grid, path, nullptr);
+            Check(beatCost > 0,
+                  "the operator's patrol beat is not a chain of single 4-neighbour steps "
+                  "over walkable cells", PD_OPERATOR_SEED);
+            MergeCollinear(path);
 
-            // The point of the whole block: after Round C's supercover fix
-            // EVERY leg the patroller is handed has to stay on the mask, judged
-            // twice - by the test the engine uses and by the independent
-            // sampled reference that shares no code with it.
+            // The point of the whole block. Round C asked only that a leg stay
+            // ON the mask; D1 asks for more, because the operator's complaint
+            // was about legs that were on the mask and still cut through a
+            // house corner: every leg AXIS-ALIGNED, every cell it crosses
+            // walkable. Judged three ways - cell by cell (CheckPatrolLegs), by
+            // the supercover test the engine uses, and by the independent
+            // sampled reference that shares no code with either.
+            CheckPatrolLegs(grid, path,
+                            "a patrol leg of the operator's layout is diagonal - it can cut "
+                            "a house corner the walk mask does not know about",
+                            "a patrol leg of the operator's layout crosses an unwalkable cell",
+                            PD_OPERATOR_SEED);
             for (size_t i = 1; i < path.size(); ++i)
             {
                 Check(GridLineWalkable(grid, path[i - 1], path[i]),
@@ -5271,13 +5699,15 @@ namespace
                       "(sampled reference)", PD_OPERATOR_SEED);
             }
 
-            std::snprintf(buf, sizeof buf, "%d:%u:%u;", k,
+            std::snprintf(buf, sizeof buf, "%d:%u:%u:%d;", k,
                           static_cast<unsigned>(path.size()),
-                          static_cast<unsigned>(cells));
+                          static_cast<unsigned>(cells), beatCost);
             beats += buf;
         }
 
-        std::string const msg = "the operator's patrol beats moved: " + beats;
+        std::string const msg =
+            "the operator's patrol beats moved: " + beats + " - the pin says " +
+            PD_OPERATOR_PATROL_PIN + " (k:waypoints:cells:cost)";
         Check(beats == PD_OPERATOR_PATROL_PIN, msg.c_str(), PD_OPERATOR_SEED);
     }
 
@@ -5298,6 +5728,11 @@ namespace
         // 8x8 grids, so they hold the no-corner-cutting rule still even on a
         // box with no kit staged - which is exactly where the pin below cannot.
         CheckCornerRule();
+        // Round D / D1, and outside the mask guard for the same reason as the
+        // corner cases above: the patrol planner's turn, wall and prop rules
+        // are stated on hand grids, so they hold on a box with no kit staged.
+        CheckPatrolPlanner();
+        CheckMergeCollinear();
         if (!g_masks.empty())
         {
             // Once, not per seed: the supercover test is a property of the KIT

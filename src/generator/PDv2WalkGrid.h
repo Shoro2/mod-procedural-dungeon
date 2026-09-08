@@ -109,6 +109,77 @@ namespace PDungeon
     // instead of stepping around a staircase of 8 yd cells.
     void SimplifyGridPath(WalkGrid const& grid, std::vector<GridPoint>& path);
 
+    // ---- the patrol planner (Round D / D1) ----
+    //
+    // Why a SECOND planner beside FindGridPath: after Round C's supercover fix
+    // the patroller stopped walking through walls, and the operator's next
+    // report was that it walked "in einer geraden linie durch ecken von
+    // haeusern und objekte hindurch" - straight legs that clip a house corner
+    // and cross the module's own props. Neither of those is a wall on this
+    // grid. A kit facade intrudes up to 6.1 yd into a corridor mouth while the
+    // cell under it stays walkable, and a prop is a GameObject the walk mask
+    // has never heard of. A guard would not hug the geometry anyway - it walks
+    // down the middle of the lane and turns at the junction - so the answer is
+    // not a finer collision test but a different COST:
+    //
+    //   step         charged for every cell entered
+    //   turn         charged when the direction changes, so one long leg beats
+    //                a staircase of the same Manhattan length; the first step
+    //                is free, a patroller starts with no heading
+    //   wallAdjacent charged when the entered cell has a blocked or
+    //                out-of-bounds 4-neighbour, so the lane centre is cheaper
+    //                than the wall band a facade leans over
+    //   propCell     charged when a prop stands on the entered cell - a COST,
+    //                not a wall, so a corridor a prop fills still has a route
+    //
+    // The chase keeps FindGridPath / SimplifyGridPath / PlanApproach: cutting
+    // a corner to reach a player is fine, that is what the diagonal legs exist
+    // for. This is for the beat a patrol walks when nothing is chasing anyone.
+    struct PatrolCost
+    {
+        int step = 10;
+        int turn = 30;
+        int wallAdjacent = 20;
+        int propCell = 60;
+    };
+
+    // A* over (cell, incoming direction), not over cells alone: a turn charge
+    // is a property of HOW a cell was entered, so the direction has to be part
+    // of the state - otherwise the cheapest arrival at a cell would be settled
+    // once and then charged wrongly for everything that leaves it. Five
+    // directions per cell (none, N, E, S, W); `none` belongs to the start and
+    // is what makes its first step free.
+    //
+    // `propCells` may be null. When given it must be indexed exactly like
+    // `grid.cells` (y * width + x) and be the same size, and a non-zero byte
+    // means a prop stands on that cell; a vector of any other size is IGNORED
+    // rather than read past its end.
+    //
+    // `outPath` comes back as the cell chain including both ends, the way
+    // FindGridPath returns it: single 4-neighbour steps, so every consecutive
+    // pair is axis-aligned by construction. False when either end is
+    // unwalkable or nothing connects them - the caller must then hold, never
+    // walk the straight line.
+    //
+    // Deterministic on every compiler, like everything else under
+    // src/generator/: integer costs only, no floating point, fixed neighbour
+    // order N/E/S/W and the open queue's ties broken by state index. A patrol
+    // that took a different route each pull would look like a bug even though
+    // every route was valid.
+    bool FindPatrolPath(WalkGrid const& grid, GridPoint from, GridPoint to,
+                        std::vector<uint8_t> const* propCells,
+                        std::vector<GridPoint>& outPath,
+                        PatrolCost const& cost = PatrolCost{});
+
+    // Drops every waypoint whose neighbours continue in the same direction:
+    // the two endpoints and every turn survive, nothing else does. The patrol
+    // counterpart of SimplifyGridPath, which merges as far as a walkable
+    // straight line reaches and therefore produces diagonals. This one never
+    // moves the route - it only says the same route in fewer points - so an
+    // axis-aligned cell chain stays axis-aligned, which is the whole promise
+    // D1 makes to the creature AI.
+    void MergeCollinear(std::vector<GridPoint>& path);
+
     // Nearest walkable cell to (cx, cy) within `radius`, for snapping a position
     // that landed just off the grid. Returns false when nothing is near.
     bool NearestWalkable(WalkGrid const& grid, int cx, int cy, int radius,

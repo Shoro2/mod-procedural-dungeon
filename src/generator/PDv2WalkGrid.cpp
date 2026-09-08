@@ -291,6 +291,212 @@ namespace PDungeon
         path.swap(out);
     }
 
+    namespace
+    {
+        // The incoming direction half of a patrol state. NONE belongs to the
+        // start cell alone - it is what makes the first step free of a turn
+        // charge - and the other four are ordered exactly like the neighbour
+        // loop below, so `d + 1` names the direction a step d arrives from.
+        enum PatrolDir
+        {
+            PATROL_DIR_NONE = 0,
+            PATROL_DIR_N,
+            PATROL_DIR_E,
+            PATROL_DIR_S,
+            PATROL_DIR_W
+        };
+
+        size_t const PATROL_DIRS = 5;
+
+        struct PatrolNode
+        {
+            int f = 0;
+            int g = 0;
+            int state = 0;
+
+            // std::priority_queue is a MAX heap, so both comparisons are
+            // inverted: the cheapest f pops first and, among equal f, the
+            // lowest state index. That second half is not decoration - it is a
+            // TOTAL order over the queue, and without it the route would be
+            // decided by the heap's internal shuffling of equal elements,
+            // which is exactly the kind of thing that differs between MSVC and
+            // libstdc++ and would break the determinism contract in CLAUDE.md.
+            bool operator<(PatrolNode const& o) const
+            {
+                if (f != o.f)
+                {
+                    return f > o.f;
+                }
+                return state > o.state;
+            }
+        };
+
+        // At() answers false for out of bounds as well, which is the intent
+        // here: the edge of the grid IS a wall - there is no terrain past it
+        // on map 760, only the void.
+        bool PatrolWallAdjacent(WalkGrid const& grid, int x, int y)
+        {
+            return !grid.At(x, y - 1) || !grid.At(x + 1, y) ||
+                   !grid.At(x, y + 1) || !grid.At(x - 1, y);
+        }
+    }
+
+    bool FindPatrolPath(WalkGrid const& grid, GridPoint from, GridPoint to,
+                        std::vector<uint8_t> const* propCells,
+                        std::vector<GridPoint>& outPath, PatrolCost const& cost)
+    {
+        outPath.clear();
+        if (!grid.At(from.x, from.y) || !grid.At(to.x, to.y))
+        {
+            return false;
+        }
+        if (from == to)
+        {
+            outPath.push_back(from);
+            return true;
+        }
+
+        // A prop mask of the wrong size is dropped rather than indexed: the
+        // alternative is reading past the end of the caller's vector, and a
+        // patrol that ignores props is a cosmetic fault while that is a crash.
+        if (propCells && propCells->size() != grid.cells.size())
+        {
+            propCells = nullptr;
+        }
+
+        std::vector<int> gScore(grid.cells.size() * PATROL_DIRS, -1);
+        std::vector<int> cameFrom(grid.cells.size() * PATROL_DIRS, -1);
+        std::priority_queue<PatrolNode> open;
+
+        auto index = [&grid](int x, int y) {
+            return static_cast<size_t>(y) * grid.width + static_cast<size_t>(x);
+        };
+
+        size_t const goalCell = index(to.x, to.y);
+        size_t const startState = index(from.x, from.y) * PATROL_DIRS + PATROL_DIR_NONE;
+        gScore[startState] = 0;
+        open.push({ Manhattan(from, to) * cost.step, 0, static_cast<int>(startState) });
+
+        // Fixed neighbour order, the same one FindGridPath uses, for the same
+        // reason: two endpoints must always yield the same beat.
+        int const dx[4] = { 0, 1, 0, -1 };
+        int const dy[4] = { -1, 0, 1, 0 };
+
+        int goalState = -1;
+        while (!open.empty())
+        {
+            PatrolNode const cur = open.top();
+            open.pop();
+            size_t const curState = static_cast<size_t>(cur.state);
+            if (cur.g > gScore[curState])
+            {
+                continue;   // a cheaper way to this state turned up after it was queued
+            }
+
+            size_t const curCell = curState / PATROL_DIRS;
+            if (curCell == goalCell)
+            {
+                // The heuristic is Manhattan * step and every step costs at
+                // least step, so it never overestimates and never drops by
+                // more than one step's charge: the first state popped at the
+                // goal cell is the cheapest one there, whichever direction it
+                // arrived from.
+                goalState = cur.state;
+                break;
+            }
+
+            int const cx = static_cast<int>(curCell % grid.width);
+            int const cy = static_cast<int>(curCell / grid.width);
+            int const curDir = static_cast<int>(curState % PATROL_DIRS);
+
+            for (int d = 0; d < 4; ++d)
+            {
+                int const nx = cx + dx[d];
+                int const ny = cy + dy[d];
+                if (!grid.At(nx, ny))
+                {
+                    continue;
+                }
+
+                int const dir = d + 1;   // PATROL_DIR_N..PATROL_DIR_W, in step order
+                int add = cost.step;
+                if (curDir != PATROL_DIR_NONE && dir != curDir)
+                {
+                    add += cost.turn;
+                }
+                if (PatrolWallAdjacent(grid, nx, ny))
+                {
+                    add += cost.wallAdjacent;
+                }
+                size_t const nCell = index(nx, ny);
+                if (propCells && (*propCells)[nCell] != 0)
+                {
+                    add += cost.propCell;
+                }
+
+                size_t const nState = nCell * PATROL_DIRS + static_cast<size_t>(dir);
+                int const tentative = cur.g + add;
+                if (gScore[nState] >= 0 && gScore[nState] <= tentative)
+                {
+                    continue;
+                }
+                gScore[nState] = tentative;
+                cameFrom[nState] = cur.state;
+                open.push({ tentative + Manhattan({ nx, ny }, to) * cost.step,
+                            tentative, static_cast<int>(nState) });
+            }
+        }
+
+        if (goalState < 0)
+        {
+            return false;
+        }
+
+        for (int at = goalState; at >= 0; at = cameFrom[static_cast<size_t>(at)])
+        {
+            size_t const cell = static_cast<size_t>(at) / PATROL_DIRS;
+            outPath.push_back({ static_cast<int>(cell % grid.width),
+                                static_cast<int>(cell / grid.width) });
+            if (static_cast<size_t>(at) == startState)
+            {
+                break;
+            }
+        }
+        std::reverse(outPath.begin(), outPath.end());
+        return true;
+    }
+
+    void MergeCollinear(std::vector<GridPoint>& path)
+    {
+        if (path.size() < 3)
+        {
+            return;
+        }
+
+        std::vector<GridPoint> out;
+        out.push_back(path.front());
+        for (size_t i = 1; i + 1 < path.size(); ++i)
+        {
+            int const inX = path[i].x - path[i - 1].x;
+            int const inY = path[i].y - path[i - 1].y;
+            int const outX = path[i + 1].x - path[i].x;
+            int const outY = path[i + 1].y - path[i].y;
+            // Same heading: the cross product vanishes AND the dot product is
+            // positive. Written out rather than compared step for step so the
+            // function is idempotent - running it over an already merged list
+            // is a no-op - and so a beat that DOUBLES BACK on itself keeps its
+            // turning point, which a bare "same axis" test would swallow.
+            bool const straightOn =
+                inX * outY - inY * outX == 0 && inX * outX + inY * outY > 0;
+            if (!straightOn)
+            {
+                out.push_back(path[i]);
+            }
+        }
+        out.push_back(path.back());
+        path.swap(out);
+    }
+
     bool NearestWalkable(WalkGrid const& grid, int cx, int cy, int radius, GridPoint& out)
     {
         if (grid.At(cx, cy))
