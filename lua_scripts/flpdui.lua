@@ -11,8 +11,8 @@
 -- again - it never guesses, and there is no `or <number>` in this file.
 --
 --   server whisper  FLPDU\t<kind> <fields...>
---                   C panel state | M block map | R run tick | E completion |
---                   N one-line notice
+--                   C panel state | M block map | K cleared blocks |
+--                   R run tick | E completion | N one-line notice
 --   client whisper  FLPD\tUI <verb> [args]
 --                   HELLO | SET <key> <int> | GEN | ENTER | HUD <0|1>
 --
@@ -50,6 +50,7 @@ end
 
 local cfg = nil             -- last C payload, nil until the server has spoken
 local mapData = nil         -- last M payload
+local clearedSet = {}       -- last K payload: ["bx,by"] = true, cleared rooms
 local run = nil             -- last R payload
 local setLoop = false       -- true while widgets are written FROM a payload
 local pending = {}          -- setKey -> value waiting for the debounce
@@ -168,12 +169,42 @@ end
 local function ParseRun(body)
     local f = SplitHead(body, 10)
     if not f or not ToNumbers(f, 10) then return nil end
+
+    -- The gate fields (segPlanned segKilled segPct for the next SEALED
+    -- barrier) are read from the tail and are OPTIONAL - the one tolerance in
+    -- this file, and a narrow one: a worldserver from before C7 sends ten
+    -- fields, and the honest answer to "which gate?" is then "the server did
+    -- not say", which is what three zeros mean. It is NOT a guess about the
+    -- dungeon; the HUD prints no gate line's numbers unless the server sent
+    -- them. A short or unparsable tail is treated exactly like an absent one.
+    local segPlanned, segKilled, segPct = 0, 0, 0
+    local g = SplitHead(f.tail, 3)
+    if g and ToNumbers(g, 3) then
+        segPlanned, segKilled, segPct = g[1], g[2], g[3]
+    end
+
     return {
         elapsed = f[1], killed = f[2], total = f[3],
         bossKilled = f[4], bossTotal = f[5],
         roomsCleared = f[6], roomsTotal = f[7],
         px = f[8], py = f[9], state = f[10],
+        segPlanned = segPlanned, segKilled = segKilled, segPct = segPct,
     }
+end
+
+-- "bx,by;bx,by;..." in the SAME frame the M payload uses (the server shifts
+-- both by the plan's minBX/minBY), keyed the way BuildMap concatenates a
+-- block's own numbers so the two sides cannot disagree about "257,258".
+-- An empty body is a legal payload and means "nothing cleared yet".
+local function ParseCleared(body)
+    local set = {}
+    for bx, by in string.gmatch(body, "(%-?%d+),(%-?%d+);") do
+        local x, y = tonumber(bx), tonumber(by)
+        if x and y then
+            set[x .. "," .. y] = true
+        end
+    end
+    return set
 end
 
 local function ParseEnd(body)
@@ -452,7 +483,7 @@ local CANVAS = 160
 
 local Hud = CreateFrame("Frame", "FLPDHud", UIParent)
 Hud:SetWidth(HUD_W)
-Hud:SetHeight(240)
+Hud:SetHeight(256)             -- +16 for the gate line (2026-09-08, C7)
 Hud:SetPoint("TOP", UIParent, "TOP", 0, -35)
 Hud:SetMovable(true)
 Hud:EnableMouse(true)
@@ -481,8 +512,15 @@ local hudCounts = Hud:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 hudCounts:SetPoint("TOP", hudTimer, "BOTTOM", 0, -4)
 hudCounts:SetText("...")
 
+-- The next sealed gate's kill progress, straight off the run tick. Like every
+-- other number on this HUD it is the server's: the addon knows neither the
+-- barrier threshold nor which segment the party stands in.
+local hudGate = Hud:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+hudGate:SetPoint("TOP", hudCounts, "BOTTOM", 0, -2)
+hudGate:SetText("...")
+
 local hudSep = Hud:CreateTexture(nil, "ARTWORK")
-hudSep:SetPoint("TOP", hudCounts, "BOTTOM", 0, -5)
+hudSep:SetPoint("TOP", hudGate, "BOTTOM", 0, -5)
 hudSep:SetWidth(HUD_W - 20)
 hudSep:SetHeight(1)
 hudSep:SetTexture(0.4, 0.4, 0.6, 0.5)
@@ -498,6 +536,14 @@ local ROLE_COLOUR = {
     E = { 0.20, 0.70, 0.30 },   -- entrance: green
     B = { 0.62, 0.16, 0.16 },   -- boss room: dark red
     c = { 0.30, 0.30, 0.30 },   -- corridor: grey
+}
+
+-- The same blocks once the K payload says every mob in them is dead. Only the
+-- two roles that hold mobs have a cleared colour; the entrance is green
+-- already and a corridor has no room counter behind it.
+local CLEARED_COLOUR = {
+    R = { 0.20, 0.75, 0.30 },   -- cleared room: green
+    B = { 0.10, 0.50, 0.20 },   -- cleared boss room: darker green
 }
 
 local cells = {}
@@ -538,6 +584,13 @@ end
 -- exist. Rooms never touch each other (the planner keeps them 2 apart), so
 -- every real connection is a corridor bar reaching the room's edge.
 local function BuildMap(m)
+    -- A DIFFERENT map table is a different run, and last run's cleared blocks
+    -- would paint a brand-new dungeon green until its own K arrived. The K
+    -- handler re-runs this function with the cached table, so identity - not
+    -- content - is the test that keeps that repaint free.
+    if m ~= mapData then
+        clearedSet = {}
+    end
     mapData = m
     cellsUsed = 0
     local bw = CANVAS / m.w
@@ -571,6 +624,9 @@ local function BuildMap(m)
                 Rect(cx - bar / 2, y0, bar, bh / 2 + bar / 2, colour)
             end
         else
+            if clearedSet[b.bx .. "," .. b.by] then
+                colour = CLEARED_COLOUR[b.role] or colour
+            end
             Rect(x0 + 1, y0 + 1, bw - 2, bh - 2, colour)
         end
     end
@@ -606,6 +662,16 @@ local function RenderCounts(r, flashOn)
         "Mobs |cffffffff%d/%d|r  %s%d/%d bosses|r  |cffffffff%d/%d rooms|r",
         r.killed, r.total, bossColour, r.bossKilled, r.bossTotal,
         r.roomsCleared, r.roomsTotal))
+
+    -- segPlanned 0 is the server's "no barrier is sealed": either none is
+    -- left, or this build of the worldserver does not send the fields yet.
+    -- Both are honestly "open" from where the player stands.
+    if r.segPlanned > 0 then
+        hudGate:SetText(string.format(
+            "Gate |cffffffff%d/%d|r  (%d%%)", r.segKilled, r.segPlanned, r.segPct))
+    else
+        hudGate:SetText("Gate |cff00ff00open|r")
+    end
 end
 
 local function ApplyRun(r)
@@ -760,6 +826,13 @@ driver:SetScript("OnEvent", function(self, event, arg1, arg2)
     elseif kind == "M" then
         local m = ParseMap(body)
         if m then BuildMap(m) end
+    elseif kind == "K" then
+        -- The map's second half, and the only payload that repaints one. A K
+        -- with no map yet is stored and paints nothing; the M that follows
+        -- drops it again (see BuildMap) and brings its own K behind it, which
+        -- is the order the server sends them in.
+        clearedSet = ParseCleared(body)
+        if mapData then BuildMap(mapData) end
     elseif kind == "R" then
         local r = ParseRun(body)
         if r then ApplyRun(r) end
@@ -767,7 +840,12 @@ driver:SetScript("OnEvent", function(self, event, arg1, arg2)
         local e = ParseEnd(body)
         if e then ApplyEnd(e) end
     elseif kind == "N" then
+        -- Both frames on purpose: the raid-warning frame is the shout the
+        -- player cannot miss mid-pull, the chat line is the scrollback that
+        -- survives it. RaidNotice_AddMessage/RaidWarningFrame are stock
+        -- 3.3.5a FrameXML (RaidWarning.lua) - no library, no fallback.
         DEFAULT_CHAT_FRAME:AddMessage("|cffFFD700The Forgotten Depths:|r " .. body)
+        RaidNotice_AddMessage(RaidWarningFrame, body, ChatTypeInfo["RAID_WARNING"])
     end
 end)
 
