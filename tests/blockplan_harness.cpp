@@ -144,6 +144,20 @@ namespace
     // parsed out of the SQL the kit generator emits alongside the ADTs.
     std::map<int, std::vector<uint8_t>> g_masks;
 
+    // Round D / D2, the clearance layer that rides in the same rows: three more
+    // RLE1 byte grids per chunk, in the walk mask's own cell order. Kept in a
+    // map of its own rather than beside the mask because a chunk MAY have none
+    // - the kit task flips the staging independently of this one, and this
+    // harness has to be runnable on either side of that flip.
+    struct PatrolLayerBytes
+    {
+        std::vector<uint8_t> clear;
+        std::vector<uint8_t> du;    // still biased by +32, as the wire has it
+        std::vector<uint8_t> dv;
+    };
+
+    std::map<int, PatrolLayerBytes> g_patrol;
+
     bool LoadMasks(char const* sqlPath)
     {
         FILE* fh = std::fopen(sqlPath, "rb");
@@ -162,6 +176,14 @@ namespace
         std::fclose(fh);
 
         // Rows look like:  (2005, @KIT, 1, 'room', 5, 'RLE1:â€¦', '{â€¦}')
+        // and, since kit v26 (Round D / D2), with three more RLE1 strings
+        // between the walk mask and the anchors JSON:
+        //   (2005, @KIT, 1, 'room', 5, 'RLE1:walk', 'RLE1:clear', 'RLE1:du',
+        //    'RLE1:dv', '{â€¦}')
+        // BOTH shapes are read. The kit task flips the staging on its own
+        // schedule, so a row with a single RLE1 is not an error - it is a kit
+        // that predates the clearance layer, and the module reads exactly that
+        // case as 15/0/0 on every walkable cell.
         size_t at = 0;
         while (true)
         {
@@ -170,21 +192,51 @@ namespace
             size_t const idStart = open + 6;
             int const chunkId = std::atoi(blob.substr(idStart, 12).c_str());
 
-            size_t const rle = blob.find("'RLE1:", idStart);
-            if (rle == std::string::npos) break;
-            size_t const rleEnd = blob.find('\'', rle + 1);
-            if (rleEnd == std::string::npos) break;
+            // The row ends where the next one begins. Without that bound a row
+            // that carries no layer would borrow the NEXT row's strings and
+            // describe one chunk with another chunk's clearance.
+            size_t const nextRow = blob.find("\n    (", idStart);
+            size_t const stop = (nextRow == std::string::npos) ? blob.size() : nextRow;
 
-            std::vector<uint8_t> mask;
-            if (DecodeWalkMaskRle(blob.substr(rle + 1, rleEnd - rle - 1), mask) &&
-                mask.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK)
+            std::vector<std::vector<uint8_t>> grids;
+            size_t scan = idStart;
+            while (grids.size() < 4)
             {
-                g_masks[chunkId] = mask;
+                size_t const rle = blob.find("'RLE1:", scan);
+                if (rle == std::string::npos || rle >= stop) break;
+                size_t const rleEnd = blob.find('\'', rle + 1);
+                if (rleEnd == std::string::npos || rleEnd > stop) break;
+                std::vector<uint8_t> one;
+                if (!DecodeWalkMaskRle(blob.substr(rle + 1, rleEnd - rle - 1), one) ||
+                    one.size() != PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK)
+                {
+                    break;
+                }
+                grids.push_back(std::move(one));
+                scan = rleEnd + 1;
             }
-            at = rleEnd;
+            if (grids.empty())
+            {
+                break;      // no mask at all - the file is not the one we think
+            }
+
+            g_masks[chunkId] = grids[0];
+            // ALL THREE OR NONE, the rule PDv2Mgr::LoadChunkMeta keeps for the
+            // same reason: a clearance without its offset is a number nobody
+            // can walk to.
+            if (grids.size() == 4)
+            {
+                PatrolLayerBytes layer;
+                layer.clear = grids[1];
+                layer.du = grids[2];
+                layer.dv = grids[3];
+                g_patrol[chunkId] = layer;
+            }
+            at = stop;
         }
-        std::printf("  %u walk mask(s) from %s\n",
-                    static_cast<unsigned>(g_masks.size()), sqlPath);
+        std::printf("  %u walk mask(s), %u clearance layer(s) from %s\n",
+                    static_cast<unsigned>(g_masks.size()),
+                    static_cast<unsigned>(g_patrol.size()), sqlPath);
         return !g_masks.empty();
     }
 
@@ -192,6 +244,28 @@ namespace
     {
         auto it = g_masks.find(chunkId);
         return it == g_masks.end() ? nullptr : it->second.data();
+    }
+
+    // The harness's PatrolLayerProvider, the shape PDv2Mgr::PatrolLayersFor
+    // answers on the server: three byte pointers, or three nulls for a chunk
+    // with no layer - which BuildWalkGrid reads as "every walkable cell free".
+    PatrolLayers PatrolLayersForChunk(int chunkId)
+    {
+        auto it = g_patrol.find(chunkId);
+        if (it == g_patrol.end())
+        {
+            return PatrolLayers{};
+        }
+        return PatrolLayers{ it->second.clear.data(), it->second.du.data(),
+                             it->second.dv.data() };
+    }
+
+    // Whether the staging this run read carries the layer at all. The two
+    // clearance pins below are stated for both worlds, because the answer is a
+    // property of the kit on disk and not of this code.
+    bool KitHasPatrolLayer()
+    {
+        return !g_patrol.empty();
     }
 
     // --- kit metadata, for the surface-class oracle -------------------------
@@ -949,12 +1023,18 @@ namespace
     // 10 per cell entered, +30 whenever the direction changes (the first step
     // is free - a patroller starts with no incoming direction), +20 when the
     // entered cell has a blocked or out-of-bounds 4-neighbour, +60 when a prop
-    // stands on it. It shares no code with FindPatrolPath's search, which is
-    // the point: the search picks a route, this says what the route costs, and
-    // the two can disagree. -1 means the path is not a chain of single
-    // 4-neighbour steps over walkable cells at all - a finding in itself, since
-    // the planner must never emit one, and the reason the operator pin below
-    // can print a cost the search never told it.
+    // stands on it, and - since Round D / D2 - +8 per quarter-yard of clearance
+    // MISSING from the entered cell, which is nothing at all on a grid without
+    // the layer and on every cell the kit calls free. It shares no code with
+    // FindPatrolPath's search, which is the point: the search picks a route,
+    // this says what the route costs, and the two can disagree. -1 means the
+    // path is not a chain of single 4-neighbour steps over walkable cells at
+    // all - a finding in itself, since the planner must never emit one, and the
+    // reason the operator pin below can print a cost the search never told it.
+    //
+    // minClearQ is deliberately NOT re-derived here. It BLOCKS rather than
+    // charges, so a path that crosses a cell below it is a path the search must
+    // never have returned; pricing it would turn a finding into a number.
     int PatrolCellPathCost(WalkGrid const& grid, std::vector<GridPoint> const& path,
                            std::vector<uint8_t> const* propCells,
                            PatrolCost const& cost = PatrolCost{})
@@ -987,6 +1067,14 @@ namespace
             if (propCells && at < propCells->size() && (*propCells)[at] != 0)
             {
                 total += cost.propCell;
+            }
+            // Through the module's own accessor, so a grid with no layer and a
+            // cell off the grid answer here exactly as they answer the engine.
+            int const clear = static_cast<int>(PatrolInfoAt(grid, path[i]).clear);
+            if (clear < static_cast<int>(PD_PATROL_CLEAR_FREE))
+            {
+                total += cost.tightPerQuarter *
+                         (static_cast<int>(PD_PATROL_CLEAR_FREE) - clear);
             }
             pdx = dx;
             pdy = dy;
@@ -1035,6 +1123,39 @@ namespace
             {
                 Check(grid.At(way[i - 1].x + sx * s, way[i - 1].y + sy * s),
                       whatUnwalkable, seed);
+            }
+        }
+    }
+
+    // Gives a hand-built grid a clearance layer. `clearRows` is the same 8x8
+    // picture the mask rows are, ONE HEX DIGIT per cell (0..f quarter-yards, f
+    // = 15 = free); '#' reads as 0 so a wall row can be copied across
+    // unchanged. Offsets start at zero and the one case that cares about them
+    // writes them cell by cell - a clearance and an offset are independent
+    // measurements and the cases that test one must not be told the other.
+    void SetPatrolClear(WalkGrid& g, char const* const* clearRows)
+    {
+        g.patrolClear.assign(g.cells.size(), 0);
+        g.patrolDu.assign(g.cells.size(), 0);
+        g.patrolDv.assign(g.cells.size(), 0);
+        for (int y = 0; y < PD_CELLS_PER_BLOCK; ++y)
+        {
+            Check(std::strlen(clearRows[y]) == static_cast<size_t>(PD_CELLS_PER_BLOCK),
+                  "a hand clearance row is not eight cells wide", 0);
+            for (int x = 0; x < PD_CELLS_PER_BLOCK; ++x)
+            {
+                char const c = clearRows[y][x];
+                int v = 0;
+                if (c >= '0' && c <= '9')
+                {
+                    v = c - '0';
+                }
+                else if (c >= 'a' && c <= 'f')
+                {
+                    v = 10 + (c - 'a');
+                }
+                g.patrolClear[static_cast<size_t>(y) * g.width + x] =
+                    static_cast<uint8_t>(v);
             }
         }
     }
@@ -1230,6 +1351,191 @@ namespace
                   "the beat through a fully propped lane row crossed no prop at all - the "
                   "case is vacuous", 0);
         }
+
+        // --- Round D / D2, the clearance layer -----------------------------
+        //
+        // Everything above runs on grids with NO layer, which is the first
+        // thing D2 has to keep true: those five cases still pass, so a kit that
+        // predates the layer plans exactly the routes it planned before.
+
+        // (e) THE HARD HALF. The same lane, but the west lane cell is a house
+        //     front all the way down: clear 2 = 0.5 yd, under minClearQ's 4.
+        //     Column 3 is therefore BLOCKED for a patrol and the only route is
+        //     column 4 - which is what "the passage is not in the middle of the
+        //     lane" looks like to the planner. The start (3,0) is not judged
+        //     (the creature is already standing there), so the beat opens with
+        //     the step east that gets it out of the pinch.
+        {
+            char const* const clearRows[PD_CELLS_PER_BLOCK] = {
+                "###2f###", "###2f###", "###2f###", "###2f###",
+                "###2f###", "###2f###", "###2f###", "###2f###",
+            };
+            WalkGrid g = GridFromRows(laneRows);
+            SetPatrolClear(g, clearRows);
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, path),
+                  "the patrol planner found no route down a lane whose west cells are "
+                  "tight - the start cell must never be judged", 0);
+            Check(path.size() == 9,
+                  "avoiding the tight lane column cost the beat its length", 0);
+            for (size_t i = 1; i < path.size(); ++i)
+            {
+                Check(path[i].x == 4,
+                      "the patrol beat entered a lane cell with 0.5 yd of clearance - "
+                      "minClearQ is not blocking", 0);
+            }
+            Check(PatrolCellPathCost(g, path, nullptr) == 270,
+                  "the clear-column beat no longer costs 270 - it is paying a tight "
+                  "charge it should never have entered", 0);
+        }
+
+        // (f) THE SOFT HALF, on its own. Column 3 at clear 8 (2.0 yd) is above
+        //     minClearQ, so nothing is blocked and only the charge can decide:
+        //     8 * (15 - 8) = 56 per column-3 cell entered against 0 for column
+        //     4. The planner must still walk the wide half, and must do it
+        //     WITHOUT lengthening the beat - a cost that bought a detour would
+        //     be a cost that is too big.
+        {
+            char const* const clearRows[PD_CELLS_PER_BLOCK] = {
+                "###8f###", "###8f###", "###8f###", "###8f###",
+                "###8f###", "###8f###", "###8f###", "###8f###",
+            };
+            WalkGrid g = GridFromRows(laneRows);
+            SetPatrolClear(g, clearRows);
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, path),
+                  "the patrol planner found no route down a lane with a merely narrow "
+                  "west column", 0);
+            Check(path.size() == 9, "the narrow-column beat is no longer eight steps", 0);
+            for (size_t i = 1; i < path.size(); ++i)
+            {
+                Check(path[i].x == 4,
+                      "the patrol beat walked the narrow lane column with the wide one "
+                      "free - tightPerQuarter is not biting", 0);
+            }
+            // The route down the narrow column, which the charge has to lose
+            // to: same length, same one turn, seven cells at 56.
+            std::vector<GridPoint> const narrow = {
+                { 3, 0 }, { 3, 1 }, { 3, 2 }, { 3, 3 }, { 3, 4 },
+                { 3, 5 }, { 3, 6 }, { 3, 7 }, { 4, 7 } };
+            Check(PatrolCellPathCost(g, narrow, nullptr) == 270 + 7 * 56,
+                  "the narrow-column route of the same length no longer costs 270 + "
+                  "7 * 56 - the case above compares against nothing", 0);
+            Check(PatrolCellPathCost(g, path, nullptr) <
+                  PatrolCellPathCost(g, narrow, nullptr),
+                  "the wide-column beat is not cheaper than the narrow one", 0);
+        }
+
+        // (g) THE FALLBACK. Row 4 is pinched across its FULL width - clear 2 on
+        //     both lane cells, the city straight with two deep houses facing
+        //     each other. At the shipped minClearQ there is no beat at all, and
+        //     the planner says so rather than squeezing; the caller's second
+        //     pass at minClearQ 0 then finds one and pays 8 * 13 = 104 for the
+        //     one pinched cell it must cross. A planner that never refused
+        //     would hide the pinch; one that had no fallback would leave that
+        //     corridor's patrol standing still for the whole run.
+        {
+            char const* const clearRows[PD_CELLS_PER_BLOCK] = {
+                "###ff###", "###ff###", "###ff###", "###ff###",
+                "###22###", "###ff###", "###ff###", "###ff###",
+            };
+            WalkGrid g = GridFromRows(laneRows);
+            SetPatrolClear(g, clearRows);
+
+            std::vector<GridPoint> path;
+            Check(!FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, path),
+                  "a lane row pinched below a yard on BOTH cells still planned at the "
+                  "shipped minClearQ - the hard half is not hard", 0);
+
+            PatrolCost loose;
+            loose.minClearQ = 0;
+            std::vector<GridPoint> fallback;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, fallback, loose),
+                  "the minClearQ 0 fallback found no route down a fully pinched lane - "
+                  "that patrol would stand still for the whole run", 0);
+            Check(fallback.size() == 9,
+                  "the fallback beat through a pinched lane row is no longer eight steps", 0);
+            Check(PatrolTurns(fallback) == 1,
+                  "the fallback beat bought turns to dodge a pinch it cannot dodge", 0);
+            Check(PatrolCellPathCost(g, fallback, nullptr) == 270 + 104,
+                  "the fallback beat no longer costs 270 + 8 * 13 - it is crossing more "
+                  "than the one pinched cell", 0);
+        }
+
+        // (h) THE WAYPOINT ITSELF. PatrolPointToWorld must move the waypoint to
+        //     the cell's clear point and STILL leave it inside that cell, for
+        //     every offset the kit can publish - the extreme is +-16
+        //     quarter-yards = 4.0 yd against a half-cell of 4.17. Asserted by
+        //     round-tripping through WorldToCell rather than by re-deriving the
+        //     arithmetic, so this cannot agree with a wrong PatrolPointToWorld
+        //     by sharing its mistake. All nine offset pairs, because the two
+        //     axes attach to world x and y in opposite senses and a sign error
+        //     in one of them is invisible while both are tested together.
+        {
+            char const* const openRows[PD_CELLS_PER_BLOCK] = {
+                "........", "........", "........", "........",
+                "........", "........", "........", "........",
+            };
+            char const* const freeRows[PD_CELLS_PER_BLOCK] = {
+                "ffffffff", "ffffffff", "ffffffff", "ffffffff",
+                "ffffffff", "ffffffff", "ffffffff", "ffffffff",
+            };
+            int const offsets[3] = { -16, 0, 16 };
+            for (int du : offsets)
+            {
+                for (int dv : offsets)
+                {
+                    WalkGrid g = GridFromRows(openRows);
+                    SetPatrolClear(g, freeRows);
+                    for (size_t i = 0; i < g.cells.size(); ++i)
+                    {
+                        g.patrolDu[i] = static_cast<int8_t>(du);
+                        g.patrolDv[i] = static_cast<int8_t>(dv);
+                    }
+                    for (int y = 0; y < g.height; ++y)
+                    {
+                        for (int x = 0; x < g.width; ++x)
+                        {
+                            GridPoint const cell{ x, y };
+                            double wx = 0.0, wy = 0.0;
+                            PatrolPointToWorld(g, cell, wx, wy);
+                            int gcx = 0, gcy = 0;
+                            WorldToCell(wx, wy, gcx, gcy);
+                            int wantX = 0, wantY = 0;
+                            g.GlobalFromLocalCell(cell, wantX, wantY);
+                            Check(gcx == wantX && gcy == wantY,
+                                  "a patrol clear point left its own cell - the kit's "
+                                  "offset cap and PatrolPointToWorld disagree", 0);
+
+                            // And it really MOVED: a zero offset is the centre,
+                            // anything else is a quarter-yard off it in the
+                            // stated direction. Without this the round trip
+                            // above would pass on a PatrolPointToWorld that
+                            // ignored the layer entirely.
+                            double cx = 0.0, cy = 0.0;
+                            CellCentreToWorld(wantX, wantY, cx, cy);
+                            double const wantDx = -du * 0.25;
+                            double const wantDy = -dv * 0.25;
+                            Check(std::fabs((wx - cx) - wantDx) < 1e-9 &&
+                                  std::fabs((wy - cy) - wantDy) < 1e-9,
+                                  "PatrolPointToWorld did not shift the waypoint by the "
+                                  "stored offset", 0);
+                        }
+                    }
+                }
+            }
+
+            // A grid with NO layer answers the cell centre, which is what keeps
+            // every pre-D2 kit walking exactly where it walked before.
+            WalkGrid const bare = GridFromRows(openRows);
+            double bx = 0.0, by = 0.0, cx = 0.0, cy = 0.0;
+            PatrolPointToWorld(bare, { 5, 2 }, bx, by);
+            int wantX = 0, wantY = 0;
+            bare.GlobalFromLocalCell({ 5, 2 }, wantX, wantY);
+            CellCentreToWorld(wantX, wantY, cx, cy);
+            Check(std::fabs(bx - cx) < 1e-9 && std::fabs(by - cy) < 1e-9,
+                  "a grid without a clearance layer no longer answers the cell centre", 0);
+        }
     }
 
     // MergeCollinear keeps the endpoints and every turn, and nothing else.
@@ -1421,7 +1727,7 @@ namespace
 
         WalkGrid grid;
         std::string err;
-        if (!BuildWalkGrid(plan, MaskFor, &grid, &err))
+        if (!BuildWalkGrid(plan, MaskFor, &grid, &err, PatrolLayersForChunk))
         {
             std::printf("walk grid FAILED: %s\n", err.c_str());
             return;
@@ -2210,7 +2516,7 @@ namespace
 
             WalkGrid grid;
             std::string why;
-            if (!BuildWalkGrid(city, MaskFor, &grid, &why))
+            if (!BuildWalkGrid(city, MaskFor, &grid, &why, PatrolLayersForChunk))
             {
                 Check(false, "theme-2 walk grid failed to build", seed);
                 continue;
@@ -5290,32 +5596,180 @@ namespace
     // the CRC. Captured by RUNNING.
     char const* const PD_OPERATOR_PLAN_PIN = "49,16,2;1081;E;2ae1a357;";
 
-    // `k:waypoints:cells:cost;` per boss segment - the merged waypoint count,
-    // the raw cell count and the PatrolCost total of the beat SpawnPatrols
-    // hands segment k, planned on the grid WITH both barriers sealed, the way
-    // the engine plans it.
+    // `i:waypoints:cells:cost:offsetSum;` per CORRIDOR of the chain - the
+    // merged waypoint count, the raw cell count, the PatrolCost total and the
+    // sum of |du| + |dv| over the beat SpawnPatrols hands the corridor into
+    // chain room i, planned on the grid WITH every barrier sealed, the way the
+    // engine plans it.
     //
-    // Two pins ago it was `1:13:121;2:13:138;` on the OPEN grid; sealing the
-    // barriers moved segment 1 to 12 waypoints over the same 121 cells (a
-    // 4-neighbour A* on a staircase always has an equal-length alternative, so
-    // the barrier did not lengthen the beat, it moved which staircase won).
-    // Round D / D1 moves it again and for a bigger reason: the beat is planned
-    // by FindPatrolPath + MergeCollinear now, not by FindGridPath +
-    // SimplifyGridPath, so the route is no longer the shortest one but the
-    // cheapest one - axis-aligned legs down the lane centre, paying for turns,
-    // for wall-adjacent cells and (in the engine, not here) for props. Both
-    // endpoints are unchanged, cell (27,27) to cell (3,43). The cost field is
-    // new with D1 and is the harness's OWN re-derivation (PatrolCellPathCost),
-    // never a number the planner reported: waypoints and cells alone cannot
-    // tell an axis-aligned beat from a diagonal one of the same length.
+    // Round D / D2 changed BOTH halves of this pin.
     //
-    // What the measured move says: the CELL counts did not budge (121 and 138),
-    // so on this layout the cheapest beat is still one of the shortest ones -
-    // the corridors offer no detour worth paying for - while the waypoints fell
-    // from 12 to 8 and from 13 to 10. Fewer, longer, axis-aligned legs over the
-    // same ground is exactly the shape the operator asked for. Captured by
-    // RUNNING.
-    char const* const PD_OPERATOR_PATROL_PIN = "1:8:121:2900;2:10:138:3450;";
+    // The DERIVATION is now doorway to doorway over every corridor of the
+    // chain. Task 3 review I2: this block still built Round B's beat - block
+    // centre of the run's last corridor to the block centre of the previous
+    // boss ROOM, one per boss SEGMENT - which ends inside a room and which the
+    // engine has not planned since D2. The pin passed and pinned nothing the
+    // server does; a pin that cannot fail is worse than no pin, because it
+    // reads as coverage.
+    //
+    // The fifth FIELD is the clearance layer's own measurement: how far off the
+    // cell centres the beat walks, in quarter-yards, summed over the raw cell
+    // chain. 0 means the beat walks centres - which is what a kit without the
+    // layer publishes and what this module did before D2.
+    //
+    // Why TWO strings. Whether the staged kit carries the layer is a property
+    // of the kit on disk, and the kit half of D2 flips the staging on its own
+    // schedule; this harness has to be green on either side of that flip. The
+    // no-layer pin is the beat over a pre-D2 kit, the layered pin the beat over
+    // kit v38. Both captured by RUNNING - the layered one against the kit v26
+    // SQL that script 48 generated for this round, which is the same data the
+    // flip puts into the staging.
+    //
+    // The D1 pin this replaces was `1:8:121:2900;2:10:138:3450;` over boss
+    // segments, for the record.
+    char const* const PD_OPERATOR_PATROL_PIN_NOLAYER =
+        "1:2:24:610:0;2:2:8:210:0;3:2:8:210:0;4:2:8:170:0;5:3:16:460:0;"
+        "6:3:15:390:0;7:2:24:570:0;8:2:8:170:0;9:2:16:410:0;10:2:16:410:0;"
+        "11:2:16:370:0;12:3:14:400:0;";
+    char const* const PD_OPERATOR_PATROL_PIN =
+        "1:2:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:2:8:250:62;"
+        "5:4:16:1458:278;6:3:15:950:142;7:2:24:1282:296;8:2:8:250:62;"
+        "9:2:16:1082:204;10:2:16:1154:204;11:2:16:482:124;12:3:14:1368:214;";
+
+    // PD_PATROL_CLEAR_PIN: the distribution of `patrolClear` over every
+    // WALKABLE cell of every chunk of the staged kit, 16 buckets, printed as
+    // `b0:b1:...:b15;`. Non-walkable cells are left out on purpose - the kit
+    // publishes 0 for them and they would bury the shape of the thing being
+    // measured under one enormous bucket 0.
+    //
+    // This is the pin that says the layer is REAL: a kit with no layer puts
+    // every walkable cell in bucket 15 (the module reads an absent layer as
+    // "free"), so the no-layer string is a single number and the layered string
+    // is the actual spread of the city theme's passages. Both captured by
+    // RUNNING, the layered one over the kit v26 SQL script 48 generated for
+    // this round.
+    char const* const PD_PATROL_CLEAR_PIN_NOLAYER = "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:8410:;";
+    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:350:75:632:61:6955:;";
+
+    // The histogram itself, over g_masks and g_patrol rather than over a built
+    // grid: this is a statement about the KIT, and a grid only ever holds the
+    // blocks one layout happened to place.
+    std::string PatrolClearHistogram()
+    {
+        unsigned bucket[16] = { 0 };
+        for (auto const& kv : g_masks)
+        {
+            auto const layer = g_patrol.find(kv.first);
+            for (size_t c = 0; c < kv.second.size(); ++c)
+            {
+                if (!kv.second[c])
+                {
+                    continue;       // not floor - the kit publishes 0/32/32
+                }
+                unsigned v = PD_PATROL_CLEAR_FREE;
+                if (layer != g_patrol.end() && c < layer->second.clear.size())
+                {
+                    v = layer->second.clear[c];
+                }
+                if (v > PD_PATROL_CLEAR_FREE)
+                {
+                    v = PD_PATROL_CLEAR_FREE;   // the module clamps too
+                }
+                ++bucket[v];
+            }
+        }
+        std::string out;
+        char buf[32];
+        for (unsigned b : bucket)
+        {
+            std::snprintf(buf, sizeof buf, "%u:", b);
+            out += buf;
+        }
+        out += ";";
+        return out;
+    }
+
+    void RunPatrolClearanceChecks()
+    {
+        if (g_masks.empty())
+        {
+            return;     // the honest skip every kit-wide check in this file makes
+        }
+
+        std::string const got = PatrolClearHistogram();
+        std::printf("  patrol clearance: %s over %u chunk(s), %u with a layer\n",
+                    got.c_str(), static_cast<unsigned>(g_masks.size()),
+                    static_cast<unsigned>(g_patrol.size()));
+
+        char const* const want =
+            KitHasPatrolLayer() ? PD_PATROL_CLEAR_PIN : PD_PATROL_CLEAR_PIN_NOLAYER;
+        std::string const msg = "the kit's patrol clearance histogram moved: " + got +
+                                " - the pin says " + want;
+        Check(got == want, msg.c_str(), 0);
+
+        if (!KitHasPatrolLayer())
+        {
+            return;
+        }
+
+        // With a layer present the shape has to be a shape. Theme 2 stands a
+        // house on both flanks of every lane, so a kit whose every walkable
+        // cell came out free would mean the sampler never saw a facade - the
+        // exact failure the kit task is asked to STOP on, restated here so the
+        // module side cannot ship a layer it silently reads as nothing.
+        size_t tight = 0;
+        size_t below = 0;
+        for (auto const& kv : g_patrol)
+        {
+            auto const mask = g_masks.find(kv.first);
+            if (mask == g_masks.end())
+            {
+                continue;
+            }
+            for (size_t c = 0; c < mask->second.size(); ++c)
+            {
+                if (!mask->second[c] || c >= kv.second.clear.size())
+                {
+                    continue;
+                }
+                if (kv.second.clear[c] < PD_PATROL_CLEAR_FREE)
+                {
+                    ++tight;
+                }
+                if (kv.second.clear[c] < PatrolCost{}.minClearQ)
+                {
+                    ++below;
+                }
+            }
+        }
+        Check(tight > 0,
+              "the staged kit publishes a clearance layer in which no walkable cell is "
+              "anything but free - the sampler saw no facade at all", 0);
+        std::printf("  patrol clearance: %u walkable cell(s) below free, %u below "
+                    "minClearQ\n", static_cast<unsigned>(tight),
+                    static_cast<unsigned>(below));
+
+        // Every chunk that publishes a layer publishes all three grids of it,
+        // and every offset is inside the +-16 quarter-yard cap the kit promises
+        // and PatrolPointToWorld relies on to keep a waypoint in its own cell.
+        for (auto const& kv : g_patrol)
+        {
+            Check(kv.second.clear.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK &&
+                  kv.second.du.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK &&
+                  kv.second.dv.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK,
+                  "a chunk's patrol clearance layer is not three 64-cell grids",
+                  static_cast<uint32_t>(kv.first));
+            for (size_t c = 0; c < kv.second.du.size(); ++c)
+            {
+                int const du = static_cast<int>(kv.second.du[c]) - 32;
+                int const dv = static_cast<int>(kv.second.dv[c]) - 32;
+                Check(du >= -16 && du <= 16 && dv >= -16 && dv <= 16,
+                      "a kit clear point sits more than 4 yd off its cell centre - it "
+                      "would leave the cell it belongs to",
+                      static_cast<uint32_t>(kv.first));
+            }
+        }
+    }
 
     // `chance50:<n>;chance100:<bx,by,seg;...>`. At the shipped default this
     // layout arms NOTHING - the two Chance(50) coins came up 70 and 94
@@ -5448,7 +5902,7 @@ namespace
 
         WalkGrid grid;
         std::string gridErr;
-        if (!BuildWalkGrid(plan, MaskFor, &grid, &gridErr))
+        if (!BuildWalkGrid(plan, MaskFor, &grid, &gridErr, PatrolLayersForChunk))
         {
             Check(false, gridErr.empty() ? "the operator's layout has no walk grid"
                                          : gridErr.c_str(), PD_OPERATOR_SEED);
@@ -5459,7 +5913,6 @@ namespace
         // PDv2InstanceScript.cpp:91 (SPAWN_FALLBACK_SNAP_CELLS) are the same 2
         // for the same reason; the beat below walks through both of them.
         int const snapCells = 2;
-        double const mid = PD_BLOCK_SIZE_YD / 2.0;
         int const chainLen = ChainLength(plan);
         int const bossRooms = std::max(1, plan.config.bossRooms);
         std::string beats;
@@ -5550,118 +6003,146 @@ namespace
                   PD_OPERATOR_SEED);
         }
 
-        for (int k = 1; k <= bossRooms; ++k)
+        // Round D / D2 re-derives this block DOORWAY TO DOORWAY, exactly the
+        // way SpawnPatrols derives it now (Task 3 review I2). Until this edit
+        // the beats here were still Round B's - block centre of the run's last
+        // corridor to the block centre of the previous boss ROOM, a beat that
+        // ends INSIDE a room, which design D2.1 forbids and which the engine
+        // has not planned since D2. The pin passed and pinned nothing the
+        // server does.
+        //
+        // One beat per CORRIDOR now, i = 1..chainLen-1, and both ends are
+        // doorway LANE cells rather than block centres:
+        //
+        //   goal  = LaneCellsForSocket(OppositeSocket(bit)) on run.back(), the
+        //           corridor's half of the doorway into chain room i - the very
+        //           pair SpawnBarriers seals alongside the room's half
+        //   start = the doorway of run.front() that faces room i-1, read off
+        //           the block STEP between those two, because SpineRunInto
+        //           names a socket for the other end only
+        auto laneCell = [](PlacedBlock const& block, unsigned edge, int& gcx, int& gcy)
         {
-            char buf[64];
+            int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+            LaneCellsForSocket(edge, cells);
+            gcx = block.bx * PD_CELLS_PER_BLOCK + cells[0][1];
+            gcy = block.by * PD_CELLS_PER_BLOCK + cells[0][0];
+        };
 
-            // SpawnPatrols' own derivation, line for line
-            // (PDv2InstanceScript.cpp:2038-2072): the beat runs from the LAST
-            // corridor of the spine run into boss k - the block its portcullis
-            // stands next to - back to chain room k-1, which for the first
-            // segment is the entrance (chain index 0).
-            int const bossChain = BossChainIndex(chainLen, plan.config.bossRooms, k);
+        int corridors = 0;
+        int fellBack = 0;
+        for (int i = 1; i < chainLen; ++i)
+        {
+            char buf[80];
+
             std::vector<size_t> run;
-            unsigned const entryBit = SpineRunInto(plan, bossChain, &run);
-            int const goalChain =
-                k > 1 ? BossChainIndex(chainLen, plan.config.bossRooms, k - 1) : 0;
-            PlacedBlock const* goal = nullptr;
+            unsigned const bit = SpineRunInto(plan, i, &run);
+            if (!bit || run.empty() ||
+                (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W))
+            {
+                // The engine skips this corridor too, with a LOG_WARN: two
+                // rooms joined directly, or a join that is not one straight
+                // run. Not a failure here either - but the pin below names
+                // every corridor that DID produce a beat, so a corridor that
+                // silently stops producing one still moves the pin.
+                continue;
+            }
+
+            PlacedBlock const* before = nullptr;
             for (PlacedBlock const& b : plan.blocks)
             {
                 // Last match, the way SpineRunInto picks it; chainIndex is -1
                 // on everything that is not a spine room.
-                if (b.chainIndex == goalChain)
+                if (b.chainIndex == i - 1)
                 {
-                    goal = &b;
+                    before = &b;
                 }
             }
-            if (!entryBit || run.empty() || !goal)
+            if (!before)
             {
-                // The worldserver placed two patrollers on this layout
-                // (Server_2026-09-08_09_49_57.log:1008), so neither segment can
-                // legitimately be beatless here.
-                Check(false, "a boss segment of the operator's layout lost its patrol beat",
-                      PD_OPERATOR_SEED);
-                std::snprintf(buf, sizeof buf, "%d:0:0:0;", k);
+                Check(false, "a corridor of the operator's layout has no chain room in "
+                             "front of it to start its beat at", PD_OPERATOR_SEED);
+                continue;
+            }
+
+            PlacedBlock const& firstBlock = plan.blocks[run.front()];
+            PlacedBlock const& lastBlock = plan.blocks[run.back()];
+
+            // bx grows EAST, by grows SOUTH - the same table PDBlockPlan's
+            // StepFor uses, and the same one SpawnPatrols re-types.
+            int const dbx = before->bx - firstBlock.bx;
+            int const dby = before->by - firstBlock.by;
+            unsigned startBit = 0;
+            if (dbx == 0 && dby == -1)
+            {
+                startBit = SOCKET_N;
+            }
+            else if (dbx == 0 && dby == 1)
+            {
+                startBit = SOCKET_S;
+            }
+            else if (dbx == -1 && dby == 0)
+            {
+                startBit = SOCKET_W;
+            }
+            else if (dbx == 1 && dby == 0)
+            {
+                startBit = SOCKET_E;
+            }
+            Check(startBit != 0,
+                  "a corridor of the operator's layout is not adjacent to the chain room "
+                  "in front of it - its beat has no start doorway", PD_OPERATOR_SEED);
+            if (!startBit)
+            {
+                continue;
+            }
+            ++corridors;
+
+            int startCellX = 0, startCellY = 0;
+            int goalCellX = 0, goalCellY = 0;
+            laneCell(firstBlock, startBit, startCellX, startCellY);
+            laneCell(lastBlock, OppositeSocket(bit), goalCellX, goalCellY);
+
+            // BOTH ends snapped, the way SpawnPatrols snaps them - and the goal
+            // end is the one that needs it: the barriers above have already
+            // taken a boss corridor's goal lane cell out of the grid, so the
+            // snap ends that beat one cell short of the closed gate instead of
+            // failing to plan at all.
+            GridPoint const rawStart = grid.LocalFromGlobalCell(startCellX, startCellY);
+            GridPoint const rawGoal = grid.LocalFromGlobalCell(goalCellX, goalCellY);
+            GridPoint from{ 0, 0 };
+            GridPoint to{ 0, 0 };
+            if (!NearestWalkable(grid, rawStart.x, rawStart.y, snapCells, from) ||
+                !NearestWalkable(grid, rawGoal.x, rawGoal.y, snapCells, to))
+            {
+                Check(false, "a doorway end of an operator corridor beat is more than two "
+                             "cells off the walkable surface", PD_OPERATOR_SEED);
+                std::snprintf(buf, sizeof buf, "%d:0:0:0:0;", i);
                 beats += buf;
                 continue;
             }
 
-            // float, not double, on purpose: BlockToWorld narrows to float
-            // (PDv2Mgr.cpp:465-475) and the block centre sits EXACTLY on the
-            // boundary between cell 3 and cell 4 (mid = BLOCK/2 = 4 * CELL), so
-            // which cell WorldToCell's floor answers is decided by that
-            // narrowing. Computing it in double here would pin a cell the
-            // engine never uses.
-            PlacedBlock const& start = plan.blocks[run.back()];
-            double sxd = 0.0, syd = 0.0;
-            BlockLocalToWorld(start.bx, start.by, mid, mid, sxd, syd);
-            int scx = 0, scy = 0;
-            WorldToCell(static_cast<float>(sxd), static_cast<float>(syd), scx, scy);
-            GridPoint startCell = grid.LocalFromGlobalCell(scx, scy);
-
-            // The spawn-side veto (PDv2InstanceScript.cpp:2148-2164): a corridor
-            // whose centre cell is void seats the patroller on the nearest
-            // walkable cell's CENTRE instead, and the AI then re-derives its
-            // cell from that position - which lands back on the same cell.
-            GridPoint snapped;
-            if (!grid.At(startCell.x, startCell.y) &&
-                NearestWalkable(grid, startCell.x, startCell.y, snapCells, snapped))
-            {
-                startCell = snapped;
-            }
-
-            // The AI's own snap of where it stands (PDv2CreatureAI.cpp:340-346).
-            GridPoint here;
-            if (!NearestWalkable(grid, startCell.x, startCell.y, snapCells, here))
-            {
-                Check(false, "the operator's patroller stands more than two cells off the "
-                             "walkable surface and can never plan a beat", PD_OPERATOR_SEED);
-                std::snprintf(buf, sizeof buf, "%d:0:0:0;", k);
-                beats += buf;
-                continue;
-            }
-
-            // The goal is stored as a GLOBAL cell at spawn time and snapped by
-            // the AI, never at spawn (PDv2CreatureAI.cpp:355-361).
-            double gxd = 0.0, gyd = 0.0;
-            BlockLocalToWorld(goal->bx, goal->by, mid, mid, gxd, gyd);
-            int gcx = 0, gcy = 0;
-            WorldToCell(static_cast<float>(gxd), static_cast<float>(gyd), gcx, gcy);
-            GridPoint const goalCell = grid.LocalFromGlobalCell(gcx, gcy);
-            GridPoint goalSnapped;
-            if (!NearestWalkable(grid, goalCell.x, goalCell.y, snapCells, goalSnapped))
-            {
-                Check(false, "the operator's patrol goal is more than two cells off the "
-                             "walkable surface", PD_OPERATOR_SEED);
-                std::snprintf(buf, sizeof buf, "%d:0:0:0;", k);
-                beats += buf;
-                continue;
-            }
-
-            // On the SEALED layout - both barriers are already down above, the
-            // way they are when SpawnPatrols runs. Both segments still have a
-            // route, and that is a fact rather than a hope: a barrier seals the
-            // ENTRY doorway of its boss room, segment 1 walks AWAY from boss 1
-            // towards the entrance, and segment 2 walks from the corridor in
-            // front of boss 2 to boss room 1, which it reaches through that
-            // room's unsealed exit socket. A refusal here is therefore a real
-            // finding - the no-route branch (PDv2CreatureAI.cpp:363-366) would
-            // leave that patroller standing still until a barrier lifts.
-            //
-            // Round D / D1: planned by the PATROL planner, because that is what
-            // the leader plans with now - FindGridPath and SimplifyGridPath
-            // stay, but for the CHASE. `propCells` is null here on purpose: the
-            // prop mask is built from the GameObjects the instance spawned, and
-            // this harness has no engine to spawn them, so the beat below is
-            // the layout's floor - the engine can only ever pay MORE for it.
+            // THE ENGINE'S TWO PASSES, in the engine's order: the shipped
+            // PatrolCost first, then minClearQ 0. `propCells` is null on
+            // purpose - the prop mask is built from the GameObjects the
+            // instance spawned and this harness has no engine to spawn them, so
+            // the beat below is the layout's floor and the engine can only ever
+            // pay MORE for it.
             std::vector<GridPoint> path;
-            if (!FindPatrolPath(grid, here, goalSnapped, nullptr, path))
+            if (!FindPatrolPath(grid, from, to, nullptr, path))
             {
-                Check(false, "the operator's patrol beat has no route with the barriers sealed",
-                      PD_OPERATOR_SEED);
-                std::snprintf(buf, sizeof buf, "%d:0:0:0;", k);
-                beats += buf;
-                continue;
+                PatrolCost loose;
+                loose.minClearQ = 0;
+                bool const ok = FindPatrolPath(grid, from, to, nullptr, path, loose);
+                Check(ok, "an operator corridor beat has no route at all, even with the "
+                          "clearance floor dropped - that patrol would stand still for "
+                          "the whole run", PD_OPERATOR_SEED);
+                if (!ok)
+                {
+                    std::snprintf(buf, sizeof buf, "%d:0:0:0:0;", i);
+                    beats += buf;
+                    continue;
+                }
+                ++fellBack;
             }
             size_t const cells = path.size();
             // The harness's own re-derivation, on the RAW cell chain (the only
@@ -5673,8 +6154,23 @@ namespace
             // than letting a negative number sail into the pin.
             int const beatCost = PatrolCellPathCost(grid, path, nullptr);
             Check(beatCost > 0,
-                  "the operator's patrol beat is not a chain of single 4-neighbour steps "
+                  "an operator corridor beat is not a chain of single 4-neighbour steps "
                   "over walkable cells", PD_OPERATOR_SEED);
+
+            // The fifth field, new with D2: how far off the cell CENTRES this
+            // beat actually walks, summed over every cell of the raw chain in
+            // quarter-yards. 0 means the kit published no clearance layer (or a
+            // perfectly centred one); a large number is the measurement that
+            // makes this round's claim - the passage really is off-centre and
+            // the waypoints really do follow it.
+            int offsetSum = 0;
+            for (GridPoint const& p : path)
+            {
+                PatrolCellInfo const info = PatrolInfoAt(grid, p);
+                offsetSum += std::abs(static_cast<int>(info.du)) +
+                             std::abs(static_cast<int>(info.dv));
+            }
+
             MergeCollinear(path);
 
             // The point of the whole block. Round C asked only that a leg stay
@@ -5689,26 +6185,45 @@ namespace
                             "a house corner the walk mask does not know about",
                             "a patrol leg of the operator's layout crosses an unwalkable cell",
                             PD_OPERATOR_SEED);
-            for (size_t i = 1; i < path.size(); ++i)
+            for (size_t w = 1; w < path.size(); ++w)
             {
-                Check(GridLineWalkable(grid, path[i - 1], path[i]),
+                Check(GridLineWalkable(grid, path[w - 1], path[w]),
                       "a patrol leg of the operator's layout crosses an unwalkable cell",
                       PD_OPERATOR_SEED);
-                Check(SampledLineWalkable(grid, path[i - 1], path[i]),
+                Check(SampledLineWalkable(grid, path[w - 1], path[w]),
                       "a patrol leg of the operator's layout leaves the walk mask "
                       "(sampled reference)", PD_OPERATOR_SEED);
             }
 
-            std::snprintf(buf, sizeof buf, "%d:%u:%u:%d;", k,
+            std::snprintf(buf, sizeof buf, "%d:%u:%u:%d:%d;", i,
                           static_cast<unsigned>(path.size()),
-                          static_cast<unsigned>(cells), beatCost);
+                          static_cast<unsigned>(cells), beatCost, offsetSum);
             beats += buf;
         }
 
+        Check(corridors > 0,
+              "the operator's layout produced no corridor beat at all - the worldserver "
+              "placed patrols on it, so this derivation has lost the run",
+              PD_OPERATOR_SEED);
+        if (fellBack)
+        {
+            std::printf("  operator layout: %d corridor beat(s) needed the minClearQ 0 "
+                        "fallback\n", fellBack);
+        }
+
+        // TWO PINS, one per world, because whether the staged kit carries the
+        // clearance layer is a property of the kit on disk and not of this
+        // code: the module task and the kit task land independently, and this
+        // harness has to be green on either side of the staging flip. The
+        // no-layer pin is what a kit that predates D2 plans (offsetSum 0
+        // throughout, and D1's costs); the layered pin is what the v38 kit
+        // plans. Both captured by RUNNING.
+        char const* const want =
+            KitHasPatrolLayer() ? PD_OPERATOR_PATROL_PIN : PD_OPERATOR_PATROL_PIN_NOLAYER;
         std::string const msg =
-            "the operator's patrol beats moved: " + beats + " - the pin says " +
-            PD_OPERATOR_PATROL_PIN + " (k:waypoints:cells:cost)";
-        Check(beats == PD_OPERATOR_PATROL_PIN, msg.c_str(), PD_OPERATOR_SEED);
+            "the operator's patrol beats moved: " + beats + " - the pin says " + want +
+            " (i:waypoints:cells:cost:offsetSum, doorway to doorway)";
+        Check(beats == want, msg.c_str(), PD_OPERATOR_SEED);
     }
 
     int RunBatch(int count, int rooms)
@@ -5733,6 +6248,10 @@ namespace
         // are stated on hand grids, so they hold on a box with no kit staged.
         CheckPatrolPlanner();
         CheckMergeCollinear();
+        // Round D / D2. It carries a mask guard of its OWN, because the
+        // clearance histogram is a statement about the staged kit: with no
+        // kit on disk it skips rather than pinning an empty one.
+        RunPatrolClearanceChecks();
         if (!g_masks.empty())
         {
             // Once, not per seed: the supercover test is a property of the KIT
@@ -5991,7 +6510,7 @@ namespace
             {
                 WalkGrid grid;
                 std::string gridErr;
-                if (!BuildWalkGrid(plan, MaskFor, &grid, &gridErr))
+                if (!BuildWalkGrid(plan, MaskFor, &grid, &gridErr, PatrolLayersForChunk))
                 {
                     Check(false, gridErr.c_str(), seed);
                 }

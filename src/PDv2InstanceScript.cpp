@@ -392,10 +392,17 @@ namespace PDungeon
             // barrier is evaluated the moment it is placed, and a segment
             // whose denominator is zero has to open right there.
             SpawnBarriers(*plan);
-            // After the barriers on purpose: a patroller belongs to the segment
-            // a barrier defines, and it walks the run that barrier seals -
-            // reading them in that order is what keeps the two from drifting
-            // apart.
+            // After the barriers on purpose - and since Round D / D2 for a
+            // different reason than the one that used to stand here. A patrol
+            // belongs to a CORRIDOR now, not to the segment a barrier defines,
+            // so the two are no longer paired by ownership at all. What still
+            // pairs them is the GRID: SpawnBarriers takes a closed portcullis'
+            // four lane cells out of it, and every file's beat is planned on
+            // that same grid, so running second is what makes a beat into a
+            // sealed boss corridor end AT the gate instead of failing to plan.
+            // The declaration of SpawnPatrols carries the other half - the
+            // spawn tag keeps the TRUE doorway cell, so the beat grows to it on
+            // the first plan after the barrier falls.
             SpawnPatrols(*plan);
             // Last. Nothing is summoned here - the ambush only ARMS a corridor
             // and remembers what it will spawn - so it has nothing to race, but
@@ -1183,8 +1190,12 @@ namespace PDungeon
         _gridTried = true;
 
         std::string error;
+        // Round D / D2: the clearance layer is laid in by the same call and in
+        // the same loop as the mask, so a cell's "is floor" and its "how much
+        // room is there" can never come from different chunk records.
         if (!BuildWalkGrid(plan, [](int chunkId) { return sPDv2Mgr->WalkMaskFor(chunkId); },
-                           &_grid, &error))
+                           &_grid, &error,
+                           [](int chunkId) { return sPDv2Mgr->PatrolLayersFor(chunkId); }))
         {
             // Without the grid the mobs stand where they spawned and never
             // chase - the dungeon degrades, it does not crash. Loud log line
@@ -2732,9 +2743,31 @@ namespace PDungeon
                     // NOT merged. MergeCollinear is for the AI, which walks
                     // legs; this wants the CELL CHAIN, because "follower k
                     // stands k cells behind the leader" is the formation.
+                    //
+                    // Round D / D2: the SAME two passes the leader's own plan
+                    // makes (PDv2CreatureAI.cpp, UpdatePatrol) - the shipped
+                    // cost first, then minClearQ 0 - because the whole point of
+                    // planning here is that the file is stood up on the cells
+                    // the AI will later walk. A fallback on one side only would
+                    // put the file on a beat the leader never plans.
                     if (!FindPatrolPath(*grid, from, to, PropCells(), beat))
                     {
-                        beat.clear();
+                        PatrolCost loose;
+                        loose.minClearQ = 0;
+                        if (!FindPatrolPath(*grid, from, to, PropCells(), beat, loose))
+                        {
+                            beat.clear();
+                            // Named rather than silent (Task 3 review M7): a
+                            // file stacked on one square with nothing in the
+                            // log is the evidence gap the debug key exists to
+                            // close. The leader recovers on its first idle tick
+                            // and MoveFollow unpiles the tail, so this is a
+                            // cosmetic degradation and not a broken run.
+                            LOG_WARN(PD_LOG, "PDv2: instance {} could not plan the beat of the "
+                                             "corridor into chain room {} - its file spawns "
+                                             "stacked on the doorway cell",
+                                     instance->GetInstanceId(), i);
+                        }
                     }
                 }
                 else
@@ -2801,15 +2834,25 @@ namespace PDungeon
                 // §D2.4). A beat shorter than the file - a one-block corridor,
                 // or a sealed one - clamps to its last cell, which stacks the
                 // tail for a second; MoveFollow unpicks that on the first tick.
-                int cellX = spawnCellX;
-                int cellY = spawnCellY;
+                //
+                // Round D / D2: on the cell's CLEAR POINT, not its centre. The
+                // file is meant to be standing in the middle of the visible
+                // passage on the very first frame a player sees it, and on a
+                // city straight the two are up to 4 yd apart - a member seated
+                // on the centre would spawn inside a house and then walk out of
+                // it on its first leg, which is exactly the sight this round
+                // exists to remove. The no-grid and empty-beat fallbacks keep
+                // the cell centre: with no grid there is no layer to read.
+                double wx = 0.0, wy = 0.0;
                 if (grid && !beat.empty())
                 {
                     size_t const idx = std::min(static_cast<size_t>(k), beat.size() - 1);
-                    grid->GlobalFromLocalCell(beat[idx], cellX, cellY);
+                    PatrolPointToWorld(*grid, beat[idx], wx, wy);
                 }
-                double wx = 0.0, wy = 0.0;
-                CellCentreToWorld(cellX, cellY, wx, wy);
+                else
+                {
+                    CellCentreToWorld(spawnCellX, spawnCellY, wx, wy);
+                }
 
                 PDv2MobData proto;
                 proto.role = PACK_ROLE_MELEE;

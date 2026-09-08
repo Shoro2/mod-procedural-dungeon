@@ -38,7 +38,8 @@ namespace PDungeon
     }
 
     bool BuildWalkGrid(BlockPlan const& plan, WalkMaskProvider const& maskFor,
-                       WalkGrid* out, std::string* error)
+                       WalkGrid* out, std::string* error,
+                       PatrolLayerProvider const& patrolFor)
     {
         auto fail = [error](std::string const& why) {
             if (error) *error = why;
@@ -63,7 +64,14 @@ namespace PDungeon
         out->originBY = minY;
         out->width = (maxX - minX + 1) * PD_CELLS_PER_BLOCK;
         out->height = (maxY - minY + 1) * PD_CELLS_PER_BLOCK;
-        out->cells.assign(static_cast<size_t>(out->width) * out->height, 0);
+        size_t const total = static_cast<size_t>(out->width) * out->height;
+        out->cells.assign(total, 0);
+        // Round D / D2. Sized with `cells` and zeroed, so a cell no block ever
+        // writes - and every non-walkable cell - reads 0/0/0, which is what the
+        // kit publishes for one and what nothing ever enters anyway.
+        out->patrolClear.assign(total, 0);
+        out->patrolDu.assign(total, 0);
+        out->patrolDv.assign(total, 0);
 
         for (PlacedBlock const& b : plan.blocks)
         {
@@ -73,6 +81,10 @@ namespace PDungeon
                 return fail("no walk mask for chunk " + std::to_string(b.chunkId) +
                             " - the kit metadata is missing or out of date");
             }
+            // ONE lookup per block, in the same loop as the mask: the clearance
+            // of a cell and the fact that it is walkable have to come from the
+            // same chunk record or they describe different terrain.
+            PatrolLayers const layers = patrolFor ? patrolFor(b.chunkId) : PatrolLayers{};
 
             int const baseX = (b.bx - minX) * PD_CELLS_PER_BLOCK;
             int const baseY = (b.by - minY) * PD_CELLS_PER_BLOCK;
@@ -80,7 +92,8 @@ namespace PDungeon
             {
                 for (int col = 0; col < PD_CELLS_PER_BLOCK; ++col)
                 {
-                    if (!mask[row * PD_CELLS_PER_BLOCK + col])
+                    int const cell = row * PD_CELLS_PER_BLOCK + col;
+                    if (!mask[cell])
                     {
                         continue;
                     }
@@ -89,6 +102,25 @@ namespace PDungeon
                     size_t const at = static_cast<size_t>(baseY + row) * out->width +
                                       static_cast<size_t>(baseX + col);
                     out->cells[at] = 1;
+                    // Clamped rather than trusted. The bytes come off a
+                    // database column a kit regeneration rewrites, and the two
+                    // failure modes a wrong one would cause here are a patrol
+                    // that refuses every cell (clear > 15 wrapping negative in
+                    // the cost) and an offset that walks a waypoint out of its
+                    // own cell - both silent, both hard to see in game.
+                    out->patrolClear[at] =
+                        layers.clear ? std::min<uint8_t>(layers.clear[cell], PD_PATROL_CLEAR_FREE)
+                                     : PD_PATROL_CLEAR_FREE;
+                    if (layers.du)
+                    {
+                        int const du = static_cast<int>(layers.du[cell]) - 32;
+                        out->patrolDu[at] = static_cast<int8_t>(std::max(-32, std::min(32, du)));
+                    }
+                    if (layers.dv)
+                    {
+                        int const dv = static_cast<int>(layers.dv[cell]) - 32;
+                        out->patrolDv[at] = static_cast<int8_t>(std::max(-32, std::min(32, dv)));
+                    }
                 }
             }
         }
@@ -364,6 +396,13 @@ namespace PDungeon
             propCells = nullptr;
         }
 
+        // Round D / D2, read under the same guard and for the same reason. Null
+        // here means "this grid has no clearance layer", which is a grid built
+        // by hand or from a kit that predates D2: no cell is tight, no cell is
+        // blocked, and the search is exactly D1's.
+        std::vector<uint8_t> const* clearCells =
+            grid.patrolClear.size() == grid.cells.size() ? &grid.patrolClear : nullptr;
+
         std::vector<int> gScore(grid.cells.size() * PATROL_DIRS, -1);
         std::vector<int> cameFrom(grid.cells.size() * PATROL_DIRS, -1);
         std::priority_queue<PatrolNode> open;
@@ -418,7 +457,22 @@ namespace PDungeon
                     continue;
                 }
 
+                size_t const nCell = index(nx, ny);
                 int const dir = d + 1;   // PATROL_DIR_N..PATROL_DIR_W, in step order
+
+                // THE HARD HALF, tested before anything is charged: a cell with
+                // less than minClearQ quarter-yards of room is not a passage.
+                // Only the cell being ENTERED is judged - the start is where
+                // the creature already stands - which is also why a tight GOAL
+                // makes the whole search fail and the caller re-runs it with
+                // minClearQ 0.
+                int const nClear = clearCells ? static_cast<int>((*clearCells)[nCell])
+                                              : static_cast<int>(PD_PATROL_CLEAR_FREE);
+                if (clearCells && nClear < cost.minClearQ)
+                {
+                    continue;
+                }
+
                 int add = cost.step;
                 if (curDir != PATROL_DIR_NONE && dir != curDir)
                 {
@@ -428,10 +482,17 @@ namespace PDungeon
                 {
                     add += cost.wallAdjacent;
                 }
-                size_t const nCell = index(nx, ny);
                 if (propCells && (*propCells)[nCell] != 0)
                 {
                     add += cost.propCell;
+                }
+                // The soft half. A free cell (15) adds nothing, so a theme
+                // without facades - and every grid without the layer - keeps
+                // D1's numbers exactly.
+                if (nClear < static_cast<int>(PD_PATROL_CLEAR_FREE))
+                {
+                    add += cost.tightPerQuarter *
+                           (static_cast<int>(PD_PATROL_CLEAR_FREE) - nClear);
                 }
 
                 size_t const nState = nCell * PATROL_DIRS + static_cast<size_t>(dir);
@@ -495,6 +556,46 @@ namespace PDungeon
         }
         out.push_back(path.back());
         path.swap(out);
+    }
+
+    PatrolCellInfo PatrolInfoAt(WalkGrid const& grid, GridPoint cell)
+    {
+        PatrolCellInfo info;
+        // All three sizes, not only the one being read: the loader stores the
+        // layer as ONE measurement or not at all, so a grid carrying two of the
+        // three would answer an offset for a clearance nobody measured.
+        // !InBounds covers the cell a caller derived from a route planned on a
+        // grid that has since been rebuilt.
+        if (grid.patrolClear.size() != grid.cells.size() ||
+            grid.patrolDu.size() != grid.cells.size() ||
+            grid.patrolDv.size() != grid.cells.size() ||
+            !grid.InBounds(cell.x, cell.y))
+        {
+            return info;    // 15/0/0 - free, and standing on the cell centre
+        }
+
+        size_t const at = static_cast<size_t>(cell.y) * grid.width +
+                          static_cast<size_t>(cell.x);
+        info.clear = grid.patrolClear[at];
+        info.du = grid.patrolDu[at];
+        info.dv = grid.patrolDv[at];
+        return info;
+    }
+
+    void PatrolPointToWorld(WalkGrid const& grid, GridPoint cell, double& x, double& y)
+    {
+        int gcx = 0, gcy = 0;
+        grid.GlobalFromLocalCell(cell, gcx, gcy);
+        CellCentreToWorld(gcx, gcy, x, y);
+
+        PatrolCellInfo const info = PatrolInfoAt(grid, cell);
+        // MINUS, and this is the whole of the frame mapping: BlockLocalToWorld
+        // is x = MAX - (by * BLOCK + u) and y = MAX - (bx * BLOCK + v), so u
+        // runs against world X and v against world Y. CellCentreToWorld is the
+        // same identity at cell resolution (its gcy is the u axis, its gcx the
+        // v axis), which is why the offsets attach to x and y in that order.
+        x -= static_cast<double>(info.du) * PD_PATROL_QUARTER_YD;
+        y -= static_cast<double>(info.dv) * PD_PATROL_QUARTER_YD;
     }
 
     bool NearestWalkable(WalkGrid const& grid, int cx, int cy, int radius, GridPoint& out)

@@ -22,6 +22,7 @@
 #include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
 #include "generator/PDv2SpawnAnchors.h"
+#include "generator/PDv2WalkGrid.h"
 #include "generator/PDv2WorldMath.h"
 
 #include <array>
@@ -140,6 +141,13 @@ namespace PDungeon
         // yard value rather than cells: MoveFollow is an engine call and its
         // range is in yards, and the lane is 16.67 yd wide, so the default 3.0
         // keeps the whole file inside it however the corridor turns.
+        //
+        // Round D / D2 (Task 3 review I1): read on every follow DECISION, not
+        // merely on every follow ISSUE. The core's follow generator freezes its
+        // range at construction, so the AI compares the live product against
+        // the distance it last issued and re-issues when the two differ - which
+        // is what makes `.reload config` re-space a file that is already
+        // walking, exactly as the conf.dist for this key promises.
         float       patrolFollowDistYd = 3.0f;
 
         // Round C. The patrol diagnostics switch, and the only reason the AI
@@ -305,6 +313,20 @@ namespace PDungeon
 
         size_t WalkMaskCount() const { return _walkMasks.size(); }
 
+        // Round D / D2. The same row's patrol clearance layer, in the shape
+        // BuildWalkGrid's PatrolLayerProvider wants: three 64-byte grids in the
+        // walk mask's own cell order, or null pointers for a chunk that
+        // publishes none. Null is not an error - a `pdungeon_chunk_meta` that
+        // predates D2 has no such columns at all, and every cell is then read
+        // as free, which is exactly what this module did before the layer
+        // existed.
+        PatrolLayers PatrolLayersFor(int chunkId) const;
+
+        // How many chunks came with a clearance layer. 0 says the kit or the
+        // database is older than D2, which is the one thing about this feature
+        // an operator has to be able to tell from the outside.
+        size_t PatrolLayerCount() const { return _chunkPatrol.size(); }
+
         // The kit's anchor points for a chunk (entry, boss, chest, spawns), in
         // the block-local FLPD-BLOCK-1 frame, or nullptr for a chunk with none
         // - which every corridor is. Loaded beside the walk masks out of the
@@ -351,6 +373,17 @@ namespace PDungeon
         std::unordered_map<uint32_t, std::shared_ptr<BlockPlan const>> _plans;
         std::unordered_map<uint32_t, PDv2AccountState> _accounts;
         std::unordered_map<int, std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK>> _walkMasks;
+        // Round D / D2, one entry per chunk that HAS a layer - not per chunk,
+        // so PatrolLayerCount() answers the question an operator asks. The
+        // three grids live in one record because they are one measurement: a
+        // clearance without its offset is a number nobody can walk to.
+        struct PatrolLayerBytes
+        {
+            std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK> clear{};
+            std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK> du{};
+            std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK> dv{};
+        };
+        std::unordered_map<int, PatrolLayerBytes> _chunkPatrol;
         std::unordered_map<int, std::vector<DecorAnchor>> _chunkAnchors;
         std::unordered_map<int, RoomAnchors> _chunkRoomAnchors;
         std::unordered_map<int, std::vector<KitProp>> _chunkProps;

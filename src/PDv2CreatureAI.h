@@ -119,7 +119,14 @@ namespace PDungeon
         // in (give or take the planners' own snap radius) is not walked at all,
         // because leg 0 would then be an unchecked straight line from here to
         // wherever that route begins.
-        void StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid);
+        //
+        // Round D / D2: `clearPoints` says WHERE inside a cell this route's
+        // waypoints are - the kit's clear point (a patrol beat) or the cell
+        // centre (a chase). It is a property of the ROUTE and not of the
+        // creature, because a patroller in a fight chases like anything else,
+        // so it is handed over with the route and kept until the next one.
+        void StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid,
+                              bool clearPoints);
         // Launches ONE leg. Round C: reachable from UpdateAI only - directly
         // for the first leg of a run, through _legPending for every later one.
         void MoveToWaypoint(size_t index, WalkGrid const& grid);
@@ -227,6 +234,13 @@ namespace PDungeon
         // (Creature.cpp:884) in the SAME tick, so the leg starts microseconds
         // later, merely outside the motion master's own call stack.
         bool _legPending = false;
+        // Round D / D2. "The route in _waypoints is a patrol beat, so its
+        // waypoints are the cells' CLEAR POINTS." Set with the route by
+        // StartWaypointRun and read by MoveToWaypoint, including the deferred
+        // launch _legPending owes - which is why it is a member and not an
+        // argument: the leg that pays that debt is launched a tick later, from
+        // a call site that no longer knows which planner produced the route.
+        bool _legOnClearPoint = false;
         bool _lineOk = false;       // last grid-line verdict, refreshed on the tick
         bool _holding = false;      // a caster that has planted itself at range
         bool _hasCalled = false;    // affix 1 already shouted for THIS fight
@@ -249,6 +263,15 @@ namespace PDungeon
         // Mutates a fresh generator on every call (MotionMaster.cpp:448-469),
         // which is why the question has to be asked at all.
         bool _followHeld = false;
+        // Round D / D2, the fix for Task 3 review I1. The distance the live
+        // MoveFollow was ISSUED with, or a negative number when this creature
+        // is not following anything. FollowMovementGenerator freezes its
+        // _range at construction, so re-reading the conf key without comparing
+        // it to this would keep promising a live key that only ever takes
+        // effect after the next fight - which is what the conf.dist says it
+        // does NOT do. A difference here re-issues the follow, and that is the
+        // whole of "`.reload config` re-spaces a file that is already walking".
+        float _followDistIssued = -1.0f;
         // Round C. The chase's own hold latch, the exact shape _holding has for
         // the caster's plant: an Unreachable verdict STOPS the creature (motion
         // master, spline and all), and this says it has already been stopped so

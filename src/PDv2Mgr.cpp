@@ -495,6 +495,7 @@ namespace PDungeon
     void PDv2Mgr::LoadChunkMeta()
     {
         _walkMasks.clear();
+        _chunkPatrol.clear();
         _chunkAnchors.clear();
         _chunkRoomAnchors.clear();
         _chunkProps.clear();
@@ -513,9 +514,36 @@ namespace PDungeon
         // describe the same block, and reading them from a second query - or
         // worse, a second file - is how a kit regeneration ends up half
         // applied.
-        QueryResult result = WorldDatabase.Query(
-            "SELECT chunkId, kitVersion, walkMask, anchors, theme "
-            "FROM pdungeon_chunk_meta ORDER BY kitVersion");
+        //
+        // Round D / D2's three clearance columns are asked for ONLY when they
+        // exist. `mod_pdungeon_chunk_meta.sql` adds them with an
+        // information_schema-guarded ALTER of its own, so on a server whose
+        // updater has run they are always there - but a server with SQL updates
+        // switched off, or one that has not restarted since the kit was
+        // regenerated, still has to load its walk masks. Naming a missing
+        // column would fail the WHOLE query and leave the dungeon with no grid
+        // at all ("0 masks = mobs stand still"), which is a far worse outcome
+        // than patrols walking cell centres for one more restart. The probe is
+        // one row at startup, and it is the only second query in this function
+        // - the DATA still comes out of a single row per chunk.
+        bool hasPatrolLayer = false;
+        if (QueryResult probe = WorldDatabase.Query(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pdungeon_chunk_meta' "
+                "AND COLUMN_NAME IN ('patrolClear', 'patrolDu', 'patrolDv')"))
+        {
+            hasPatrolLayer = probe->Fetch()[0].Get<uint64>() == 3;
+        }
+
+        std::string query =
+            "SELECT chunkId, kitVersion, walkMask, anchors, theme";
+        if (hasPatrolLayer)
+        {
+            query += ", patrolClear, patrolDu, patrolDv";
+        }
+        query += " FROM pdungeon_chunk_meta ORDER BY kitVersion";
+
+        QueryResult result = WorldDatabase.Query(query);
         if (!result)
         {
             LOG_ERROR(PD_LOG, "PDv2: pdungeon_chunk_meta has no rows - "
@@ -548,6 +576,57 @@ namespace PDungeon
 
             auto& slot = _walkMasks[chunkId];
             std::copy(mask.begin(), mask.end(), slot.begin());
+
+            // Round D / D2, the clearance layer. ALL THREE OR NONE: a clearance
+            // without its offset is a number nobody can walk to, and half a
+            // layer would send patrols to cell centres it had already decided
+            // were tight. A NULL, an empty string or a blob of the wrong length
+            // therefore leaves the chunk out of _chunkPatrol entirely, which
+            // BuildWalkGrid reads as "every walkable cell is free" - today's
+            // behaviour, and the right answer for theme 1, which places no
+            // facades at all.
+            if (hasPatrolLayer)
+            {
+                std::vector<uint8_t> layer[3];
+                bool ok = true;
+                for (int i = 0; i < 3 && ok; ++i)
+                {
+                    Field const& f = fields[5 + i];
+                    if (f.IsNull())
+                    {
+                        ok = false;
+                        break;
+                    }
+                    std::string const text = f.Get<std::string>();
+                    if (text.empty())
+                    {
+                        ok = false;
+                        break;
+                    }
+                    ok = DecodeWalkMaskRle(text, layer[i]) &&
+                         layer[i].size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK;
+                    if (!ok)
+                    {
+                        LOG_ERROR(PD_LOG, "PDv2: chunk {} has a malformed patrol clearance "
+                                          "column {} - that chunk's cells are read as free",
+                                  chunkId, i);
+                    }
+                }
+                if (ok)
+                {
+                    auto& p = _chunkPatrol[chunkId];
+                    std::copy(layer[0].begin(), layer[0].end(), p.clear.begin());
+                    std::copy(layer[1].begin(), layer[1].end(), p.du.begin());
+                    std::copy(layer[2].begin(), layer[2].end(), p.dv.begin());
+                }
+                else
+                {
+                    // A row that overwrites a lower kitVersion has to overwrite
+                    // its layer too, or a chunk would keep the clearance of a
+                    // kit it no longer is.
+                    _chunkPatrol.erase(chunkId);
+                }
+            }
 
             // A chunk with no anchors is ordinary - every corridor variant has
             // none - so an empty list is stored rather than nothing, and only
@@ -595,8 +674,18 @@ namespace PDungeon
         } while (result->NextRow());
 
         LOG_INFO(PD_LOG, "PDv2: loaded {} walk mask(s) from pdungeon_chunk_meta "
-                         "across all themes ({} for configured theme {}, {} malformed)",
-                 uint32(_walkMasks.size()), configThemeRows, _config.theme, bad);
+                         "across all themes ({} for configured theme {}, {} malformed), "
+                         "{} with a patrol clearance layer",
+                 uint32(_walkMasks.size()), configThemeRows, _config.theme, bad,
+                 uint32(_chunkPatrol.size()));
+        if (!hasPatrolLayer)
+        {
+            // Not an error: the module works without it, patrols simply walk
+            // cell centres. But it IS the difference between "the fix is in"
+            // and "the fix is compiled in and doing nothing", so it says so.
+            LOG_INFO(PD_LOG, "PDv2: pdungeon_chunk_meta has no patrol clearance columns - "
+                             "patrols walk cell centres until the kit v38 SQL is applied");
+        }
         if (configThemeRows == 0)
         {
             LOG_ERROR(PD_LOG, "PDv2: configured theme {} has NO chunk-meta rows - "
@@ -610,6 +699,17 @@ namespace PDungeon
     {
         auto it = _walkMasks.find(chunkId);
         return it == _walkMasks.end() ? nullptr : it->second.data();
+    }
+
+    PatrolLayers PDv2Mgr::PatrolLayersFor(int chunkId) const
+    {
+        auto it = _chunkPatrol.find(chunkId);
+        if (it == _chunkPatrol.end())
+        {
+            return PatrolLayers{};      // three nulls = every cell free
+        }
+        return PatrolLayers{ it->second.clear.data(), it->second.du.data(),
+                             it->second.dv.data() };
     }
 
     std::vector<DecorAnchor> const* PDv2Mgr::AnchorsFor(int chunkId) const

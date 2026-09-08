@@ -350,7 +350,20 @@ namespace PDungeon
         int gcx = 0, gcy = 0;
         grid.GlobalFromLocalCell(_waypoints[index], gcx, gcy);
         double wx = 0.0, wy = 0.0;
-        CellCentreToWorld(gcx, gcy, wx, wy);
+        // Round D / D2. A PATROL walks the cell's clear point, the chase walks
+        // its centre - and the difference is up to 4 yd, which on a 6.6 yd city
+        // passage is the whole of it. The chase keeps centres deliberately: it
+        // is aimed at a player who is standing wherever they like, the leg is
+        // re-decided every 500 ms, and moving its target off-centre would only
+        // add a wobble to a route that already ends at a moving unit.
+        if (_legOnClearPoint)
+        {
+            PatrolPointToWorld(grid, _waypoints[index], wx, wy);
+        }
+        else
+        {
+            CellCentreToWorld(gcx, gcy, wx, wy);
+        }
         // WHAT THE `false` ACTUALLY BUYS, corrected in Round C. It lands on
         // MovePoint's `generatePath` parameter (MotionMaster.h:242) - the call
         // IS the one it means - but that flag does not suppress the
@@ -385,23 +398,38 @@ namespace PDungeon
         // signature - the grid is 8.33 yd per cell, so a simplified leg of a few
         // cells is tens of yards and anything in the hundreds is not a leg at
         // all. Consecutive legs whose `me` never changes were the bug itself.
+        //
+        // Round D / D2 adds `clear` and the offset the leg's target carries.
+        // They are the operator-visible half of this whole round: a leg into a
+        // city straight should read a clear of 12-15 and a non-zero offset,
+        // and a leg that reads `clear 4` is the planner buying the last cell a
+        // body fits through - which is the line to quote when the patrol still
+        // brushes a house.
         if (PatrolDebug() && _mob && _mob->isPatrol)
         {
+            PatrolCellInfo const info = PatrolInfoAt(grid, _waypoints[index]);
             LOG_INFO(PD_LOG, "PDv2 patrol: {} guid {} leg wp {}/{} cell ({},{}) global ({},{}) "
-                             "-> world ({:.1f},{:.1f},{:.1f}) | me ({:.1f},{:.1f},{:.1f}) "
-                             "| top {} | dist {:.1f}",
+                             "clear {} offset ({},{}) -> world ({:.1f},{:.1f},{:.1f}) "
+                             "| me ({:.1f},{:.1f},{:.1f}) | top {} | dist {:.1f}",
                      me->GetName(), me->GetGUID().GetCounter(), uint32(index),
                      uint32(_waypoints.size()), _waypoints[index].x, _waypoints[index].y,
-                     gcx, gcy, float(wx), float(wy), sPDv2Mgr->GetConfig().floorZ,
+                     gcx, gcy, uint32(info.clear), int32(info.du), int32(info.dv),
+                     float(wx), float(wy), sPDv2Mgr->GetConfig().floorZ,
                      me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
                      MotionName(me->GetMotionMaster()->GetCurrentMovementGeneratorType()),
                      me->GetExactDist2d(float(wx), float(wy)));
         }
     }
 
-    void PDv2MobAI::StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid)
+    void PDv2MobAI::StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid,
+                                     bool clearPoints)
     {
         _waypoints = std::move(waypoints);
+        // Set BEFORE the two refusals below rather than after them: a refused
+        // route clears _waypoints, and leaving the flag describing the route
+        // before it would hand the next MoveToWaypoint the wrong frame if
+        // anything ever launched a leg without going through here.
+        _legOnClearPoint = clearPoints;
         if (_waypoints.size() < 2)
         {
             _followingPath = false;
@@ -670,10 +698,36 @@ namespace PDungeon
             // of the grid - the snap answers the lane cell one step back, and
             // the beat grows to the doorway itself on the first plan after the
             // barrier falls.
+            //
+            // Round D / D2, the two-pass plan. The first pass runs at the
+            // shipped PatrolCost, whose minClearQ BLOCKS every cell with less
+            // than 1.0 yd of room to either side; the second drops that floor
+            // and lets the tightPerQuarter charge alone decide. Both passes
+            // pay the charge, so the fallback is still the widest route
+            // available and not D1's route back - it is only allowed to squeeze
+            // where nothing else exists. A corridor whose every lane row is
+            // pinched (a city straight with two deep houses facing each other)
+            // would otherwise leave its patrol standing still for the whole
+            // run, which is a worse dungeon than one whose patrol brushes a
+            // wall for two cells.
             std::vector<GridPoint> path;
             if (!FindPatrolPath(*grid, here, goal, _instance->PropCells(), path))
             {
-                return;
+                PatrolCost loose;
+                loose.minClearQ = 0;
+                if (!FindPatrolPath(*grid, here, goal, _instance->PropCells(), path, loose))
+                {
+                    return;
+                }
+                // ONE LINE PER BEAT, not per tick: this branch runs inside
+                // `!_patrolActive`, and the plan it produces sets that flag.
+                // A patroller that logs this twice has lost its beat twice,
+                // which is itself the finding.
+                LOG_WARN(PD_LOG, "PDv2: patrol planner fell back to the walk grid for {} "
+                                 "guid {}: no beat from cell ({},{}) to ({},{}) keeps a "
+                                 "yard of clearance",
+                         me->GetName(), me->GetGUID().GetCounter(),
+                         here.x, here.y, goal.x, goal.y);
             }
             MergeCollinear(path);
             if (path.size() < 2)
@@ -760,10 +814,31 @@ namespace PDungeon
                         nearest = i;
                     }
                 }
+                //
+                // Round D / D2: the same two passes the first plan makes, for
+                // the same reason and in the same order. A fight that ended
+                // inside a pinched stretch would otherwise be unable to walk
+                // back onto its own beat and would drop it - and dropping the
+                // beat is exactly what this branch exists to prevent.
                 std::vector<GridPoint> back;
-                if (_patrolRoute.empty() ||
-                    !FindPatrolPath(*grid, here, _patrolRoute[nearest],
-                                    _instance->PropCells(), back))
+                bool haveBack = !_patrolRoute.empty() &&
+                                FindPatrolPath(*grid, here, _patrolRoute[nearest],
+                                               _instance->PropCells(), back);
+                if (!haveBack && !_patrolRoute.empty())
+                {
+                    PatrolCost loose;
+                    loose.minClearQ = 0;
+                    haveBack = FindPatrolPath(*grid, here, _patrolRoute[nearest],
+                                              _instance->PropCells(), back, loose);
+                    if (haveBack)
+                    {
+                        LOG_WARN(PD_LOG, "PDv2: patrol rejoin fell back to the walk grid for "
+                                         "{} guid {}: no way from cell ({},{}) back onto the "
+                                         "beat keeps a yard of clearance",
+                                 me->GetName(), me->GetGUID().GetCounter(), here.x, here.y);
+                    }
+                }
+                if (!haveBack)
                 {
                     // No beat at all, or off its component entirely (a barrier
                     // closed between us and it). The old fallback: give the
@@ -830,7 +905,8 @@ namespace PDungeon
         // corridor, not to sprint. JustEngagedWith puts it back on run speed
         // the moment it pulls.
         me->SetWalk(true);
-        StartWaypointRun(std::move(leg), *grid);
+        // A BEAT, so its waypoints are the cells' clear points (Round D / D2).
+        StartWaypointRun(std::move(leg), *grid, /*clearPoints=*/true);
         if (!_followingPath)
         {
             // The runner refused the leg: fewer than two waypoints, or - since
@@ -891,6 +967,7 @@ namespace PDungeon
                 // described rather than half.
                 me->StopMoving();
                 me->GetMotionMaster()->MoveIdle();
+                _followDistIssued = -1.0f;      // nothing is being followed now
                 if (PatrolDebug())
                 {
                     LOG_INFO(PD_LOG, "PDv2 patrol: {} guid {} follower {} holds - its leader "
@@ -932,17 +1009,34 @@ namespace PDungeon
         // route its leader planned. inheritWalkState and inheritSpeed are the
         // call's defaults (true): the followers walk while the leader walks its
         // beat and run when it runs, without this AI tracking either.
-        if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
+        //
+        // Round D / D2, Task 3 review I1: the key is read on every DECISION,
+        // which is what conf.dist promises, and not merely on every issue.
+        // FollowMovementGenerator freezes its _range at construction
+        // (TargetedMovementGenerator.h), so a file already walking would
+        // otherwise keep the spacing it was born with until a fight took the
+        // follow away - and `.reload config` would re-space nothing, which is
+        // the one thing the operator will try during the round. Comparing the
+        // live product against what was issued costs one float and re-issues
+        // ONLY when the operator really moved the key: MoveFollow never
+        // de-duplicates, so an unconditional call here would restart the spline
+        // twice a second.
+        float const dist = sPDv2Mgr->GetConfig().patrolFollowDistYd *
+                           static_cast<float>(_mob->patrolRank);
+        bool const following =
+            me->GetMotionMaster()->GetCurrentMovementGeneratorType() == FOLLOW_MOTION_TYPE;
+        if (!following || dist != _followDistIssued)
         {
-            float const dist = sPDv2Mgr->GetConfig().patrolFollowDistYd *
-                               static_cast<float>(_mob->patrolRank);
             me->GetMotionMaster()->MoveFollow(leader, dist, float(M_PI));
+            _followDistIssued = dist;
             if (PatrolDebug())
             {
                 LOG_INFO(PD_LOG, "PDv2 patrol: {} guid {} follower {} follows {} at {:.1f} yd "
-                                 "| me ({:.1f},{:.1f}) leader ({:.1f},{:.1f}) dist {:.1f}",
+                                 "({}) | me ({:.1f},{:.1f}) leader ({:.1f},{:.1f}) dist {:.1f}",
                          me->GetName(), me->GetGUID().GetCounter(), uint32(_mob->patrolRank),
-                         leader->GetName(), dist, me->GetPositionX(), me->GetPositionY(),
+                         leader->GetName(), dist,
+                         following ? "re-spaced from the live conf" : "new follow",
+                         me->GetPositionX(), me->GetPositionY(),
                          leader->GetPositionX(), leader->GetPositionY(),
                          me->GetExactDist2d(leader));
             }
@@ -959,6 +1053,10 @@ namespace PDungeon
         {
             _followTimer = 0;
             _followHeld = false;
+            // The follow the evade threw away was issued with SOME distance;
+            // saying "none is issued" here keeps the field describing the
+            // motion master rather than a generator that no longer exists.
+            _followDistIssued = -1.0f;
             StopWaypointRun(false);
             return;
         }
@@ -1163,7 +1261,13 @@ namespace PDungeon
                 _chaseHeld = false;
                 if (!_followingPath)
                 {
-                    StartWaypointRun(std::move(waypoints), *grid);
+                    // CELL CENTRES. The chase is aimed at a player standing
+                    // wherever they like and re-decided every 500 ms; walking
+                    // its waypoints off-centre would add a wobble to a route
+                    // that already ends at a moving unit, and the clearance
+                    // layer describes where a PATROL should be seen, not where
+                    // a mob has to stand to reach someone.
+                    StartWaypointRun(std::move(waypoints), *grid, /*clearPoints=*/false);
                 }
                 return _followingPath;
 

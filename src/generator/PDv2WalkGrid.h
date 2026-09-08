@@ -48,6 +48,53 @@ namespace PDungeon
     // unwalkable room is worse than a refusal.
     using WalkMaskProvider = std::function<uint8_t const*(int chunkId)>;
 
+    // Round D / D2 - THE CLEARANCE LAYER, and why a walk mask needed one.
+    //
+    // A corridor lane is two cells = 16.67 yd wide, but in the city theme the
+    // kit stands a house on each flank and the models' visible fronts intrude
+    // 3.30 to 6.27 yd past the lane edge - INDEPENDENTLY on the two sides,
+    // because each flank draws its own model. Measured over the shipped kit the
+    // free passage is 6.6 yd wide on a straight, its centre is off the block
+    // centre by up to 1.61 yd, and the clearance of the two lane cells differs
+    // by up to 3.87 yd. A cell CENTRE is therefore the wrong place to walk: on
+    // 80 % of the theme-2 lane rows a 2 yd body around BOTH lane-cell centres
+    // is inside a house, which is what the operator kept seeing ("die pat geht
+    // noch immer durch das haus").
+    //
+    // So the kit publishes, per walkable cell, the point inside that cell with
+    // the largest distance to any facade footprint - the CLEAR POINT - and that
+    // distance. Three byte grids in the walk mask's own cell order:
+    //
+    //   clear   quarter-yards to the nearest facade, capped at 15 (= "3.75 yd
+    //           or more, free"); 0 on a non-walkable cell
+    //   du/dv   the clear point's offset from the cell centre in quarter-yards
+    //           along the block-local u (south) and v (east) axes
+    //
+    // On the wire (kit_meta.json, pdungeon_chunk_meta) du/dv are unsigned bytes
+    // biased by +32; a provider hands them over in that form and BuildWalkGrid
+    // is what removes the bias, so everything past this point is already
+    // signed. A chunk with no layer - an old database, or theme 1, which places
+    // no facades at all - reads as 15/0/0 on every walkable cell, which is
+    // exactly the behaviour this module had before D2.
+    struct PatrolLayers
+    {
+        uint8_t const* clear = nullptr;   // 64 bytes, 0..15, or null
+        uint8_t const* du = nullptr;      // 64 bytes, 0..64 (offset + 32), or null
+        uint8_t const* dv = nullptr;      // same
+    };
+
+    // The clearance counterpart of WalkMaskProvider. Unlike that one a null
+    // answer is NOT an error: a chunk without a clearance layer is a chunk
+    // whose cells are all free, and reading it as "all blocked" would strand
+    // every patrol on a server whose kit predates D2.
+    using PatrolLayerProvider = std::function<PatrolLayers(int chunkId)>;
+
+    // The cap in `patrolClear`, and what an absent layer reads as.
+    constexpr uint8_t PD_PATROL_CLEAR_FREE = 15;
+
+    // The unit `patrolClear`, `patrolDu` and `patrolDv` are counted in.
+    constexpr double PD_PATROL_QUARTER_YD = 0.25;
+
     struct GridPoint
     {
         int x = 0;
@@ -63,6 +110,22 @@ namespace PDungeon
         int width = 0;                 // in cells
         int height = 0;
         std::vector<uint8_t> cells;    // 1 = walkable, row-major
+
+        // Round D / D2. Indexed exactly like `cells` and sized with it by
+        // BuildWalkGrid, which fills them for EVERY grid it builds - 15/0/0 on
+        // a walkable cell whose chunk publishes no layer, 0/0/0 on a
+        // non-walkable one. A grid assembled by hand (the harness does that)
+        // leaves them empty, and empty means "feature off": every reader below
+        // checks the size against `cells` and ignores a vector of any other
+        // size rather than indexing past its end, the same guard FindPatrolPath
+        // has always applied to the prop mask.
+        //
+        // A barrier does NOT touch them: SetCellsWalkable only ever writes
+        // `cells`, so a lane cell a portcullis closes and re-opens keeps the
+        // clearance the kit measured for it.
+        std::vector<uint8_t> patrolClear;   // 0..15 quarter-yards, 15 = free
+        std::vector<int8_t>  patrolDu;      // clear point offset from the cell
+        std::vector<int8_t>  patrolDv;      // centre, quarter-yards, bias removed
 
         bool InBounds(int cx, int cy) const
         {
@@ -95,8 +158,14 @@ namespace PDungeon
 
     // Lays every placed block's mask into one grid spanning the plan's bounding
     // box. Fails when a chunk's mask is unavailable.
+    //
+    // `patrolFor` is optional and is read in the SAME copy loop as the mask, so
+    // the clearance layer cannot end up describing a different block than the
+    // walkable cell it belongs to. Omitting it - or answering with null
+    // pointers for a chunk - fills that block's walkable cells with 15/0/0.
     bool BuildWalkGrid(BlockPlan const& plan, WalkMaskProvider const& maskFor,
-                       WalkGrid* out, std::string* error);
+                       WalkGrid* out, std::string* error,
+                       PatrolLayerProvider const& patrolFor = PatrolLayerProvider{});
 
     // 4-neighbour A* over walkable cells; the returned path includes both ends.
     // 4 rather than 8 on purpose: a diagonal step between two blocked cells
@@ -132,6 +201,24 @@ namespace PDungeon
     //   propCell     charged when a prop stands on the entered cell - a COST,
     //                not a wall, so a corridor a prop fills still has a route
     //
+    // Round D / D2 adds the two terms that read the clearance layer, because
+    // `wallAdjacent` could only ever say "this cell touches the WALK MASK's
+    // edge" and the mask has never heard of the house leaning over it:
+    //
+    //   tightPerQuarter  charged per quarter-yard of clearance MISSING from
+    //                    the entered cell, i.e. tightPerQuarter * (15 - clear).
+    //                    At 8 a cell with 1.0 yd of room costs 88 - more than
+    //                    a prop - while a free cell costs nothing, so the
+    //                    planner picks the wide half of an off-centre lane
+    //                    without needing to be told which half that is.
+    //   minClearQ        the entered cell is BLOCKED below this many
+    //                    quarter-yards. 4 = 1.0 yd: less than that is not a
+    //                    passage a body fits through at all, and pricing it
+    //                    would only make the planner buy it when the
+    //                    alternative is long enough. A HARD reading needs the
+    //                    caller's fallback (see FindPatrolPath below), which
+    //                    is why it is a cost field rather than a constant.
+    //
     // The chase keeps FindGridPath / SimplifyGridPath / PlanApproach: cutting
     // a corner to reach a player is fine, that is what the diagonal legs exist
     // for. This is for the beat a patrol walks when nothing is chasing anyone.
@@ -141,6 +228,8 @@ namespace PDungeon
         int turn = 30;
         int wallAdjacent = 20;
         int propCell = 60;
+        int tightPerQuarter = 8;
+        int minClearQ = 4;
     };
 
     // A* over (cell, incoming direction), not over cells alone: a turn charge
@@ -153,7 +242,18 @@ namespace PDungeon
     // `propCells` may be null. When given it must be indexed exactly like
     // `grid.cells` (y * width + x) and be the same size, and a non-zero byte
     // means a prop stands on that cell; a vector of any other size is IGNORED
-    // rather than read past its end.
+    // rather than read past its end. `grid.patrolClear` is read under exactly
+    // the same guard, so a grid without a clearance layer plans the way it did
+    // before D2.
+    //
+    // THE START CELL IS NEVER CHARGED AND NEVER BLOCKED. Every term above is a
+    // property of ENTERING a cell and the patroller is already standing on the
+    // first one; refusing to plan because the square under its feet is tight
+    // would strand exactly the creature this feature exists to move. The goal
+    // cell IS entered, so a tight goal makes the search fail - which is the
+    // point of the caller's fallback: plan again with `minClearQ` 0 and let the
+    // cost alone decide. That second call still pays `tightPerQuarter`, so the
+    // fallback beat is the widest route available rather than the old one.
     //
     // `outPath` comes back as the cell chain including both ends, the way
     // FindGridPath returns it: single 4-neighbour steps, so every consecutive
@@ -179,6 +279,37 @@ namespace PDungeon
     // axis-aligned cell chain stays axis-aligned, which is the whole promise
     // D1 makes to the creature AI.
     void MergeCollinear(std::vector<GridPoint>& path);
+
+    // The clearance layer's answer for ONE cell, with every guard in a single
+    // place: a grid that carries no layer (a hand-built one, or one from a kit
+    // that predates D2) and a cell outside the grid both read 15/0/0 - "free,
+    // standing on the centre" - which is exactly what this module did before
+    // the layer existed. Everything that reads the layer goes through here, so
+    // the waypoint the creature walks to, the number the debug line prints and
+    // the number the harness pins can never come from three different guards.
+    struct PatrolCellInfo
+    {
+        uint8_t clear = PD_PATROL_CLEAR_FREE;
+        int8_t  du = 0;
+        int8_t  dv = 0;
+    };
+
+    PatrolCellInfo PatrolInfoAt(WalkGrid const& grid, GridPoint cell);
+
+    // Where a patrol waypoint on `cell` (a LOCAL grid cell) actually is: the
+    // cell's CLEAR POINT, not its centre. CellCentreToWorld, then the stored
+    // offset - subtracted, because BlockLocalToWorld runs u against -X and v
+    // against -Y, so a clear point further south (+du) is at a SMALLER world x.
+    //
+    // With no clearance layer, or a cell outside the grid, this is exactly
+    // CellCentreToWorld and the patrol walks cell centres as it did before D2.
+    // The offset can never leave the cell: a cell is 8.33 yd, the kit samples
+    // the clear point 0.25 yd inside the border, so |offset| <= 16
+    // quarter-yards = 4.0 yd against a half-cell of 4.17 - which the harness
+    // asserts by round-tripping through WorldToCell rather than by trusting
+    // the kit.
+    void PatrolPointToWorld(WalkGrid const& grid, GridPoint cell,
+                            double& x, double& y);
 
     // Nearest walkable cell to (cx, cy) within `radius`, for snapping a position
     // that landed just off the grid. Returns false when nothing is near.
