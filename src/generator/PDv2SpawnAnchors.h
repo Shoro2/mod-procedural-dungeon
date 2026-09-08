@@ -30,8 +30,9 @@
 //   {"entry":{u,v,z},"boss":{u,v,z}|null,"chest":{u,v,z}|null,
 //    "spawns":[{u,v,z,"role":"melee|caster|elite|patrol"},...],"props":[...]}
 // DecodeAnchorList (PDv2DecorPlan.h) flattens every point into one clearance
-// list on purpose; this decoder keeps the KIND, which the altar (entry), the
-// chest (chest) and B2's spawn placement (boss, spawns) need. A scanner like
+// list on purpose; this decoder keeps the KIND, which the spawn veto's
+// fallback (entry), the chest (chest) and B2's spawn placement (boss, spawns)
+// need - until Round C / C5 the altar read `entry` too. A scanner like
 // its sibling, for the same reason: one generated writer, no JSON dependency.
 // Engine-free: the harness proves it against kit_meta.json.
 //
@@ -67,8 +68,8 @@ namespace PDungeon
         // and nothing else. std::strtod would do the same, but its decimal
         // point follows the C locale, and a worldserver whose locale was set
         // elsewhere would then read the entry anchor's 29.166666 as 29 and
-        // seat the altar a third of a block off. The identical reasoning (and
-        // the identical scanner) sits in PDv2DecorPlan.cpp's ReadNumber; this
+        // seat a vetoed spawn a third of a block off. The identical reasoning
+        // (and the identical scanner) sits in PDv2DecorPlan.cpp's ReadNumber; this
         // header cannot call it because it must stay engine-free and
         // header-only.
         inline bool ReadNumberAt(std::string const& json, size_t at, size_t limit,

@@ -671,7 +671,9 @@ ProceduralDungeon.V2.Ambush.Mobs = 4
 #        through a corner, a T or a cross hugs the square's corner at
 #        8.33 * sqrt(2) = 11.79 yd and missed the disc entirely - as did the
 #        dogleg around the centre pillar of the alt-1 straight, at 11.43 yd.
-#        Half the corridor kinds in the kit could be walked past.
+#        Four of the kit's five corridor kinds - corner, T, cross and the
+#        alt-1 straight with its centre pillar - could be walked past; only
+#        the plain straight ever passed close enough to fire.
 #
 #        Widening the radius would have closed the hole with a number that
 #        silently breaks the day the kit's corridor width changes. The trigger

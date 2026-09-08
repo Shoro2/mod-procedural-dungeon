@@ -1206,8 +1206,8 @@ namespace PDungeon
         // Every other spine position is an ordinary room. Chain 0 is the
         // entrance (checked above) and the last chain room is a boss, so the
         // interior is the only place a wrong role could hide - a second
-        // RoomEntrance at chain 3 used to validate, and B1's altar cadence and
-        // B4's barrier both read the role, not just the index.
+        // RoomEntrance at chain 3 used to validate, and B3's barrier and C5's
+        // respawn checkpoint both read the role, not just the index.
         for (int idx = 1; idx < chainLen - 1; ++idx)
         {
             if (bossPos[static_cast<size_t>(idx)])
@@ -1473,7 +1473,7 @@ namespace PDungeon
 
         // 2. Spine adjacency: consecutive chain rooms are joined by exactly
         //    one corridor run, which is what makes the chain order physical
-        //    rather than a label (B1's altar cadence, B5's patrol).
+        //    rather than a label (C5's respawn checkpoint, B5's patrol).
         for (int i = 1; i < chainLen; ++i)
         {
             size_t const from = static_cast<size_t>(chainBlock[static_cast<size_t>(i - 1)]);

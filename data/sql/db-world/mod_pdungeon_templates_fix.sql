@@ -207,12 +207,17 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 (910074, 5, 7312, 'PD Skeleton Alt',        1.0,  0, 0, ''),
 (910075, 5,  293, 'PD Bone Pile',           1.0,  0, 0, ''),
 (910076, 5, 7225, 'PD Coffin',              1.0,  0, 0, ''),
--- Round B / B1: the respawn altar. type 10 GOOBER so OnGossipHello fires on
--- click (GameObject::Use, no GO_FLAG_NOT_SELECTABLE); display 7355 Altar01.m2
--- resolves in GameObjectDisplayInfo.dbc, has a collision model in
--- GameObjectModels.dtree, and is the display of the stock 'WotLK Light Altar'
--- (gameobject_template 190741) - the three-way check this file's header asks for.
-(910058, 10, 7355, 'Altar of Return', 1, 0, 0, 'go_pdungeon_altar'),
+-- Altar of Return: UNSPAWNED since Round C (C5) - the row stays, the script
+-- and the spawns are gone. Kept because the id registry's rule is not to prune
+-- casually (910040 is unspawned the same way), so nothing may reuse 910058.
+-- ScriptName is cleared with the code: a name no C++ script registers is a
+-- startup LOG_ERROR ("assigned in the database, but has no code",
+-- ScriptMgr::CheckIfScriptsInDatabaseExist), and go_pdungeon_altar was deleted
+-- with PDv2Altar.cpp. Round B / B1's original row was type 10 GOOBER so
+-- OnGossipHello fired on click, display 7355 Altar01.m2 (a collision model in
+-- GameObjectModels.dtree, the display of the stock 'WotLK Light Altar'
+-- 190741) - the three-way check this file's header asks for.
+(910058, 10, 7355, 'Altar of Return', 1, 0, 0, ''),
 -- Round B / B3: the boss-room barrier. type 5 GENERIC because that is the
 -- only GameObject class measured to block a player on map 760; opened by
 -- Delete(), never by state. Display 7482 Vr_Portcullis.m2 spans 16.3 yd at

@@ -169,16 +169,6 @@ namespace PDungeon
     int ChainLength(BlockPlan const& plan);
     int SegmentOf(BlockPlan const& plan, PlacedBlock const& block);
 
-    // Round B / B1: an altar (the run's respawn point) stands in the entrance
-    // and in every PD_ALTAR_EVERY_N_ROOMS-th spine room by chain index.
-    // Pockets and loop rooms carry chainIndex -1 and never qualify.
-    constexpr int PD_ALTAR_EVERY_N_ROOMS = 5;
-
-    inline bool IsAltarRoom(PlacedBlock const& block)
-    {
-        return block.chainIndex >= 0 && block.chainIndex % PD_ALTAR_EVERY_N_ROOMS == 0;
-    }
-
     // Round B / B3-B5: the corridor run behind socket `bit` of block `from`.
     // Walks corridor blocks, ignores chest stubs, continues straight through a
     // loop attachment, and returns the index of the first ROOM reached. -1

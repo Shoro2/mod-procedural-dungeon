@@ -269,6 +269,16 @@ namespace PDungeon
             _roomIsBoss.clear();
             _segmentPlanned.clear();
             _segmentKilled.clear();
+            // Round C / C5, the same reasoning one layout further: a rebuilt
+            // dungeon must not hand a corpse a checkpoint in a room that no
+            // longer exists, so the four per-room facts and the checkpoint
+            // they feed go with the rest. The run starts at the entrance again.
+            _roomSpot.clear();
+            _roomBX.clear();
+            _roomBY.clear();
+            _roomChain.clear();
+            _checkpointChain = -1;
+            _checkpointRoom = -1;
             // The portcullis GameObjects themselves went with _decorGuids in
             // DespawnAll, and the grid holes they cut go with the grid the
             // rebuild throws away - what is left here is the run's memory of
@@ -297,9 +307,6 @@ namespace PDungeon
             // it. Ambient life, same guard, own GUID list and own teardown.
             SpawnCritters(*plan, decorPositions);
             SpawnDeadEndChests(*plan);
-            // Needs the walk grid EnsureWalkGrid built above: an altar is only
-            // ever seated on a cell that grid calls floor.
-            SpawnAltars(*plan);
             // After SpawnFromPlan, which is what filled _segmentPlanned: a
             // barrier is evaluated the moment it is placed, and a segment
             // whose denominator is zero has to open right there.
@@ -591,6 +598,22 @@ namespace PDungeon
             if (tag->isRunBoss && _run.bossKilled < _run.bossTotal)
             {
                 ++_run.bossKilled;
+                // Round C / C5: the checkpoint is the FURTHEST cleared boss
+                // hall, so it moves only forward. `>` against the running
+                // maximum, not "the latest kill", makes it order-proof: the
+                // barriers gate the bosses in chain order in practice, but
+                // nothing in the code enforces that, and a boss pulled out of
+                // order must not drag the respawn point backwards. Pockets
+                // carry chainIndex -1 and never hold a boss, so the initial
+                // -1 can only be beaten by a real spine room - the entrance
+                // is chain 0 and holds no pack at all (SpawnFromPlan skips
+                // RoomEntrance), so chain 0 never enters this vector.
+                if (tag->roomIndex < _roomChain.size() &&
+                    _roomChain[tag->roomIndex] > _checkpointChain)
+                {
+                    _checkpointChain = _roomChain[tag->roomIndex];
+                    _checkpointRoom = static_cast<int>(tag->roomIndex);
+                }
             }
 
             if (tag->roomIndex < _roomAlive.size() && _roomAlive[tag->roomIndex] > 0)
@@ -735,13 +758,9 @@ namespace PDungeon
         }
         _decorGuids.clear();
 
-        // The altars ARE decor GUIDs, so the loop above already deleted the
-        // objects; what is left here is the run's memory of them. Cleared
-        // with everything else: a rebuilt dungeon must not hand a player a
-        // respawn point in a room that no longer exists.
-        _altars.clear();
-        _altarByGuid.clear();
-        _boundAltar.clear();
+        // A death recorded against the layout being torn down has nothing left
+        // to be teleported to, so it is dropped here rather than answered by
+        // the next tick against a dungeon that no longer exists.
         _pendingRespawn.clear();
 
         // Critters are creatures, not GameObjects: DespawnOrUnsummon is their
@@ -1025,12 +1044,19 @@ namespace PDungeon
         // entrance stays empty so an arriving player is not already in combat.
         std::vector<PlacedBlock const*> roomBlocks;
         SpawnSelectInputs inputs;
-        // Round B / B3: the per-room facts a barrier's arithmetic needs, taken
-        // in the same pass and in the same order, so `roomIndex` means one
-        // thing in all four vectors. `roomBlocks` is discarded at the end of
-        // this function - these are what survives it.
+        // Round B / B3 and Round C / C5: the per-room facts a barrier's
+        // arithmetic and the respawn checkpoint need, taken in the same pass
+        // and in the same order, so `roomIndex` means one thing in all six
+        // vectors. `roomBlocks` is discarded at the end of this function -
+        // these are what survives it.
         _roomSegment.clear();
         _roomIsBoss.clear();
+        _roomSpot.clear();
+        _roomBX.clear();
+        _roomBY.clear();
+        _roomChain.clear();
+        _checkpointChain = -1;
+        _checkpointRoom = -1;
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.roomId < 0 || b.role == BlockRole::RoomEntrance)
@@ -1047,6 +1073,45 @@ namespace PDungeon
             // segment, a pocket's host segment, a loop room's run segment.
             _roomSegment.push_back(SegmentOf(plan, b));
             _roomIsBoss.push_back(b.role == BlockRole::RoomBoss);
+            // Round C / C5. chainIndex, not SegmentOf: "furthest" is measured
+            // along the spine, and a pocket carries -1 there on purpose - it
+            // is off the chain and can never be the checkpoint.
+            _roomChain.push_back(b.chainIndex);
+            _roomBX.push_back(b.bx);
+            _roomBY.push_back(b.by);
+            RoomSpot spot;
+            {
+                double const mid = PD_BLOCK_SIZE_YD / 2.0;
+                sPDv2Mgr->BlockToWorld(b.bx, b.by, mid, mid, spot.x, spot.y, spot.z);
+                // Grid-vetoed like a spawn point, and NOT as a formality.
+                // Measured over the shipped chunk-meta masks: all 60
+                // room_boss chunks are floor at the centre cell (4, 4) - so
+                // the CHECKPOINT itself always stands on the arena floor,
+                // even the 33 yd platform's - but 15 of the 90 room chunks
+                // are not: theme 2's alt-1 room, 13001-13015, carries a 2x2
+                // VOID in the middle of the block. There the veto is
+                // load-bearing, and it finds floor on ring 1.
+                if (WalkGrid const* grid = GetWalkGrid())
+                {
+                    int gcx = 0, gcy = 0;
+                    WorldToCell(spot.x, spot.y, gcx, gcy);
+                    GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                    // `snapped`, not the plan's `near`: <minwindef.h> defines
+                    // `near` as an empty macro, so that name compiles to
+                    // nothing on this platform.
+                    GridPoint snapped;
+                    if (!grid->At(cell.x, cell.y) &&
+                        NearestWalkable(*grid, cell.x, cell.y, 2, snapped))
+                    {
+                        grid->GlobalFromLocalCell(snapped, gcx, gcy);
+                        double wx = 0.0, wy = 0.0;
+                        CellCentreToWorld(gcx, gcy, wx, wy);
+                        spot.x = static_cast<float>(wx);
+                        spot.y = static_cast<float>(wy);
+                    }
+                }
+            }
+            _roomSpot.push_back(spot);
         }
 
         inputs.spawnsPerRoom = cfg.spawnsPerRoom;
@@ -1196,8 +1261,9 @@ namespace PDungeon
                 // that falls outside a 33 yd room's platform. Gravity is off on
                 // this map, so a mob seated off the floor hovers over the void
                 // for ever: unreachable, unkillable, and holding the room's
-                // counter open. The entry anchor is provably floor (the altar
-                // stands beside it), so that is where a vetoed pick goes; a
+                // counter open. The entry anchor is provably floor (it is the
+                // cell every walk into the room arrives on), so that is where
+                // a vetoed pick goes; a
                 // chunk without one falls back to the block centre, which is
                 // walkable in every room variant the kit ships.
                 //
@@ -1752,113 +1818,6 @@ namespace PDungeon
         }
     }
 
-    void PDv2InstanceScript::SpawnAltars(BlockPlan const& plan)
-    {
-        _altars.clear();
-        _altarByGuid.clear();
-        _boundAltar.clear();
-        _pendingRespawn.clear();
-
-        std::vector<PlacedBlock const*> rooms;
-        for (PlacedBlock const& b : plan.blocks)
-        {
-            if (IsAltarRoom(b))
-            {
-                rooms.push_back(&b);
-            }
-        }
-        // Chain order, so _altars[0] is always the entrance's: an unbound
-        // player respawns at the front of the dungeon, not at whichever room
-        // the plan happened to emit first.
-        std::sort(rooms.begin(), rooms.end(), [](PlacedBlock const* a, PlacedBlock const* b)
-        {
-            return a->chainIndex < b->chainIndex;
-        });
-
-        WalkGrid const* grid = GetWalkGrid();
-        uint32 placed = 0;
-        for (PlacedBlock const* b : rooms)
-        {
-            RoomAnchors const* anchors = sPDv2Mgr->RoomAnchorsFor(b->chunkId);
-            if (!anchors || !anchors->hasEntry)
-            {
-                LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} publishes no entry anchor - "
-                                 "no altar in chain room {}",
-                         instance->GetInstanceId(), b->chunkId, b->chainIndex);
-                continue;
-            }
-
-            Altar altar;
-            altar.chainIndex = b->chainIndex;
-            sPDv2Mgr->BlockToWorld(b->bx, b->by, anchors->entry.u, anchors->entry.v,
-                                   altar.x, altar.y, altar.z);
-
-            // The altar stands one cell beside the entry anchor, off the socket
-            // track (the block's centre row and column), on a cell the walk
-            // grid calls floor - checked in WORLD coordinates through the same
-            // conversion SplitOnDeath trusts, so no axis assumption is made.
-            int const entryRow = static_cast<int>(anchors->entry.u / PD_CELL_SIZE_YD);
-            int const entryCol = static_cast<int>(anchors->entry.v / PD_CELL_SIZE_YD);
-            int const tries[4][2] = { { -1, 0 }, { 0, -1 }, { 0, 1 }, { 1, 0 } };   // N, W, E, S
-            bool seated = false;
-            for (auto const& t : tries)
-            {
-                int const row = entryRow + t[0];
-                int const col = entryCol + t[1];
-                if (row < 0 || col < 0 || row >= PD_CELLS_PER_BLOCK || col >= PD_CELLS_PER_BLOCK)
-                {
-                    continue;
-                }
-                if (row == PD_CELLS_PER_BLOCK / 2 || col == PD_CELLS_PER_BLOCK / 2)
-                {
-                    continue;       // the socket track: the one line every player walks
-                }
-                if (row == 0 || col == 0 || row == PD_CELLS_PER_BLOCK - 1 || col == PD_CELLS_PER_BLOCK - 1)
-                {
-                    continue;       // the kit's doorways are two cells wide, so a block-edge cell is either the doorway or the wall band
-                }
-                float ax = 0.0f, ay = 0.0f, az = 0.0f;
-                sPDv2Mgr->BlockToWorld(b->bx, b->by, (row + 0.5) * PD_CELL_SIZE_YD,
-                                       (col + 0.5) * PD_CELL_SIZE_YD, ax, ay, az);
-                if (grid)
-                {
-                    int gcx = 0, gcy = 0;
-                    WorldToCell(ax, ay, gcx, gcy);
-                    GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
-                    if (!grid->At(cell.x, cell.y))
-                    {
-                        continue;
-                    }
-                }
-                float const facing = std::atan2(altar.y - ay, altar.x - ax);
-                GameObject* go = instance->SummonGameObject(GO_ALTAR, ax, ay, az, facing,
-                                                            0.0f, 0.0f, 0.0f, 0.0f, 0);
-                if (!go)
-                {
-                    LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the altar "
-                                      "(missing gameobject_template {}?)",
-                              instance->GetInstanceId(), uint32(GO_ALTAR));
-                    break;
-                }
-                _decorGuids.push_back(go->GetGUID());
-                altar.guid = go->GetGUID();
-                _altarByGuid[go->GetGUID()] = _altars.size();
-                seated = true;
-                ++placed;
-                break;
-            }
-            if (!seated)
-            {
-                LOG_WARN(PD_LOG, "PDv2: instance {} found no cell for the altar in chain room {} "
-                                 "- the room keeps its respawn spot without an altar",
-                         instance->GetInstanceId(), b->chainIndex);
-            }
-            _altars.push_back(altar);
-        }
-        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} altar(s) in {} altar room(s)",
-                 instance->GetInstanceId(), placed, uint32(_altars.size()));
-    }
-
     void PDv2InstanceScript::SpawnBarriers(BlockPlan const& plan)
     {
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
@@ -1958,8 +1917,8 @@ namespace PDungeon
 
             // One cell INSIDE the boss block, on that edge, at the lane
             // centre - the doorway's own square. u runs along the row axis and
-            // v along the column axis, the same reading SpawnAltars uses for
-            // the kit's anchors.
+            // v along the column axis, the same reading the kit's typed
+            // anchors are decoded with.
             double const nearEdge = PD_CELL_SIZE_YD / 2.0;                      // 4.1667
             double const farEdge = PD_BLOCK_SIZE_YD - PD_CELL_SIZE_YD / 2.0;    // 62.5
             double const lane = PD_BLOCK_SIZE_YD / 2.0;                         // 33.3333
@@ -2384,6 +2343,16 @@ namespace PDungeon
                     // throughout, like the barrier hint and for the same
                     // reason - the dungeon is one floor plane and a Z term
                     // would only measure the height of a jump.
+                    //
+                    // Known and bounded: a closed barrier takes its four lane
+                    // cells OUT of this grid (SetCellsWalkable), so standing
+                    // exactly in a sealed doorway of an armed corridor does
+                    // not fire the spot. It costs nothing - those four cells
+                    // are the last of the lane, so the player crossed the rest
+                    // of the corridor first and the ambush already had every
+                    // other cell of the block to fire on - and the moment
+                    // OpenBarrier hands the cells back the spot covers them
+                    // again.
                     GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
                     if (!grid->At(cell.x, cell.y))
                     {
@@ -2403,9 +2372,11 @@ namespace PDungeon
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
 
         // DISARMED FIRST, before anything below can fail. The scan runs four
-        // times a second and the player is standing in the radius for seconds:
+        // times a second and a player crosses the block over several seconds:
         // a spot left armed through a failed summon would stun them again on
-        // the next tick, and again after that.
+        // the next tick, and again after that. Round C / C2 changed WHAT is
+        // stood in (a corridor block, no longer a disc); it did not change
+        // that a player stands in it for many ticks, which is the reason.
         ambush.armed = false;
 
         if (cfg.ambushStunSpell)
@@ -2495,36 +2466,17 @@ namespace PDungeon
                  ambush.spot.by, player->GetName(), born, cfg.ambushStunSpell);
     }
 
-    bool PDv2InstanceScript::BindAltar(Player* player, ObjectGuid const& altarGuid)
+    bool PDv2InstanceScript::CheckpointSpot(float& x, float& y, float& z) const
     {
-        auto const it = _altarByGuid.find(altarGuid);
-        if (!player || it == _altarByGuid.end())
+        if (_checkpointRoom < 0 || static_cast<size_t>(_checkpointRoom) >= _roomSpot.size())
         {
             return false;
         }
-        auto const bound = _boundAltar.find(player->GetGUID());
-        if (bound != _boundAltar.end() && bound->second == it->second)
-        {
-            sPDv2UILink->SendNotice(player, "This altar is already yours.");
-            return true;
-        }
-        _boundAltar[player->GetGUID()] = it->second;
-        sPDv2UILink->SendNotice(player, "Altar bound. If you fall, you return here.");
-        LOG_DEBUG(PD_LOG, "PDv2: {} bound the altar of chain room {}",
-                  player->GetName(), _altars[it->second].chainIndex);
+        RoomSpot const& s = _roomSpot[static_cast<size_t>(_checkpointRoom)];
+        x = s.x;
+        y = s.y;
+        z = s.z;
         return true;
-    }
-
-    PDv2InstanceScript::Altar const* PDv2InstanceScript::RespawnAltarFor(ObjectGuid const& playerGuid) const
-    {
-        auto const bound = _boundAltar.find(playerGuid);
-        if (bound != _boundAltar.end() && bound->second < _altars.size())
-        {
-            return &_altars[bound->second];
-        }
-        // Nothing bound yet (or a binding the rebuild outlived): the entrance
-        // room's altar, which is _altars[0] by the chain sort above.
-        return _altars.empty() ? nullptr : &_altars[0];
     }
 
     void PDv2InstanceScript::OnUnitDeath(Unit* unit)
@@ -2585,34 +2537,38 @@ namespace PDungeon
             player->ResurrectPlayer(1.0f, true);
             player->SpawnCorpseBones();
 
-            // Where to: the bound altar, else the entrance room's altar (both
-            // answered by RespawnAltarFor). If the build seated no altar at
-            // all, the entrance itself; and if there is not even one of
-            // those, nowhere - they rise where they fell, because (0, 0, 0)
-            // on a composed map is the void and the fall catcher that would
-            // rescue them from it is switched off by the same missing
-            // entrance that got us here.
-            if (Altar const* altar = RespawnAltarFor(entry.first))
+            // Where to (Round C / C5): the furthest cleared boss hall, else
+            // the entrance. Both are COMPUTED from the run's own state - the
+            // player never chose either, which is the whole point of dropping
+            // B1's clickable altars. Returning to the entrance is the normal
+            // case for the first half of a run, not a fallback, so it is not
+            // logged as a warning any more. If there is not even an entrance,
+            // nowhere - they rise where they fell, because (0, 0, 0) on a
+            // composed map is the void and the fall catcher that would rescue
+            // them from it is switched off by the same missing entrance that
+            // got us here.
+            float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+            if (CheckpointSpot(cx, cy, cz))
             {
-                player->TeleportTo(instance->GetId(), altar->x, altar->y, altar->z + 2.0f, 0.0f);
-                sPDv2UILink->SendNotice(player, "You return to the altar, weakened.");
-                LOG_INFO(PD_LOG, "PDv2: {} returned alive to the altar of chain room {} in "
+                player->TeleportTo(instance->GetId(), cx, cy, cz + 2.0f, 0.0f);
+                sPDv2UILink->SendNotice(player, "You return to the last boss's hall, weakened.");
+                LOG_INFO(PD_LOG, "PDv2: {} returned alive to the hall of chain room {} in "
                                  "instance {} after {} ms",
-                         player->GetName(), altar->chainIndex, instance->GetInstanceId(), waitedMs);
+                         player->GetName(), _checkpointChain, instance->GetInstanceId(), waitedMs);
             }
             else if (_haveEntrance)
             {
                 player->TeleportTo(instance->GetId(), _entranceX, _entranceY, _entranceZ + 2.0f, 0.0f);
                 sPDv2UILink->SendNotice(player, "You return to the entrance, weakened.");
-                LOG_WARN(PD_LOG, "PDv2: instance {} seated no altar - {} returned alive to the "
-                                 "entrance after {} ms",
-                         instance->GetInstanceId(), player->GetName(), waitedMs);
+                LOG_INFO(PD_LOG, "PDv2: {} returned alive to the entrance of instance {} "
+                                 "after {} ms",
+                         player->GetName(), instance->GetInstanceId(), waitedMs);
             }
             else
             {
                 sPDv2UILink->SendNotice(player, "You rise again where you fell.");
-                LOG_WARN(PD_LOG, "PDv2: instance {} has neither an altar nor an entrance - "
-                                 "{} was resurrected in place after {} ms",
+                LOG_WARN(PD_LOG, "PDv2: instance {} has no entrance - {} was resurrected "
+                                 "in place after {} ms",
                          instance->GetInstanceId(), player->GetName(), waitedMs);
             }
         }
@@ -2694,12 +2650,13 @@ namespace PDungeon
             CatchFallers();
             // After the fall catcher on purpose: a player who died BELOW the
             // floor is first pulled back onto the map by CatchFallers and
-            // then sent on to their altar, so the altar is the teleport that
-            // lands last and the ordering never leaves a corpse in the void.
+            // then sent on to their checkpoint, so the checkpoint is the
+            // teleport that lands last and the ordering never leaves a corpse
+            // in the void.
             RespawnPending();
             // Round B / B3. After the respawn, so a player who just landed at
-            // an altar is measured where they actually are; a barrier only
-            // ever talks, so its place in the tick is free.
+            // their checkpoint is measured where they actually are; a barrier
+            // only ever talks, so its place in the tick is free.
             HintBarriers();
             EvictDisconnected();
             TickVoidZones();
@@ -2723,8 +2680,8 @@ namespace PDungeon
         }
 
         // Round B / B5, on its own cadence and AFTER the 1 Hz branch. A player
-        // the respawn just teleported to an altar is measured where they now
-        // are rather than where they died, which is the only ordering that
+        // the respawn just teleported to their checkpoint is measured where
+        // they now are rather than where they died, the only ordering that
         // cannot spring a trap at a position the player no longer occupies.
         // Accumulating rather than counting down: the map ticks at 10 ms, so
         // the remainder above 250 is a fraction of one tick and dropping it

@@ -221,10 +221,6 @@ namespace PDungeon
         // on the 1 Hz tick (RespawnPending), never inside the death itself.
         void OnUnitDeath(Unit* unit) override;
 
-        // The player clicked an altar: binds the run's respawn point to it.
-        // False for a GameObject that is not one of this instance's altars.
-        bool BindAltar(Player* player, ObjectGuid const& altarGuid);
-
         // True while a death is waiting for its tick; the release veto in
         // PDClientLink reads it so a quick 'release spirit' cannot beat the
         // tick to the graveyard.
@@ -270,25 +266,11 @@ namespace PDungeon
         // the decor GUID list so one teardown owns every summoned object.
         void SpawnDeadEndChests(BlockPlan const& plan);
 
-        // Round B / B1. One altar per altar room (IsAltarRoom), in chain
-        // order, on a walkable cell beside the room's entry anchor. The
-        // respawn spot itself is the entry anchor. Same guard and teardown
-        // as the decor.
-        struct Altar
-        {
-            int chainIndex = 0;
-            float x = 0.0f;         // the respawn spot (entry anchor), world
-            float y = 0.0f;
-            float z = 0.0f;
-            ObjectGuid guid;        // the altar GameObject; empty when none could be seated
-        };
-        void SpawnAltars(BlockPlan const& plan);
-
         // Round B / B3. One sealed portcullis per boss segment, standing in
         // the boss room's own doorway - the cell inside the entry edge that
         // segment's corridor run arrives through, found with the SAME walk the
-        // validator proved the spine with. Called after SpawnAltars so the
-        // walk grid EnsureWalkGrid built is there to be cut: the GameObject
+        // validator proved the spine with. Called after EnsureWalkGrid built
+        // the walk grid, so there is a grid to cut: the GameObject
         // stops the PLAYER, and the four lane cells taken out of the grid stop
         // the CREATURES, which ignore GameObject collision entirely.
         struct Barrier
@@ -385,15 +367,17 @@ namespace PDungeon
 
         // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
         // is safe: everyone recorded there who is still on this map and still
-        // dead comes back alive at RespawnAltarFor's spot with resurrection
-        // sickness. Called after CatchFallers, so a death below the floor is
-        // pulled onto the map before it is sent to its altar.
+        // dead comes back alive with resurrection sickness, at the entrance
+        // or the furthest cleared boss hall - computed, never chosen (Round C
+        // / C5; B1's clickable altars are gone). Called after CatchFallers, so
+        // a death below the floor is pulled onto the map before it is sent on.
         void RespawnPending();
 
-        // The altar a player respawns at: the one they bound, else the
-        // entrance room's (_altars[0]). nullptr only when the build seated
-        // no altar at all - RespawnPending owns that fallback.
-        Altar const* RespawnAltarFor(ObjectGuid const& playerGuid) const;
+        // Round C / C5. The checkpoint's world position: the arena centre of
+        // the boss room with the highest chainIndex whose boss is dead.
+        // False when no boss has fallen yet - RespawnPending then uses the
+        // entrance, which is the normal case for the first half of a run.
+        bool CheckpointSpot(float& x, float& y, float& z) const;
 
         // Summons ONE dungeon mob: the floor plane, the disabled gravity, the
         // tag copied off `proto`, the run's affix auras and their spawn-time
@@ -471,6 +455,28 @@ namespace PDungeon
         std::vector<uint16> _roomPlanned;       // per room, what the draw actually spawned
         std::vector<int>    _roomSegment;       // per room, SegmentOf its block
         std::vector<bool>   _roomIsBoss;        // per room, its block is a RoomBoss
+
+        // Round C / C5. Four more per-room facts, taken in the SAME pass and
+        // the same order as the three above, so `roomIndex` still means one
+        // thing in all seven. `roomBlocks` is discarded at the end of
+        // SpawnFromPlan - these are what survives it, and they are what
+        // replaced B1's altars: the respawn point is COMPUTED from the run's
+        // own state rather than clicked.
+        struct RoomSpot
+        {
+            float x = 0.0f;                     // the room's arena centre, world
+            float y = 0.0f;
+            float z = 0.0f;
+        };
+        std::vector<RoomSpot> _roomSpot;        // per room, the grid-vetoed arena centre
+        std::vector<int> _roomBX;               // per room, its block coordinates
+        std::vector<int> _roomBY;
+        std::vector<int> _roomChain;            // per room, PlacedBlock::chainIndex (-1 off the spine)
+        // The furthest cleared boss room, moved only forward by OnMobDied.
+        // -1/-1 means no boss has fallen yet, which is what sends a corpse
+        // back to the entrance. Reset with the run, like every vector above.
+        int _checkpointChain = -1;              // its chainIndex, -1 = none
+        int _checkpointRoom = -1;               // its dense roomIndex, -1 = none
         // Index 1..N, [0] unused: segment 0 is the entrance, which has no
         // barrier. The boss room's own pack is deliberately NOT in `planned` -
         // a segment whose only room is its boss would otherwise never open.
@@ -486,9 +492,6 @@ namespace PDungeon
         // that this corridor is spent - and the rebuild, not the firing, is
         // what forgets it. Same shape and same reasoning as _barriers.
         std::vector<Ambush> _ambushes;
-        std::vector<Altar> _altars;                              // chain order; [0] = the entrance's
-        std::unordered_map<ObjectGuid, size_t> _altarByGuid;     // altar GO -> index into _altars
-        std::unordered_map<ObjectGuid, size_t> _boundAltar;      // player -> index into _altars
         std::unordered_map<ObjectGuid, uint32> _pendingRespawn;  // player -> getMSTime() at death
         std::vector<ObjectGuid> _voidZones;     // friendly ground-hazard carriers; pruned each tick
         uint32   _fallCheckTimer = 0;

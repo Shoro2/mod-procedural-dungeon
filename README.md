@@ -14,9 +14,10 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > rooms from the entrance through the boss rooms, a few one-room pockets and, per boss segment,
 > a possible loop room beside the corridor - see `docs/superpowers/specs/2026-09-02-pdv2-b0-spine-generator-design.md`.
 >
-> Round B also **fills** that chain. An **Altar of Return** (GO 910058) stands in the entrance
-> room and every fifth chain room: clicking one binds you, and dying returns you there alive
-> with resurrection sickness instead of sending you to a world graveyard (map 760 has none).
+> Round B also **fills** that chain. **Death** returns you alive - with resurrection sickness,
+> never to a world graveyard (map 760 has none) - to the arena of the **furthest boss you have
+> already killed**, or to the entrance while no boss has fallen. Since Round C / C5 that
+> checkpoint is computed from the run's own state; B1's clickable Altars of Return are gone.
 > A **sealed portcullis** (GO 910059) holds each boss doorway - the walk grid is cut on both
 > sides, so creatures stop at it too - until that segment's PLANNED non-boss kills reach
 > `V2.Barrier.Pct`. One **patroller** walks the corridor run in front of every boss room and

@@ -287,8 +287,9 @@ namespace PDungeon
         std::vector<DecorAnchor> const* AnchorsFor(int chunkId) const;
 
         // The same row's anchors with their KINDS kept (entry, boss, chest,
-        // spawns) - what the altar, the loop-room chest and B2's spawn
-        // placement read. nullptr for a chunk the SQL does not know.
+        // spawns) - what the spawn veto's fallback, the loop-room chest and
+        // B2's spawn placement read (B1's altar read `entry` too, until Round
+        // C / C5 dropped it). nullptr for a chunk the SQL does not know.
         RoomAnchors const* RoomAnchorsFor(int chunkId) const;
         size_t RoomAnchorChunkCount() const { return _chunkRoomAnchors.size(); }
 

@@ -944,22 +944,25 @@ namespace
     {
         double const mid = PD_BLOCK_SIZE_YD / 2.0;
 
-        // Both corners of the block field, the operator's own origin, and one
-        // block of his layout (the ambush pin's segment-1 corridor is (259,259),
-        // inside this range). Block 511 sits at about -17066 yd, so the sign of
-        // x/y is covered as well.
+        // Both corners of the block field, the operator's own origin, and the
+        // ambush pin's own segment-1 corridor block (259,259) - the block this
+        // trigger is actually pinned on, so the check samples the layout it
+        // guards rather than a neighbour of it. Block 511 sits at about
+        // -17066 yd, so the sign of x/y is covered as well.
         struct Blk { int bx; int by; };
-        Blk const blocks[4] = { { 0, 0 }, { 256, 256 }, { 263, 259 }, { 511, 511 } };
+        Blk const blocks[4] = { { 0, 0 }, { 256, 256 }, { 259, 259 }, { 511, 511 } };
 
-        // Block-local (u, v) in yards: the near corner cell, the centre (the
-        // boundary case), the far corner cell, and a point that sits on the
-        // cell 3/4 boundary of one axis only.
+        // Block-local (u, v) in yards: the near corner cell, the centre (both
+        // axes exactly on the cell 3/4 boundary), the far corner cell, and
+        // 4 * CELL = 33.3333 on one axis only - ON that same boundary in u,
+        // mid-cell in v, so the one-sided case is covered too. 33.3 would sit
+        // a third of a yard BELOW the boundary and prove nothing.
         struct Pt { double u; double v; char const* what; };
         Pt const points[4] = {
             { 0.5, 0.5, "(0.5,0.5)" },
             { mid, mid, "(mid,mid)" },
             { 66.6, 66.6, "(66.6,66.6)" },
-            { 33.3, 0.5, "(33.3,0.5)" },
+            { 4.0 * PD_CELL_SIZE_YD, 0.5, "(33.3333,0.5)" },
         };
 
         char msg[192];
@@ -2194,26 +2197,12 @@ namespace
                 // one off it would make it true by construction.
                 if (loops > 0) sawDetour = true;
 
-                // Round B / B1: the altar rooms are the entrance and every
-                // fifth spine room; pockets and loop rooms never carry one.
-                int altars = 0;
-                bool entranceHasAltar = false;
-                for (PlacedBlock const& b : plan.blocks)
-                {
-                    if (!IsAltarRoom(b)) continue;
-                    ++altars;
-                    Check(b.chainIndex >= 0, "an altar room is not a spine room", seed);
-                    if (b.role == BlockRole::RoomEntrance) entranceHasAltar = true;
-                }
-                Check(entranceHasAltar, "the entrance has no altar", seed);
-                Check(altars == (wantChain - 1) / PD_ALTAR_EVERY_N_ROOMS + 1, "altar count is not floor((L-1)/5)+1", seed);
-
                 // Spine adjacency (spec 7.1 invariant 3, final review M2):
                 // consecutive chain rooms are joined by EXACTLY one corridor
                 // run. Construction guarantees it today and one pinned seed
-                // notices a move, but B1's altar cadence and B5's patrol key
-                // off the physical order, so it is asserted per seed here -
-                // with the harness's own corridor walk, not the validator's.
+                // notices a move, but C5's respawn checkpoint and B5's patrol
+                // key off the physical order, so it is asserted per seed here
+                // - with the harness's own corridor walk, not the validator's.
                 for (int idx = 1; idx < wantChain; ++idx)
                 {
                     size_t const from = static_cast<size_t>(chainBlock[static_cast<size_t>(idx - 1)]);
@@ -4227,10 +4216,11 @@ namespace
         std::printf("\n");
     }
 
-    // Round B / B1: the typed anchors the altar (and B2's spawn placement)
-    // stand on. Every room-role chunk publishes an entry on a walkable cell,
-    // the entry is the first point of the flat list (AnchorsFor[0] - the
-    // order 48 emits), boss rooms publish a boss, rooms a chest and spawns.
+    // Round B / B1: the typed anchors B2's spawn placement stands on (until
+    // Round C the altar stood on the entry one as well). Every room-role
+    // chunk publishes an entry on a walkable cell, the entry is the first
+    // point of the flat list (AnchorsFor[0] - the order 48 emits), boss rooms
+    // publish a boss, rooms a chest and spawns.
     // Pinned on two chunks, captured by running: paste the value out of the
     // "typed anchors ... moved" failure message, never by reasoning about
     // what it should be. 12015 is an ordinary room (no boss, a chest, six

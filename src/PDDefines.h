@@ -39,7 +39,9 @@ namespace PDungeon
         GO_ENTRANCE_DECO = 910033,
         // Round B (2026-09-03): gameplay objects in the 910050+ band that
         // mod_pdungeon_templates_fix.sql owns. 910059's row lands with B3.
-        GO_ALTAR         = 910058,  // B1: respawn altar, type 10, display 7355
+        // 910058 (B1's 'Altar of Return') has no constant any more: Round C /
+        // C5 deleted the script and the spawns, and the template row survives
+        // unspawned so the id stays reserved. Nothing here may reuse it.
         GO_BARRIER       = 910059   // B3: boss-room barrier
     };
 
