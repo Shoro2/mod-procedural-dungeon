@@ -30,6 +30,15 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > bosses than the run has boss rooms (below that, repeats fill the rooms), and every boss
 > fights with **two abilities at difficulty 1** - four rows per boss, two at `minDiff 1`
 > plus one each at 50 and 75.
+> Round C / C7 puts that state on the **HUD**: a `Gate` line counts the next sealed
+> portcullis's kills up and reads `open` when nothing is sealed, the map paints every
+> **cleared room green**, and every notice is shouted as a **raid warning** on top of the
+> chat line. And with C8 the run now **ends** somewhere: when the last boss dies **Chromie**
+> (NPC 910550) appears in that hall, speaks three lines four seconds apart, a **reward
+> cache** (GO 910068) stands beside her, and about a second after the last line a **portal
+> to Azealia** (GO 910067) opens - a click, not an automatic pull, so the cache is looted
+> first. All three go down with the run, so re-entering during the finale rebuilds the
+> dungeon and takes an un-looted cache with it.
 > Creatures also stand on the kit's **published spawn anchors** now, not on a 12 yd circle
 > around the block centre (that circle survives only as the overflow), and the ordinary room
 > gained a **third size** - a 33.33 yd platform - while the entrance and boss rooms lost their
