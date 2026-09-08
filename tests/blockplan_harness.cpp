@@ -675,6 +675,116 @@ namespace
         return true;
     }
 
+    // The Bresenham sampler Round B shipped, kept ONLY as the reference the
+    // supercover test is measured against (research c-research-patrol-ambush.md
+    // A1: it skips one cell at every minor-axis transition).
+    bool LegacyLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b)
+    {
+        int const steps = std::max(std::abs(b.x - a.x), std::abs(b.y - a.y));
+        if (steps == 0)
+        {
+            return grid.At(a.x, a.y);
+        }
+        for (int i = 0; i <= steps; ++i)
+        {
+            double const t = static_cast<double>(i) / steps;
+            int const x = static_cast<int>(std::lround(a.x + (b.x - a.x) * t));
+            int const y = static_cast<int>(std::lround(a.y + (b.y - a.y) * t));
+            if (!grid.At(x, y))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Independent reference: sample the segment between the two cell centres
+    // at 1/64 of a cell and demand that every sampled cell is walkable. Slower
+    // and cruder than the DDA, which is the point - it shares no code with it.
+    bool SampledLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b)
+    {
+        int const steps = 64 * std::max(1, std::max(std::abs(b.x - a.x), std::abs(b.y - a.y)));
+        for (int i = 0; i <= steps; ++i)
+        {
+            double const t = static_cast<double>(i) / steps;
+            double const fx = a.x + (b.x - a.x) * t;
+            double const fy = a.y + (b.y - a.y) * t;
+            int const x = static_cast<int>(std::floor(fx + 0.5));
+            int const y = static_cast<int>(std::floor(fy + 0.5));
+            if (!grid.At(x, y))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // One 8x8 grid per kit chunk, built the way BuildWalkGrid copies a mask
+    // (PDv2WalkGrid.cpp:79-90: mask[row * PD_CELLS_PER_BLOCK + col] with row
+    // the cell's y and col its x, so At(x, y) reads mask[y * 8 + x]).
+    WalkGrid GridFromMask(uint8_t const* mask)
+    {
+        WalkGrid g;
+        g.originBX = 0;
+        g.originBY = 0;
+        g.width = PD_CELLS_PER_BLOCK;
+        g.height = PD_CELLS_PER_BLOCK;
+        g.cells.assign(mask, mask + PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK);
+        return g;
+    }
+
+    // The supercover pair counts over the whole kit, `approved,rejected;`.
+    // Captured by RUNNING `pdblock --batch` and reading the "supercover pair
+    // counts moved" message, never by reasoning about the value. `rejected` is
+    // the size of the defect the Round C fix removes: pairs the shipped
+    // Bresenham sampler approved and the supercover test does not.
+    char const* const PD_SUPERCOVER_PAIRS_PIN = "291480,9604;";
+
+    // Over EVERY kit walk mask and every ordered pair of its walkable cells:
+    //   (1) whatever the supercover test approves, the sampled reference approves too
+    //       (no approved segment leaves the mask);
+    //   (2) approved(supercover) is a subset of approved(legacy) - the fix only
+    //       removes approvals;
+    //   (3) the legacy sampler approves strictly more pairs (the defect exists).
+    // The pair counts are pinned so a later change to the test is visible.
+    void CheckSupercover(std::map<int, std::vector<uint8_t>> const& masks,
+                         uint64_t& approved, uint64_t& rejectedByFix)
+    {
+        approved = 0;
+        rejectedByFix = 0;
+        for (auto const& kv : masks)
+        {
+            WalkGrid const g = GridFromMask(kv.second.data());
+            for (int ay = 0; ay < g.height; ++ay)
+                for (int ax = 0; ax < g.width; ++ax)
+                {
+                    if (!g.At(ax, ay)) continue;
+                    for (int by = 0; by < g.height; ++by)
+                        for (int bx = 0; bx < g.width; ++bx)
+                        {
+                            if (!g.At(bx, by)) continue;
+                            GridPoint const a{ ax, ay }, b{ bx, by };
+                            bool const ok = GridLineWalkable(g, a, b);
+                            bool const legacy = LegacyLineWalkable(g, a, b);
+                            if (ok)
+                            {
+                                ++approved;
+                                Check(SampledLineWalkable(g, a, b),
+                                      "supercover approved a segment that leaves the walk mask",
+                                      static_cast<uint32_t>(kv.first));
+                                Check(legacy, "supercover approved a segment the legacy sampler refused",
+                                      static_cast<uint32_t>(kv.first));
+                            }
+                            else if (legacy)
+                            {
+                                ++rejectedByFix;
+                            }
+                        }
+                }
+        }
+        Check(rejectedByFix > 0, "the legacy sampler approved nothing the supercover test rejects (vacuous)", 0);
+    }
+
     // Forward (block-local, the spawn path) and inverse (world -> cell, the AI
     // path) must agree, or creatures would chase mirrored positions. The u/v
     // to row/col pairing below IS the axis mapping - if someone swaps it, this
@@ -4246,6 +4356,21 @@ namespace
         RunChainMathChecks();
         RunLayoutFreezeCheck();
         RunTypedAnchorChecks();
+        if (!g_masks.empty())
+        {
+            // Once, not per seed: the supercover test is a property of the KIT
+            // masks, not of any layout. Skipped without the kit metadata for
+            // the same reason as every other walk-grid check in this file -
+            // a faked pass is worse than a skip.
+            uint64_t approved = 0, rejected = 0;
+            CheckSupercover(g_masks, approved, rejected);
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "%llu,%llu;",
+                          static_cast<unsigned long long>(approved),
+                          static_cast<unsigned long long>(rejected));
+            std::string const msg = std::string("supercover pair counts moved: ") + buf;
+            Check(std::string(buf) == PD_SUPERCOVER_PAIRS_PIN, msg.c_str(), 0);
+        }
         {
             // Two statements, not one call: argument evaluation order is
             // unspecified, and why.c_str() must not be taken before

@@ -203,23 +203,53 @@ namespace PDungeon
         return true;
     }
 
-    // Every cell a straight line between two cell centres passes through must
-    // be walkable, or the straight run would cut a corner. Public because it is
-    // also the creature AI's chase gate (see the header).
+    // SUPERCOVER: every cell the segment between the two cell CENTRES enters
+    // must be walkable. Exact integer DDA - the next x boundary is crossed at
+    // t = (2 nx + 1) / (2 ax), the next y boundary at (2 ny + 1) / (2 ay), and
+    // the two are compared cross-multiplied so a tie is exact. A tie is the
+    // segment passing through a cell CORNER: then BOTH straddling cells must
+    // be walkable (no corner cutting - a creature has a body). Round B's
+    // version sampled one rounded cell per major-axis step and skipped a cell
+    // at every minor-axis transition, which is how the patroller walked
+    // through walls (Round C research A1). Public because it is also the
+    // creature AI's chase gate (see the header).
     bool GridLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b)
     {
-        int const steps = std::max(std::abs(b.x - a.x), std::abs(b.y - a.y));
-        if (steps == 0)
+        if (!grid.At(a.x, a.y))
         {
-            return grid.At(a.x, a.y);
+            return false;
         }
-        for (int i = 0; i <= steps; ++i)
+        int const ax = std::abs(b.x - a.x);
+        int const ay = std::abs(b.y - a.y);
+        int const sx = b.x > a.x ? 1 : -1;
+        int const sy = b.y > a.y ? 1 : -1;
+        int x = a.x, y = a.y, nx = 0, ny = 0;
+        while (nx < ax || ny < ay)
         {
-            // Rounded sampling: the midpoint of a step must be solid too,
-            // otherwise a diagonal run could clip a corner between cells.
-            double const t = static_cast<double>(i) / steps;
-            int const x = static_cast<int>(std::lround(a.x + (b.x - a.x) * t));
-            int const y = static_cast<int>(std::lround(a.y + (b.y - a.y) * t));
+            bool const stepX = nx < ax && (ny >= ay || (2LL * nx + 1) * ay < (2LL * ny + 1) * ax);
+            bool const stepY = ny < ay && (nx >= ax || (2LL * ny + 1) * ax < (2LL * nx + 1) * ay);
+            if (!stepX && !stepY)
+            {
+                // Exact corner crossing.
+                if (!grid.At(x + sx, y) || !grid.At(x, y + sy))
+                {
+                    return false;
+                }
+                x += sx;
+                y += sy;
+                ++nx;
+                ++ny;
+            }
+            else if (stepX)
+            {
+                x += sx;
+                ++nx;
+            }
+            else
+            {
+                y += sy;
+                ++ny;
+            }
             if (!grid.At(x, y))
             {
                 return false;

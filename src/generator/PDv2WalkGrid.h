@@ -114,11 +114,16 @@ namespace PDungeon
     bool NearestWalkable(WalkGrid const& grid, int cx, int cy, int radius,
                          GridPoint& out);
 
-    // True when every cell under the straight line between two cell centres is
-    // walkable. This is the chase gate: engine line-of-sight cannot serve on
-    // map 760, because the server has no VMAP and no terrain there - the
-    // engine sees a clear line straight across the void between two platforms,
-    // and a creature sent down that line walks off the world.
+    // A supercover line test: true when EVERY cell the straight segment between
+    // the two cell centres enters is walkable, and - where the segment passes
+    // exactly through a cell corner - both cells it straddles are walkable too
+    // (no corner cutting; a creature has a body). This is the chase gate:
+    // engine line-of-sight cannot serve on map 760, because the server has no
+    // VMAP and no terrain there - the engine sees a clear line straight across
+    // the void between two platforms, and a creature sent down that line walks
+    // off the world. Until Round C this was a Bresenham sampler that tested one
+    // rounded cell per major-axis step and silently skipped a cell at every
+    // minor-axis transition, which let patrols walk through walls.
     bool GridLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b);
 
     // What a creature at `from` should do about a target at `to`.
