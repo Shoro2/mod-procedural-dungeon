@@ -26,6 +26,10 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > block and it springs once - a 2 s stun and `V2.Ambush.Mobs` creatures. The trigger is the
 > block, not a radius (Round C removed `V2.Ambush.RadiusYd`: a 9 yd disc could be walked
 > past on every corner, T and cross junction). Neither patrol nor ambush moves any counter.
+> Since Round C / C6 a run also draws **no boss twice** while the pool holds more distinct
+> bosses than the run has boss rooms (below that, repeats fill the rooms), and every boss
+> fights with **two abilities at difficulty 1** - four rows per boss, two at `minDiff 1`
+> plus one each at 50 and 75.
 > Creatures also stand on the kit's **published spawn anchors** now, not on a 12 yd circle
 > around the block centre (that circle survives only as the overflow), and the ordinary room
 > gained a **third size** - a 33.33 yd platform - while the entrance and boss rooms lost their
