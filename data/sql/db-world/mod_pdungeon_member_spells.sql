@@ -54,6 +54,14 @@
 -- longer end: 6000 a light weapon strike, 7000 a normal single-target ability,
 -- 8000+ an AoE, a DoT, a channel or anything with a cast time.
 --
+-- ONE EXCEPTION since Round C / C6 (operator, 2026-09-08: "2 Basis, dann je
+-- eine auf 50 und 75"): a BOSS carries a SECOND row at position 1, and it sits
+-- at cd 9000 ms - deliberately past the 6000-8000 band, so that a boss's two
+-- base abilities together do not double what one boss put out before. Trash
+-- kits are unchanged, and `position` was never a database column: `slot` tells
+-- the RANGE filler apart and nothing else (src/PDv2CreatureAI.cpp:664-681), so
+-- two rows at position 1 are two rows at minDiff 1 sharing slot 1.
+--
 -- ----------------------------------------------------------------------------
 -- CC CLASSIFICATION (aura effects read out of Spell.dbc, not guessed)
 --
@@ -172,9 +180,10 @@
 --  71110  Aura of Darkness    84289 p2        PDv2 has no phase machinery, so
 --  71586  Hardened Skin       84290 p2        these one-offs have no trigger
 --  48806  Hammer of Wrath     84288 p2        phase-two ROTATION slot; the
---                                             boss's three positions are
---                                             already filled from its own
---                                             tier 0/50/75 rotation
+--                                             boss's four rows are already
+--                                             filled from its own 1/1/50/75
+--                                             rotation (two at minDiff 1
+--                                             since Round C / C6)
 --  20791  Shadow Bolt         84282           the generic FALLBACK nuke this
 --                                             mob carried while it was a
 --                                             caster. It never belonged to its
@@ -339,7 +348,9 @@ INSERT INTO `pdungeon_member_spells`
   (84286, 59116, 1,  8000,  1, 1),  -- Poison Cloud      6 yd ground DoT            t0
   (84286, 48130, 1, 10000, 75, 1),  -- Gore              damage + bleed             t75
   -- ==========================================================================
-  -- BOSSES (role 2) - melee model, same cadence, three positions
+  -- BOSSES (role 2) - melee model, same cadence, FOUR rows since Round C / C6:
+  -- two at minDiff 1 (the second one at cd 9000, appended in its own block at
+  -- the end of this INSERT), one at 50, one at 75
   -- ==========================================================================
   -- 84288 Dralak  boss_dralak  (uc8, level 82)
   (84288, 66536, 1,  7000,  1, 1),  -- Holy Smite        50 yd single, 1.25s cast   t0

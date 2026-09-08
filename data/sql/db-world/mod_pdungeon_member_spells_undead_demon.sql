@@ -1,10 +1,11 @@
 -- ----------------------------------------------------------------------------
 -- mod-procedural-dungeon: combat kits for the Task 11 packs (world database)
 --
--- 72 rows, three per creature, for the 24 members of pack 4 "Barrow Dead"
--- (undead) and pack 5 "Legion Rift" (demons) - see
--- mod_pdungeon_packs_undead_demon.sql. Column order and cadence rule match
--- the shipped mod_pdungeon_member_spells.sql exactly:
+-- 74 rows for the 24 members of pack 4 "Barrow Dead"
+-- (undead) and pack 5 "Legion Rift" (demons) - three per creature, and FOUR
+-- for the two BOSSES (25352, 29620), which gained a second minDiff 1 row in
+-- Round C / C6 - see mod_pdungeon_packs_undead_demon.sql. Column order and
+-- cadence rule match the shipped mod_pdungeon_member_spells.sql exactly:
 --
 --   MELEE + BOSS   position 1  cd 6000-8000 ms   minDiff 1
 --                  position 2  cd 8000-10000 ms  minDiff 50
@@ -13,6 +14,10 @@
 --                  position 2  cd 8000-10000 ms  minDiff 50
 --                  position 3  cd 8000-12000 ms  minDiff 75
 --   CC             ALWAYS cd 60000, and NEVER position 1
+--
+-- with that file's one Round C / C6 exception: a BOSS carries a SECOND row at
+-- position 1 at cd 9000 ms, past the 6000-8000 band on purpose, so two base
+-- abilities do not double a boss's output. Trash kits are unchanged.
 --
 -- Every id below was checked against Data\dbc\Spell.dbc (55100 records - the
 -- file the worldserver actually loads, NOT acore_world.spell_dbc, which is

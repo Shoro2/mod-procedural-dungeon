@@ -858,6 +858,28 @@ namespace
               { { 3, 0 }, { 3, 1 }, { 3, 2 }, { 3, 3 }, { 3, 4 }, { 3, 5 }, { 3, 6 }, { 3, 7 },
                 { 5, 0 }, { 5, 1 }, { 5, 2 }, { 5, 3 }, { 5, 4 }, { 5, 5 }, { 5, 6 }, { 5, 7 } },
               true },
+            // The same 45 degree geometry walked BACKWARDS. Every case above
+            // runs with b.x >= a.x and b.y >= a.y, so sx = sy = +1 and the two
+            // corner reads are always At(x + 1, y) / At(x, y + 1); a
+            // regression that got the sign wrong - At(x - sx, y), or a rule
+            // applied only on a positive delta - would pass the whole table
+            // above, pass CheckSupercover (blind at corners, see the note over
+            // the table) and move PD_SUPERCOVER_PAIRS_PIN, which is the
+            // failure mode this oracle exists to replace (Round C / C1 Task 6
+            // review, Important 1). The function IS called in both directions
+            // in production: SimplifyGridPath probes path[anchor] ->
+            // path[probe] while the AI probes here -> target.
+            //
+            // (3,3) -> (0,0) ties at (2.5,2.5) first, straddling (2,3) on the
+            // x side and (3,2) on the y side; the cells actually entered are
+            // the diagonal (3,3) (2,2) (1,1) (0,0), so neither blocked cell
+            // lies on the path.
+            { "45 deg BACKWARDS with both straddling cells open must be APPROVED",
+              { 3, 3 }, { 0, 0 }, {}, true },
+            { "45 deg BACKWARDS with the x-side straddling cell (2,3) blocked must be REFUSED",
+              { 3, 3 }, { 0, 0 }, { { 2, 3 } }, false },
+            { "45 deg BACKWARDS with the y-side straddling cell (3,2) blocked must be REFUSED",
+              { 3, 3 }, { 0, 0 }, { { 3, 2 } }, false },
         };
 
         for (CornerCase const& c : cases)
@@ -4357,6 +4379,109 @@ namespace
         return true;
     }
 
+    // --- Round C / C6: the OTHER half of the same rule ---------------------
+    //
+    // The rule has two clauses and every fixture in this file could only ever
+    // reach one of them. `pick = fresh.empty() ? WeightedPick(bosses, rng) :
+    // WeightedPick(fresh, rng)` (PDv2PackDraw.cpp) never took its FIRST
+    // branch anywhere here: BossDrawPackPools is 5 bosses against at most 4
+    // rooms, FixedPackPools 2 against 1, ThemeCoherencePackPools 3 against 1,
+    // and NoBossPackPools skips the branch entirely - so design C6.2's
+    // "otherwise repeats are allowed" was asserted nowhere (Round C / C6
+    // Task 2 review, Important 1).
+    //
+    // It is unreachable in production TODAY (five bosses, GameBossRooms(30)
+    // = 4 at the shipped V2.DlvlCap = 30) and two operator-level moves make
+    // it live without a line of code changing: raising DlvlCap past 39 (5,
+    // then 6 boss rooms) or dropping one boss from the pool. What an untested
+    // branch would hide is not cosmetic - a WeightedPick over an EMPTY pool
+    // returns null, emit drops the pick without pushing, and
+    // PDv2PackMgr::SelectSpawns's fixed `1 + bossRoomAdds` slicing then reads
+    // that room's first TRASH pick as its boss and shifts every later room by
+    // one: a run that can never be completed, reported by nothing.
+    //
+    // Two bosses over three boss rooms is the smallest fixture on the other
+    // side of the gate: `bosses.size() (2) > bossRoomsTotal (3)` is false,
+    // `fresh` is never built, and every boss room draws from the full pool.
+    // Distinctness is deliberately NOT asserted - repeats ARE the contract
+    // here, and asserting against them would assert against the spec.
+    PackPools BossFallbackPackPools()
+    {
+        PackPools pools = ThemeCoherencePackPools();
+        pools.boss = {
+            {3, 84288, PACK_ROLE_BOSS}, {3, 84289, PACK_ROLE_BOSS},
+        };
+        return pools;
+    }
+
+    // Captured by RUNNING, like every other pin in this file: the placeholder
+    // "0,0,0;" was in the literal until the batch printed the real string.
+    // All THREE boss rooms drew 84289 - a repeat is not a failure here, it is
+    // the branch, and a pin that forbade one would forbid the contract.
+    char const* const PD_BOSS_FALLBACK_PIN = "84289,84289,84289;";
+
+    bool CheckBossFallbackPinned(std::string& why)
+    {
+        // The no-repeat pin's layout with one boss room fewer, so the two
+        // fixtures differ in the boss POOL and the boss COUNT and in nothing
+        // else that steers the stream.
+        BlockCfg cfg = MakeCfg(12345u, 4);
+        cfg.bossRooms = 3;
+        BlockPlan plan;
+        if (!GenerateBlockPlan(cfg, &plan))
+        {
+            why = "the boss fallback pin could not generate a layout";
+            return false;
+        }
+
+        SpawnSelectInputs const in = RoomsOfPlan(plan);
+        std::vector<SpawnPick> flat;
+        if (!PDv2SelectSpawns(plan.effectiveSeed, in, BossFallbackPackPools(), flat))
+        {
+            why = "the fallback boss draw refused to select";
+            return false;
+        }
+
+        std::vector<uint32_t> const bossPicks = BossPicksOf(flat, in);
+        std::string got;
+        for (size_t i = 0; i < bossPicks.size(); ++i)
+        {
+            if (i > 0)
+            {
+                got += ',';
+            }
+            got += std::to_string(bossPicks[i]);
+        }
+        got += ';';
+
+        if (bossPicks.size() != 3)
+        {
+            why = "the fallback layout no longer has three boss rooms: " + got;
+            return false;
+        }
+
+        // THE assertion of this fixture: every boss room still yields a boss,
+        // and it is one of the two the pool holds. A dropped pick would shift
+        // the slice and surface a TRASH entry in the boss slot, which is
+        // precisely what an empty-pool WeightedPick would cause and what no
+        // other check here would see.
+        for (uint32_t const entry : bossPicks)
+        {
+            if (entry != 84288u && entry != 84289u)
+            {
+                why = "a boss room drew an entry the two-boss pool does not hold: " + got;
+                return false;
+            }
+        }
+
+        if (got != PD_BOSS_FALLBACK_PIN)
+        {
+            why = "the pinned fallback boss draw moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
     // Round B: the field the ENGINE runs, over the engine's real configuration
     // space rather than a diagonal of it. The fixed 8x8 batch never exercised
     // a shrunken field at all, and the first version of this sweep walked
@@ -4884,9 +5009,11 @@ namespace
 
         {
             // plan.effectiveSeed, never cfg.seed - the engine passes that one
-            // (PDv2InstanceScript.cpp:2210-2211), and on a layout that needed a
-            // retry the two differ and the spots would come off a stream the
-            // run never used.
+            // in SpawnAmbushPlan (PDv2InstanceScript.cpp:2509-2510 at
+            // de46c40; the function name is the durable half of this cite -
+            // the line moved twice inside Round C alone), and on a layout that
+            // needed a retry the two differ and the spots would come off a
+            // stream the run never used.
             //
             // The 50 is a LITERAL, for the reason PD_AMBUSH_PLAN_PIN_MID states
             // above: an operator moving what the server ships with must not turn
@@ -5290,6 +5417,15 @@ namespace
             std::string why;
             bool const ok = CheckBossNoRepeatPinned(why);
             Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // The other side of that gate: a pool too small to forbid a
+            // repeat, where the run must still get one boss per boss room.
+            // Same two-statements-not-one-call shape, for the same
+            // argument-evaluation-order reason.
+            std::string why;
+            bool const ok = CheckBossFallbackPinned(why);
+            Check(ok, why.empty() ? "the fallback boss draw failed" : why.c_str(), 12345u);
         }
 
         // The city cap must hold like the mine cap - its ids are one digit
