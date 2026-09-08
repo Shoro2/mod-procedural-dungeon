@@ -348,9 +348,13 @@ INSERT INTO `pdungeon_member_spells`
   -- 84289 Lord Maltrion  boss_vampir_lord  (uc8, level 82)
   (84289, 34240, 1,  8000,  1, 1),  -- Carrion Swarm     40 yd cone damage          t0
   (84289, 51016, 1, 10000, 50, 1),  -- Vampiric Bolt     40 yd damage + leech       t50
-  (84289, 64160, 1, 12000, 75, 1),  -- Blood Tap         45 yd leech   phase-2 slot, see
+  (84289, 64160, 1, 12000, 75, 1),  -- Drain Life        45 yd leech   phase-2 slot, see
                                     --                   the 34111 exclusion above
   -- 84290 Mor'Kar  boss_crypt_lord  (uc8, level 82)
   (84290, 70965, 1,  8000,  1, 1),  -- Crypt Scarabs     40 yd single, 2.0s cast    t0
   (84290, 67860, 1, 10000, 50, 1),  -- Impale            6 yd cone damage           t50
-  (84290, 28615, 1, 12000, 75, 1);  -- Spike Volley      30 yd area damage          t75
+  (84290, 28615, 1, 12000, 75, 1),  -- Spike Volley      30 yd area damage          t75
+  -- Round C / C6: a second base ability per boss (operator, 2026-09-08: "2 Basis, dann je eine auf 50 und 75")
+  (84288, 59992, 1,  9000,  1, 1),  -- Cleave            weapon damage   (as 84264)         t0 #2
+  (84289, 47864, 1,  9000,  1, 1),  -- Curse of Agony R9 30 yd DoT       (as 84267)         t0 #2
+  (84290, 59116, 1,  9000,  1, 1);  -- Poison Cloud      6 yd ground DoT (as 84286)         t0 #2

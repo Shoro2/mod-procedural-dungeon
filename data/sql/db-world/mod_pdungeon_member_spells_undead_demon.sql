@@ -145,6 +145,8 @@ INSERT INTO `pdungeon_member_spells`
   -- ==========================================================================
   -- 25352 Scourge Overlord  (unit_class 1, rank 1)
   (25352, 59992, 1,  7000,  1, 1),  -- Cleave            weapon damage              t0
+  -- Round C / C6: a second base ability per boss (operator, 2026-09-08: "2 Basis, dann je eine auf 50 und 75")
+  (25352, 60015, 1,  9000,  1, 1),  -- Shadow Bolt       40 yd single    (as 30203 filler)  t0 #2
   (25352, 54889, 1, 10000, 50, 1),  -- Shadow Shock      25 yd area damage          t50
   (25352, 48687, 1, 12000, 75, 1),  -- Shadow Bolt Volley 100 yd AoE                t75
   -- ==========================================================================
@@ -202,5 +204,7 @@ INSERT INTO `pdungeon_member_spells`
   -- ==========================================================================
   -- 29620 Dreadlord Mal'Ganis  (unit_class 1, rank 1)
   (29620, 70191, 1,  7000,  1, 1),  -- Cleave            weapon damage              t0
+  -- Round C / C6: a second base ability per boss (operator, 2026-09-08: "2 Basis, dann je eine auf 50 und 75")
+  (29620, 69211, 1,  9000,  1, 1),  -- Shadow Bolt       30 yd single    (as 18870 filler)  t0 #2
   (29620,  9034, 1, 10000, 50, 1),  -- Immolate          30 yd DoT                  t50
   (29620,  6215, 1, 60000, 75, 1);  -- Fear R3           20 yd  CC (MOD_FEAR)       t75
