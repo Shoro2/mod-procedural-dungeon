@@ -66,10 +66,11 @@
 -- on. Do NOT "tidy" this by moving 910030 back to its declaring files.
 --
 -- The DELETE below names every entry individually rather than a BETWEEN
--- range: this file's rows are not contiguous (910048-910049,
--- 910067-910069, 910077-910099 are unused gaps in the reserved block), and
--- an explicit list can never claim a gap id some later addition might use
--- for something else. Same discipline as mod_pdungeon_prop_displays.sql.
+-- range: this file's rows are not contiguous (910048-910049, 910069,
+-- 910077-910099 are unused gaps in the reserved block), and an explicit list
+-- can never claim a gap id some later addition might use for something else.
+-- Same discipline as mod_pdungeon_prop_displays.sql. (910067 and 910068 were
+-- two of those gaps until Round C / C8 took them for the finale below.)
 --
 -- The real fix - narrowing mod_pdungeon_templates.sql's range delete to
 -- 910000-910033 - is recorded in the global queue
@@ -153,6 +154,7 @@ DELETE FROM `gameobject_template` WHERE `entry` IN (
     910050, 910051, 910052, 910053, 910054, 910055, 910056, 910057,
     910058, 910059,
     910060, 910061, 910062, 910063, 910064, 910065, 910066,
+    910067, 910068,
     910070, 910071, 910072, 910073, 910074, 910075, 910076
 );
 INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`, `Data0`, `Data1`, `ScriptName`) VALUES
@@ -228,8 +230,36 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 -- clickable and satisfies nobody's objective, the same argument the clutter
 -- ids above make. No ScriptName: the barrier is opened by the instance
 -- script, and a GENERIC object cannot be used by a player anyway.
-(910059, 5, 7482, 'Sealed Portcullis', 1.1, 0, 0, '');
+(910059, 5, 7482, 'Sealed Portcullis', 1.1, 0, 0, ''),
+-- Round C / C8: the finale. Both rows are summoned by the instance script
+-- when the last boss dies and are torn down with the run (DespawnAll), so
+-- neither is ever a world spawn.
+--
+-- 910067 'Portal to Azealia': type 10 GOOBER, so a click fires
+-- OnGossipHello; display 9041 is the model FL's own three return portals
+-- already use (777000 'To Azealia', 222000/223000 'Return To Azealia').
+-- Those three carry their teleport in Data2 = an `event_scripts` id; this row
+-- deliberately does NOT copy that mechanism. go_pdungeon_azealia_portal
+-- (src/PDExitObjects.cpp) teleports in C++ to `game_tele` 20040
+-- `flraidazealia` - (727, 13611.1, 13655.7, 9.87548, o 4.7776), the canonical
+-- "back to Azealia" spot the nine dungeon exits share - which needs no
+-- world-DB script row at all. Nobody is teleported automatically: the click
+-- is the player's, so the cache can be looted first (operator decision
+-- 2026-09-08).
+--
+-- 910068 'Chromie''s Cache': type 3 CHEST, display 259 (TreasureChest01) like
+-- the pocket cache above but at size 2, so the run's reward reads as the
+-- bigger one. Data0 = lock 57 (LOCKTYPE_OPEN/TREASURE, skill 0) for the
+-- reason spelled out at 910030: a lockless chest is rejected outright by
+-- Spell::CheckCast with SPELL_FAILED_BAD_TARGETS and can never be opened.
+-- Data1 = loot 910068, whose rows live in mod_pdungeon_chromie.sql. No
+-- ScriptName - a chest is looted through the client's Opening cast, and
+-- GameObject::Use() has no CHEST case for a script to hook.
+(910067, 10, 9041, 'Portal to Azealia', 1, 0, 0, 'go_pdungeon_azealia_portal'),
+(910068, 3, 259, 'Chromie''s Cache', 2, 57, 910068, '');
 
 -- Chest data beyond the INSERT's column list: Data3 = consumable (one loot per spawn),
 -- Data2 = restock 0. Without Data3 the cache refilled every tick (Round C research 1.3).
+-- Same two values for the finale cache 910068: it pays out once per run.
 UPDATE `gameobject_template` SET `Data2` = 0, `Data3` = 1 WHERE `entry` = 910030;
+UPDATE `gameobject_template` SET `Data2` = 0, `Data3` = 1 WHERE `entry` = 910068;

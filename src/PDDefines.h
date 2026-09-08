@@ -23,7 +23,8 @@
 namespace PDungeon
 {
     // Reserved project id blocks (registered in share-public 06-custom-ids.md):
-    // gameobject_template 910000-910099, creature_template 910500-910549.
+    // gameobject_template 910000-910099, creature_template 910500-910549 (v1)
+    // and 910550-910599 (the v2 sub-block, opened by C8's Chromie).
     enum PDGameObjectEntries : uint32
     {
         GO_WALL_LONG     = 910000,  // 3 tiles
@@ -42,7 +43,13 @@ namespace PDungeon
         // 910058 (B1's 'Altar of Return') has no constant any more: Round C /
         // C5 deleted the script and the spawns, and the template row survives
         // unspawned so the id stays reserved. Nothing here may reuse it.
-        GO_BARRIER       = 910059   // B3: boss-room barrier
+        GO_BARRIER       = 910059,  // B3: boss-room barrier
+        // Round C / C8 (2026-09-08): the finale's two objects, summoned when
+        // the last boss dies and torn down with the run. Rows live in
+        // mod_pdungeon_templates_fix.sql; the cache's loot (910068) is in
+        // mod_pdungeon_chromie.sql.
+        GO_AZEALIA_PORTAL = 910067, // C8: type 10, click teleports to Azealia
+        GO_REWARD_CHEST   = 910068  // C8: "Chromie's Cache", lock 57
     };
 
     enum PDCreatureEntries : uint32
@@ -51,7 +58,13 @@ namespace PDungeon
         NPC_TRASH_CASTER = 910501,
         NPC_ELITE        = 910502,
         NPC_BOSS         = 910503,
-        NPC_ENTRANCE     = 910510
+        NPC_ENTRANCE     = 910510,
+        // Round C / C8: the finale's speaker. First entry of the 910550-910599
+        // sub-block, so mod_pdungeon_templates.sql's DELETE ... BETWEEN 910500
+        // AND 910549 never reaches her; her row lives in its own file,
+        // mod_pdungeon_chromie.sql. No ScriptName - PDv2InstanceScript's
+        // _finale holds her GUID and speaks her lines.
+        NPC_CHROMIE      = 910550
     };
 
     enum PDSpells : uint32
