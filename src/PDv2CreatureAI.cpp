@@ -336,6 +336,11 @@ namespace PDungeon
         ResumePatrol();
     }
 
+    // ONLY EVER CALLED FROM UpdateAI (Round C). Directly for the first leg of a
+    // run - StartWaypointRun's own callers are both UpdateAI branches - and
+    // through _legPending for every leg after that. A leg launched from inside
+    // MovementInform is killed by the Reset that follows the finalize; the
+    // header's _legPending comment carries the call chain and the line numbers.
     void PDv2MobAI::MoveToWaypoint(size_t index, WalkGrid const& grid)
     {
         int gcx = 0, gcy = 0;
@@ -369,10 +374,13 @@ namespace PDungeon
                                          /*generatePath=*/false);
 
         // D1. One line per leg: where the module thinks it is going and how far
-        // that is. A leg longer than the cell size times a waypoint span is the
-        // "flew off the beat" signature - the grid is 8.33 yd per cell, so a
-        // simplified leg of a few cells is tens of yards and anything in the
-        // hundreds is not a leg at all.
+        // that is. Since Round C this line is printed from the UpdateAI launch,
+        // so `me` is where the creature really stands when the leg starts - and
+        // `dist` is therefore the length the leg will really have. A leg longer
+        // than the cell size times a waypoint span is the "flew off the beat"
+        // signature - the grid is 8.33 yd per cell, so a simplified leg of a few
+        // cells is tens of yards and anything in the hundreds is not a leg at
+        // all. Consecutive legs whose `me` never changes were the bug itself.
         if (PatrolDebug() && _mob && _mob->isPatrol)
         {
             LOG_INFO(PD_LOG, "PDv2 patrol: {} guid {} leg wp {}/{} cell ({},{}) global ({},{}) "
@@ -402,8 +410,40 @@ namespace PDungeon
         // first leg IS the walk into that cell and nobody else ever line-checks
         // it; only when we already stand in the cell is index 0 skipped.
         GridPoint const standing = CellOf(grid, me->GetPositionX(), me->GetPositionY());
+
+        // NO BEELINE START (Round C). "Up to SNAP_RADIUS_CELLS" is the whole
+        // licence the paragraph above has, and it is now enforced instead of
+        // assumed. Both snaps are square-ring searches of that radius
+        // (PDv2WalkGrid.cpp:294-321, :329), so for any route planned from HERE
+        // the offset is Chebyshev <= SNAP_RADIUS_CELLS by construction and this
+        // never fires. It fires for a route planned somewhere ELSE - the beat
+        // reversed while the creature was still at the far end of it, a
+        // displacement no MovementInform reported - and there leg 0 would be an
+        // unchecked straight line from here to the route's start: the 489 yd
+        // flight across the void the 2026-09-08 retest recorded. Refusing costs
+        // one 500 ms tick, after which the caller plans again from where the
+        // creature actually is.
+        int const offCells = std::max(std::abs(standing.x - _waypoints[0].x),
+                                      std::abs(standing.y - _waypoints[0].y));
+        if (offCells > SNAP_RADIUS_CELLS)
+        {
+            if (PatrolDebug())
+            {
+                LOG_INFO(PD_LOG, "PDv2 patrol: {} guid {} refused: start {} cells from waypoint 0 "
+                                 "(standing ({},{}), wp0 ({},{}), {} waypoint(s))",
+                         me->GetName(), me->GetGUID().GetCounter(), offCells,
+                         standing.x, standing.y, _waypoints[0].x, _waypoints[0].y,
+                         uint32(_waypoints.size()));
+            }
+            _followingPath = false;
+            _waypoints.clear();
+            _waypointIndex = 0;
+            return;
+        }
+
         _waypointIndex = (standing == _waypoints[0]) ? 1 : 0;
         _followingPath = true;
+        _legPending = false;    // this leg is being launched right here
         MoveToWaypoint(_waypointIndex, grid);
     }
 
@@ -412,8 +452,20 @@ namespace PDungeon
         _followingPath = false;
         _waypoints.clear();
         _waypointIndex = 0;
+        // The owed leg dies with the run it was owed to. Without this, a run
+        // stopped between the arrival and the next UpdateAI would leave a
+        // pending launch pointing into a cleared route.
+        _legPending = false;
         if (resumeChase)
         {
+            // SAFE FROM INSIDE MovementInform, unlike a MovePoint - and this is
+            // the one call the inform still makes. ChaseMovementGenerator's
+            // DoReset is DoInitialize (TargetedMovementGenerator.cpp:401-405),
+            // and the Creature specialisation (:382-390) launches no spline at
+            // all: it only clears _lastTargetPosition and the recheck timer, so
+            // the Reset that DirectExpire runs afterwards has nothing to kill
+            // and in fact GUARANTEES the next DoUpdate re-aims and launches.
+            // Deferring it would be pure loss - a tick of standing still.
             if (Unit* victim = me->GetVictim())
             {
                 me->GetMotionMaster()->MoveChase(victim);
@@ -421,6 +473,36 @@ namespace PDungeon
         }
     }
 
+    // AN ARRIVAL IS RECORDED HERE AND NOTHING IS LAUNCHED (Round C, the patrol
+    // fix; measured 2026-09-08, log Server_2026-09-08_21_03_52 lines 988-1093).
+    //
+    // Round B walked the beat from this hook: arrive, ++index, MovePoint the
+    // next leg. Every leg after the first then died on the frame it was born.
+    // The core reaches this function through
+    // MotionMaster::DirectExpire (MotionMaster.cpp:177-195), which pops and
+    // DIRECTLY deletes the finished generator - that delete is the Finalize
+    // that informs us (PointMovementGenerator.cpp:322-323) - and only
+    // afterwards runs `top()->Reset(_owner)` on whatever is on top by then. A
+    // MovePoint issued from here is not queued: MMCF_UPDATE is already cleared
+    // when MovementExpired is called (MotionMaster.cpp:117-121), so Mutate
+    // initialises the new generator at once (MotionMaster.cpp:891-917) and
+    // PointMovementGenerator::DoInitialize launches its spline. Control returns
+    // to DirectExpire, `top()` is now that brand-new generator, and its
+    // Reset - PointMovementGenerator::DoReset,
+    // PointMovementGenerator.cpp:295-297 - opens with
+    // `if (!unit->IsStopped()) unit->StopMoving();`. The spline dies a line
+    // after it was launched, the next tick's DoUpdate sees a finalised spline,
+    // expires, informs, and the whole run burns through its waypoints in one
+    // second without the creature moving a yard - "leg 2..11 and their informs
+    // all at me (-54.2,-362.5)" in the log. The route then reversed, and the
+    // first leg launched from OUTSIDE the motion update (by UpdatePatrol) DID
+    // run: one 489 yd straight line across the dungeon and the void.
+    //
+    // So this hook validates the arrival, advances the index, and asks the next
+    // UpdateAI for the leg. That tick is the SAME server tick - Creature::Update
+    // runs Unit::Update (Creature.cpp:771 -> the motion master, Unit.cpp:636)
+    // before AI()->UpdateAI (Creature.cpp:884) - so nothing is delayed; the leg
+    // is merely started outside a call stack that would undo it.
     void PDv2MobAI::MovementInform(uint32 type, uint32 id)
     {
         // D2, BEFORE the guard on purpose: an inform the module drops - wrong
@@ -438,6 +520,17 @@ namespace PDungeon
         }
 
         if (type != POINT_MOTION_TYPE || !_followingPath || id < WAYPOINT_MOVE_ID_BASE)
+        {
+            return;
+        }
+
+        // WHICH leg ended, not just "a leg did". The id is the index the leg
+        // was launched with (MoveToWaypoint), and the only leg this AI is
+        // waiting for is _waypointIndex; anything else is an arrival from a leg
+        // that was already thrown away and re-issued, and advancing on it would
+        // skip a waypoint nobody walked. Cheap, and it makes the invariant
+        // "index == the leg in flight" checkable rather than assumed.
+        if (id - WAYPOINT_MOVE_ID_BASE != static_cast<uint32>(_waypointIndex))
         {
             return;
         }
@@ -476,19 +569,17 @@ namespace PDungeon
 
             // Arrived where the target WAS when the path was planned. Resume
             // the chase and force the next tick to re-decide, so a target
-            // that moved on is followed by plan rather than by beeline.
+            // that moved on is followed by plan rather than by beeline. The
+            // MoveChase inside StopWaypointRun is the one motion call that is
+            // safe from here - see the reason there.
             StopWaypointRun(true);
             _repathTimer = 0;
             return;
         }
 
-        WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
-        if (!grid)
-        {
-            StopWaypointRun(false);
-            return;
-        }
-        MoveToWaypoint(_waypointIndex, *grid);
+        // OWE the next leg; do not launch it. UpdateAI pays the debt later in
+        // this same tick, from a call stack that will not Reset it away.
+        _legPending = true;
     }
 
     void PDv2MobAI::UpdatePatrol(uint32 diff)
@@ -704,9 +795,13 @@ namespace PDungeon
         StartWaypointRun(std::move(leg), *grid);
         if (!_followingPath)
         {
-            // The runner refused the leg (fewer than two waypoints). Nothing
-            // else on that path clears _patrolActive, so without this the same
-            // doomed leg would be retried every 500 ms for the rest of the run.
+            // The runner refused the leg: fewer than two waypoints, or - since
+            // Round C - a route that does not start where the creature stands.
+            // Nothing else on that path clears _patrolActive, so without this
+            // the same doomed leg would be retried every 500 ms for the rest of
+            // the run. Dropping the beat is exactly right for the second case:
+            // the next tick takes a fresh A* FROM HERE, which is the only
+            // honest answer once the creature and its route have parted.
             _patrolActive = false;
         }
     }
@@ -743,6 +838,11 @@ namespace PDungeon
         //                                              the grid or the planner
         //                                              is what is wrong
         //
+        // Round C adds `pending`: the owed leg is paid by the very next
+        // UpdateAI, so this reads 0 to a human every time. A 1 that survives
+        // being looked at twice means UpdateAI is not running for this creature
+        // at all - the run is not stuck, the AI is.
+        //
         // Nothing here decides anything, and nothing here is cheap to be
         // clever about: it is typed by hand, once.
         WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
@@ -773,7 +873,7 @@ namespace PDungeon
         return Acore::StringFormat(
             "{} entry {} guid {} | pos ({:.0f},{:.0f},{:.0f}) cell ({},{}) walkable {} "
             "| top {} spline {} stopped {} "
-            "| following {} idx {}/{} route {} nearest {} active {} rejoin {} "
+            "| following {} idx {}/{} pending {} route {} nearest {} active {} rejoin {} "
             "| home ({:.0f},{:.0f}) dist {:.0f} | victim {}",
             me->GetName(), me->GetEntry(), me->GetGUID().GetCounter(),
             me->GetPositionX(), me->GetPositionY(), me->GetPositionZ(),
@@ -782,6 +882,7 @@ namespace PDungeon
             me->movespline->Finalized() ? "finalized" : "RUNNING",
             me->IsStopped() ? 1 : 0,
             _followingPath ? 1 : 0, uint32(_waypointIndex), uint32(_waypoints.size()),
+            _legPending ? 1 : 0,
             uint32(_patrolRoute.size()), routeDist, _patrolActive ? 1 : 0,
             _patrolRejoin ? 1 : 0,
             hx, hy, me->GetExactDist2d(hx, hy),
@@ -870,6 +971,16 @@ namespace PDungeon
                 // An active run is left to finish; MovementInform re-decides
                 // the moment it ends. Replanning every tick would make the
                 // mob stutter each time the target strafes a cell.
+                //
+                // Round C: if the runner refuses the route it plans again on
+                // the next 500 ms decision, from PlanApproach's fresh snap of
+                // where the creature then stands - nothing here has to undo
+                // anything, because a refused run started no motion. That
+                // refusal cannot actually fire on this path: PlanApproach's
+                // waypoint 0 IS NearestWalkable(our own cell, SNAP_RADIUS_CELLS)
+                // (PDv2WalkGrid.cpp:329), i.e. within the radius by
+                // construction. The guard is there for the producer that is not
+                // this one.
                 _chaseHeld = false;
                 if (!_followingPath)
                 {
@@ -1352,6 +1463,33 @@ namespace PDungeon
         if (!_mob)
         {
             _mob = me->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY);
+        }
+
+        // THE OWED LEG, FIRST - before the beat, before the chase, before the
+        // aggro sweep, in and out of combat alike. MovementInform recorded an
+        // arrival and refused to launch anything (the reason is written out
+        // there); this is the one place in the module that starts a leg after
+        // the first, and it is deliberately ahead of every decision that could
+        // read _followingPath, so no branch below ever sees a run that is
+        // between legs.
+        //
+        // The _mob fetch above is not an action, just the tag pointer this tick
+        // needs - the leg's own debug line reads it.
+        if (_legPending)
+        {
+            _legPending = false;
+            WalkGrid const* grid = _instance ? _instance->GetWalkGrid() : nullptr;
+            if (!_followingPath || _waypointIndex >= _waypoints.size() || !grid)
+            {
+                // The run died between the arrival and now (an evade, a stop,
+                // an instance without a grid). Nothing to walk, and the flags
+                // must not survive it.
+                StopWaypointRun(false);
+            }
+            else
+            {
+                MoveToWaypoint(_waypointIndex, *grid);
+            }
         }
 
         // D4, once per patroller and here because this is the first tick on

@@ -74,6 +74,8 @@ namespace PDungeon
         void JustDied(Unit* killer) override;
         void JustReachedHome() override;
         void UpdateAI(uint32 diff) override;
+        // Round C. RECORDS an arrival; it never launches the next leg itself.
+        // See _legPending, and the .cpp, where the whole argument lives.
         void MovementInform(uint32 type, uint32 id) override;
 
         // Round B / B4, REORDERED by Round C's patrol fix. The core's evade
@@ -112,7 +114,14 @@ namespace PDungeon
         void UpdateImmolation(uint32 diff);
         void CallAlliesForHelp(Unit* victim);
         bool GridLineOkTo(Unit* victim) const;
+        // Takes a planned route and walks its FIRST leg. Round C added a
+        // refusal: a route whose waypoint 0 is not the cell the creature stands
+        // in (give or take the planners' own snap radius) is not walked at all,
+        // because leg 0 would then be an unchecked straight line from here to
+        // wherever that route begins.
         void StartWaypointRun(std::vector<GridPoint>&& waypoints, WalkGrid const& grid);
+        // Launches ONE leg. Round C: reachable from UpdateAI only - directly
+        // for the first leg of a run, through _legPending for every later one.
         void MoveToWaypoint(size_t index, WalkGrid const& grid);
         void StopWaypointRun(bool resumeChase);
 
@@ -169,6 +178,23 @@ namespace PDungeon
         uint32 _fillerRemainingMs = 0;
         bool _kitBuilt = false;
         bool _followingPath = false;
+        // Round C, THE patrol fix. "A leg ended and the next one is owed."
+        // Set by MovementInform, acted on and cleared by the next UpdateAI,
+        // cleared by StopWaypointRun with the run it belonged to.
+        //
+        // Why the launch cannot happen where the arrival is learned: the inform
+        // reaches the AI from inside MotionMaster::DirectExpire
+        // (MotionMaster.cpp:177-195), which finalises the finished generator
+        // FIRST and only then runs `top()->Reset(_owner)` on whatever is now on
+        // top. A MovePoint issued from the inform installs and starts the new
+        // generator during that finalize, so the Reset lands on it -
+        // PointMovementGenerator::DoReset (PointMovementGenerator.cpp:295-297)
+        // calls StopMoving() and kills the spline one line after it was
+        // launched. Deferring costs nothing: Creature::Update runs the motion
+        // (Creature.cpp:771 -> Unit.cpp:635-636) and then the AI
+        // (Creature.cpp:884) in the SAME tick, so the leg starts microseconds
+        // later, merely outside the motion master's own call stack.
+        bool _legPending = false;
         bool _lineOk = false;       // last grid-line verdict, refreshed on the tick
         bool _holding = false;      // a caster that has planted itself at range
         bool _hasCalled = false;    // affix 1 already shouted for THIS fight
