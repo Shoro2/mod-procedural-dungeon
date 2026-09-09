@@ -558,6 +558,124 @@ namespace PDungeon
         path.swap(out);
     }
 
+    namespace
+    {
+        // The unit the merge below measures in: 1/12 of a yard, chosen because
+        // it makes BOTH lengths that matter exact integers - a cell is 25/3 yd
+        // = 100 units and the clearance layer's quarter-yard is 3. The double
+        // PD_CELL_SIZE_YD is deliberately NOT used: this test decides how many
+        // waypoints a beat has, and an integer answer is the same answer on
+        // every compiler (CLAUDE.md's determinism rule).
+        long long const PATROL_UNITS_PER_CELL = 100;
+        long long const PATROL_UNITS_PER_QUARTER = 3;
+
+        struct PatrolClearPoint
+        {
+            long long x = 0;
+            long long y = 0;
+        };
+
+        // A cell's clear point in the GRID's own frame, which is all this
+        // needs: the world mapping (BlockLocalToWorld, u against -X and v
+        // against -Y) is a 180 degree rotation of it, and a rotation moves no
+        // distance - a perpendicular distance measured here is the one the
+        // creature walks. grid.x is the v axis and grid.y the u axis, the same
+        // pairing BuildWalkGrid lays the mask down with.
+        PatrolClearPoint PatrolClearPointOf(WalkGrid const& grid, GridPoint cell)
+        {
+            PatrolCellInfo const info = PatrolInfoAt(grid, cell);
+            PatrolClearPoint p;
+            p.x = static_cast<long long>(cell.x) * PATROL_UNITS_PER_CELL +
+                  PATROL_UNITS_PER_CELL / 2 +
+                  static_cast<long long>(info.dv) * PATROL_UNITS_PER_QUARTER;
+            p.y = static_cast<long long>(cell.y) * PATROL_UNITS_PER_CELL +
+                  PATROL_UNITS_PER_CELL / 2 +
+                  static_cast<long long>(info.du) * PATROL_UNITS_PER_QUARTER;
+            return p;
+        }
+    }
+
+    void MergeClearPoints(WalkGrid const& grid, std::vector<GridPoint>& path,
+                          int toleranceQ)
+    {
+        if (path.size() < 3)
+        {
+            return;
+        }
+        if (toleranceQ < 0)
+        {
+            // A negative tolerance is "keep every cell", not a merge that runs
+            // backwards: nothing can be within a negative distance of a line.
+            toleranceQ = 0;
+        }
+
+        long long const tol = static_cast<long long>(toleranceQ) * PATROL_UNITS_PER_QUARTER;
+
+        // Would ONE leg from path[a] to path[b] still describe every clear
+        // point between them? |cross| / |ab| is a point's perpendicular
+        // distance from the line, so the question is |cross| <= tol * |ab| -
+        // asked squared, which keeps it in integers and needs no square root.
+        // Magnitudes are small (a run is at most a few hundred cells and a
+        // clear point sits inside its own cell), so the squares stay far below
+        // what a 64-bit integer holds.
+        auto describesRun = [&grid, tol](std::vector<GridPoint> const& p, size_t a, size_t b)
+        {
+            PatrolClearPoint const from = PatrolClearPointOf(grid, p[a]);
+            PatrolClearPoint const to = PatrolClearPointOf(grid, p[b]);
+            long long const abx = to.x - from.x;
+            long long const aby = to.y - from.y;
+            long long const len2 = abx * abx + aby * aby;
+            if (len2 == 0)
+            {
+                // Two clear points on top of each other - there is no line to
+                // measure against, so keep both rather than merge blind.
+                return false;
+            }
+            for (size_t i = a + 1; i < b; ++i)
+            {
+                PatrolClearPoint const mid = PatrolClearPointOf(grid, p[i]);
+                long long const cross = abx * (mid.y - from.y) - aby * (mid.x - from.x);
+                if (cross * cross > tol * tol * len2)
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+
+        std::vector<GridPoint> out;
+        out.push_back(path.front());
+        // The index in `path` of the last waypoint KEPT, which is where the leg
+        // under test starts. `path` is never written before the swap, so this
+        // stays valid while `out` grows.
+        size_t anchor = 0;
+        for (size_t i = 1; i + 1 < path.size(); ++i)
+        {
+            int const inX = path[i].x - path[i - 1].x;
+            int const inY = path[i].y - path[i - 1].y;
+            int const outX = path[i + 1].x - path[i].x;
+            int const outY = path[i + 1].y - path[i].y;
+            // MergeCollinear's rule, unchanged and asked first: a turn is a
+            // waypoint whatever the clearance layer says, which is what keeps
+            // every leg axis-aligned.
+            bool const straightOn =
+                inX * outY - inY * outX == 0 && inX * outX + inY * outY > 0;
+            // The second question, and the whole of this function: the leg the
+            // drop would produce runs anchor -> i + 1, so it has to describe
+            // every clear point in between - path[i]'s included, and every one
+            // dropped before it. Checking the WHOLE run rather than the one
+            // step is what stops a lane that drifts a quarter-yard per cell
+            // from merging into a leg that ends a house-width off the passage.
+            if (!straightOn || !describesRun(path, anchor, i + 1))
+            {
+                out.push_back(path[i]);
+                anchor = i;
+            }
+        }
+        out.push_back(path.back());
+        path.swap(out);
+    }
+
     PatrolCellInfo PatrolInfoAt(WalkGrid const& grid, GridPoint cell)
     {
         PatrolCellInfo info;

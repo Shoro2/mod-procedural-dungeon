@@ -142,12 +142,19 @@ namespace PDungeon
         // agreed with the chase about walkable ground only approximately would
         // eventually step off the world.
         //
-        // Since Round D / D1 the plan comes from FindPatrolPath + MergeCollinear
+        // Since Round D / D1 the plan comes from FindPatrolPath + a merge
         // rather than FindGridPath + SimplifyGridPath: axis-aligned legs down
         // the lane centre that pay for turns, for hugging a wall and for
         // walking over a prop, instead of the diagonals that cut through house
         // corners and furniture (the operator's "durch ecken von häusern",
         // 2026-09-08). Nothing else about the beat changed.
+        //
+        // The merge is MergeClearPoints since the D2 follow-up, not
+        // MergeCollinear: the legs are walked on the cells' CLEAR POINTS, so a
+        // run may only collapse while the straight line between the surviving
+        // ends still passes every dropped cell's clear point within half a
+        // yard. A beat therefore has more waypoints than D1's had, and each
+        // extra one is a place where the visible passage bends.
         //
         // ONCE is load-bearing. _patrolRoute is never re-planned once it holds
         // a beat: a fight that ends anywhere but on the route is rejoined (see

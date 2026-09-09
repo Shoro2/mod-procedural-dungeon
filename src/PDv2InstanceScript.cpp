@@ -2740,9 +2740,14 @@ namespace PDungeon
                                     SPAWN_FALLBACK_SNAP_CELLS, to))
                 {
                     grid->GlobalFromLocalCell(from, spawnCellX, spawnCellY);
-                    // NOT merged. MergeCollinear is for the AI, which walks
-                    // legs; this wants the CELL CHAIN, because "follower k
-                    // stands k cells behind the leader" is the formation.
+                    // NOT merged, and it must not be. A merge (MergeClearPoints
+                    // since the D2 follow-up) is for the AI, which walks legs;
+                    // this wants the CELL CHAIN, because "follower k stands k
+                    // cells behind the leader" is the formation and a merged
+                    // list has no cell k. The waypoints the leader will walk
+                    // are a SUBSET of these cells and every one of them is
+                    // placed on its own clear point below, so the file still
+                    // stands where the beat will run.
                     //
                     // Round D / D2: the SAME two passes the leader's own plan
                     // makes (PDv2CreatureAI.cpp, UpdatePatrol) - the shipped

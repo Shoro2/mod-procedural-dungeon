@@ -686,7 +686,7 @@ namespace PDungeon
             // walkable ground. That is the operator's "durch ecken von häusern
             // und objekte hindurch". FindPatrolPath pays for a turn, for a cell
             // with a non-walkable neighbour and for a cell with a prop on it,
-            // so the cheapest route is the lane centre; MergeCollinear then
+            // so the cheapest route is the lane centre; MergeClearPoints then
             // says that same route in fewer points WITHOUT introducing a
             // diagonal. The prop map comes from the instance (PropCells(), null
             // when there are none), which is why this needs _instance and not
@@ -729,7 +729,17 @@ namespace PDungeon
                          me->GetName(), me->GetGUID().GetCounter(),
                          here.x, here.y, goal.x, goal.y);
             }
-            MergeCollinear(path);
+            // MERGED ON THE CLEAR POINTS, not on the cells (Round D2
+            // follow-up). MergeCollinear kept only the two ends of a straight
+            // run, so every cell between them lost the offset the kit measured
+            // for it and the leg walked the straight line between two corrected
+            // ends - back through the facade on 16 of the kit's 66 theme-2 lane
+            // runs. This merge stops wherever the passage really moves: the
+            // cells merge while the leg still passes each dropped clear point
+            // within half a yard, and the cell where that fails becomes a
+            // waypoint. Beats therefore carry MORE waypoints than in D1, which
+            // is the point - each one is a place the lane bends.
+            MergeClearPoints(*grid, path);
             if (path.size() < 2)
             {
                 // Standing on the goal already. Nothing to walk this tick; a
@@ -846,7 +856,11 @@ namespace PDungeon
                     _patrolActive = false;
                     return;
                 }
-                MergeCollinear(back);
+                // On the clear points, like the beat itself: the walk back is
+                // walked down the same corridor, in public, and a leg that
+                // merged away the passage's bends here would clip the same
+                // house corner the beat now goes round.
+                MergeClearPoints(*grid, back);
                 leg = back;                 // here ... _patrolRoute[nearest]
                 for (size_t i = nearest + 1; i < _patrolRoute.size(); ++i)
                 {

@@ -1590,6 +1590,344 @@ namespace
         }
     }
 
+    // A cell's clear point in YARDS, computed independently of the module: the
+    // engine works in 1/12-yard integers and this works in doubles, so the
+    // checks below cannot agree with a wrong MergeClearPoints by sharing its
+    // arithmetic. PatrolInfoAt is the only thing shared, deliberately - a
+    // second decoder of the layer would be testing the wrong thing.
+    // grid.x is the v axis and grid.y the u axis, the pairing BuildWalkGrid
+    // lays the mask down with.
+    void ClearPointYd(WalkGrid const& grid, GridPoint cell, double& px, double& py)
+    {
+        PatrolCellInfo const info = PatrolInfoAt(grid, cell);
+        px = (static_cast<double>(cell.x) + 0.5) * PD_CELL_SIZE_YD +
+             static_cast<double>(info.dv) * PD_PATROL_QUARTER_YD;
+        py = (static_cast<double>(cell.y) + 0.5) * PD_CELL_SIZE_YD +
+             static_cast<double>(info.du) * PD_PATROL_QUARTER_YD;
+    }
+
+    // What a MERGED beat has to keep, judged against the raw cell chain it was
+    // merged from. Two statements, and the second is this harness's answer to
+    // the check it cannot make:
+    //
+    //   (1) every cell a leg covers has its clear point within `toleranceQ`
+    //       quarter-yards of that leg's line - the contract MergeClearPoints
+    //       exists to keep, re-derived here in yards;
+    //   (2) the line never leaves the BAND of cells the leg covers - the
+    //       leg's own column or row, half a cell either side of its centre -
+    //       by more than the same tolerance.
+    //
+    // (2) is the stand-in for the measurement that would settle this properly:
+    // "every point of the walked segment keeps a yard of clearance from every
+    // facade box". That needs the built ADTs and this harness has no terrain at
+    // all, so what is asserted instead is the geometric consequence that
+    // matters - a leg that stays inside its own column cannot be inside the
+    // house on the far side of the lane, and the clearance layer is what puts
+    // it in the free half of that column.
+    void CheckMergedBeat(WalkGrid const& grid, std::vector<GridPoint> const& raw,
+                         std::vector<GridPoint> const& merged, int toleranceQ,
+                         char const* whatOff, char const* whatBand, uint32_t seed)
+    {
+        if (merged.size() < 2 || raw.size() < 2)
+        {
+            return;
+        }
+
+        double const tol = static_cast<double>(toleranceQ) * PD_PATROL_QUARTER_YD;
+        double const half = PD_CELL_SIZE_YD / 2.0;
+        // Doubles against an integer test: a clear point exactly on the
+        // tolerance passes the engine's `<=` and must not fail here on the last
+        // bit of a division.
+        double const eps = 1e-6;
+
+        size_t cursor = 0;
+        for (size_t m = 1; m < merged.size(); ++m)
+        {
+            // The merged list is a SUBSEQUENCE of the raw chain, so both ends
+            // of every leg are found by walking the chain forwards once.
+            while (cursor < raw.size() && !(raw[cursor] == merged[m - 1]))
+            {
+                ++cursor;
+            }
+            size_t const a = cursor;
+            size_t b = cursor;
+            while (b < raw.size() && !(raw[b] == merged[m]))
+            {
+                ++b;
+            }
+            if (a >= raw.size() || b >= raw.size())
+            {
+                Check(false, "a merged beat is not a subsequence of the cell chain it was "
+                             "merged from", seed);
+                return;
+            }
+            cursor = b;
+
+            double ax = 0.0, ay = 0.0, bx = 0.0, by = 0.0;
+            ClearPointYd(grid, merged[m - 1], ax, ay);
+            ClearPointYd(grid, merged[m], bx, by);
+            double const dx = bx - ax;
+            double const dy = by - ay;
+            double const len = std::sqrt(dx * dx + dy * dy);
+            if (len < eps)
+            {
+                Check(false, "a merged beat has two waypoints on the same clear point", seed);
+                continue;
+            }
+
+            // Which axis the leg runs along, in CELLS. Every leg is
+            // axis-aligned in cells (CheckPatrolLegs says so separately) even
+            // though the line between two clear points is not: the band is the
+            // column or row of cells the leg covers, half a cell either side of
+            // its centre, and along the axis it reaches half a cell past the
+            // first and last cell centres.
+            bool const alongX = merged[m - 1].y == merged[m].y;
+            double const bandCentre = alongX
+                ? (static_cast<double>(merged[m - 1].y) + 0.5) * PD_CELL_SIZE_YD
+                : (static_cast<double>(merged[m - 1].x) + 0.5) * PD_CELL_SIZE_YD;
+            double alongMin = 0.0, alongMax = 0.0;
+            for (size_t k = a; k <= b; ++k)
+            {
+                double const centre = alongX
+                    ? (static_cast<double>(raw[k].x) + 0.5) * PD_CELL_SIZE_YD
+                    : (static_cast<double>(raw[k].y) + 0.5) * PD_CELL_SIZE_YD;
+                if (k == a || centre - half < alongMin)
+                {
+                    alongMin = centre - half;
+                }
+                if (k == a || centre + half > alongMax)
+                {
+                    alongMax = centre + half;
+                }
+            }
+
+            // (1) THE MERGE'S OWN CONTRACT: every cell this leg covers is
+            //     passed within the tolerance of its clear point.
+            for (size_t k = a; k <= b; ++k)
+            {
+                double px = 0.0, py = 0.0;
+                ClearPointYd(grid, raw[k], px, py);
+                double const cross = dx * (py - ay) - dy * (px - ax);
+                Check(std::fabs(cross) / len <= tol + eps, whatOff, seed);
+            }
+
+            // (2) THE WALKED LINE, sampled end to end every half yard, against
+            //     that band. A creature walks the straight line between two
+            //     clear points (MovePoint with no path generation on a map with
+            //     no mmaps), so this is the ground it really crosses. Both
+            //     directions are asserted: across the band, which is the wall
+            //     the operator sees, and along it, which would catch a waypoint
+            //     that left its own cell - the property case (h) round-trips
+            //     for the encoding, here re-asserted over the shipped kit.
+            int const samples = static_cast<int>(len / 0.5) + 1;
+            for (int s = 0; s <= samples; ++s)
+            {
+                double const t = static_cast<double>(s) / static_cast<double>(samples);
+                double const sx = ax + t * dx;
+                double const sy = ay + t * dy;
+                double const across = alongX ? sy : sx;
+                double const along = alongX ? sx : sy;
+                Check(std::fabs(across - bandCentre) <= half + tol + eps, whatBand, seed);
+                Check(along >= alongMin - tol - eps && along <= alongMax + tol + eps,
+                      whatBand, seed);
+            }
+        }
+    }
+
+    // MergeClearPoints: the cell rule of MergeCollinear plus the clear points.
+    // Hand grids, so the rule is stated rather than measured - the operator
+    // beats measure it.
+    void CheckMergeClearPoints()
+    {
+        // One open column down an 8x8 grid; the beat is the eight cells of
+        // column 4, which is a single straight run with no turn in it at all.
+        char const* const openRows[PD_CELLS_PER_BLOCK] = {
+            "........", "........", "........", "........",
+            "........", "........", "........", "........",
+        };
+        char const* const freeRows[PD_CELLS_PER_BLOCK] = {
+            "ffffffff", "ffffffff", "ffffffff", "ffffffff",
+            "ffffffff", "ffffffff", "ffffffff", "ffffffff",
+        };
+        std::vector<GridPoint> const lane = {
+            { 4, 0 }, { 4, 1 }, { 4, 2 }, { 4, 3 },
+            { 4, 4 }, { 4, 5 }, { 4, 6 }, { 4, 7 } };
+
+        // (a) A RUN OF IDENTICAL OFFSETS IS STILL A STRAIGHT LINE. Every cell's
+        //     clear point sits 1.5 yd east of its centre, so the passage is
+        //     off-centre but straight, and the eight cells must still collapse
+        //     to two waypoints: the whole line lies on the line between them.
+        //     This is the half of the rule that keeps the beats short.
+        {
+            WalkGrid g = GridFromRows(openRows);
+            SetPatrolClear(g, freeRows);
+            for (size_t i = 0; i < g.cells.size(); ++i)
+            {
+                g.patrolDv[i] = static_cast<int8_t>(6);     // +1.5 yd east, every cell
+            }
+            std::vector<GridPoint> path = lane;
+            MergeClearPoints(g, path);
+            Check(path.size() == 2 && path.front() == lane.front() &&
+                  path.back() == lane.back(),
+                  "MergeClearPoints split a straight run whose clear points are all "
+                  "offset the same way - an off-centre passage is still a straight line",
+                  0);
+            CheckMergedBeat(g, lane, path, PD_PATROL_MERGE_TOLERANCE_Q,
+                            "a merged leg of the identical-offset lane passes a clear point "
+                            "further than the tolerance",
+                            "a merged leg of the identical-offset lane leaves its own cell "
+                            "band", 0);
+        }
+
+        // (b) A WOBBLE MID-RUN IS A WAYPOINT. The same lane, all offsets zero
+        //     except cell (4,4), whose clear point sits 1.0 yd east - the lane
+        //     jogging around one house that leans in. Every break below is the
+        //     perpendicular distance of a clear point from the line the merge
+        //     is about to draw, in quarter-yards (the tolerance is 2 = 0.5 yd):
+        //       run (4,0)..(4,4): (4,3) lies 3.0 q off it -> the extension is
+        //       refused and (4,3) is kept, the last cell of the straight part;
+        //       run (4,3)..(4,5): the wobble cell lies 4.0 q off -> (4,4) is
+        //       kept, which is the whole point of this case;
+        //       run (4,4)..(4,6): (4,5) lies exactly 2.0 q off -> inside the
+        //       tolerance, so it merges;
+        //       run (4,4)..(4,7): (4,5) is now 2.7 q off it -> refused, and
+        //       (4,6) is kept.
+        //     Five waypoints, and the wobble cell is one of them. With
+        //     MergeCollinear this beat is two waypoints and the walked line
+        //     misses the jog by the full yard.
+        {
+            WalkGrid g = GridFromRows(openRows);
+            SetPatrolClear(g, freeRows);
+            // +1.0 yd east on the one cell
+            g.patrolDv[static_cast<size_t>(4) * g.width + 4] = static_cast<int8_t>(4);
+            std::vector<GridPoint> path = lane;
+            MergeClearPoints(g, path);
+
+            std::vector<GridPoint> const want = {
+                { 4, 0 }, { 4, 3 }, { 4, 4 }, { 4, 6 }, { 4, 7 } };
+            Check(path.size() == want.size() &&
+                  std::equal(path.begin(), path.end(), want.begin()),
+                  "MergeClearPoints no longer splits a lane that wobbles by a yard "
+                  "mid-run - the beat would walk straight past the jog", 0);
+
+            bool kept = false;
+            for (GridPoint const& p : path)
+            {
+                if (p == GridPoint{ 4, 4 })
+                {
+                    kept = true;
+                }
+            }
+            Check(kept, "MergeClearPoints dropped the one cell whose clear point moved", 0);
+
+            CheckMergedBeat(g, lane, path, PD_PATROL_MERGE_TOLERANCE_Q,
+                            "a merged leg of the wobbling lane passes a clear point further "
+                            "than the tolerance",
+                            "a merged leg of the wobbling lane leaves its own cell band", 0);
+
+            // And the comparison this case exists to make: the old merge keeps
+            // the two ends and nothing else, so the wobble is walked over.
+            std::vector<GridPoint> old = lane;
+            MergeCollinear(old);
+            Check(old.size() == 2,
+                  "MergeCollinear no longer collapses the wobbling lane to two points - "
+                  "the case above compares against nothing", 0);
+        }
+
+        // (c) WITHOUT A LAYER THE TWO MERGES ARE ONE FUNCTION. Every cell reads
+        //     as its own centre, so nothing can deviate from a straight line
+        //     and the clear-point merge has to answer exactly what the cell
+        //     merge answers - which is what keeps a kit that predates D2, and
+        //     every hand grid in this file, walking the beats it always walked.
+        {
+            WalkGrid const bare = GridFromRows(openRows);
+            std::vector<std::vector<GridPoint>> const cases = {
+                lane,
+                { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 4, 2 } },
+                { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 2, 1 }, { 2, 2 } },
+                { { 2, 2 }, { 2, 5 } },
+                { { 2, 2 } },
+                {},
+            };
+            for (std::vector<GridPoint> const& c : cases)
+            {
+                std::vector<GridPoint> a = c;
+                std::vector<GridPoint> b = c;
+                MergeCollinear(a);
+                MergeClearPoints(bare, b);
+                Check(a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin()),
+                      "MergeClearPoints and MergeCollinear disagree on a grid with no "
+                      "clearance layer", 0);
+            }
+        }
+
+        // (d) A TURN IS A WAYPOINT WHATEVER THE CLEAR POINTS SAY, and the
+        //     merged list is a SUBSEQUENCE of the chain it was merged from.
+        //     Those two together are what keeps every leg axis-aligned in
+        //     cells, which is D1's promise to the creature AI and the reason
+        //     the AI may walk a leg with MovePoint and no path generation. The
+        //     offsets here are deliberately violent - alternating ends of the
+        //     cell - so the tolerance test fires on nearly every step and the
+        //     turn rule is what has to survive it.
+        //
+        //     This case replaces an idempotency check, and the reason it is not
+        //     one is worth stating: MergeClearPoints is NOT idempotent, because
+        //     re-running it sees only the waypoints that survived and can merge
+        //     a cell whose objection was raised by a neighbour that is no longer
+        //     in the list. It is defined over the RAW chain FindPatrolPath
+        //     returns, and no call site ever hands it anything else.
+        {
+            char const* const bendRows[PD_CELLS_PER_BLOCK] = {
+                "........", "........", "........", "........",
+                "........", "........", "........", "........",
+            };
+            WalkGrid g = GridFromRows(bendRows);
+            SetPatrolClear(g, freeRows);
+            for (size_t i = 0; i < g.cells.size(); ++i)
+            {
+                g.patrolDu[i] = static_cast<int8_t>((i % 2) ? 12 : -12);
+                g.patrolDv[i] = static_cast<int8_t>((i % 3) ? -12 : 12);
+            }
+            // Three east, two south, one east: two turns, at (3,0) and (3,2).
+            std::vector<GridPoint> const raw = {
+                { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 4, 2 } };
+            std::vector<GridPoint> path = raw;
+            MergeClearPoints(g, path);
+
+            Check(path.front() == raw.front() && path.back() == raw.back(),
+                  "MergeClearPoints moved an endpoint of a bent beat", 0);
+            bool haveFirst = false, haveSecond = false;
+            size_t cursor = 0;
+            for (GridPoint const& p : path)
+            {
+                while (cursor < raw.size() && !(raw[cursor] == p))
+                {
+                    ++cursor;
+                }
+                Check(cursor < raw.size(),
+                      "MergeClearPoints returned a waypoint that is not a cell of the "
+                      "chain it merged, or returned them out of order", 0);
+                if (p == GridPoint{ 3, 0 })
+                {
+                    haveFirst = true;
+                }
+                if (p == GridPoint{ 3, 2 })
+                {
+                    haveSecond = true;
+                }
+            }
+            Check(haveFirst && haveSecond,
+                  "MergeClearPoints dropped a turn - a leg of this beat is diagonal and "
+                  "the creature would walk it as a straight line across the corner", 0);
+            CheckPatrolLegs(g, path, "a merged leg of the bent beat is diagonal",
+                            "a merged leg of the bent beat crosses an unwalkable cell", 0);
+            CheckMergedBeat(g, raw, path, PD_PATROL_MERGE_TOLERANCE_Q,
+                            "a merged leg of the bent beat passes a clear point further "
+                            "than the tolerance",
+                            "a merged leg of the bent beat leaves its own cell band", 0);
+        }
+    }
+
     // Forward (block-local, the spawn path) and inverse (world -> cell, the AI
     // path) must agree, or creatures would chase mirrored positions. The u/v
     // to row/col pairing below IS the axis mapping - if someone swaps it, this
@@ -5627,14 +5965,33 @@ namespace
     //
     // The D1 pin this replaces was `1:8:121:2900;2:10:138:3450;` over boss
     // segments, for the record.
+    //
+    // The D2 FOLLOW-UP moved the LAYERED string once more, and only it: the
+    // merge is MergeClearPoints now, so a straight run of cells splits wherever
+    // the passage moves more than half a yard off the line the merge would
+    // draw, and the waypoint counts (the second field) went UP. Nothing else in
+    // the string can move with it - cells, cost and offsetSum are all read off
+    // the RAW chain, which no merge touches. The no-layer string is unchanged
+    // and must stay so: with no clearance layer every cell reads as its own
+    // centre, and the two merges are then the same function.
+    //
+    // The layered string it replaced, for the record - the same twelve beats
+    // merged on cells alone:
+    //   1:2:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:2:8:250:62;
+    //   5:4:16:1458:278;6:3:15:950:142;7:2:24:1282:296;8:2:8:250:62;
+    //   9:2:16:1082:204;10:2:16:1154:204;11:2:16:482:124;12:3:14:1368:214;
+    // Corridor 7 is the one to read: 24 cells said in 2 waypoints became 15,
+    // i.e. fourteen legs where one straight line used to cut across every jog
+    // the kit measured. Corridor 3 did not move at all - a passage whose clear
+    // points really are collinear still merges to its two ends.
     char const* const PD_OPERATOR_PATROL_PIN_NOLAYER =
         "1:2:24:610:0;2:2:8:210:0;3:2:8:210:0;4:2:8:170:0;5:3:16:460:0;"
         "6:3:15:390:0;7:2:24:570:0;8:2:8:170:0;9:2:16:410:0;10:2:16:410:0;"
         "11:2:16:370:0;12:3:14:400:0;";
     char const* const PD_OPERATOR_PATROL_PIN =
-        "1:2:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:2:8:250:62;"
-        "5:4:16:1458:278;6:3:15:950:142;7:2:24:1282:296;8:2:8:250:62;"
-        "9:2:16:1082:204;10:2:16:1154:204;11:2:16:482:124;12:3:14:1368:214;";
+        "1:10:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:6:8:250:62;"
+        "5:6:16:1458:278;6:8:15:950:142;7:15:24:1282:296;8:6:8:250:62;"
+        "9:7:16:1082:204;10:5:16:1154:204;11:10:16:482:124;12:6:14:1368:214;";
 
     // PD_PATROL_CLEAR_PIN: the distribution of `patrolClear` over every
     // WALKABLE cell of every chunk of the staged kit, 16 buckets, printed as
@@ -6145,8 +6502,13 @@ namespace
                 ++fellBack;
             }
             size_t const cells = path.size();
+            // The chain as the planner returned it, kept for the merge check
+            // below: a merged beat only says which of these cells survived as
+            // waypoints, so the raw chain is what the walked legs are judged
+            // against.
+            std::vector<GridPoint> const rawChain = path;
             // The harness's own re-derivation, on the RAW cell chain (the only
-            // form it is defined for) and before MergeCollinear touches it -
+            // form it is defined for) and before the merge touches it -
             // merging changes how many points describe the route, never the
             // route, so this is the merged beat's cost as well. -1 would mean
             // the planner emitted something that is not a chain of single
@@ -6171,7 +6533,27 @@ namespace
                              std::abs(static_cast<int>(info.dv));
             }
 
-            MergeCollinear(path);
+            // THE ENGINE'S MERGE, which since the D2 follow-up is the
+            // clear-point one: a straight run of cells collapses only while the
+            // line between the surviving ends still passes every dropped cell's
+            // clear point within half a yard. That is why the waypoint counts
+            // in the pin below are HIGHER than D1's - each extra one is a place
+            // the passage moves - and it is what the check under it measures.
+            MergeClearPoints(grid, path);
+
+            // What the merge promised, re-derived in yards over the raw chain,
+            // and the closest this harness can get to "the walked line keeps
+            // its clearance": every cell a leg covers is passed within the
+            // tolerance, and the line never leaves the leg's own column or row
+            // of cells by more than that. The proper measurement - the walked
+            // segment against every facade box - needs the built ADTs, which
+            // this harness does not have and never will.
+            CheckMergedBeat(grid, rawChain, path, PD_PATROL_MERGE_TOLERANCE_Q,
+                            "a merged patrol leg of the operator's layout passes a cell's "
+                            "clear point further than the merge tolerance",
+                            "a merged patrol leg of the operator's layout leaves the band "
+                            "of cells it covers",
+                            PD_OPERATOR_SEED);
 
             // The point of the whole block. Round C asked only that a leg stay
             // ON the mask; D1 asks for more, because the operator's complaint
@@ -6248,6 +6630,9 @@ namespace
         // are stated on hand grids, so they hold on a box with no kit staged.
         CheckPatrolPlanner();
         CheckMergeCollinear();
+        // The D2 follow-up's merge, beside the one it replaces and for the
+        // same reason: hand grids, so the rule holds on a box with no kit.
+        CheckMergeClearPoints();
         // Round D / D2. It carries a mask guard of its OWN, because the
         // clearance histogram is a statement about the staged kit: with no
         // kit on disk it skips rather than pinning an empty one.

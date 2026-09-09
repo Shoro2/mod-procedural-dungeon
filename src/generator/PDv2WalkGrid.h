@@ -95,6 +95,12 @@ namespace PDungeon
     // The unit `patrolClear`, `patrolDu` and `patrolDv` are counted in.
     constexpr double PD_PATROL_QUARTER_YD = 0.25;
 
+    // How far a merged patrol leg may pass from a clear point it merged away,
+    // in those same quarter-yards - 2 = 0.5 yd. Named rather than written into
+    // MergeClearPoints' default argument so the harness can state the number it
+    // is checking instead of restating a literal that could drift.
+    constexpr int PD_PATROL_MERGE_TOLERANCE_Q = 2;
+
     struct GridPoint
     {
         int x = 0;
@@ -278,7 +284,64 @@ namespace PDungeon
     // moves the route - it only says the same route in fewer points - so an
     // axis-aligned cell chain stays axis-aligned, which is the whole promise
     // D1 makes to the creature AI.
+    //
+    // Since Round D / D2 no patrol beat calls this directly: a beat merges
+    // through MergeClearPoints below, which asks this same question about the
+    // cells and a second one about the clear points. It stays as the statement
+    // of the cell rule ALONE, and as the harness's oracle for it - on a grid
+    // without a clearance layer the two are the same function, and the harness
+    // pins that equivalence over the hand paths it states the rule with.
     void MergeCollinear(std::vector<GridPoint>& path);
+
+    // The merge a patrol BEAT takes since Round D / D2, and why MergeCollinear
+    // stopped being it.
+    //
+    // A beat's waypoints are walked as CLEAR POINTS (PatrolPointToWorld), not
+    // as cell centres, while MergeCollinear decides what to keep from the CELLS
+    // alone: it collapses a straight run of cells to its two ends, so every
+    // intermediate cell's clear point - the correction this round exists to
+    // publish - is thrown away and the leg is walked as one straight line
+    // between the two survivors. On a lane whose two flanks are built from
+    // different house models that line walks back into the facade the clear
+    // points were leading the patrol around. Measured over the shipped kit's 66
+    // theme-2 corridor lane runs (D2 review, Important 1): cell by cell 1 of 66
+    // legs enters a facade ground box, 0.88 yd deep; merged on cells 16 of 66
+    // do, up to 0.95 yd; on the old cell centres 66 of 66 did, 2.4 to 3.6 yd
+    // deep. The merge, not the layer, is what put those 16 back inside a house.
+    //
+    // So this merge asks a second question before it drops a cell: would the
+    // straight line between the two KEPT endpoints' clear points still pass
+    // every dropped cell's clear point within `toleranceQ` quarter-yards,
+    // measured perpendicular to that line? While it would, the cells merge
+    // exactly the way MergeCollinear merges them; where it would not, the cell
+    // whose passage has moved is KEPT as a waypoint and the leg is split there.
+    // A turn is still kept unconditionally, so legs stay axis-aligned in cells
+    // - the promise D1 makes to the creature AI - and a cell with no layer
+    // reads as its own centre (PatrolInfoAt), so a grid built by hand or from a
+    // kit that predates D2 merges exactly as it did before.
+    //
+    // `toleranceQ` is in the layer's own unit: 2 = 0.5 yd, half of the 1.0 yd
+    // `PatrolCost::minClearQ` calls "a body fits". Larger merges more and lets
+    // the walked line stray further from the measured passage; 0 would keep
+    // every cell whose clear point is not exactly on the line, which is nearly
+    // all of them.
+    //
+    // DEFINED OVER THE RAW CELL CHAIN FindPatrolPath returns, and unlike
+    // MergeCollinear it is NOT idempotent: run it again and it sees only the
+    // waypoints that survived, so a cell whose objection was raised by a
+    // neighbour that has since been dropped can merge on the second pass. That
+    // is a property of measuring the cells BETWEEN two waypoints, not a defect,
+    // and no call site hands it anything but a fresh chain - the AI merges the
+    // plan once and the rejoin merges its own walk-back once, then appends the
+    // already merged tail of the beat without touching it again.
+    //
+    // Deterministic like the planner it follows: the distance test is integer
+    // arithmetic over 1/12-yard units (a cell is 100 of them, a quarter-yard is
+    // 3), never a double, because this decides HOW MANY waypoints a beat has,
+    // and a beat that came out one waypoint longer on MSVC than on gcc would
+    // break the determinism contract in CLAUDE.md the way a shuffled heap does.
+    void MergeClearPoints(WalkGrid const& grid, std::vector<GridPoint>& path,
+                          int toleranceQ = PD_PATROL_MERGE_TOLERANCE_Q);
 
     // The clearance layer's answer for ONE cell, with every guard in a single
     // place: a grid that carries no layer (a hand-built one, or one from a kit
