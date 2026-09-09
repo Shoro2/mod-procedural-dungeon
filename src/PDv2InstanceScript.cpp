@@ -893,6 +893,12 @@ namespace PDungeon
         // PDv2MobData, so she cannot move a counter, cannot be scaled, cannot
         // be affixed and cannot be split. Her template makes her unattackable
         // in the first place; the missing tag is what makes that structural.
+        //
+        // And no SetReputationRewardDisabled either, unlike every other summon
+        // this module makes: she cannot be killed, so there is no kill for the
+        // core to reward. Measured 2026-09-09 - creature_template 910550 has
+        // unit_flags 514 = 0x2 UNIT_FLAG_NON_ATTACKABLE | 0x200
+        // UNIT_FLAG_IMMUNE_TO_NPC, and no creature_onkill_reputation row.
         chromie->SetHomePosition(chromie->GetPositionX(), chromie->GetPositionY(),
                                  chromie->GetPositionZ(), chromie->GetOrientation());
 
@@ -1230,6 +1236,41 @@ namespace PDungeon
         }
 
         c->SetHomePosition(x, y, z, 0.0f);
+
+        // NOTHING THIS DUNGEON SUMMONS PAYS KILL REPUTATION. A policy of the
+        // module, not a patch for one pack: PDv2 fills its rooms from arbitrary
+        // stock creature_template entries, and a stock entry can carry a
+        // creature_onkill_reputation row that was written for hand-placed,
+        // finite spawns in a real zone. The same row inside an infinitely
+        // repeatable procedural dungeon is a faucet, and no pack file can be
+        // trusted to notice - so the switch lives on the spawn path, where every
+        // mob the module creates has to pass.
+        //
+        // The case that produced the rule, measured on this box 2026-09-09: all
+        // seven trash members of pack 7 "Cult of the Damned" (10471, 10476,
+        // 10477, 10486, 10488, 10489, 11551 - stock Scholomance) carry
+        // RewOnKillRepFaction1 529 (Argent Dawn), RewOnKillRepValue1 10,
+        // MaxStanding1 6 = REP_EXALTED, IsTeamAward1 0. That is +10 Argent Dawn
+        // per kill, for either faction, all the way to Exalted, with no turn-in
+        // and no NPC visit - about 4200 trash kills for Neutral -> Exalted. Not
+        // one of the 52 pack members that shipped before it had such a row.
+        //
+        // Creature::SetReputationRewardDisabled (Creature.h:378) sets the flag
+        // the core tests FIRST: Player::RewardReputation returns before it even
+        // looks the ReputationOnKillEntry up when IsReputationRewardDisabled()
+        // is true (Player.cpp:5962-5963), and that function is the only way a
+        // creature death grants reputation - KillRewarder::_RewardReputation
+        // (KillRewarder.cpp:192-196) is its sole kill-side caller, reached from
+        // _RewardPlayer (KillRewarder.cpp:237). The flag is initialised false in
+        // the Creature constructor (Creature.cpp:280) and nothing else resets
+        // it, so this one call is the whole switch. It is the same call the
+        // core's own instance scripts make for the same purpose
+        // (instance_hyjal.cpp:197).
+        //
+        // Deliberately NOT a data patch: editing creature_template or
+        // creature_onkill_reputation here would retune Scholomance itself, and
+        // the next pack drawn from stock entries would reopen the hole.
+        c->SetReputationRewardDisabled(true);
 
         // NO SetDisableGravity(true) here, and the absence is the fix (Round D
         // / D3). Until 2026-09-08 every summon on this map set it, on the
@@ -2294,6 +2335,17 @@ namespace PDungeon
             // and a critter stands at floorZ without it (SpawnTaggedMob cites
             // the core lines).
             c->SetHomePosition(x, y, z, static_cast<float>(spot.orientation));
+
+            // A critter IS killable - all four shipped rules point at unit_flags
+            // 0 templates (32428, 23086, 2110, 26525: selectable, attackable,
+            // not IMMUNE_TO_PC), and an AoE that clips one kills it - so it
+            // takes the module's no-kill-reputation policy too. SpawnTaggedMob
+            // carries the reasoning and the core cites. None of the four has a
+            // creature_onkill_reputation row today (measured 2026-09-09); the
+            // switch is set regardless, because pdungeon_critter_rules is
+            // OPERATOR data and the policy has to hold for a row this module
+            // has never seen.
+            c->SetReputationRewardDisabled(true);
 
             // NO PDv2MobData tag, deliberately. The tag is the module's own
             // definition of "this is a dungeon mob": without it, OnMobDied
