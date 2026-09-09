@@ -82,7 +82,9 @@
 --   5  Legion Rift              1.0 .. 2.9      156 .. 704     92 .. 304
 --   8  Ahn'kahet Deep (THIS)    7.5 ON ALL 8   1563 .. 2199   780 .. 945
 --   shipped BOSSES  25352 / 29620   7.5        1581 .. 2199          945
---   shipped BOSSES  84288-84290     8.0         485 ..  645          188
+--   shipped BOSSES  84288-84290     8.0         321 ..  481          134
+--                                   (BaseVariance 0 and BaseAttackTime 3000,
+--                                    which is why 8.0 lands under this pack's 7.5)
 --
 -- Read that last block twice: EVERY trash member of this pack swings for
 -- exactly what the pack-4 and pack-5 BOSSES swing for, and 5.5x-10.9x what
@@ -101,7 +103,12 @@
 --     member.
 --   * creature_template.DamageModifier is NOT edited, for the same reason
 --     HealthModifier is not: it is a shared column that Ahn'kahet itself and
---     every other consumer reads.
+--     every other consumer reads. Nor is there a lower-hitting swap on this
+--     theme: every rank 1 / exp 2 Ahn'kahet, nerubian or Twilight's Hammer
+--     template in creature_template is 7.5 (19 of them), 13 (17 heroic
+--     clones) or higher (4 Nerubian Burrowers at 16.2-33.6). The only
+--     on-theme stock below 7.5 is rank 0 with a HealthModifier of 0.012
+--     (Ahn'kahar Swarmer, ~153 hp at 80) - not a pack member.
 --   * `weight` stays 100 on all eight, per the pack contract.
 --   * So the levers that remain are the DIFFICULTY DIAL and the KIT. The kit
 --     is where this pass spent them: mod_pdungeon_member_spells_faceless.sql
