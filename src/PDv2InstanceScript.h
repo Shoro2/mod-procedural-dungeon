@@ -24,9 +24,12 @@
 #include "PDv2PackMgr.h"
 #include "Position.h"
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2AmbushPlan.h"
 #include "generator/PDv2WalkGrid.h"
 
 #include <cstdint>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 class Creature;
@@ -74,6 +77,32 @@ namespace PDungeon
         // its children, 2 for theirs. Depth 2 does not split again, so one
         // carrier is worth 1 -> 2 -> 4 corpses and no more.
         uint8  splitDepth = 0;
+
+        // Round B. false for the patrol (B4) and the ambush mobs (B5): they
+        // fight, scale, split and drop loot like any dungeon mob but move no
+        // run counter and no barrier - risk on the road, not progress.
+        bool   countsForRun = true;
+
+        // B4: this creature walks a beat out of combat. Since Round D / D2 the
+        // beat is ONE CORRIDOR - both of its ends are doorway lane cells of
+        // that corridor run, in GLOBAL grid cells, and the patrol never enters
+        // a room. The AI plans the route on its first idle tick and reverses it
+        // at either end.
+        //
+        // A patrol is a FILE: pick 0 of the corridor's draw is the LEADER and
+        // carries the two cells; picks 1..n are FOLLOWERS and carry the leader
+        // instead. The two halves are mutually exclusive by construction - an
+        // empty `patrolLeader` IS "this one leads" - because a follower walks
+        // no beat of its own: it follows the creature in front of it, so one
+        // patrol costs one path however many creatures it has (design
+        // 2026-09-08 §D2.3).
+        bool   isPatrol = false;
+        int    patrolStartCellX = 0;
+        int    patrolStartCellY = 0;
+        int    patrolGoalCellX = 0;
+        int    patrolGoalCellY = 0;
+        ObjectGuid patrolLeader;        // empty on the leader itself
+        uint8  patrolRank = 0;          // 0 = leader, k >= 1 = the k-th follower
 
         // Damage Reduce (affix 8) is the one affix a creature cannot answer
         // about itself: the carrier is somebody else, so the verdict costs a
@@ -134,6 +163,11 @@ namespace PDungeon
         void Initialize() override { }
         void Update(uint32 diff) override;
         void OnPlayerEnter(Player* player) override;
+
+        // Round B / B1. Forgets a player's pending respawn when they leave
+        // this map - the .cpp says which core ordering makes that necessary.
+        void OnPlayerLeave(Player* player) override;
+
         // Disarms unselectable summons (void zones) so they decorate instead of
         // damaging - see the .cpp for why this is scoped to this map.
         void OnCreatureCreate(Creature* creature) override;
@@ -147,9 +181,42 @@ namespace PDungeon
 
         // The walkable surface of this instance's plan, or nullptr while no
         // plan is bound yet (or its masks are missing). The creature AI paths
-        // over this; it is built once on first entry and read-only afterwards,
-        // and AI updates run on this map's own update thread, so no lock.
+        // over this.
+        //
+        // It is built once on first entry and written afterwards ONLY by the
+        // instance itself, through SetCellsWalkable: since Round B (B3) a
+        // closed barrier seals its lane cells and reopens them when it falls,
+        // because creatures ignore GameObject collision and this grid is the
+        // only thing they path over. Every reader and that one writer run on
+        // this map's own update thread, so there is still no lock.
         WalkGrid const* GetWalkGrid() const { return _gridReady ? &_grid : nullptr; }
+
+        // Round D / D1-D2. Where this instance's props stand, indexed exactly
+        // like the walk grid's `cells` (1 = at least one prop occupies that
+        // cell), or nullptr while there is no grid or nothing was placed.
+        //
+        // NOT a walkability flag and deliberately not folded into the grid: a
+        // prop is a COST to the patrol planner (FindPatrolPath adds
+        // PatrolCost::propCell for entering one) and nothing at all to the
+        // chase, because a mob squeezing past a brazier to reach a player is
+        // fine and a patrol strolling through one is what the operator
+        // reported. Barriers are not in here - a closed portcullis flips its
+        // lane cells out of the grid itself, which is a wall and not a cost.
+        std::vector<uint8_t> const* PropCells() const
+        {
+            return _propCells.empty() ? nullptr : &_propCells;
+        }
+
+        // Round C, for `.pdungeon v2 patrol` and nothing else. One snapshot
+        // line per tagged patrol CREATURE this instance summoned, in spawn
+        // order, each formatted by the AI itself (PDv2MobAI::PatrolStateLine).
+        // Since Round D that is every member of every file, leaders and
+        // followers alike, and the line's own role field is what tells them
+        // apart. The walk lives here rather than in the command because
+        // _spawnedGuids is this class's business and `instance` resolves a GUID
+        // on the map that owns it. A member that has despawned contributes no
+        // line.
+        std::vector<std::string> PatrolSnapshot() const;
 
         // The live run. Read-only for everyone outside this class: the counters
         // are only ever moved by OnMobDied, on this map's own update thread.
@@ -190,6 +257,56 @@ namespace PDungeon
         // whatever landed the blow, which may be a pet or nothing at all.
         void OnMobDied(Creature* creature, Unit* killer);
 
+        // Round B / B1. A player died on this map: ZoneScript hook, reached
+        // through GetInstanceScript() from Unit::setDeathState - before any
+        // corpse or ghost exists. Only records the death; the resurrect runs
+        // on the 1 Hz tick (RespawnPending), never inside the death itself.
+        void OnUnitDeath(Unit* unit) override;
+
+        // True while a death is waiting for its tick; the release veto in
+        // PDClientLink reads it so a quick 'release spirit' cannot beat the
+        // tick to the graveyard.
+        bool HasPendingRespawn(ObjectGuid const& playerGuid) const
+        {
+            return _pendingRespawn.find(playerGuid) != _pendingRespawn.end();
+        }
+
+        // Round C / C7. The gate the HUD reports on: the LOWEST segment whose
+        // portcullis is still sealed, with that segment's own numbers. False -
+        // and three zeros - means no barrier of this run is closed any more,
+        // which includes a run that never built one.
+        //
+        // `pct` is the RAW progress killed/planned, NOT progress towards the
+        // threshold: the player is meant to watch it climb past the configured
+        // barrierPct and see the wall fall there, and a bar that reads 100 %
+        // while the portcullis still stands is a bug report. A segment that
+        // plans nothing reports 100 because that is what EvaluateBarrier does
+        // with it - it opens on sight (the single-boss-segment case).
+        bool NextClosedBarrier(uint32& planned, uint32& killed, uint32& pct) const;
+
+        // Round C / C7. The block coordinates of every room whose pack is
+        // dead, in the PLAN's own frame - the UI link shifts them into the map
+        // payload's frame with the same origin it shifts the M payload's
+        // blocks by. A room that spawned nothing is cleared from the first
+        // tick, which is also what it looks like to a player standing in it.
+        void ClearedRoomBlocks(std::vector<std::pair<int, int>>& out) const;
+
+        // The run's cleared-room counter, as the wire's change detector: the
+        // K message is a complete set, so "resend it when this moved" is all
+        // the link needs to keep every client's map honest without a delta
+        // protocol it could silently fall out of step with.
+        uint32 RoomsClearedCount() const { return _run.roomsCleared; }
+
+        // ...and the OTHER half of that change detector. The counter above
+        // only counts rooms emptied by kills, so it cannot tell a rebuild
+        // apart from the run it replaced when both stand at 0 - and the K
+        // payload does differ there, because it also carries rooms that
+        // spawned nothing. This number is bumped by the rebuild itself, so a
+        // link that records the pair always resends for a new run
+        // (C7 Task 1 review, minor 2). Starts at 1, so a record written with
+        // no script at all - {0, 0} - can never look like a real one.
+        uint32 RunGeneration() const { return _runGeneration; }
+
     private:
         void SpawnFromPlan(BlockPlan const& plan);
 
@@ -213,6 +330,15 @@ namespace PDungeon
         // first Phase-4 T2 round). Same guard, same teardown as SpawnDecor.
         void SpawnKitProps(BlockPlan const& plan);
 
+        // Round D / D1-D2. Fills _propCells from _decorGuids, so it must run
+        // AFTER SpawnDecor and SpawnKitProps and BEFORE SpawnPatrols (the
+        // spawn-time beat is planned with it) - and it is deliberately built
+        // from the SUMMONED objects rather than from the two plans, because
+        // that is the only list that knows which prop actually made it onto
+        // the map. Barriers are excluded by construction: SpawnBarriers runs
+        // later, and its cells leave the walk grid rather than joining this.
+        void BuildPropCells();
+
         // Ambient life: BuildCritterPlan's spots, summoned as ownerless,
         // tagless creatures. `decorPositions` is SpawnDecor's output for the
         // SAME layout - a critter within CRITTER_DECOR_CLEAR_YD of a prop is
@@ -226,6 +352,125 @@ namespace PDungeon
         // reward, not a look: deliberately NOT behind Decor.Enable. Shares
         // the decor GUID list so one teardown owns every summoned object.
         void SpawnDeadEndChests(BlockPlan const& plan);
+
+        // Round B / B3. One sealed portcullis per boss segment, standing in
+        // the boss room's own doorway - the cell inside the entry edge that
+        // segment's corridor run arrives through, found with the SAME walk the
+        // validator proved the spine with. Called after EnsureWalkGrid built
+        // the walk grid, so there is a grid to cut: the GameObject
+        // stops the PLAYER, and the four lane cells taken out of the grid stop
+        // the CREATURES, which ignore GameObject collision entirely.
+        struct Barrier
+        {
+            int segment = 0;                // k; the boss room is chain b_k
+            ObjectGuid guid;                // the portcullis, empty once opened
+            std::vector<GridPoint> cells;   // the four lane cells it seals
+            float x = 0.0f;                 // where it stands, for the hint radius
+            float y = 0.0f;
+            bool open = false;
+            bool hinted = false;
+        };
+        void SpawnBarriers(BlockPlan const& plan);
+
+        // Round B / B4, REWRITTEN by Round D / D2. ONE patrol per CORRIDOR:
+        // for every chain room i = 1..chainLen-1 the corridor run that leads
+        // into it (SpineRunInto, the same walk the barrier and the validator
+        // make) gets a single file of 1, 2 or 3 creatures by run difficulty.
+        //
+        // The beat is CORRIDOR ONLY - doorway to doorway, never into a room -
+        // so a patrol is risk on the road and never a second pack in a room
+        // the player already cleared (design 2026-09-08 §D2.1). Both ends are
+        // read off the run itself: the entry socket SpineRunInto answers is
+        // room i's OWN edge, so the corridor's end of it is OppositeSocket(bit)
+        // on run.back(), exactly as SpawnBarriers seals both halves of that
+        // doorway; the far end is the socket of run.front() that faces room
+        // i-1, which is the step between those two blocks.
+        //
+        // Its own RNG stream (PD_PATROL_SEED_MIX, mixed again per corridor), so
+        // adding or retuning a patrol cannot move one pick of the room draw.
+        // Called after SpawnBarriers because a sealed portcullis takes its four
+        // lane cells out of the walk grid, and the goal cell of a boss
+        // corridor is one of them - see the snap in the body.
+        void SpawnPatrols(BlockPlan const& plan);
+
+        // Round B / B5. One corridor per boss segment may be armed with an
+        // ambush: the player who walks into it is stunned for two seconds and
+        // a handful of mobs appear around them.
+        //
+        // WHICH corridor is a pure function of the layout and one chance, so
+        // it is decided in the engine-free planner (BuildAmbushPlan) that the
+        // harness pins; nothing here rolls anything about the geometry. What
+        // this half owns is the arming: the block centre in world coordinates,
+        // the corridor's own socket mask (which IS its axis, and therefore the
+        // direction the mobs are placed along) and the creatures the spot will
+        // spawn - drawn ONCE at build time on the ambush's own stream, so the
+        // same seed springs the same ambush and a trap that fires costs no
+        // draw at the moment the player is already busy being stunned.
+        struct Ambush
+        {
+            AmbushSpot spot;            // bx/by ARE the trigger since C2
+            float x = 0.0f;             // the corridor block's centre, world
+            float y = 0.0f;             // - the arm log's coordinate, not a test
+            float z = 0.0f;             // the corridor's floor plane, where mobs are seated
+            unsigned socketMask = 0;    // that block's sockets = the corridor axis
+            std::vector<SpawnPick> picks;
+            bool armed = true;          // fires once, then stays spent until a rebuild
+        };
+        void SpawnAmbushPlan(BlockPlan const& plan);
+
+        // AMBUSH_SCAN_MS. Every armed spot against every player in the
+        // instance. The trigger is the BLOCK, not a disc (Round C / C2):
+        // WorldToCell on the player's position, then gcx / PD_CELLS_PER_BLOCK
+        // and gcy / PD_CELLS_PER_BLOCK against the spot's own bx/by, refined
+        // by the walk grid so a player on the wall band is not "in" the
+        // corridor. Kind-independent and without a tuning constant.
+        //
+        // Round B measured a 9 yd disc around the block centre, and half the
+        // corridor kinds could be walked past: the four centre cells form a
+        // junction square of half-width 8.33 yd, so a straight transit passes
+        // its inscribed disc at 8.08 yd and fires, while a turn's geodesic
+        // hugs the square's CORNER at 8.33 * sqrt(2) = 11.79 yd and never
+        // does - 11.20 to 11.79 yd on every corner, T and cross, and 11.43 yd
+        // on the alt-1 straight whose centre pillar offers a dogleg (research
+        // c-research-ambush-trigger.md, "Per-kind lane geometry"). Widening
+        // the radius past 11.79 would have closed the hole and left a magic
+        // number that breaks the day the kit's corridor width changes; the
+        // block test has nothing to break.
+        //
+        // It keeps its own cadence rather than the 1 Hz branch's, but no
+        // longer because it has to: the disc could be crossed in under two
+        // seconds, while a whole block is 66.67 yd and takes a running player
+        // some nine, so 1 Hz would now catch them too. What 250 ms buys is how
+        // fast the trap SPRINGS once they are in - a one-second scan would let
+        // them walk several yards into the corridor before the stun lands.
+        void TickAmbushes();
+
+        // Disarms the spot, stuns the player, says so, and puts the stored
+        // picks on the floor around them - grid-vetoed, because a corridor
+        // block is 66.67 yd across and only its lane is floor: two cells of
+        // 8.333 yd (LaneCellsForSocket puts the doorway on columns 3-4 / rows
+        // 3-4), so 16.67 yd wide, 8.33 yd of it either side of the lane
+        // centre. The eight offsets are measured from the PLAYER in x/y and
+        // seated on Ambush::z, which is the corridor's own floor plane -
+        // Ambush::x/y are the block centre and, since C2 dropped the disc,
+        // only what the arm log prints.
+        void FireAmbush(Ambush& ambush, Player* player);
+
+        // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
+        // is safe: everyone recorded there who is still on this map and still
+        // dead comes back alive at full health and WITHOUT resurrection
+        // sickness (ResurrectPlayer's applySickness is false - operator, T2
+        // 2026-09-08), at the entrance or the furthest cleared boss hall -
+        // computed, never chosen (Round C / C5; B1's clickable altars are
+        // gone). Called after CatchFallers, so a death below the floor is
+        // pulled onto the map before it is sent on.
+        void RespawnPending();
+
+        // Round C / C5. The checkpoint's world position: the arena centre of
+        // the boss room with the highest chainIndex whose boss is dead.
+        // False when no boss has fallen yet - RespawnPending then uses the
+        // entrance, which is the normal case for the first half of a run.
+        bool CheckpointSpot(float& x, float& y, float& z) const;
 
         // Summons ONE dungeon mob: the floor plane, the disabled gravity, the
         // tag copied off `proto`, the run's affix auras and their spawn-time
@@ -245,7 +490,80 @@ namespace PDungeon
         // counter, which is the only ordering that keeps them honest.
         void SplitOnDeath(Creature* parent, PDv2MobData const& parentTag, Unit* killer);
         void MarkRunDirty() { _runDirty = true; }
+
+        // Round B / B3. A segment's kill counter moved: re-decide whether that
+        // segment's barrier may fall. OnMobDied calls it from the counter
+        // block - the numerator moves, then the barrier is asked, before
+        // MarkRunDirty - and SpawnBarriers calls it once per barrier it
+        // places, which is what opens a segment that plans no trash at all.
+        void EvaluateBarrier(int segment);
+
+        // Drops the portcullis: deletes the GameObject, hands the four lane
+        // cells back to the walk grid and says so to everyone in the dungeon.
+        // `why` goes to the log only. Idempotent - an open barrier is left
+        // alone, so a second threshold hit costs nothing.
+        void OpenBarrier(Barrier& barrier, char const* why);
+
+        // 1 Hz. A closed barrier explains itself ONCE, to whoever walks up to
+        // it: a wall with no stated reason reads as a broken dungeon, and the
+        // number it names is the only place a player learns what is left.
+        void HintBarriers();
+
+        // Flips walkability on a handful of grid cells, in place - the grid's
+        // OWN (local) coordinates, the shape LocalFromGlobalCell returns. B3's
+        // barrier is the only caller: creatures ignore GameObject collision,
+        // so a closed portcullis has to be a hole in this grid or mobs walk
+        // straight through it. No-op while the grid is not ready; a cell
+        // outside it is skipped, never clamped.
+        void SetCellsWalkable(std::vector<GridPoint> const& cells, bool walkable);
+
         void FinishRun();
+
+        // Round C / C8. The run's closing beat, and the module's only piece of
+        // staged theatre: Chromie and the reward cache appear the moment the
+        // last boss falls, she speaks three lines, and the portal home opens
+        // behind the third.
+        //
+        // A state machine and not a chain of timed callbacks because the
+        // instance script already owns a 1 Hz tick and nothing here needs to
+        // be finer than that - `step` is which beat comes next and `nextAtMs`
+        // is when it is due, so the whole thing survives a save/load of
+        // nothing at all and costs one comparison a second while it runs.
+        //
+        // `x, y, z` is the arena centre the finale is staged around, copied
+        // once at the start: `_roomSpot[_checkpointRoom]` can be re-derived at
+        // any later tick, but a rebuild would have emptied it, and the three
+        // objects must stand in a fixed relation to each other rather than to
+        // whatever the run state says four seconds later.
+        struct Finale
+        {
+            bool active = false;        // false once the portal is up, and before it starts
+            uint32 step = 0;            // 0-2 = the lines, 3 = the portal
+            uint32 nextAtMs = 0;        // getMSTime() deadline of `step`
+            ObjectGuid chromie;         // the speaker; she is in _spawnedGuids
+            float x = 0.0f;             // the arena centre the three objects ring
+            float y = 0.0f;
+            float z = 0.0f;
+        };
+
+        // Called at the end of FinishRun, so it runs after OnMobDied moved the
+        // checkpoint onto the boss room that just fell. Summons Chromie and
+        // the cache and arms the first line; does nothing that can fail the
+        // run if either summon fails.
+        void StartFinale();
+
+        // 1 Hz, after HintBarriers. One beat per tick at most: the deadline is
+        // a schedule, not a budget, so a step that comes due between ticks
+        // simply fires on the next one.
+        void TickFinale();
+
+        // The grid veto every other placement in this file takes, applied to
+        // one finale spot. Moves (x, y) onto the nearest walkable cell centre
+        // when the cell it names is not floor; leaves it where it was when
+        // there is no grid or nothing walkable within SPAWN_FALLBACK_SNAP_CELLS.
+        // `what` names the object in the log line ("Chromie", "cache", "portal").
+        void VetoFinaleSpot(float& x, float& y, char const* what) const;
+
         void RollBonusLoot(Unit* killer);
         void DespawnAll();
         void EnsureWalkGrid(BlockPlan const& plan);
@@ -264,8 +582,72 @@ namespace PDungeon
         bool     _runDirty = false;
         uint64   _leaderGuid = 0;               // the character that opened this run
         std::vector<uint16> _roomAlive;         // per room, index-aligned with the spawn draw
+
+        // Round B / B3, the barrier's arithmetic. All five are per dense room
+        // index or per boss segment and are filled once, at the end of
+        // SpawnFromPlan, beside _roomAlive.
+        //
+        // _roomPlanned is a COPY of _roomAlive taken there and never moved
+        // again: _roomAlive is inflated mid-run by a Lil' Bro split, so it can
+        // only ever be the numerator's live count, never the denominator a
+        // threshold is measured against.
+        std::vector<uint16> _roomPlanned;       // per room, what the draw actually spawned
+        std::vector<int>    _roomSegment;       // per room, SegmentOf its block
+        std::vector<bool>   _roomIsBoss;        // per room, its block is a RoomBoss
+
+        // Round C / C5. Four more per-room facts, taken in the SAME pass and
+        // the same order as the three above, so `roomIndex` still means one
+        // thing in every vector keyed by it. `roomBlocks` is discarded at the
+        // end of SpawnFromPlan - these are what survives it, and they are what
+        // replaced B1's altars: the respawn point is COMPUTED from the run's
+        // own state rather than clicked.
+        struct RoomSpot
+        {
+            float x = 0.0f;                     // the room's arena centre, world
+            float y = 0.0f;
+            float z = 0.0f;
+        };
+        std::vector<RoomSpot> _roomSpot;        // per room, the grid-vetoed arena centre
+        std::vector<int> _roomBX;               // per room, its block coordinates
+        std::vector<int> _roomBY;
+        std::vector<int> _roomChain;            // per room, PlacedBlock::chainIndex (-1 off the spine)
+        // The furthest cleared boss room, moved only forward by OnMobDied.
+        // -1/-1 means no boss has fallen yet, which is what sends a corpse
+        // back to the entrance. Reset with the run, like every vector above.
+        int _checkpointChain = -1;              // its chainIndex, -1 = none
+        int _checkpointRoom = -1;               // its dense roomIndex, -1 = none
+        // Index 1..N, [0] unused: segment 0 is the entrance, which has no
+        // barrier. The boss room's own pack is deliberately NOT in `planned` -
+        // a segment whose only room is its boss would otherwise never open.
+        std::vector<uint32> _segmentPlanned;
+        std::vector<uint32> _segmentKilled;
+        // One entry per boss segment that got a portcullis, in segment order.
+        // An opened barrier STAYS in here with `open` set: it is the record
+        // that this segment's threshold was already met, and the rebuild - not
+        // the opening - is what forgets it.
+        std::vector<Barrier> _barriers;
+        // Round B / B5. One entry per armed corridor, in segment order. A
+        // sprung ambush STAYS in here with `armed` cleared - that is the record
+        // that this corridor is spent - and the rebuild, not the firing, is
+        // what forgets it. Same shape and same reasoning as _barriers.
+        std::vector<Ambush> _ambushes;
+        // Round C / C8. Inert until the last boss dies and inert again once
+        // the portal is up, so the 1 Hz branch pays one bool for it on every
+        // other tick of every other run. The rebuild resets it whole, the same
+        // way it resets _barriers and _ambushes - the three objects themselves
+        // went with _spawnedGuids and _decorGuids in DespawnAll, and this is
+        // the run's memory that the beat already played.
+        Finale _finale;
+        // Round C / C7 review fold. Which run of THIS instance is standing:
+        // bumped once by the rebuild branch, never reset, and read only by the
+        // UI link's K record (RunGeneration says why). 1, not 0, so "no script"
+        // is a value it cannot take. It wraps after 4 billion rebuilds of one
+        // instance, which no instance survives.
+        uint32   _runGeneration = 1;
+        std::unordered_map<ObjectGuid, uint32> _pendingRespawn;  // player -> getMSTime() at death
         std::vector<ObjectGuid> _voidZones;     // friendly ground-hazard carriers; pruned each tick
         uint32   _fallCheckTimer = 0;
+        uint32   _ambushTimer = 0;      // accumulates toward AMBUSH_SCAN_MS
         float    _entranceX = 0.0f;
         float    _entranceY = 0.0f;
         float    _entranceZ = 0.0f;
@@ -273,6 +655,10 @@ namespace PDungeon
         WalkGrid _grid;
         bool     _gridReady = false;
         bool     _gridTried = false;
+        // Round D / D1-D2, PropCells() says what it means. Sized like
+        // _grid.cells when it is filled and empty otherwise; cleared by the
+        // rebuild together with the objects it describes.
+        std::vector<uint8_t> _propCells;
     };
 }
 

@@ -25,19 +25,28 @@
 #include "Log.h"
 #include "LootMgr.h"
 #include "Map.h"
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "PDDefines.h"
 #include "PDv2Affixes.h"
+#include "PDv2CreatureAI.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
 #include "PDv2UILink.h"
 #include "Player.h"
 #include "Position.h"
 #include "SpellMgr.h"
+#include "StringFormat.h"
 #include "TemporarySummon.h"
+#include "Timer.h"
 #include "WorldSession.h"
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
+#include <set>
+#include <utility>
+#include <vector>
 
 namespace PDungeon
 {
@@ -61,7 +70,26 @@ namespace PDungeon
         // signal, which a plausible-looking undead would hide.
         uint32 const PLACEHOLDER_CREATURE = 29402;   // Ironwool Mammoth
 
+        // The radius of the OVERFLOW ring, and nothing else since Round B / B2.
+        // Creatures stand on the spawn anchors the kit publishes per chunk
+        // (PlanSpawnPoints, PDv2SpawnAnchors.h); this circle around the block
+        // centre is what is left for the two cases that have no anchor to
+        // stand on: a chunk whose SQL row carries no typed anchors at all
+        // (an unapplied mod_pdungeon_chunk_meta.sql, or an older kit), and the
+        // picks past the six an ordinary room publishes, which only a raised
+        // V2.SpawnsPerRoom / V2.BossRoomAdds can produce. PlanSpawnPoints
+        // hard-codes the same 12.0 for its own overflow tail - the harness
+        // pins both, so the two must not drift apart.
         float const SPAWN_SPREAD_YD = 12.0f;
+
+        // How far SpawnFromPlan may look for floor when the point a vetoed
+        // pick falls back to - the chunk's entry anchor, or the block centre -
+        // is itself off the grid. Two cells (16.67 yd) is PDv2CreatureAI's
+        // SNAP_RADIUS_CELLS, the same "a position rarely sits dead on a
+        // walkable cell centre" tolerance, and it stays inside the room a
+        // fallback belongs to. Nothing walkable within it means the fallback
+        // stands where it was, which is what this code did before B2.
+        int const SPAWN_FALLBACK_SNAP_CELLS = 2;
 
         // How close a critter may land to a prop before SpawnCritters drops
         // it rather than summon it. A scatter decor rule and the critter rule
@@ -72,6 +100,74 @@ namespace PDungeon
         // is comfortably inside "same spot" and comfortably outside "next
         // cell over", which is all this needs to be.
         double const CRITTER_DECOR_CLEAR_YD = 2.0;
+
+        // Round B / B3: how close a player has to come to a closed barrier
+        // before it tells them why it is closed. 12 yd is a bit less than two
+        // cells (8.33 yd each), so the hint fires when the portcullis fills
+        // the screen and not from the far end of the corridor run.
+        float const BARRIER_HINT_YD = 12.0f;
+
+        // Round B / B4: the patrol's own RNG stream. The module's precedent is
+        // layoutSeed ^ CONSTANT (PD_DECOR_SEED_MIX, PD_CRITTER_SEED_MIX), and
+        // the reason is the same one every time: a draw that shares the layout
+        // stream cannot be added, removed or retuned without moving every pick
+        // that follows it. The patrol takes it one step further and mixes the
+        // SEGMENT in as well, so a run with three bosses draws the same first
+        // patroller as a run with one.
+        uint32 const PD_PATROL_SEED_MIX = 0x9A7201EDu;
+
+        // The odd golden-ratio word, the standard way to fold an index into a
+        // seed without the low bits marching in lockstep. Multiplied, not
+        // added: with `+` a segment step of 1 would leave the low bits of two
+        // neighbouring segments' seeds one apart.
+        uint32 const PD_SEGMENT_SEED_STEP = 0x9E3779B1u;
+
+        // Round B / B5: how often the armed corridors are measured against the
+        // players standing in the dungeon. Four times a second, not the 1 Hz
+        // branch's once: a player runs at about 7 yd/s, so the default 9 yd
+        // radius is crossed in under three seconds and a one-second scan would
+        // let somebody walk through an armed corridor untouched. A DBC-free
+        // area trigger is impossible on this map (the id comes from the
+        // client), so an own timer in Update IS the trigger.
+        uint32 const AMBUSH_SCAN_MS = 250;
+
+        // Where an ambush's mobs land relative to the player it fires on:
+        // along the corridor's own axis and across it, in yards. 6 yd along
+        // puts two in front and two behind - close enough to be an ambush, far
+        // enough not to spawn inside the player - and 4 yd across stays inside
+        // the lane, which is two cells of 8.333 yd and therefore 8.33 yd of
+        // floor either side of its centre. Whether any offset is actually
+        // floor is not assumed: FireAmbush vetoes every one of them against
+        // the walk grid and falls back to the player's own cell.
+        //
+        // EIGHT of them for a key that allows up to eight mobs: a full
+        // V2.Ambush.Mobs = 8 puts eight creatures in eight distinct places
+        // rather than four pairs, which is what the key's own 0..8 clamp has
+        // always been documented to mean. The second four sit at 2 yd along -
+        // a nearer rank on the same two lines across, because the lane has no
+        // room for a second rank ACROSS it (4 yd is already most of the
+        // 8.33 yd half-width) while the corridor is 66.67 yd long and has
+        // room to spare along it. The first four are unchanged and in their
+        // original order, so the default of 4 places its mobs exactly where
+        // it did before.
+        struct AmbushOffset
+        {
+            float along;
+            float across;
+        };
+
+        size_t const AMBUSH_OFFSET_COUNT = 8;
+
+        AmbushOffset const AMBUSH_OFFSETS[AMBUSH_OFFSET_COUNT] = {
+            {  6.0f,  4.0f },
+            {  6.0f, -4.0f },
+            { -6.0f,  4.0f },
+            { -6.0f, -4.0f },
+            {  2.0f,  4.0f },
+            {  2.0f, -4.0f },
+            { -2.0f,  4.0f },
+            { -2.0f, -4.0f }
+        };
 
         // Where a Lil' Bro's two children land relative to the corpse. That
         // module's own offsets, mirrored (DungeonChallengeScripts.cpp:877-878);
@@ -95,6 +191,62 @@ namespace PDungeon
             { 920102, 10 },     // Forgotten Fragment
             { 920103,  4 },     // Forgotten Core
             { 920104,  1 }      // Forgotten Relic
+        };
+
+        // Round C / C8, the finale's clock. Four seconds is long enough to
+        // read a line of chat and short enough that nobody walks off before
+        // the portal is up; design §C8.2 names it, so it is a constant and not
+        // a conf key - the beat is authored, not tuned per realm.
+        //
+        // The 1 Hz branch is what measures it, so a line lands at the first
+        // tick at or after its deadline: the spacing is four seconds plus at
+        // most one tick's phase, never less than four.
+        //
+        // It spaces the LINES only. The whole beat, measured from the last
+        // boss's death: Chromie and the cache at 0 s, the three lines at ~4,
+        // ~8 and ~12 s, and the portal on the very next tick after the third
+        // line, ~13 s (TickFinale says why it is not a fourth 4 s beat).
+        uint32 const FINALE_STEP_MS = 4000;
+
+        // Where the three objects stand, relative to the arena centre the last
+        // boss died in. Chromie and the cache share the +x side so the player
+        // finds both in one glance, the portal takes the -x side so nobody
+        // walks into it while looting; 6 yd clears a player's own body and
+        // stays well inside the smallest arena the kit ships (a 33 yd room is
+        // 16.67 yd of floor either side of its centre). Deliberately axis
+        // offsets and not a ring: the finale is staged for a player standing
+        // in the middle of the room, and an axis reads as a line-up.
+        float const FINALE_CHROMIE_OFFSET_X_YD = 6.0f;
+        float const FINALE_CACHE_OFFSET_Y_YD = 4.0f;
+        float const FINALE_PORTAL_OFFSET_X_YD = -6.0f;
+
+        // -pi/2, and MEASURED rather than derived: at orientation 0.0f the
+        // operator reported the dead-end cache standing "90 Grad nach rechts"
+        // (T2 2026-09-08), and 220a295 answered it by summoning those at a
+        // fixed 4.712389f = 3*pi/2 = -pi/2 normalised. GO 910068 carries the
+        // SAME display 259, so if that quarter turn is a property of the model
+        // and not a one-off scene choice, the finale cache needs it too. It is
+        // therefore subtracted from the angle to the arena centre rather than
+        // replacing it: the chest still faces inward, one model-forward
+        // correction later. Written as the literal radian and not float(M_PI)/2
+        // because M_PI is not portably visible through <cmath> on MSVC.
+        //
+        // T2 OBSERVABLE, not a proof: runde29 §C8 asks whether the cache faces
+        // the middle of the room or is turned 90 degrees, and the answer is
+        // what decides whether this term stays.
+        float const FINALE_CACHE_MODEL_FACING_OFFSET = -1.5707964f;
+
+        // Chromie's three lines, spoken in order. English like every other
+        // module text; authored in design §C8.2 and quoted verbatim, so an
+        // edit here is a content change and belongs in the spec first.
+        // No creature_text rows and no Talk(): the module has never had either,
+        // and three lines do not justify a DB table plus a locale pipeline.
+        uint32 const CHROMIE_LINE_COUNT = 3;
+
+        char const* const CHROMIE_LINES[CHROMIE_LINE_COUNT] = {
+            "Well, that took you long enough! The timeways are humming again.",
+            "Take what the Depths owe you - you have earned every bit of it.",
+            "When you are ready, step through. Azealia is waiting."
         };
     }
 
@@ -163,6 +315,55 @@ namespace PDungeon
             // SpawnFromPlan re-derives difficulty, roomsTotal and bossTotal, and
             // the `!_run.started` block below re-arms the clock and the leader.
             _run = PDv2RunState{};
+
+            // ...and the per-room bookkeeping with it. SpawnFromPlan refills
+            // every one of these, but a rebuild that failed halfway must not
+            // leave the previous layout's room segments behind for the next
+            // OnMobDied to index into.
+            _roomAlive.clear();
+            _roomPlanned.clear();
+            _roomSegment.clear();
+            _roomIsBoss.clear();
+            _segmentPlanned.clear();
+            _segmentKilled.clear();
+            // Round C / C5, the same reasoning one layout further: a rebuilt
+            // dungeon must not hand a corpse a checkpoint in a room that no
+            // longer exists, so the four per-room facts and the checkpoint
+            // they feed go with the rest. The run starts at the entrance again.
+            _roomSpot.clear();
+            _roomBX.clear();
+            _roomBY.clear();
+            _roomChain.clear();
+            _checkpointChain = -1;
+            _checkpointRoom = -1;
+            // The portcullis GameObjects themselves went with _decorGuids in
+            // DespawnAll, and the grid holes they cut go with the grid the
+            // rebuild throws away - what is left here is the run's memory of
+            // which segment was already paid for.
+            _barriers.clear();
+            // ...and which corridors were already sprung (design §B5.4: "spots
+            // rebuilt with the run"). A rebuild re-arms every one of them,
+            // which is the whole difference between a trap and a one-off.
+            _ambushes.clear();
+            // Round C / C8. Chromie, her cache and the portal went with
+            // _spawnedGuids and _decorGuids in DespawnAll above; this is the
+            // state machine that was walking them, and it has to go too. Note
+            // which rebuild reason usually gets here: `runFinished` - a
+            // completed run is re-entered, so the ordinary way the finale ends
+            // is that somebody walks back in and the dungeon re-populates
+            // (design §C8.4). A finale still mid-line when that happens is cut
+            // off, which is correct: the room it was staged in no longer
+            // exists. Whole-struct assignment rather than field by field, so a
+            // field added to Finale later cannot be forgotten here.
+            _finale = Finale{};
+            // Round C / C7 review fold, and the one thing in this block that
+            // is NOT a reset: the run generation counts UP. Every other line
+            // here throws away what the previous run knew; this one is how the
+            // UI link learns that it happened, so that a client whose K record
+            // says "0 rooms cleared" is told again rather than keeping the old
+            // layout's green blocks (RunGeneration says why the count alone is
+            // not enough).
+            ++_runGeneration;
             MarkRunDirty();
         }
 
@@ -178,10 +379,36 @@ namespace PDungeon
             std::vector<Position> decorPositions;
             SpawnDecor(*plan, decorPositions);
             SpawnKitProps(*plan);
+            // Round D / D2. Both prop passes are in, none of the barriers is,
+            // so _decorGuids holds exactly the furniture a patrol has to walk
+            // around - and the map is wanted before SpawnPatrols, which plans
+            // each file's beat with it.
+            BuildPropCells();
             // Reads decorPositions, so it must come after SpawnDecor filled
             // it. Ambient life, same guard, own GUID list and own teardown.
             SpawnCritters(*plan, decorPositions);
             SpawnDeadEndChests(*plan);
+            // After SpawnFromPlan, which is what filled _segmentPlanned: a
+            // barrier is evaluated the moment it is placed, and a segment
+            // whose denominator is zero has to open right there.
+            SpawnBarriers(*plan);
+            // After the barriers on purpose - and since Round D / D2 for a
+            // different reason than the one that used to stand here. A patrol
+            // belongs to a CORRIDOR now, not to the segment a barrier defines,
+            // so the two are no longer paired by ownership at all. What still
+            // pairs them is the GRID: SpawnBarriers takes a closed portcullis'
+            // four lane cells out of it, and every file's beat is planned on
+            // that same grid, so running second is what makes a beat into a
+            // sealed boss corridor end AT the gate instead of failing to plan.
+            // The declaration of SpawnPatrols carries the other half - the
+            // spawn tag keeps the TRUE doorway cell, so the beat grows to it on
+            // the first plan after the barrier falls.
+            SpawnPatrols(*plan);
+            // Last. Nothing is summoned here - the ambush only ARMS a corridor
+            // and remembers what it will spawn - so it has nothing to race, but
+            // it belongs at the end of the same guard as everything else the
+            // rebuild tears down.
+            SpawnAmbushPlan(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -207,6 +434,21 @@ namespace PDungeon
         // because it is the one event every entry path shares: the command, the
         // panel's own Enter button, and a summon all end up here.
         sPDv2UILink->SendCfg(player);
+    }
+
+    // A logout sends the player home from OnPlayerBeforeLogout, and that far
+    // teleport takes them off this map (Player.cpp:1569-1571) BEFORE the core's
+    // own RepopAtGraveyard for a dead character (WorldSession.cpp:633-637) - so
+    // the pending death has to be forgotten here, or the release veto in
+    // PDClientLink would still answer "wait" for someone the dungeon no longer
+    // has, and the logout-while-dead path stops being the core's (design
+    // 2026-09-03 §B1.2).
+    void PDv2InstanceScript::OnPlayerLeave(Player* player)
+    {
+        if (player)
+        {
+            _pendingRespawn.erase(player->GetGUID());
+        }
     }
 
     // Ground-effect carriers must decorate, not fight.
@@ -433,17 +675,55 @@ namespace PDungeon
             SplitOnDeath(creature, *tag, killer);
         }
 
-        ++_run.killed;
-        if (tag->isRunBoss && _run.bossKilled < _run.bossTotal)
+        // Round B / B4-B5: the patrol and the ambush are RISK, not progress.
+        // They fight, scale, split and drop loot like any dungeon mob, but a
+        // run whose total counted them could not be finished without hunting
+        // down a patroller, and a barrier whose denominator counted them would
+        // seal itself behind mobs that may never be pulled at all.
+        if (tag->countsForRun)
         {
-            ++_run.bossKilled;
-        }
-
-        if (tag->roomIndex < _roomAlive.size() && _roomAlive[tag->roomIndex] > 0)
-        {
-            if (--_roomAlive[tag->roomIndex] == 0)
+            ++_run.killed;
+            if (tag->isRunBoss && _run.bossKilled < _run.bossTotal)
             {
-                ++_run.roomsCleared;
+                ++_run.bossKilled;
+                // Round C / C5: the checkpoint is the FURTHEST cleared boss
+                // hall, so it moves only forward. `>` against the running
+                // maximum, not "the latest kill", makes it order-proof: the
+                // barriers gate the bosses in chain order in practice, but
+                // nothing in the code enforces that, and a boss pulled out of
+                // order must not drag the respawn point backwards. Pockets
+                // carry chainIndex -1 and never hold a boss, so the initial
+                // -1 can only be beaten by a real spine room - the entrance
+                // is chain 0 and holds no pack at all (SpawnFromPlan skips
+                // RoomEntrance), so chain 0 never enters this vector.
+                if (tag->roomIndex < _roomChain.size() &&
+                    _roomChain[tag->roomIndex] > _checkpointChain)
+                {
+                    _checkpointChain = _roomChain[tag->roomIndex];
+                    _checkpointRoom = static_cast<int>(tag->roomIndex);
+                }
+            }
+
+            if (tag->roomIndex < _roomAlive.size() && _roomAlive[tag->roomIndex] > 0)
+            {
+                if (--_roomAlive[tag->roomIndex] == 0)
+                {
+                    ++_run.roomsCleared;
+                }
+            }
+
+            // B3's numerator, and the boss room is out of it on purpose: its
+            // pack stands BEHIND the barrier, so counting it would ask the
+            // player to clear a room they cannot reach yet (design 2026-09-03
+            // §B3.1, the single-boss-segment softlock).
+            if (tag->roomIndex < _roomSegment.size() && !_roomIsBoss[tag->roomIndex])
+            {
+                int const seg = _roomSegment[tag->roomIndex];
+                if (seg >= 1 && static_cast<size_t>(seg) < _segmentKilled.size())
+                {
+                    ++_segmentKilled[static_cast<size_t>(seg)];
+                    EvaluateBarrier(seg);
+                }
             }
         }
         MarkRunDirty();
@@ -539,6 +819,325 @@ namespace PDungeon
         // Nobody is teleported out. The dungeon stays walkable after its last
         // boss because farming it is the point (01 §8) - the way out is the way
         // the player came in.
+        //
+        // Round C / C8 adds a way out that is OFFERED rather than taken: the
+        // finale's portal is a click, so the decision above is untouched. Last
+        // in FinishRun on purpose - the reward, the toast, the chat lines and
+        // the history row are what completing a run means, and none of them
+        // may wait on a summon.
+        StartFinale();
+    }
+
+    void PDv2InstanceScript::StartFinale()
+    {
+        // The last boss's own hall: OnMobDied moved the checkpoint onto the
+        // room it just cleared before it called FinishRun, so this reads the
+        // arena centre of the boss room with the HIGHEST chainIndex that is
+        // dead - which, when the bosses are killed in chain order, is the one
+        // the players are standing in. Killed out of order it is not: the
+        // checkpoint only ever moves forward (OnMobDied says why), so a run
+        // whose second boss fell before its first stages the finale in boss
+        // 2's hall. Accepted - "the furthest hall the run reached" is a
+        // defensible place for the reward to stand, and the alternative would
+        // be a second, contradictory notion of "last".
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        if (!CheckpointSpot(x, y, z))
+        {
+            // No boss room to stand in. Only reachable when the run was
+            // completed without a tagged boss kill moving the checkpoint -
+            // a GM finishing a run by hand, or a layout whose boss room lost
+            // its pack - so it is a warning, not a normal branch, and the
+            // entrance is the one position this script always knows.
+            if (!_haveEntrance)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} completed with neither a checkpoint nor "
+                                 "an entrance - no finale", instance->GetInstanceId());
+                return;
+            }
+            x = _entranceX;
+            y = _entranceY;
+            z = _entranceZ;
+            LOG_WARN(PD_LOG, "PDv2: instance {} completed with no cleared boss hall "
+                             "(checkpoint room {}) - the finale is staged at the entrance",
+                     instance->GetInstanceId(), _checkpointRoom);
+        }
+
+        // Facing the centre, all three of them: GetAngle is the angle FROM
+        // this position TO the one named, so an object standing off-centre and
+        // asked for the angle to the centre looks inward at the players.
+        //
+        // Each spot is grid-vetoed first (VetoFinaleSpot says why), and the
+        // veto runs on the POSITION, before the angle is taken: a snapped spot
+        // one cell over still has to look at the centre, not at where it used
+        // to stand.
+        float chromieX = x + FINALE_CHROMIE_OFFSET_X_YD;
+        float chromieY = y;
+        VetoFinaleSpot(chromieX, chromieY, "Chromie");
+        Position chromiePos(chromieX, chromieY, z, 0.0f);
+        chromiePos.SetOrientation(chromiePos.GetAngle(x, y));
+
+        Creature* chromie = instance->SummonCreature(NPC_CHROMIE, chromiePos);
+        if (!chromie)
+        {
+            LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon Chromie "
+                              "(missing creature_template {}?) - no finale",
+                      instance->GetInstanceId(), uint32(NPC_CHROMIE));
+            return;
+        }
+
+        // No gravity flag, for the same reason no other summon on this map
+        // carries one any more (Round D / D3, SpawnTaggedMob says it at
+        // length): the core strips it on the first movement update and until
+        // then it is a visible hover, while nothing falls without it. Nothing
+        // else of SpawnTaggedMob applies - she is NOT a run mob: no
+        // PDv2MobData, so she cannot move a counter, cannot be scaled, cannot
+        // be affixed and cannot be split. Her template makes her unattackable
+        // in the first place; the missing tag is what makes that structural.
+        //
+        // And no SetReputationRewardDisabled either, unlike every other summon
+        // this module makes: she cannot be killed, so there is no kill for the
+        // core to reward. Measured 2026-09-09 - creature_template 910550 has
+        // unit_flags 514 = 0x2 UNIT_FLAG_NON_ATTACKABLE | 0x200
+        // UNIT_FLAG_IMMUNE_TO_NPC, and no creature_onkill_reputation row.
+        chromie->SetHomePosition(chromie->GetPositionX(), chromie->GetPositionY(),
+                                 chromie->GetPositionZ(), chromie->GetOrientation());
+
+        // _spawnedGuids, not _decorGuids: she is a creature, and that list is
+        // the one DespawnAll walks with DespawnOrUnsummon. It looks up each
+        // GUID and never reads a tag, so an untagged creature in it is torn
+        // down exactly like a tagged one.
+        _spawnedGuids.push_back(chromie->GetGUID());
+
+        // The cache, beside her rather than behind her: 4 yd on +y from her
+        // own spot, still facing the centre. The four zeros after the angle
+        // are the quaternion, and an all-zero quaternion is not a facing -
+        // SummonGameObject rebuilds the rotation from this angle about +Z, the
+        // same reasoning SpawnDeadEndChests spells out.
+        float cacheX = x + FINALE_CHROMIE_OFFSET_X_YD;
+        float cacheY = y + FINALE_CACHE_OFFSET_Y_YD;
+        VetoFinaleSpot(cacheX, cacheY, "cache");
+        Position const cachePos(cacheX, cacheY, z, 0.0f);
+        // ...and one quarter turn back off that angle, because display 259
+        // does not point where its orientation says it does
+        // (FINALE_CACHE_MODEL_FACING_OFFSET carries the measurement).
+        float const cacheFacing = Position::NormalizeOrientation(
+            cachePos.GetAngle(x, y) + FINALE_CACHE_MODEL_FACING_OFFSET);
+        if (GameObject* cache = instance->SummonGameObject(
+                GO_REWARD_CHEST, cacheX, cacheY, z, cacheFacing,
+                0.0f, 0.0f, 0.0f, 0.0f, 0))
+        {
+            _decorGuids.push_back(cache->GetGUID());
+        }
+        else
+        {
+            // Chromie still speaks and the portal still opens: a missing chest
+            // costs the reward, not the way home.
+            LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the finale cache "
+                              "(missing gameobject_template {}?)",
+                      instance->GetInstanceId(), uint32(GO_REWARD_CHEST));
+        }
+
+        _finale.active = true;
+        _finale.step = 0;
+        _finale.nextAtMs = getMSTime() + FINALE_STEP_MS;
+        _finale.chromie = chromie->GetGUID();
+        _finale.x = x;
+        _finale.y = y;
+        _finale.z = z;
+
+        // "chain index", not "chain room": the number is _checkpointChain, the
+        // position IN the chain, while the LOG_WARN on the entrance fallback
+        // above prints _checkpointRoom under the words "checkpoint room". Two
+        // similar phrases carrying two different numbers is how a reader
+        // misreads the honest `-1` this line shows on that fallback path as a
+        // bug (C8 review, minor 6).
+        LOG_INFO(PD_LOG, "PDv2: instance {} finale staged at ({:.1f}, {:.1f}, {:.1f}) - "
+                         "chain index {}, first line in {} ms",
+                 instance->GetInstanceId(), x, y, z, _checkpointChain, FINALE_STEP_MS);
+    }
+
+    void PDv2InstanceScript::VetoFinaleSpot(float& x, float& y, char const* what) const
+    {
+        // The same veto SpawnFromPlan's room pass, SpawnPatrols' spawn point
+        // and SplitOnDeath's child offsets take, applied to the three finale
+        // spots as well (C8 review, minor 5). On the shipped kit the risk is
+        // low: the checkpoint spot the offsets hang off is itself vetoed, all
+        // 60 room_boss chunks are floor across the whole centre quad, and a
+        // 33 yd arena has 16.67 yd of floor either side of centre against a
+        // worst-case 7.21 yd offset. The ENTRANCE fallback has no such
+        // guarantee, and the failure mode there is silent - a GameObject does
+        // not fall and Chromie has gravity off, so all three would simply
+        // hover over the void with nothing in the log.
+        WalkGrid const* grid = GetWalkGrid();
+        if (!grid)
+        {
+            return;
+        }
+
+        int gcx = 0, gcy = 0;
+        WorldToCell(x, y, gcx, gcy);
+        GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+        if (grid->At(cell.x, cell.y))
+        {
+            return;
+        }
+
+        GridPoint snapped;
+        if (!NearestWalkable(*grid, cell.x, cell.y, SPAWN_FALLBACK_SNAP_CELLS, snapped))
+        {
+            // The offset stands, which is exactly what this code did before
+            // the veto existed - a reward standing over the void is still
+            // better than no reward, and the line below is what tells the
+            // operator which of the three to look for.
+            LOG_WARN(PD_LOG, "PDv2: instance {} finale {} stands on a void cell and found no "
+                             "floor within {} cell(s) - it stays where it was",
+                     instance->GetInstanceId(), what, SPAWN_FALLBACK_SNAP_CELLS);
+            return;
+        }
+
+        int scx = 0, scy = 0;
+        grid->GlobalFromLocalCell(snapped, scx, scy);
+        double wx = 0.0, wy = 0.0;
+        CellCentreToWorld(scx, scy, wx, wy);
+        x = static_cast<float>(wx);
+        y = static_cast<float>(wy);
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} moved the finale {} onto cell ({}, {}) - "
+                         "its offset landed off the walk grid",
+                 instance->GetInstanceId(), what, snapped.x, snapped.y);
+    }
+
+    void PDv2InstanceScript::TickFinale()
+    {
+        if (!_finale.active)
+        {
+            return;
+        }
+
+        // Signed difference, not `getMSTime() >= nextAtMs`: getMSTime() is a
+        // uint32 of milliseconds since start-up and wraps every 49.7 days, and
+        // a plain `>=` across that wrap would park the finale for another 49
+        // days. This is the same wrap-safe reading GetMSTimeDiffToNow gives
+        // the rest of the module, written as a deadline rather than an age.
+        if (static_cast<int32>(getMSTime() - _finale.nextAtMs) < 0)
+        {
+            return;
+        }
+
+        if (_finale.step < CHROMIE_LINE_COUNT)
+        {
+            Creature* chromie = instance->GetCreature(_finale.chromie);
+            if (!chromie)
+            {
+                // She is in _spawnedGuids, and DespawnAll - its only caller
+                // being the rebuild, which resets this struct in the same
+                // block - is the only thing in the module that takes her off
+                // the map. So this is a guard against a core-side despawn
+                // nobody has seen rather than a path a player can walk into;
+                // it is loud because if it ever fires, the cause is worth the
+                // log line.
+                LOG_WARN(PD_LOG, "PDv2: instance {} lost Chromie before line {} - "
+                                 "the finale ends here",
+                         instance->GetInstanceId(), _finale.step + 1);
+                _finale.active = false;
+                return;
+            }
+
+            // Say, not Yell: the dungeon is one room wide at this point and
+            // everyone who finished the boss is standing in it. LANG_UNIVERSAL
+            // so both factions read it.
+            chromie->Say(CHROMIE_LINES[_finale.step], LANG_UNIVERSAL);
+            // The portal follows the LAST line by one tick, not by a fourth
+            // beat: leaving the deadline where it is makes step 3 already due,
+            // so it fires on the next 1 Hz tick (design §C8.3). Advancing it
+            // here unconditionally would put the portal at ~16 s and leave
+            // four silent seconds after the last line, which reads as "did it
+            // break?" - so only the gaps BETWEEN lines get the four seconds.
+            if (_finale.step + 1 < CHROMIE_LINE_COUNT)
+            {
+                _finale.nextAtMs += FINALE_STEP_MS;
+            }
+            ++_finale.step;
+            return;
+        }
+
+        // The way home, and the last beat. -6 yd on x puts it on the opposite
+        // side of the arena centre from Chromie and her cache, so the players
+        // walk past the reward to reach it.
+        //
+        // Vetoed here rather than in StartFinale, and that costs nothing: the
+        // only thing that moves the walk grid during a run is a barrier
+        // opening, which only ever ADDS walkable cells (SetCellsWalkable), so
+        // a spot that was floor 13 seconds ago is still floor. Doing it here
+        // keeps the portal's position in one place instead of storing a fourth
+        // and fifth float on Finale.
+        float portalX = _finale.x + FINALE_PORTAL_OFFSET_X_YD;
+        float portalY = _finale.y;
+        VetoFinaleSpot(portalX, portalY, "portal");
+        Position const portalPos(portalX, portalY, _finale.z, 0.0f);
+        if (GameObject* portal = instance->SummonGameObject(
+                GO_AZEALIA_PORTAL, portalX, portalY, _finale.z,
+                portalPos.GetAngle(_finale.x, _finale.y), 0.0f, 0.0f, 0.0f, 0.0f, 0))
+        {
+            _decorGuids.push_back(portal->GetGUID());
+
+            // The OpenBarrier pattern: one notice per player on the map. It is
+            // a notice and not a chat line because the addon paints those as
+            // raid warnings since C7, which is what makes a portal appearing
+            // behind the player impossible to miss.
+            Map::PlayerList const& players = instance->GetPlayers();
+            for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+            {
+                sPDv2UILink->SendNotice(it->GetSource(), "A portal to Azealia opens.");
+            }
+
+            LOG_INFO(PD_LOG, "PDv2: instance {} opened the portal to Azealia at "
+                             "({:.1f}, {:.1f}, {:.1f})",
+                     instance->GetInstanceId(), portalX, portalY, _finale.z);
+        }
+        else
+        {
+            // Nobody is stranded by this: the dungeon stays walkable and the
+            // way the player came in is still open (01 §8).
+            LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the portal to Azealia "
+                              "(missing gameobject_template {}?)",
+                      instance->GetInstanceId(), uint32(GO_AZEALIA_PORTAL));
+        }
+
+        // Spent either way. The finale plays once per run, and the rebuild -
+        // not this line - is what lets the next run play it again.
+        _finale.active = false;
+    }
+
+    std::vector<std::string> PDv2InstanceScript::PatrolSnapshot() const
+    {
+        std::vector<std::string> lines;
+        for (ObjectGuid const& guid : _spawnedGuids)
+        {
+            Creature* c = instance->GetCreature(guid);
+            if (!c)
+            {
+                continue;   // despawned, or this run was torn down under us
+            }
+            PDv2MobData const* tag = c->CustomData.Get<PDv2MobData>(PD_MOB_DATA_KEY);
+            if (!tag || !tag->isPatrol)
+            {
+                continue;
+            }
+            PDv2MobAI const* ai = dynamic_cast<PDv2MobAI const*>(c->AI());
+            if (!ai)
+            {
+                // Tagged as a patroller but not carrying this AI: that is a
+                // finding rather than a nuisance, so it gets a line of its own.
+                lines.push_back(Acore::StringFormat(
+                    "{} entry {} guid {} | NO PDv2MobAI attached",
+                    c->GetName(), c->GetEntry(), guid.GetCounter()));
+                continue;
+            }
+            lines.push_back(c->IsAlive() ? ai->PatrolStateLine()
+                                         : "DEAD " + ai->PatrolStateLine());
+        }
+        return lines;
     }
 
     void PDv2InstanceScript::DespawnAll()
@@ -565,6 +1164,15 @@ namespace PDungeon
             }
         }
         _decorGuids.clear();
+        // Round D. The prop map DESCRIBES those objects, so it dies with them:
+        // a rebuild that kept it would cost the next layout's patrols a turn
+        // around furniture the previous dungeon owned.
+        _propCells.clear();
+
+        // A death recorded against the layout being torn down has nothing left
+        // to be teleported to, so it is dropped here rather than answered by
+        // the next tick against a dungeon that no longer exists.
+        _pendingRespawn.clear();
 
         // Critters are creatures, not GameObjects: DespawnOrUnsummon is their
         // teardown path, the same one _spawnedGuids uses above, not the
@@ -588,8 +1196,12 @@ namespace PDungeon
         _gridTried = true;
 
         std::string error;
+        // Round D / D2: the clearance layer is laid in by the same call and in
+        // the same loop as the mask, so a cell's "is floor" and its "how much
+        // room is there" can never come from different chunk records.
         if (!BuildWalkGrid(plan, [](int chunkId) { return sPDv2Mgr->WalkMaskFor(chunkId); },
-                           &_grid, &error))
+                           &_grid, &error,
+                           [](int chunkId) { return sPDv2Mgr->PatrolLayersFor(chunkId); }))
         {
             // Without the grid the mobs stand where they spawned and never
             // chase - the dungeon degrades, it does not crash. Loud log line
@@ -610,10 +1222,13 @@ namespace PDungeon
                                                  uint32 baseHealthOverride)
     {
         // Exactly ON the floor plane. This used to add 0.5 yd "so a creature is
-        // not spawned inside the floor" - harmless while gravity would have
-        // settled them, but with gravity disabled that offset is a permanent
-        // hover (operator report 2026-08-06: mobs stood slightly in the air
-        // until a pull and evade walked them onto their home position).
+        // not spawned inside the floor", and the offset was a PERMANENT hover:
+        // there is no server-side gravity on this map to settle it (the
+        // paragraph below carries the core lines), so a mob spawned half a yard
+        // up stayed half a yard up until a pull and evade walked it onto its
+        // home position - operator report 2026-08-06. Round D / D3 removed the
+        // gravity flag that made the same mistake a second time; the floor
+        // plane this function is handed is the only Z a summon ever gets.
         Creature* c = instance->SummonCreature(entry, Position(x, y, z, 0.0f));
         if (!c)
         {
@@ -622,14 +1237,82 @@ namespace PDungeon
 
         c->SetHomePosition(x, y, z, 0.0f);
 
-        // Gravity OFF, and this is not cosmetic: the server has no terrain
-        // here, so Map::GetHeight answers INVALID_HEIGHT and every creature is
-        // permanently "above nothing" - they fall through the platforms the
-        // client draws (operator report 2026-08-06). Disabling gravity pins
-        // them to the floor plane the kit was generated at, which is the only
-        // floor the server knows. Movement is unaffected: the walk grid drives
-        // it and every waypoint carries the same Z.
-        c->SetDisableGravity(true);
+        // NOTHING THIS DUNGEON SUMMONS PAYS KILL REPUTATION. A policy of the
+        // module, not a patch for one pack: PDv2 fills its rooms from arbitrary
+        // stock creature_template entries, and a stock entry can carry a
+        // creature_onkill_reputation row that was written for hand-placed,
+        // finite spawns in a real zone. The same row inside an infinitely
+        // repeatable procedural dungeon is a faucet, and no pack file can be
+        // trusted to notice - so the switch lives on the spawn path, where every
+        // mob the module creates has to pass.
+        //
+        // The case that produced the rule, measured on this box 2026-09-09: all
+        // seven trash members of pack 7 "Cult of the Damned" (10471, 10476,
+        // 10477, 10486, 10488, 10489, 11551 - stock Scholomance) carry
+        // RewOnKillRepFaction1 529 (Argent Dawn), RewOnKillRepValue1 10,
+        // MaxStanding1 6 = REP_EXALTED, IsTeamAward1 0. That is +10 Argent Dawn
+        // per kill, for either faction, all the way to Exalted, with no turn-in
+        // and no NPC visit - about 4200 trash kills for Neutral -> Exalted. Not
+        // one of the 52 pack members that shipped before it had such a row.
+        //
+        // Creature::SetReputationRewardDisabled (Creature.h:378) sets the flag
+        // the core tests FIRST: Player::RewardReputation returns before it even
+        // looks the ReputationOnKillEntry up when IsReputationRewardDisabled()
+        // is true (Player.cpp:5962-5963), and that function is the only way a
+        // creature death grants reputation - KillRewarder::_RewardReputation
+        // (KillRewarder.cpp:192-196) is its sole kill-side caller, reached from
+        // _RewardPlayer (KillRewarder.cpp:237). The flag is initialised false in
+        // the Creature constructor (Creature.cpp:280) and nothing else resets
+        // it, so this one call is the whole switch. It is the same call the
+        // core's own instance scripts make for the same purpose
+        // (instance_hyjal.cpp:197).
+        //
+        // Deliberately NOT a data patch: editing creature_template or
+        // creature_onkill_reputation here would retune Scholomance itself, and
+        // the next pack drawn from stock entries would reopen the hole.
+        c->SetReputationRewardDisabled(true);
+
+        // NO SetDisableGravity(true) here, and the absence is the fix (Round D
+        // / D3). Until 2026-09-08 every summon on this map set it, on the
+        // theory that a creature with gravity would fall through the platforms
+        // only the client draws. The operator's T2 report of 2026-09-08 - some
+        // mobs hover at spawn and stand normally after a pull or a reset - is
+        // that flag and nothing else: the hover IS the levitation, and the pull
+        // is what removes it.
+        //
+        // The core drops the flag on its own, on the FIRST movement update.
+        // None of these templates has a `creature_template_movement` row, so
+        // CreatureMovementData's defaults apply (Creature.cpp:60-62) with
+        // Flight = None, IsFlightAllowed() is false (CreatureData.h:141-144),
+        // and Creature::UpdateMovementFlags takes its else branch
+        // (Creature.cpp:3460, 3470) to call SetDisableGravity(false) on
+        // anything levitating (Creature.cpp:3475-3476). The one opt-out,
+        // CREATURE_FLAG_EXTRA_NO_MOVE_FLAGS_UPDATE (Creature.cpp:3452), is set
+        // on none of them (flags_extra = 0, measured). The path there is the
+        // creature's first step: Unit::Update drives the spline (Unit.cpp:635
+        // -> UpdateSplineMovement :695 -> UpdateSplinePosition :727) into
+        // Creature::SetPosition (Creature.cpp:3287-3292), and
+        // Map::CreatureRelocation refreshes the position data (Map.cpp:834 ->
+        // Unit::ProcessPositionDataChanged Unit.cpp:4467-4470 ->
+        // ProcessTerrainStatusUpdate :4473-4476). A respawn strips it too
+        // (Creature.cpp:2004). So the flag only ever lived from the summon to
+        // the first leg - visible as the hover, gone after the first move.
+        //
+        // Nothing falls without it. The server does not simulate creature
+        // gravity: the only downward motion is MotionMaster::MoveFall
+        // (MotionMaster.cpp:689), which this module never issues - the core's
+        // callers are the corpse fall (Creature.cpp:1981-1986, gated on
+        // IsFlying()/IsHovering()), a vehicle exit (Unit.cpp:15855), totems, a
+        // SmartScript action and fly/levitate aura removal
+        // (SpellAuraEffects.cpp:3446-3447) - and on this map it would bail out
+        // anyway, because GetMapHeight answers INVALID_HEIGHT with no terrain
+        // and no vmaps and MoveFall returns on that (MotionMaster.cpp:695-701).
+        // Creature::Update (Creature.cpp:706) samples no ground height per
+        // tick either: the only GetFloorZ() on this path sits inside
+        // UpdateMovementFlags (Creature.cpp:3455), which Update does not call.
+        // And UpdateAllowedPositionZ leaves Z alone without height data
+        // (Object.cpp:1610, the `max_z > INVALID_HEIGHT` gate). The mob stands
+        // at the floorZ this function was handed, flag or no flag.
 
         // The tag is what makes this creature a PDv2 mob for every other hook
         // in the module. GetDefault here (it creates), Get everywhere else (it
@@ -644,6 +1327,21 @@ namespace PDungeon
         tag->isRunBoss = proto.isRunBoss;
         tag->affixMask = proto.affixMask;
         tag->splitDepth = proto.splitDepth;
+        // Round B: everything the module spawns comes through here, the patrol
+        // and the ambush included, so the four fields that say "this one is not
+        // part of the run's arithmetic" are copied here and nowhere else.
+        tag->countsForRun = proto.countsForRun;
+        tag->isPatrol = proto.isPatrol;
+        // Round D / D2: the beat's two ends on the leader, the leader on a
+        // follower. Copied unconditionally like everything else here - the
+        // caller decides which half of the pair is filled, and a mob that is
+        // not a patrol carries the zeroes the struct's own defaults gave it.
+        tag->patrolStartCellX = proto.patrolStartCellX;
+        tag->patrolStartCellY = proto.patrolStartCellY;
+        tag->patrolGoalCellX = proto.patrolGoalCellX;
+        tag->patrolGoalCellY = proto.patrolGoalCellY;
+        tag->patrolLeader = proto.patrolLeader;
+        tag->patrolRank = proto.patrolRank;
 
         // Before the affixes, never after: a Lil' Bro child is a TENTH of its
         // parent that a Big Boy bit then grows by half again, and reversing
@@ -732,6 +1430,12 @@ namespace PDungeon
         // run finish twice over.
         proto.isRunBoss = false;
 
+        // Round B: the children of an uncounted mob are uncounted too, or a
+        // patroller with Lil' Bro would quietly hand the run two kills it was
+        // never asked to earn. `isPatrol` stays false - a child inherits the
+        // exemption, not the beat; it has no route and no goal cell.
+        proto.countsForRun = parentTag.countsForRun;
+
         WalkGrid const* grid = GetWalkGrid();
         float const floorZ = sPDv2Mgr->GetConfig().floorZ;
 
@@ -793,10 +1497,18 @@ namespace PDungeon
         // live count never touches zero while children are standing in it -
         // which would otherwise count the room cleared and then count it again
         // when the children died.
-        _run.total = static_cast<uint16>(_run.total + born);
-        if (proto.roomIndex < _roomAlive.size())
+        //
+        // ...and only for a counted parent (Round B): OnMobDied will never
+        // score an uncounted child, so raising the run total for one would
+        // leave a HUD that can never reach its own denominator. Design
+        // 2026-09-03 B4.3 - "_run.total excludes them".
+        if (proto.countsForRun)
         {
-            _roomAlive[proto.roomIndex] = static_cast<uint16>(_roomAlive[proto.roomIndex] + born);
+            _run.total = static_cast<uint16>(_run.total + born);
+            if (proto.roomIndex < _roomAlive.size())
+            {
+                _roomAlive[proto.roomIndex] = static_cast<uint16>(_roomAlive[proto.roomIndex] + born);
+            }
         }
         MarkRunDirty();
 
@@ -826,6 +1538,19 @@ namespace PDungeon
         // entrance stays empty so an arriving player is not already in combat.
         std::vector<PlacedBlock const*> roomBlocks;
         SpawnSelectInputs inputs;
+        // Round B / B3 and Round C / C5: the per-room facts a barrier's
+        // arithmetic and the respawn checkpoint need, taken in the same pass
+        // and in the same order, so `roomIndex` means one thing in every
+        // vector keyed by it. `roomBlocks` is discarded at the end of this
+        // function - these are what survives it.
+        _roomSegment.clear();
+        _roomIsBoss.clear();
+        _roomSpot.clear();
+        _roomBX.clear();
+        _roomBY.clear();
+        _roomChain.clear();
+        _checkpointChain = -1;
+        _checkpointRoom = -1;
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.roomId < 0 || b.role == BlockRole::RoomEntrance)
@@ -838,6 +1563,61 @@ namespace PDungeon
             room.isBoss = b.role == BlockRole::RoomBoss;
             inputs.rooms.push_back(room);
             roomBlocks.push_back(&b);
+            // SegmentOf answers for all three room kinds: a spine room's own
+            // segment, a pocket's host segment, a loop room's run segment.
+            _roomSegment.push_back(SegmentOf(plan, b));
+            _roomIsBoss.push_back(b.role == BlockRole::RoomBoss);
+            // Round C / C5. chainIndex, not SegmentOf: "furthest" is measured
+            // along the spine, and a pocket carries -1 there on purpose - it
+            // is off the chain and can never be the checkpoint.
+            _roomChain.push_back(b.chainIndex);
+            _roomBX.push_back(b.bx);
+            _roomBY.push_back(b.by);
+            RoomSpot spot;
+            {
+                double const mid = PD_BLOCK_SIZE_YD / 2.0;
+                sPDv2Mgr->BlockToWorld(b.bx, b.by, mid, mid, spot.x, spot.y, spot.z);
+                // Grid-vetoed like a spawn point, and NOT as a formality.
+                //
+                // `mid` is half a block, i.e. exactly 4 * PD_CELL_SIZE_YD, so
+                // this point is not the centre OF a cell - it is the corner
+                // where (3,3), (3,4), (4,3) and (4,4) meet, and which of the
+                // four WorldToCell names is decided by the float BlockToWorld
+                // narrows to (SpawnPatrols carries the measurement, and the
+                // same one-cell reading applies here).
+                //
+                // That distinction costs nothing on the masks the kit ships,
+                // because all four answer the same way in every chunk that can
+                // be a checkpoint. Measured over the shipped chunk-meta walk
+                // masks: in all 60 room_boss chunks all four cells are floor -
+                // so the CHECKPOINT itself always stands on the arena floor,
+                // even the 33 yd platform's - while in 15 of the 90 room
+                // chunks all four are VOID: theme 2's alt-1 room, 13001-13015,
+                // carries a 2x2 hole in the middle of the block, and it is
+                // exactly this quad. There the veto is load-bearing whichever
+                // of the four the float names, and it finds floor on ring 1.
+                if (WalkGrid const* grid = GetWalkGrid())
+                {
+                    int gcx = 0, gcy = 0;
+                    WorldToCell(spot.x, spot.y, gcx, gcy);
+                    GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                    // `snapped`, not the plan's `near`: <minwindef.h> defines
+                    // `near` as an empty macro, so that name compiles to
+                    // nothing on this platform.
+                    GridPoint snapped;
+                    if (!grid->At(cell.x, cell.y) &&
+                        NearestWalkable(*grid, cell.x, cell.y, SPAWN_FALLBACK_SNAP_CELLS,
+                                        snapped))
+                    {
+                        grid->GlobalFromLocalCell(snapped, gcx, gcy);
+                        double wx = 0.0, wy = 0.0;
+                        CellCentreToWorld(gcx, gcy, wx, wy);
+                        spot.x = static_cast<float>(wx);
+                        spot.y = static_cast<float>(wy);
+                    }
+                }
+            }
+            _roomSpot.push_back(spot);
         }
 
         inputs.spawnsPerRoom = cfg.spawnsPerRoom;
@@ -908,6 +1688,34 @@ namespace PDungeon
         uint32 spawned = 0;
         uint32 affixedMobs = 0;
         double const mid = PD_BLOCK_SIZE_YD / 2.0;
+
+        // The placement this used to do for EVERY pick, kept verbatim for the
+        // chunk that publishes no typed anchors: a small fixed pattern around
+        // the block centre. Deliberately NOT random - the same plan must
+        // produce the same dungeon, and an unseeded draw here would break that
+        // quietly. PlanSpawnPoints reproduces the identical ring for the picks
+        // an anchored room runs out of anchors for.
+        auto circlePoints = [mid](size_t count) -> std::vector<PDv2SpawnPoint>
+        {
+            std::vector<PDv2SpawnPoint> out;
+            out.reserve(count);
+            for (size_t i = 0; i < count; ++i)
+            {
+                double const angle = 2.0 * 3.14159265358979 *
+                                     static_cast<double>(i) / static_cast<double>(count);
+                out.push_back({ mid + std::cos(angle) * SPAWN_SPREAD_YD,
+                                mid + std::sin(angle) * SPAWN_SPREAD_YD });
+            }
+            return out;
+        };
+
+        // The instance's own walk grid vetoes a point that is not floor, the
+        // same way SplitOnDeath vetoes a child's offset - and one warning per
+        // CHUNK, not per creature, because a chunk whose anchors disagree with
+        // its walk mask would otherwise write one line per mob per run.
+        WalkGrid const* grid = GetWalkGrid();
+        std::set<int> vetoedChunks;
+
         for (size_t r = 0; r < roomBlocks.size() && r < spawns.size(); ++r)
         {
             PlacedBlock const& b = *roomBlocks[r];
@@ -915,17 +1723,111 @@ namespace PDungeon
             std::vector<SpawnPick> const& picks = spawns[r].picks;
             int const count = static_cast<int>(picks.size());
 
-            for (int i = 0; i < count; ++i)
+            // Round B / B2: WHERE this room's picks stand. The roles go in in
+            // pick order (PACK_ROLE_* and SPAWN_ROLE_* are the same three
+            // values), and one point comes back per pick, so `points[i]`
+            // belongs to `picks[i]` and the boss - pick 0 of a boss room - gets
+            // the kit's boss anchor, which is the arena centre. The draw above
+            // is untouched: PlanSpawnPoints reads anchors and roles only, it
+            // draws nothing and it cannot move a pick.
+            //
+            // The "same three values" above is the whole mapping, so it is
+            // asserted rather than asserted-in-prose: SPAWN_ROLE_* are plain
+            // ints in generator/PDv2SpawnAnchors.h, PACK_ROLE_* an enum in
+            // generator/PDv2PackDraw.h, and neither header includes the other
+            // (both are engine-free and must stay independent). This is the
+            // translation unit that sees both, so this is where the mirror can
+            // be made self-checking.
+            static_assert(SPAWN_ROLE_MELEE == PACK_ROLE_MELEE, "spawn/pack melee role drifted");
+            static_assert(SPAWN_ROLE_CASTER == PACK_ROLE_CASTER, "spawn/pack caster role drifted");
+            static_assert(SPAWN_ROLE_BOSS == PACK_ROLE_BOSS, "spawn/pack boss role drifted");
+
+            std::vector<int> roles;
+            roles.reserve(picks.size());
+            for (SpawnPick const& pick : picks)
             {
-                // A small fixed pattern around the block centre. Deliberately
-                // NOT random: the same plan must produce the same dungeon, and
-                // an unseeded draw here would break that quietly.
-                double const angle = 2.0 * 3.14159265358979 * i / count;
-                double const du = std::cos(angle) * SPAWN_SPREAD_YD;
-                double const dv = std::sin(angle) * SPAWN_SPREAD_YD;
+                roles.push_back(static_cast<int>(pick.role));
+            }
+
+            RoomAnchors const* anchors = sPDv2Mgr->RoomAnchorsFor(b.chunkId);
+            std::vector<PDv2SpawnPoint> const points =
+                anchors ? PlanSpawnPoints(*anchors, isBossRoom, roles)
+                        : circlePoints(roles.size());
+
+            for (int i = 0; i < count && i < static_cast<int>(points.size()); ++i)
+            {
+                PDv2SpawnPoint const& point = points[static_cast<size_t>(i)];
 
                 float x = 0.0f, y = 0.0f, z = 0.0f;
-                sPDv2Mgr->BlockToWorld(b.bx, b.by, mid + du, mid + dv, x, y, z);
+                sPDv2Mgr->BlockToWorld(b.bx, b.by, point.u, point.v, x, y, z);
+
+                // An anchor is a kit constant and the walk grid is what this
+                // instance actually composed, so the two can disagree - a kit
+                // published against an older mask, or an overflow ring point
+                // that falls outside a 33 yd room's platform. Gravity is off on
+                // this map, so a mob seated off the floor hovers over the void
+                // for ever: unreachable, unkillable, and holding the room's
+                // counter open. The entry anchor is provably floor (it is the
+                // cell every walk into the room arrives on), so that is where
+                // a vetoed pick goes; a chunk without one falls back to the
+                // block centre, which is walkable in every room variant the
+                // kit ships.
+                //
+                // Why the circle path never gets here: LoadChunkMeta writes
+                // _walkMasks[chunkId] and _chunkRoomAnchors[chunkId] from the
+                // SAME row in the same iteration, so a chunk with no anchors
+                // has no walk mask either, BuildWalkGrid fails on it and `grid`
+                // is null - the veto and the overflow circle cannot meet.
+                //
+                // That same-row property is also the ONLY reason the entry
+                // anchor is floor at all: the kit derives it as a walkable cell
+                // centre of that very mask, i.e. the argument is about the
+                // kit's mask, not about the grid this instance composed. A
+                // hand-edited chunk_meta row breaks the tie, and then the
+                // fallback would stack every vetoed pick of the room on a point
+                // in the void the veto exists to prevent. So the fallback is
+                // grid-checked too and snapped to the nearest walkable cell;
+                // when the grid is null or nothing walkable is within reach,
+                // the un-snapped point stands, exactly as before.
+                if (grid)
+                {
+                    int gcx = 0, gcy = 0;
+                    WorldToCell(x, y, gcx, gcy);
+                    GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                    if (!grid->At(cell.x, cell.y))
+                    {
+                        bool const onEntry = anchors && anchors->hasEntry;
+                        sPDv2Mgr->BlockToWorld(b.bx, b.by,
+                                               onEntry ? anchors->entry.u : mid,
+                                               onEntry ? anchors->entry.v : mid,
+                                               x, y, z);
+
+                        int fcx = 0, fcy = 0;
+                        WorldToCell(x, y, fcx, fcy);
+                        GridPoint const fallbackCell = grid->LocalFromGlobalCell(fcx, fcy);
+                        GridPoint snapped;
+                        if (!grid->At(fallbackCell.x, fallbackCell.y) &&
+                            NearestWalkable(*grid, fallbackCell.x, fallbackCell.y,
+                                            SPAWN_FALLBACK_SNAP_CELLS, snapped))
+                        {
+                            int scx = 0, scy = 0;
+                            grid->GlobalFromLocalCell(snapped, scx, scy);
+                            double wx = 0.0, wy = 0.0;
+                            CellCentreToWorld(scx, scy, wx, wy);
+                            x = static_cast<float>(wx);
+                            y = static_cast<float>(wy);
+                        }
+
+                        if (vetoedChunks.insert(b.chunkId).second)
+                        {
+                            LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} planned a spawn point "
+                                             "the walk grid calls void - that chunk's vetoed "
+                                             "picks stand on its {} instead",
+                                     instance->GetInstanceId(), b.chunkId,
+                                     onEntry ? "entry anchor" : "block centre");
+                        }
+                    }
+                }
 
                 PDv2MobData proto;
                 proto.role = picks[i].role;
@@ -965,6 +1867,29 @@ namespace PDungeon
         }
         _run.total = static_cast<uint16>(spawned);
 
+        // Round B / B3: the barrier's DENOMINATOR, frozen here. _roomAlive is
+        // the live count and a Lil' Bro split inflates it mid-run, so the copy
+        // - not the vector - is what a threshold is ever measured against.
+        _roomPlanned = _roomAlive;
+        size_t const segments = static_cast<size_t>(std::max(1, plan.config.bossRooms)) + 1;
+        _segmentPlanned.assign(segments, 0);
+        _segmentKilled.assign(segments, 0);
+        for (size_t r = 0; r < _roomPlanned.size(); ++r)
+        {
+            // The boss room's own pack stands BEHIND its barrier and is left
+            // out, or a segment whose only room is its boss could never open
+            // (design 2026-09-03 §B3.1). Segment 0 is the entrance: no barrier.
+            if (r >= _roomSegment.size() || _roomIsBoss[r] || _roomSegment[r] < 1)
+            {
+                continue;
+            }
+            size_t const seg = static_cast<size_t>(_roomSegment[r]);
+            if (seg < _segmentPlanned.size())
+            {
+                _segmentPlanned[seg] += _roomPlanned[r];
+            }
+        }
+
         LOG_INFO(PD_LOG, "PDv2: instance {} on map {} spawned {} creature(s) in {} room(s) "
                          "({} boss) from a {}-block plan, difficulty {} lootMult {}, "
                          "{} mob(s) wearing {} affix(es)",
@@ -972,6 +1897,211 @@ namespace PDungeon
                  uint32(_run.roomsTotal), uint32(_run.bossTotal),
                  uint32(plan.blocks.size()), uint32(_run.difficulty),
                  uint32(_run.lootMultX100), affixedMobs, uint32(_runAffixes.size()));
+    }
+
+    void PDv2InstanceScript::EvaluateBarrier(int segment)
+    {
+        // Segment 0 is the entrance and has no barrier; anything below that is
+        // a corridor's -1 and never reaches here from OnMobDied's guard.
+        if (segment < 1 || _barriers.empty())
+        {
+            return;
+        }
+
+        size_t const seg = static_cast<size_t>(segment);
+        uint32 const planned = seg < _segmentPlanned.size() ? _segmentPlanned[seg] : 0;
+        uint32 const killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+        uint32 const pct = static_cast<uint32>(sPDv2Mgr->GetConfig().barrierPct);
+
+        for (Barrier& barrier : _barriers)
+        {
+            if (barrier.segment != segment || barrier.open)
+            {
+                continue;
+            }
+            if (planned == 0)
+            {
+                // The denominator excludes the boss room's own pack, so a
+                // segment whose ONLY room is its boss plans nothing - the
+                // single-boss-segment softlock (design §B3.1). It opens on
+                // sight rather than never.
+                OpenBarrier(barrier, "its segment plans no trash in front of the boss");
+            }
+            else if (killed * 100 >= planned * pct)
+            {
+                // Integers on purpose: the same comparison the hint's own
+                // ceiling is derived from, so the two can never disagree about
+                // whether one more kill is needed.
+                OpenBarrier(barrier, "the segment's kill threshold was met");
+            }
+        }
+    }
+
+    void PDv2InstanceScript::OpenBarrier(Barrier& barrier, char const* why)
+    {
+        if (barrier.open)
+        {
+            return;
+        }
+        barrier.open = true;
+
+        // Delete(), not a door state: type 5 GENERIC has no open state to set,
+        // and the whole point of the choice is that its collision is the one
+        // shape measured to stop a player on this map. The portcullis simply
+        // stops existing.
+        if (GameObject* go = instance->GetGameObject(barrier.guid))
+        {
+            go->Delete();
+        }
+        _decorGuids.erase(std::remove(_decorGuids.begin(), _decorGuids.end(), barrier.guid),
+                          _decorGuids.end());
+        barrier.guid.Clear();
+
+        // ...and the creatures get their lane back. Nothing is re-pathed: the
+        // AI re-decides inside 500 ms on its own.
+        SetCellsWalkable(barrier.cells, true);
+
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+        {
+            sPDv2UILink->SendNotice(it->GetSource(), "The barrier to the boss falls.");
+        }
+
+        size_t const seg = static_cast<size_t>(barrier.segment);
+        uint32 const planned = seg < _segmentPlanned.size() ? _segmentPlanned[seg] : 0;
+        uint32 const killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+        LOG_INFO(PD_LOG, "PDv2: instance {} opened the barrier of segment {} - {} "
+                         "({}/{} planned kills, threshold {}%)",
+                 instance->GetInstanceId(), barrier.segment, why, killed, planned,
+                 sPDv2Mgr->GetConfig().barrierPct);
+    }
+
+    void PDv2InstanceScript::HintBarriers()
+    {
+        if (_barriers.empty())
+        {
+            return;
+        }
+
+        uint32 const pct = static_cast<uint32>(sPDv2Mgr->GetConfig().barrierPct);
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Barrier& barrier : _barriers)
+        {
+            if (barrier.open || barrier.hinted)
+            {
+                continue;
+            }
+
+            size_t const seg = static_cast<size_t>(barrier.segment);
+            uint32 const planned = seg < _segmentPlanned.size() ? _segmentPlanned[seg] : 0;
+            uint32 const killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+
+            // The ceiling of planned x pct / 100 is the kill count that first
+            // satisfies EvaluateBarrier's >=, so this number is what the
+            // player actually still owes - never one less, never one more. It
+            // is floored at 1: a closed barrier by definition still wants a
+            // kill, and "0 more must fall" in front of a wall is a bug report.
+            uint32 const needAll = (planned * pct + 99) / 100;
+            uint32 const needed = needAll > killed ? needAll - killed : 1;
+
+            for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+            {
+                Player* player = it->GetSource();
+                if (!player || !player->IsInWorld())
+                {
+                    continue;
+                }
+                // 2D: the dungeon is one floor plane, and a Z term would only
+                // add the height of a jump.
+                float const dx = player->GetPositionX() - barrier.x;
+                float const dy = player->GetPositionY() - barrier.y;
+                if (dx * dx + dy * dy > BARRIER_HINT_YD * BARRIER_HINT_YD)
+                {
+                    continue;
+                }
+                sPDv2UILink->SendNotice(player, Acore::StringFormat(
+                    "The barrier holds - {} more of this segment's foes must fall.", needed));
+                // Everyone standing there is told, and then never again for
+                // this barrier: it is a signpost, not an alarm.
+                barrier.hinted = true;
+            }
+        }
+    }
+
+    bool PDv2InstanceScript::NextClosedBarrier(uint32& planned, uint32& killed, uint32& pct) const
+    {
+        // Zeroed up front, so a caller that ignores the answer still puts the
+        // wire's own "no gate" value on the wire (PDv2UILink::SendRunTick).
+        planned = 0;
+        killed = 0;
+        pct = 0;
+
+        // SpawnBarriers fills _barriers in segment order and an opened barrier
+        // STAYS in it with `open` set, so the lowest sealed segment is a scan.
+        // Done by comparison rather than by taking the first !open entry
+        // because that ordering is a property of the spawner, not a contract
+        // this getter is entitled to lean on.
+        Barrier const* next = nullptr;
+        for (Barrier const& barrier : _barriers)
+        {
+            if (barrier.open)
+            {
+                continue;
+            }
+            if (!next || barrier.segment < next->segment)
+            {
+                next = &barrier;
+            }
+        }
+
+        if (!next)
+        {
+            return false;
+        }
+
+        size_t const seg = static_cast<size_t>(next->segment);
+        planned = seg < _segmentPlanned.size() ? _segmentPlanned[seg] : 0;
+        killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+
+        // Clamped, and not defensively: _segmentPlanned counts _roomPlanned,
+        // frozen at spawn, while _segmentKilled counts corpses - and a Lil'
+        // Bro split makes more corpses than the draw planned. Without the
+        // clamp that segment's gate line would read past 100 %.
+        pct = planned ? std::min<uint32>(100, killed * 100 / planned) : 100;
+        return true;
+    }
+
+    void PDv2InstanceScript::ClearedRoomBlocks(std::vector<std::pair<int, int>>& out) const
+    {
+        out.clear();
+        for (size_t r = 0; r < _roomAlive.size(); ++r)
+        {
+            // _roomBX/_roomBY are filled in the same pass and the same order
+            // as _roomAlive, so the bound can only bite on a half-built
+            // instance - which is exactly when a caller must get nothing back
+            // rather than a block coordinate that means something else.
+            if (_roomAlive[r] != 0 || r >= _roomBX.size() || r >= _roomBY.size())
+            {
+                continue;
+            }
+            out.push_back(std::make_pair(_roomBX[r], _roomBY[r]));
+        }
+    }
+
+    void PDv2InstanceScript::SetCellsWalkable(std::vector<GridPoint> const& cells, bool walkable)
+    {
+        if (!_gridReady)
+        {
+            return;
+        }
+        for (GridPoint const& p : cells)
+        {
+            if (!_grid.InBounds(p.x, p.y))
+            {
+                continue;
+            }
+            _grid.cells[static_cast<size_t>(p.y) * _grid.width + p.x] = walkable ? 1 : 0;
+        }
     }
 
     void PDv2InstanceScript::SpawnDecor(BlockPlan const& plan, std::vector<Position>& outPositions)
@@ -1080,6 +2210,60 @@ namespace PDungeon
         }
     }
 
+    void PDv2InstanceScript::BuildPropCells()
+    {
+        _propCells.clear();
+        if (!_gridReady || _decorGuids.empty())
+        {
+            // No grid means no indexing scheme to hand the planner, and no
+            // props means an all-zero vector the planner would pay for on
+            // every step. PropCells() answers nullptr for both, which
+            // FindPatrolPath reads as "no prop costs anywhere".
+            return;
+        }
+
+        // ONE BYTE PER GRID CELL, the walk grid's own indexing. The planner
+        // reads it with the same (y * width + x) it reads `cells` with, which
+        // is why it is sized from the grid rather than from the plan.
+        _propCells.assign(_grid.cells.size(), 0);
+
+        uint32 marked = 0;
+        for (ObjectGuid const& guid : _decorGuids)
+        {
+            GameObject* go = instance->GetGameObject(guid);
+            if (!go)
+            {
+                // Summoned and already gone (a dead-end chest that was looted
+                // and deleted, a barrier this run opened on the spot). Not a
+                // finding: the object is not standing in the corridor any
+                // more, so the cell it used to hold is free.
+                continue;
+            }
+            int gcx = 0, gcy = 0;
+            WorldToCell(go->GetPositionX(), go->GetPositionY(), gcx, gcy);
+            GridPoint const cell = _grid.LocalFromGlobalCell(gcx, gcy);
+            if (!_grid.InBounds(cell.x, cell.y))
+            {
+                // A prop outside the grid's bounding box cannot be in anyone's
+                // way, and writing it would be an out-of-range store.
+                continue;
+            }
+            size_t const idx = static_cast<size_t>(cell.y) * _grid.width + cell.x;
+            if (!_propCells[idx])
+            {
+                ++marked;
+            }
+            // Not a counter: several props share a cell often enough (a torch
+            // pair, a prop on a decor spot), and the planner asks a yes/no
+            // question. One flag per cell, however many objects stand on it.
+            _propCells[idx] = 1;
+        }
+
+        LOG_DEBUG(PD_LOG, "PDv2: instance {} marked {} prop cell(s) of {} for the "
+                          "patrol planner", instance->GetInstanceId(), marked,
+                  uint32(_propCells.size()));
+    }
+
     void PDv2InstanceScript::SpawnCritters(BlockPlan const& plan,
                                             std::vector<Position> const& decorPositions)
     {
@@ -1145,12 +2329,23 @@ namespace PDungeon
                 continue;
             }
 
-            // The same two lines every dungeon spawn gets, and for the same
-            // reason: the server has no terrain on this map, so Map::GetHeight
-            // answers INVALID_HEIGHT and a creature with gravity would fall
-            // through the floor the client draws.
+            // The home position every dungeon spawn gets, and - since Round D
+            // / D3 - no gravity flag beside it: the core strips that on the
+            // first movement update anyway, until then it shows as a hover,
+            // and a critter stands at floorZ without it (SpawnTaggedMob cites
+            // the core lines).
             c->SetHomePosition(x, y, z, static_cast<float>(spot.orientation));
-            c->SetDisableGravity(true);
+
+            // A critter IS killable - all four shipped rules point at unit_flags
+            // 0 templates (32428, 23086, 2110, 26525: selectable, attackable,
+            // not IMMUNE_TO_PC), and an AoE that clips one kills it - so it
+            // takes the module's no-kill-reputation policy too. SpawnTaggedMob
+            // carries the reasoning and the core cites. None of the four has a
+            // creature_onkill_reputation row today (measured 2026-09-09); the
+            // switch is set regardless, because pdungeon_critter_rules is
+            // OPERATOR data and the policy has to hold for a row this module
+            // has never seen.
+            c->SetReputationRewardDisabled(true);
 
             // NO PDv2MobData tag, deliberately. The tag is the module's own
             // definition of "this is a dungeon mob": without it, OnMobDied
@@ -1171,42 +2366,1029 @@ namespace PDungeon
 
     void PDv2InstanceScript::SpawnDeadEndChests(BlockPlan const& plan)
     {
-        // One Shifting Cache (GO_CHEST, native loot table) on the junction
-        // square of every dead-end stub - the stub's whole reason to exist.
-        // NOT gated on Decor.Enable: the chest is a reward, not a look, and
-        // the dungeon must not lose loot to a cosmetics switch. Torn down by
-        // the same DespawnAll as everything else this instance stands up.
-        uint32 placed = 0;
+        // One Shifting Cache (GO_CHEST, native loot table) per dead-end stub,
+        // on its junction square - the stub's whole reason to exist - and per
+        // loop room (B0b), on the kit's chest anchor: a loop is a detour off
+        // the straight run, so it has to pay for the walk the same way a stub
+        // does. NOT gated on Decor.Enable: the chest is a reward, not a look,
+        // and the dungeon must not lose loot to a cosmetics switch. Torn down
+        // by the same DespawnAll as everything else this instance stands up.
+        uint32 stubs = 0;
+        uint32 loops = 0;
         for (PlacedBlock const& b : plan.blocks)
         {
-            if (b.role != BlockRole::CorridorDeadEnd)
+            // Exclusive by construction: the planner validates that a loop
+            // room is a Room block (PDBlockPlan.cpp, "a loop room carries the
+            // wrong role or fields"), never a corridor.
+            bool const isStub = b.role == BlockRole::CorridorDeadEnd;
+            bool const isLoopRoom = b.detourOf >= 0;
+            if (!isStub && !isLoopRoom)
             {
                 continue;
             }
+
             // The kit pins the stub's chest anchor to the block centre (the
             // junction square), so the position is a constant of the format
-            // rather than a lookup that could go stale.
+            // rather than a lookup that could go stale. A loop room is a room
+            // chunk and publishes a real chest anchor instead - one the kit
+            // put clear of the walls and of the socket track.
+            double u = PD_BLOCK_SIZE_YD / 2.0;
+            double v = PD_BLOCK_SIZE_YD / 2.0;
+            if (isLoopRoom)
+            {
+                RoomAnchors const* anchors = sPDv2Mgr->RoomAnchorsFor(b.chunkId);
+                if (anchors && anchors->hasChest)
+                {
+                    u = anchors->chest.u;
+                    v = anchors->chest.v;
+                }
+                else
+                {
+                    // The block centre is walkable in every room variant, so
+                    // the reward is still reachable - it just stands on the
+                    // track instead of beside it.
+                    LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} publishes no chest anchor - "
+                                     "the loop room's cache stands on the block centre",
+                             instance->GetInstanceId(), b.chunkId);
+                }
+            }
+
             float x = 0.0f, y = 0.0f, z = 0.0f;
-            sPDv2Mgr->BlockToWorld(b.bx, b.by,
-                                   PD_BLOCK_SIZE_YD / 2.0f, PD_BLOCK_SIZE_YD / 2.0f,
-                                   x, y, z);
+            sPDv2Mgr->BlockToWorld(b.bx, b.by, u, v, x, y, z);
+            // -pi/2: "90 Grad nach rechts" (T2 2026-09-08); WoW orientation is
+            // counter-clockwise. The four zeros after it are the quaternion, and
+            // an all-zero quaternion is not a facing: Map::SummonGameObject hands
+            // this angle and that quat to GameObject::Create, which relocates the
+            // object with the angle and then calls SetWorldRotation, which rebuilds
+            // the rotation from the orientation about +Z whenever the quat's
+            // magnitude is zero. So this literal alone decides the facing.
             GameObject* go = instance->SummonGameObject(
-                GO_CHEST, x, y, z, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
+                GO_CHEST, x, y, z, 4.712389f, 0.0f, 0.0f, 0.0f, 0.0f, 0);
             if (!go)
             {
-                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the "
-                                  "dead-end chest (missing gameobject_template "
-                                  "{}?)",
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon a cache "
+                                  "(missing gameobject_template {}?)",
                           instance->GetInstanceId(), uint32(GO_CHEST));
                 continue;
             }
             _decorGuids.push_back(go->GetGUID());
-            ++placed;
+            if (isStub)
+            {
+                ++stubs;
+            }
+            else
+            {
+                ++loops;
+            }
         }
-        if (placed)
+        if (stubs || loops)
         {
-            LOG_INFO(PD_LOG, "PDv2: instance {} placed {} dead-end chest(s)",
-                     instance->GetInstanceId(), placed);
+            LOG_INFO(PD_LOG, "PDv2: instance {} placed {} dead-end chest(s) and "
+                             "{} loop-room chest(s)",
+                     instance->GetInstanceId(), stubs, loops);
+        }
+    }
+
+    void PDv2InstanceScript::SpawnBarriers(BlockPlan const& plan)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        if (!_gridReady)
+        {
+            // Not a reason to skip the portcullis: the GameObject still stops
+            // the PLAYER, which is the mechanic the run is measured on. Only
+            // the creature half is lost here - and a dungeon whose walk grid
+            // failed to build has no creature pathing to lose in the first
+            // place, because that grid IS the navigation on this map.
+            LOG_WARN(PD_LOG, "PDv2: instance {} has no walk grid - its barriers will hold "
+                             "players back but not creatures",
+                     instance->GetInstanceId());
+        }
+
+        // The two cells a block's doorway occupies on the edge a socket bit
+        // names, appended as walk-grid cells. The TABLE itself lives in the
+        // engine-free planner (LaneCellsForSocket) so `pdblock` can pin it -
+        // B3-B5 Task 2 review, Important 1; all that is left here is the one
+        // translation an engine has to do, (row, col) -> LocalFromGlobalCell(
+        // x = col, y = row).
+        auto laneCells = [this](PlacedBlock const& block, unsigned edge,
+                                std::vector<GridPoint>& out)
+        {
+            int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+            LaneCellsForSocket(edge, cells);
+            for (int i = 0; i < 2; ++i)
+            {
+                out.push_back(_grid.LocalFromGlobalCell(
+                    block.bx * PD_CELLS_PER_BLOCK + cells[i][1],
+                    block.by * PD_CELLS_PER_BLOCK + cells[i][0]));
+            }
+        };
+
+        int const chainLen = ChainLength(plan);
+        int const bossRooms = std::max(1, plan.config.bossRooms);
+        uint32 placed = 0;
+        for (int k = 1; k <= bossRooms; ++k)
+        {
+            // The same walk the validator proved the spine with, so the run a
+            // barrier seals and the run the plan is valid for are one run.
+            // `run` comes back in walking order, so its LAST block is the
+            // corridor that touches the boss room's doorway.
+            int const bossChain = BossChainIndex(chainLen, plan.config.bossRooms, k);
+            std::vector<size_t> run;
+            unsigned const bit = SpineRunInto(plan, bossChain, &run);
+            if (!bit || run.empty())
+            {
+                // A boss sitting on the entrance itself (chain 0), or a join
+                // that is not one straight run. Neither has a single doorway
+                // to seal, so that segment stays open - a missing barrier is a
+                // shortcut, never a softlock.
+                LOG_WARN(PD_LOG, "PDv2: instance {} found no single entry run into boss {} "
+                                 "(chain room {}) - segment {} gets no barrier",
+                         instance->GetInstanceId(), k, bossChain, k);
+                continue;
+            }
+            if (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W)
+            {
+                // SpineRunInto only ever answers with one of the four bits, so
+                // this is a contract check rather than a branch a plan can
+                // reach - but it has to be made HERE: LaneCellsForSocket and
+                // OppositeSocket read anything else as SOCKET_E, and a
+                // portcullis on the wrong edge is worse than none.
+                LOG_WARN(PD_LOG, "PDv2: instance {} could not name the lane cells of "
+                                 "socket {} into chain room {} - segment {} gets no barrier",
+                         instance->GetInstanceId(), bit, bossChain, k);
+                continue;
+            }
+
+            PlacedBlock const* boss = nullptr;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                // Last match, the way SpineRunInto picks it. chainIndex is set
+                // on spine rooms only (pockets carry branchOf, loop rooms
+                // detourOf), so there is exactly one of these anyway.
+                if (b.chainIndex == bossChain)
+                {
+                    boss = &b;
+                }
+            }
+            if (!boss)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} has no chain room {} to bar - "
+                                 "segment {} gets no barrier",
+                         instance->GetInstanceId(), bossChain, k);
+                continue;
+            }
+            PlacedBlock const& neighbour = plan.blocks[run.back()];
+
+            // BOTH sides of the edge. Creatures snap to a cell within two of
+            // their own, so sealing only the boss block's half would leave the
+            // corridor cell next to it as a legal step across the doorway.
+            std::vector<GridPoint> cells;
+            laneCells(*boss, bit, cells);
+            laneCells(neighbour, OppositeSocket(bit), cells);
+
+            // One cell INSIDE the boss block, on that edge, at the lane
+            // centre - the doorway's own square. u runs along the row axis and
+            // v along the column axis, the same reading the kit's typed
+            // anchors are decoded with.
+            double const nearEdge = PD_CELL_SIZE_YD / 2.0;                      // 4.1667
+            double const farEdge = PD_BLOCK_SIZE_YD - PD_CELL_SIZE_YD / 2.0;    // 62.5
+            double const lane = PD_BLOCK_SIZE_YD / 2.0;                         // 33.3333
+            double u = lane;
+            double v = lane;
+            // Two conf keys, not two constants: which radian value stands the
+            // model across the lane depends on how the m2 is authored, and the
+            // operator calibrates it in game with `.reload config`.
+            float orientation = cfg.barrierOrientNS;
+            switch (bit)
+            {
+                case SOCKET_N:  u = nearEdge;   orientation = cfg.barrierOrientNS;  break;
+                case SOCKET_S:  u = farEdge;    orientation = cfg.barrierOrientNS;  break;
+                case SOCKET_W:  v = nearEdge;   orientation = cfg.barrierOrientEW;  break;
+                case SOCKET_E:  v = farEdge;    orientation = cfg.barrierOrientEW;  break;
+                default:        break;      // unreachable: `bit` was checked against the four sockets above
+            }
+
+            float x = 0.0f, y = 0.0f, z = 0.0f;
+            sPDv2Mgr->BlockToWorld(boss->bx, boss->by, u, v, x, y, z);
+            GameObject* go = instance->SummonGameObject(GO_BARRIER, x, y, z, orientation,
+                                                        0.0f, 0.0f, 0.0f, 0.0f, 0);
+            if (!go)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the barrier "
+                                  "(missing gameobject_template {}?)",
+                          instance->GetInstanceId(), uint32(GO_BARRIER));
+                continue;
+            }
+            // The decor list owns the object, so one teardown deletes
+            // everything this instance stood up; _barriers only remembers what
+            // the object MEANS.
+            _decorGuids.push_back(go->GetGUID());
+
+            Barrier barrier;
+            barrier.segment = k;
+            barrier.guid = go->GetGUID();
+            barrier.cells = cells;
+            barrier.x = x;
+            barrier.y = y;
+            _barriers.push_back(barrier);
+            SetCellsWalkable(cells, false);
+            ++placed;
+
+            // Asked once, right here. A segment whose rooms in front of the
+            // boss plan no trash at all (design 2026-09-03 §B3.1) has to open
+            // before anyone walks up to it: no kill will ever come to ask
+            // again, and a sealed lane with nothing behind it to clear is the
+            // softlock this whole denominator is shaped to avoid.
+            EvaluateBarrier(k);
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} barrier(s) for {} boss segment(s)",
+                 instance->GetInstanceId(), placed, uint32(bossRooms));
+    }
+
+    void PDv2InstanceScript::SpawnPatrols(BlockPlan const& plan)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        PDv2AccountState const account = sPDv2Mgr->GetAccountState(_accountId);
+
+        // EnsureWalkGrid ran before this (see the run set-up), so this is the
+        // same grid the patrol's own AI will walk on - which is the point: the
+        // beat is planned, and every spawn point vetoed, by exactly the thing
+        // that has to accept them.
+        WalkGrid const* grid = GetWalkGrid();
+
+        // HOW LONG THE FILE IS, one number for the whole dungeon. The dial is
+        // frozen per run (SpawnFromPlan wrote _run.difficulty long before
+        // this), so every corridor of a run gets the same size and an operator
+        // can read the dial off any one patrol. Two live keys, two steps: 1
+        // below Size2Diff, 2 from it, 3 from Size3Diff. Size3Diff <= Size2Diff
+        // is not refused - it only makes the middle band empty, which is a
+        // legitimate thing for an operator to type.
+        int const diff = static_cast<int>(_run.difficulty);
+        int const size = 1 + (diff >= cfg.patrolSize2Diff ? 1 : 0) +
+                             (diff >= cfg.patrolSize3Diff ? 1 : 0);
+
+        // The FIRST of the two doorway cells a socket names, as a GLOBAL cell.
+        // The same translation SpawnBarriers makes - LaneCellsForSocket answers
+        // (row, col) and the cell frame's x axis is the COLUMN one - but global
+        // rather than grid-local, because that is the form the spawn tag
+        // carries and the AI reads back through LocalFromGlobalCell.
+        auto laneCell = [](PlacedBlock const& block, unsigned edge, int& gcx, int& gcy)
+        {
+            int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+            LaneCellsForSocket(edge, cells);
+            gcx = block.bx * PD_CELLS_PER_BLOCK + cells[0][1];
+            gcy = block.by * PD_CELLS_PER_BLOCK + cells[0][0];
+        };
+
+        int const chainLen = ChainLength(plan);
+        uint32 patrols = 0;
+        uint32 members = 0;
+        uint32 runs = 0;
+        // EVERY corridor between two rooms, not one per boss segment (Round D /
+        // D2). A dungeon with four chain rooms has three corridors and gets
+        // three patrols, whatever its boss count is - the operator asked for
+        // "ein pat zwischen jedem raum", and a segment boundary is not a
+        // corridor.
+        for (int i = 1; i < chainLen; ++i)
+        {
+            // THE BEAT, DERIVED FROM THE RUN AND NOTHING ELSE
+            //
+            //      room i-1 |###|###|###| room i
+            //               ^A            ^B
+            //               front     back
+            //
+            // SpineRunInto answers `run` in WALKING order (room i-1 -> room i)
+            // and `bit`, the socket on ROOM i's OWN edge that the run arrives
+            // through. So:
+            //
+            //   B (goal)  = the corridor's half of that same doorway, i.e.
+            //               LaneCellsForSocket(OppositeSocket(bit)) on
+            //               run.back() - exactly the pair SpawnBarriers seals
+            //               alongside room i's half.
+            //   A (start) = the doorway of run.front() that faces room i-1.
+            //               SpineRunInto names no socket for that end, so it is
+            //               read off the STEP between those two blocks: the run
+            //               walked from room i-1 into run.front(), so the two
+            //               are neighbours, and bx grows EAST while by grows
+            //               SOUTH (PDBlockPlan.cpp's StepFor is the same table).
+            //
+            // A one-block run has run.front() == run.back(), so A and B are
+            // that single block's two doorways - which is what design §D2.1
+            // asks for, without a special case.
+            std::vector<size_t> run;
+            unsigned const bit = SpineRunInto(plan, i, &run);
+            if (!bit || run.empty())
+            {
+                // Two rooms joined directly, or a join that is not one straight
+                // run. Neither is a corridor to patrol, and neither is an
+                // error: it is the same refusal SpawnBarriers makes on the same
+                // walk, for the same reason.
+                LOG_WARN(PD_LOG, "PDv2: instance {} found no single corridor run into chain "
+                                 "room {} - that corridor gets no patrol",
+                         instance->GetInstanceId(), i);
+                continue;
+            }
+            if (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W)
+            {
+                // A contract check rather than a branch a plan can reach, made
+                // HERE for the reason SpawnBarriers makes it: LaneCellsForSocket
+                // and OppositeSocket read anything else as SOCKET_E, and a beat
+                // that ends on the wrong edge is a patrol walking into a wall.
+                LOG_WARN(PD_LOG, "PDv2: instance {} could not name the lane cells of socket {} "
+                                 "into chain room {} - that corridor gets no patrol",
+                         instance->GetInstanceId(), bit, i);
+                continue;
+            }
+            ++runs;
+
+            PlacedBlock const* before = nullptr;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                // chainIndex is set on spine rooms only (pockets carry
+                // branchOf, loop rooms detourOf), so this can never catch a
+                // corridor; last match, the way SpineRunInto picks it.
+                if (b.chainIndex == i - 1)
+                {
+                    before = &b;
+                }
+            }
+            if (!before)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} has no chain room {} to start the beat at - "
+                                 "the corridor into chain room {} gets no patrol",
+                         instance->GetInstanceId(), i - 1, i);
+                continue;
+            }
+
+            PlacedBlock const& firstBlock = plan.blocks[run.front()];
+            PlacedBlock const& lastBlock = plan.blocks[run.back()];
+
+            // The step from run.front() to room i-1, as a socket bit. One of
+            // the four by construction (RunFromSocket walks block by block, so
+            // the two are neighbours), and the else is the contract check.
+            int const dbx = before->bx - firstBlock.bx;
+            int const dby = before->by - firstBlock.by;
+            unsigned startBit = 0;
+            if (dbx == 0 && dby == -1)
+            {
+                startBit = SOCKET_N;
+            }
+            else if (dbx == 0 && dby == 1)
+            {
+                startBit = SOCKET_S;
+            }
+            else if (dbx == -1 && dby == 0)
+            {
+                startBit = SOCKET_W;
+            }
+            else if (dbx == 1 && dby == 0)
+            {
+                startBit = SOCKET_E;
+            }
+            if (!startBit)
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} found chain room {} at ({},{}) not adjacent "
+                                 "to its run's first block ({},{}) - the corridor into chain "
+                                 "room {} gets no patrol",
+                         instance->GetInstanceId(), i - 1, before->bx, before->by,
+                         firstBlock.bx, firstBlock.by, i);
+                continue;
+            }
+
+            int startCellX = 0, startCellY = 0;
+            int goalCellX = 0, goalCellY = 0;
+            laneCell(firstBlock, startBit, startCellX, startCellY);
+            laneCell(lastBlock, OppositeSocket(bit), goalCellX, goalCellY);
+
+            // THE BEAT, PLANNED ONCE HERE - and only for the file's spawn
+            // POSITIONS. The leader plans its own on its first idle tick, with
+            // the same planner over the same grid and the same prop map, so the
+            // two agree by construction instead of by carrying a route through
+            // the spawn tag; and it has to, because the veto below may have
+            // moved it off this cell.
+            //
+            // BOTH ends are snapped, and the goal end is the one that needs it:
+            // SpawnBarriers ran before this, and a boss corridor's portcullis
+            // has already taken the goal's own lane cell OUT of the grid
+            // (SetCellsWalkable(false) on both halves of that doorway). The
+            // snap answers the first walkable cell of the ring around it, which
+            // inside a sealed corridor is the lane one step back - so the beat
+            // ends AT the closed gate instead of failing to plan at all. The
+            // TAG still carries the true doorway cell, which is what lets the
+            // AI's own plan reach the doorway once the barrier falls.
+            std::vector<GridPoint> beat;
+            int spawnCellX = startCellX;
+            int spawnCellY = startCellY;
+            if (grid)
+            {
+                GridPoint const rawStart = grid->LocalFromGlobalCell(startCellX, startCellY);
+                GridPoint const rawGoal = grid->LocalFromGlobalCell(goalCellX, goalCellY);
+                GridPoint from{ 0, 0 };
+                GridPoint to{ 0, 0 };
+                if (NearestWalkable(*grid, rawStart.x, rawStart.y,
+                                    SPAWN_FALLBACK_SNAP_CELLS, from) &&
+                    NearestWalkable(*grid, rawGoal.x, rawGoal.y,
+                                    SPAWN_FALLBACK_SNAP_CELLS, to))
+                {
+                    grid->GlobalFromLocalCell(from, spawnCellX, spawnCellY);
+                    // NOT merged, and it must not be. A merge (MergeClearPoints
+                    // since the D2 follow-up) is for the AI, which walks legs;
+                    // this wants the CELL CHAIN, because "follower k stands k
+                    // cells behind the leader" is the formation and a merged
+                    // list has no cell k. The waypoints the leader will walk
+                    // are a SUBSET of these cells and every one of them is
+                    // placed on its own clear point below, so the file still
+                    // stands where the beat will run.
+                    //
+                    // Round D / D2: the SAME two passes the leader's own plan
+                    // makes (PDv2CreatureAI.cpp, UpdatePatrol) - the shipped
+                    // cost first, then minClearQ 0 - because the whole point of
+                    // planning here is that the file is stood up on the cells
+                    // the AI will later walk. A fallback on one side only would
+                    // put the file on a beat the leader never plans.
+                    if (!FindPatrolPath(*grid, from, to, PropCells(), beat))
+                    {
+                        PatrolCost loose;
+                        loose.minClearQ = 0;
+                        if (!FindPatrolPath(*grid, from, to, PropCells(), beat, loose))
+                        {
+                            beat.clear();
+                            // Named rather than silent (Task 3 review M7): a
+                            // file stacked on one square with nothing in the
+                            // log is the evidence gap the debug key exists to
+                            // close. The leader recovers on its first idle tick
+                            // and MoveFollow unpiles the tail, so this is a
+                            // cosmetic degradation and not a broken run.
+                            LOG_WARN(PD_LOG, "PDv2: instance {} could not plan the beat of the "
+                                             "corridor into chain room {} - its file spawns "
+                                             "stacked on the doorway cell",
+                                     instance->GetInstanceId(), i);
+                        }
+                    }
+                }
+                else
+                {
+                    LOG_WARN(PD_LOG, "PDv2: instance {} found no floor within {} cells of the "
+                                     "beat's ends for the corridor into chain room {} - its "
+                                     "patrol stands on the doorway cell unvetoed",
+                             instance->GetInstanceId(), SPAWN_FALLBACK_SNAP_CELLS, i);
+                }
+            }
+
+            // ONE DRAW PER CORRIDOR, on the patrol's OWN stream, shaped like a
+            // single room with no boss: the picks come off the same pools, the
+            // same band and the same unlock as the dungeon's trash, because in
+            // a module with no rank and no elite pool an "elite" IS a trash mob
+            // with a bigger bar (design 2026-09-03 §B4.2). `size` picks in one
+            // call rather than `size` calls, so the file's members are drawn
+            // from one stream and the seed says what the whole patrol is.
+            SpawnSelectInputs in;
+            RoomRequest room;
+            room.roomIndex = 0;
+            room.isBoss = false;
+            in.rooms.push_back(room);
+            in.spawnsPerRoom = size;
+            in.bossRoomAdds = 0;
+            // Melee only. A caster plants itself at range the moment it pulls,
+            // and a corridor sentry that never closes is not a patrol.
+            in.casterPct = 0;
+            // Copied from the room draw for the SHAPE of the stream, not for
+            // its result: the draw rolls `affixed` per trash pick either way,
+            // and the flag is deliberately dropped below - §B4.2 gives the
+            // patrol no affix, and proto.affixMask staying 0 is what says so.
+            in.affixPct = cfg.affixPct;
+            in.bandMin = account.cfgBandMin;
+            in.unlockedDlvl = static_cast<int>(account.dlvl);
+
+            std::vector<RoomSpawns> out;
+            uint32 const seed = plan.effectiveSeed ^ PD_PATROL_SEED_MIX ^
+                                (static_cast<uint32>(i) * PD_SEGMENT_SEED_STEP);
+            std::vector<uint32> entries;
+            if (sPDv2PackMgr->SelectSpawns(seed, in, out) && !out.empty())
+            {
+                for (SpawnPick const& pick : out[0].picks)
+                {
+                    entries.push_back(pick.entry);
+                }
+            }
+            // The same degradation the room draw and the ambush take when the
+            // pack SQL was never applied: placeholder mammoths rather than an
+            // empty corridor. It also covers a draw that came back short.
+            while (entries.size() < static_cast<size_t>(size))
+            {
+                entries.push_back(PLACEHOLDER_CREATURE);
+            }
+
+            ObjectGuid leaderGuid;
+            for (int k = 0; k < size; ++k)
+            {
+                // WHERE this member stands. The leader takes the beat's first
+                // cell - the vetoed doorway lane cell - and follower k the k-th
+                // cell along the beat, so the file is already strung out down
+                // the lane on the first frame of the run instead of piling up
+                // on one square and sorting itself out afterwards (design
+                // §D2.4). A beat shorter than the file - a one-block corridor,
+                // or a sealed one - clamps to its last cell, which stacks the
+                // tail for a second; MoveFollow unpicks that on the first tick.
+                //
+                // Round D / D2: on the cell's CLEAR POINT, not its centre. The
+                // file is meant to be standing in the middle of the visible
+                // passage on the very first frame a player sees it, and on a
+                // city straight the two are up to 4 yd apart - a member seated
+                // on the centre would spawn inside a house and then walk out of
+                // it on its first leg, which is exactly the sight this round
+                // exists to remove. The no-grid and empty-beat fallbacks keep
+                // the cell centre: with no grid there is no layer to read.
+                double wx = 0.0, wy = 0.0;
+                if (grid && !beat.empty())
+                {
+                    size_t const idx = std::min(static_cast<size_t>(k), beat.size() - 1);
+                    PatrolPointToWorld(*grid, beat[idx], wx, wy);
+                }
+                else
+                {
+                    CellCentreToWorld(spawnCellX, spawnCellY, wx, wy);
+                }
+
+                PDv2MobData proto;
+                proto.role = PACK_ROLE_MELEE;
+                // In no room and in no counter: a patrol is risk on the road,
+                // not progress (design §B4.3). PD_ROOM_NONE rather than the
+                // tag's 0 default is what keeps OnMobDied from decrementing
+                // room 0.
+                proto.roomIndex = PD_ROOM_NONE;
+                proto.countsForRun = false;
+                proto.isPatrol = true;
+                if (k == 0)
+                {
+                    // GLOBAL cells, never this grid's local ones: the AI reads
+                    // the tag through LocalFromGlobalCell, and the grid origin
+                    // is a property of the layout rather than of the creature
+                    // that walks over it.
+                    proto.patrolStartCellX = startCellX;
+                    proto.patrolStartCellY = startCellY;
+                    proto.patrolGoalCellX = goalCellX;
+                    proto.patrolGoalCellY = goalCellY;
+                }
+                else
+                {
+                    proto.patrolLeader = leaderGuid;
+                    proto.patrolRank = static_cast<uint8>(k);
+                }
+
+                Creature* c = SpawnTaggedMob(entries[static_cast<size_t>(k)], proto,
+                                             static_cast<float>(wx), static_cast<float>(wy),
+                                             cfg.floorZ);
+                if (!c)
+                {
+                    LOG_WARN(PD_LOG, "PDv2: instance {} could not summon creature {} as "
+                                     "member {} of the patrol in the corridor into chain "
+                                     "room {}",
+                             instance->GetInstanceId(), entries[static_cast<size_t>(k)], k, i);
+                    if (k == 0)
+                    {
+                        // No leader, no file. A follower whose tag names an
+                        // empty leader would hold its ground for the rest of
+                        // the run, which is a mob standing in a corridor for no
+                        // reason - so the corridor gets nothing instead.
+                        break;
+                    }
+                    continue;
+                }
+                if (k == 0)
+                {
+                    leaderGuid = c->GetGUID();
+                    ++patrols;
+                }
+
+                // A MULTIPLIER, which is exactly why it cannot go through
+                // baseHealthOverride: that argument is an ABSOLUTE number the
+                // caller has to know in advance (it is how a Lil' Bro child
+                // gets its tenth), and the number this one multiplies - what
+                // this run's difficulty scale already made of the template -
+                // does not exist until SummonCreature has run PDv2Scaling's
+                // OnCreatureSelectLevel (PDv2Scaling.cpp:232-263; gated on the
+                // MAP, not on the tag, so it has fired by the time
+                // SpawnTaggedMob returns). Every member of the file is
+                // therefore a multiple of what this run's trash actually is,
+                // never of the row.
+                //
+                // 64-bit product on purpose. The multiplier is clamped from
+                // below (>= 100) and not from above, so a conf typo of 100000
+                // would wrap a big bar into a small one in 32 bits - the
+                // opposite of what the key is for.
+                uint64 const scaled = static_cast<uint64>(c->GetMaxHealth()) *
+                                      static_cast<uint64>(cfg.patrolHealthMultPct) / 100;
+                uint64 const capped = std::min<uint64>(
+                    scaled, static_cast<uint64>(std::numeric_limits<uint32>::max()));
+                SetDungeonHealth(c, static_cast<uint32>(capped));
+                c->SetFullHealth();
+                // Out of combat it walks; JustEngagedWith puts it back on run
+                // speed the moment it pulls. A follower inherits this from its
+                // leader anyway (MoveFollow's inheritWalkState, default true),
+                // but it also has to be true before the first follow tick.
+                c->SetWalk(true);
+                ++members;
+            }
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} placed {} patrol(s), {} creature(s) for {} "
+                         "corridor run(s)",
+                 instance->GetInstanceId(), patrols, members, runs);
+    }
+
+    void PDv2InstanceScript::SpawnAmbushPlan(BlockPlan const& plan)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        PDv2AccountState const account = sPDv2Mgr->GetAccountState(_accountId);
+
+        // WHICH corridors, decided entirely in the engine-free planner. The
+        // chance is read LIVE (design 2026-09-03 §B5.1): an operator turning
+        // V2.Ambush.Chance re-arms the next run rather than re-rolling a layout
+        // an account already owns, which is why it is not a plan input.
+        std::vector<AmbushSpot> const spots =
+            BuildAmbushPlan(plan, cfg.ambushChancePct, plan.effectiveSeed);
+
+        double const mid = PD_BLOCK_SIZE_YD / 2.0;
+        for (AmbushSpot const& spot : spots)
+        {
+            if (spot.blockIndex >= plan.blocks.size())
+            {
+                // BuildAmbushPlan indexes the plan it was handed, so this is a
+                // contract check rather than a branch a plan can reach - but an
+                // out-of-range read here would be a crash, not a missing trap.
+                LOG_WARN(PD_LOG, "PDv2: instance {} got an ambush spot outside the plan "
+                                 "(block {} of {}) - segment {} gets no ambush",
+                         instance->GetInstanceId(), uint32(spot.blockIndex),
+                         uint32(plan.blocks.size()), spot.segment);
+                continue;
+            }
+
+            Ambush ambush;
+            ambush.spot = spot;
+            // The corridor's OWN sockets are its axis: a straight N|S piece
+            // runs north-south whatever else is around it, and FireAmbush reads
+            // nothing else to decide which way to place the mobs.
+            ambush.socketMask = plan.blocks[spot.blockIndex].socketMask;
+            sPDv2Mgr->BlockToWorld(spot.bx, spot.by, mid, mid, ambush.x, ambush.y, ambush.z);
+
+            // ONE synthetic room's worth of trash, drawn here and stored - not
+            // at the moment the trap fires. Two reasons, and the second is the
+            // load-bearing one: the draw is seeded, so a spot that is rolled at
+            // build time springs the same creatures every time this seed is
+            // entered; and the firing tick is the one place in the run where
+            // the player is already stunned and the server has no business
+            // doing anything it could have done minutes earlier.
+            SpawnSelectInputs in;
+            RoomRequest room;
+            room.roomIndex = 0;
+            room.isBoss = false;
+            in.rooms.push_back(room);
+            in.spawnsPerRoom = cfg.ambushMobs;
+            in.bossRoomAdds = 0;
+            // Everything else exactly as SpawnFromPlan fills it, so an ambush
+            // draws from the same pools, the same band and the same unlock as
+            // the dungeon's own trash. affixPct is copied for the SHAPE of the
+            // stream only: the draw rolls `affixed` per pick either way, and
+            // §B5.3 gives the ambush no affix - proto.affixMask staying 0 below
+            // is what says so.
+            in.casterPct = account.cfgCasterPct;
+            in.affixPct = cfg.affixPct;
+            in.bandMin = account.cfgBandMin;
+            in.unlockedDlvl = static_cast<int>(account.dlvl);
+
+            std::vector<RoomSpawns> out;
+            uint32 const seed = plan.effectiveSeed ^ PD_AMBUSH_SEED_MIX ^
+                                (static_cast<uint32>(spot.segment) * PD_SEGMENT_SEED_STEP);
+            if (sPDv2PackMgr->SelectSpawns(seed, in, out) && !out.empty() &&
+                !out[0].picks.empty())
+            {
+                ambush.picks = out[0].picks;
+            }
+            else if (cfg.ambushMobs > 0)
+            {
+                // The same degradation the room draw takes when the pack SQL
+                // was never applied: placeholder mammoths rather than a trap
+                // that stuns and then does nothing.
+                ambush.picks.assign(static_cast<size_t>(cfg.ambushMobs),
+                                    SpawnPick{ PLACEHOLDER_CREATURE, PACK_ROLE_MELEE, 0 });
+            }
+
+            _ambushes.push_back(ambush);
+
+            // Per spot, not just a count. The Round B log printed only how
+            // many corridors were armed, and when the operator reported "no
+            // ambush" that line could not say whether the trap was in the
+            // corridor he walked or two segments away - the plan had to be
+            // regenerated offline to find out (research
+            // c-research-ambush-trigger.md, closing note). The block is what
+            // the trigger now tests, so the block is what this prints.
+            LOG_INFO(PD_LOG, "PDv2: instance {} armed segment {} at block ({},{}) "
+                             "chunk {} centre ({:.1f},{:.1f})",
+                     instance->GetInstanceId(), ambush.spot.segment,
+                     ambush.spot.bx, ambush.spot.by,
+                     plan.blocks[ambush.spot.blockIndex].chunkId, ambush.x, ambush.y);
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} armed {} corridor(s) with an ambush "
+                         "(chance {}%, {} mob(s) each)",
+                 instance->GetInstanceId(), uint32(_ambushes.size()),
+                 cfg.ambushChancePct, cfg.ambushMobs);
+    }
+
+    void PDv2InstanceScript::TickAmbushes()
+    {
+        if (_ambushes.empty())
+        {
+            return;
+        }
+
+        // Null until the layout's walk grid is built, which is only ever the
+        // case for a run whose kit metadata never loaded. The block test below
+        // stands on its own without it; the grid only refines it.
+        WalkGrid const* grid = GetWalkGrid();
+        Map::PlayerList const& players = instance->GetPlayers();
+        for (Ambush& ambush : _ambushes)
+        {
+            if (!ambush.armed)
+            {
+                continue;
+            }
+            for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
+            {
+                Player* player = it->GetSource();
+                // A dead player does not spring a trap: the corpse run back
+                // through the corridor is not the moment to spend the one
+                // ambush this segment gets. A game master springs nothing at
+                // all - TickVoidZones filters IsGameMaster for the same reason
+                // and it matters more here, because a sprung spot stays spent
+                // until the run is rebuilt: a GM flying the layout to look at
+                // it would otherwise disarm every ambush in the dungeon.
+                if (!player || !player->IsInWorld() || !player->IsAlive() ||
+                    player->IsGameMaster())
+                {
+                    continue;
+                }
+                // The trigger is the BLOCK, not a disc (Round C / C2). A
+                // player cannot cross a corridor block without standing on one
+                // of its cells, whatever the corridor's kind and whichever
+                // pair of sockets they walk between - which is exactly what
+                // the 9 yd disc could not say (header comment on the struct).
+                // Non-negative is part of the test: global cells are
+                // non-negative inside the field, and integer division
+                // truncates towards zero, so a position outside it would
+                // divide to a block it is not in.
+                int gcx = 0, gcy = 0;
+                WorldToCell(player->GetPositionX(), player->GetPositionY(), gcx, gcy);
+                if (gcx < 0 || gcy < 0 ||
+                    gcx / PD_CELLS_PER_BLOCK != ambush.spot.bx ||
+                    gcy / PD_CELLS_PER_BLOCK != ambush.spot.by)
+                {
+                    continue;
+                }
+                if (grid)
+                {
+                    // In the block but off its lane: a corridor block is
+                    // 66.67 yd across and only its lane is floor, so a player
+                    // who got onto the wall band (a jump, a knockback, a GM
+                    // drop) is over the corridor rather than in it. 2D
+                    // throughout, like the barrier hint and for the same
+                    // reason - the dungeon is one floor plane and a Z term
+                    // would only measure the height of a jump.
+                    //
+                    // Known and bounded: a closed barrier takes its four lane
+                    // cells OUT of this grid (SetCellsWalkable), so standing
+                    // exactly in a sealed doorway of an armed corridor does
+                    // not fire the spot. It costs nothing - those four cells
+                    // are the last of the lane, so the player crossed the rest
+                    // of the corridor first and the ambush already had every
+                    // other cell of the block to fire on - and the moment
+                    // OpenBarrier hands the cells back the spot covers them
+                    // again.
+                    GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                    if (!grid->At(cell.x, cell.y))
+                    {
+                        continue;
+                    }
+                }
+                FireAmbush(ambush, player);
+                // Spent. Whoever walked in first is the one it fires on, and
+                // the rest of this player list has nothing left to trigger.
+                break;
+            }
+        }
+    }
+
+    void PDv2InstanceScript::FireAmbush(Ambush& ambush, Player* player)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        // DISARMED FIRST, before anything below can fail. The scan runs four
+        // times a second and a player crosses the block over several seconds:
+        // a spot left armed through a failed summon would stun them again on
+        // the next tick, and again after that. Round C / C2 changed WHAT is
+        // stood in (a corridor block, no longer a disc); it did not change
+        // that a player stands in it for many ticks, which is the reason.
+        ambush.armed = false;
+
+        if (cfg.ambushStunSpell)
+        {
+            // The PLAYER is the caster (design §B5.3): AddAura with a matching
+            // caster and target is the shape that gives the client a real stun
+            // with a debuff icon, and the default 20170 is aura-only with a
+            // flat 2 s duration, so it releases itself and no code here has to
+            // remember to take it off.
+            player->AddAura(cfg.ambushStunSpell, player);
+        }
+        sPDv2UILink->SendNotice(player, "Ambush!");
+
+        // Along the corridor and across it, in WORLD coordinates. The block
+        // frame's u runs south and v runs east (PDv2WorldMath.h: x = MAX -
+        // (by*BLOCK + u), y = MAX - (bx*BLOCK + v)), so u is the world X axis
+        // and v the world Y axis, up to a sign that a symmetric ± pattern does
+        // not care about. A corridor with a north or south socket therefore
+        // runs along world X, and anything else along world Y.
+        //
+        // A corner piece answers both readings; this takes the N|S one and lets
+        // the grid veto sort out the offsets that land in the wall, because
+        // "which of the two halves of an L is the player in" is a question the
+        // block plan cannot answer and the walk grid can.
+        bool const alongWorldX = (ambush.socketMask & (SOCKET_N | SOCKET_S)) != 0;
+
+        WalkGrid const* grid = GetWalkGrid();
+        uint32 born = 0;
+        for (size_t i = 0; i < ambush.picks.size(); ++i)
+        {
+            AmbushOffset const& offset = AMBUSH_OFFSETS[i % AMBUSH_OFFSET_COUNT];
+            float cx = player->GetPositionX() +
+                       (alongWorldX ? offset.along : offset.across);
+            float cy = player->GetPositionY() +
+                       (alongWorldX ? offset.across : offset.along);
+
+            // The same veto SplitOnDeath uses on a child's offset, for the same
+            // reason: gravity is off, so a mob placed past the platform edge
+            // hovers over the void for ever - unreachable, unkillable and
+            // permanently in combat with the player who sprang the trap. The
+            // walk grid is the only thing on this server that knows where floor
+            // is, so it decides; the player's own feet are the fallback,
+            // because the player is provably standing on floor.
+            if (grid)
+            {
+                int gcx = 0, gcy = 0;
+                WorldToCell(cx, cy, gcx, gcy);
+                GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                if (!grid->At(cell.x, cell.y))
+                {
+                    cx = player->GetPositionX();
+                    cy = player->GetPositionY();
+                }
+            }
+
+            PDv2MobData proto;
+            proto.role = ambush.picks[i].role;
+            proto.casterSpellId = ambush.picks[i].casterSpellId;
+            // In no room and in no counter: an ambush is risk on the road, not
+            // progress (design §B5.3, the same exemption the patrol carries).
+            // affixMask is left 0 - "no affix" - even though the draw rolled
+            // the flag.
+            proto.roomIndex = PD_ROOM_NONE;
+            proto.countsForRun = false;
+
+            // Z from the SPOT, never from the player: ambush.z is the floor
+            // plane this corridor was placed at, and a player caught mid-jump
+            // must not hand four gravity-less mobs a permanent hover.
+            Creature* c = SpawnTaggedMob(ambush.picks[i].entry, proto, cx, cy, ambush.z);
+            if (!c)
+            {
+                continue;
+            }
+            ++born;
+
+            // The whole point of the trap: they are already on the player when
+            // the stun ends, rather than waiting to be noticed.
+            if (CreatureAI* ai = c->AI())
+            {
+                ai->AttackStart(player);
+            }
+        }
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} sprang the ambush of segment {} in block "
+                         "({}, {}) on {} - {} mob(s), stun spell {}",
+                 instance->GetInstanceId(), ambush.spot.segment, ambush.spot.bx,
+                 ambush.spot.by, player->GetName(), born, cfg.ambushStunSpell);
+    }
+
+    bool PDv2InstanceScript::CheckpointSpot(float& x, float& y, float& z) const
+    {
+        if (_checkpointRoom < 0 || static_cast<size_t>(_checkpointRoom) >= _roomSpot.size())
+        {
+            return false;
+        }
+        RoomSpot const& s = _roomSpot[static_cast<size_t>(_checkpointRoom)];
+        x = s.x;
+        y = s.y;
+        z = s.z;
+        return true;
+    }
+
+    void PDv2InstanceScript::OnUnitDeath(Unit* unit)
+    {
+        if (!unit || !unit->IsPlayer())
+        {
+            return;
+        }
+
+        // RECORDED ONLY. This hook fires from setDeathState(JustDied)
+        // (Unit.cpp:11439-11440) - the core is still inside Unit::Kill, and
+        // KillPlayer has not yet set the corpse state or the death timer, so
+        // anything resurrected from in here would be killed again on the way
+        // out. RespawnPending does it on the next 1 Hz tick instead, and that
+        // one second is the whole window the release veto in PDClientLink
+        // exists to cover.
+        _pendingRespawn[unit->GetGUID()] = getMSTime();
+        LOG_DEBUG(PD_LOG, "PDv2: {} died in instance {} - respawn on the next tick",
+                  unit->GetName(), instance->GetInstanceId());
+    }
+
+    void PDv2InstanceScript::RespawnPending()
+    {
+        if (_pendingRespawn.empty())
+        {
+            return;
+        }
+
+        // Taken out and the map emptied BEFORE anything below runs. Every
+        // branch drops its entry anyway, so this changes no outcome - but
+        // ResurrectPlayer walks UpdateZone and the aura machinery, and an
+        // iterator into _pendingRespawn held across that would dangle the
+        // moment any of it reached back into OnUnitDeath and rehashed the
+        // map. A death recorded while this loop runs is a NEW death and
+        // belongs to the next tick, which is exactly what it gets.
+        std::vector<std::pair<ObjectGuid, uint32>> due(_pendingRespawn.begin(),
+                                                       _pendingRespawn.end());
+        _pendingRespawn.clear();
+
+        for (auto const& entry : due)
+        {
+            // GetPlayer(Map const*, guid) already answers nullptr for anyone
+            // who is not in world on THIS map, so a player who left, logged
+            // out or was evicted simply drops out here: the core owns them.
+            Player* player = ObjectAccessor::GetPlayer(instance, entry.first);
+            if (!player || player->IsAlive())
+            {
+                continue;               // gone, or someone else resurrected them
+            }
+
+            // Alive, full health and NO resurrection sickness: the second
+            // parameter of Player::ResurrectPlayer(float restore_percent,
+            // bool applySickness) IS the sickness switch - false returns
+            // early at src/server/game/Entities/Player/Player.cpp:4446,
+            // before the CastSpell(this, 15007) at :4460 that would apply
+            // it. Dying in a run costs neither the sickness (operator, T2
+            // 2026-09-08) nor durability.
+            // SpawnCorpseBones is a no-op when the player never released, and
+            // when they did it only clears the ghost flag and re-saves the
+            // auras - it never writes the position, so dying in here can
+            // never be what stores a character on this map.
+            uint32 const waitedMs = GetMSTimeDiffToNow(entry.second);
+            player->ResurrectPlayer(1.0f, false);
+            player->SpawnCorpseBones();
+
+            // Where to (Round C / C5): the furthest cleared boss hall, else
+            // the entrance. Both are COMPUTED from the run's own state - the
+            // player never chose either, which is the whole point of dropping
+            // B1's clickable altars. Returning to the entrance is the normal
+            // case for the first half of a run, not a fallback, so it is not
+            // logged as a warning any more. If there is not even an entrance,
+            // nowhere - they rise where they fell, because (0, 0, 0) on a
+            // composed map is the void and the fall catcher that would rescue
+            // them from it is switched off by the same missing entrance that
+            // got us here.
+            float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+            if (CheckpointSpot(cx, cy, cz))
+            {
+                player->TeleportTo(instance->GetId(), cx, cy, cz + 2.0f, 0.0f);
+                sPDv2UILink->SendNotice(player, "You return to the last boss's hall.");
+                LOG_INFO(PD_LOG, "PDv2: {} returned alive to the hall of chain room {} in "
+                                 "instance {} after {} ms",
+                         player->GetName(), _checkpointChain, instance->GetInstanceId(), waitedMs);
+            }
+            else if (_haveEntrance)
+            {
+                player->TeleportTo(instance->GetId(), _entranceX, _entranceY, _entranceZ + 2.0f, 0.0f);
+                sPDv2UILink->SendNotice(player, "You return to the entrance.");
+                LOG_INFO(PD_LOG, "PDv2: {} returned alive to the entrance of instance {} "
+                                 "after {} ms",
+                         player->GetName(), instance->GetInstanceId(), waitedMs);
+            }
+            else
+            {
+                sPDv2UILink->SendNotice(player, "You rise again where you fell.");
+                LOG_WARN(PD_LOG, "PDv2: instance {} has no entrance - {} was resurrected "
+                                 "in place after {} ms",
+                         instance->GetInstanceId(), player->GetName(), waitedMs);
+            }
         }
     }
 
@@ -1284,6 +3466,21 @@ namespace PDungeon
         {
             _fallCheckTimer = FALL_CHECK_INTERVAL_MS;
             CatchFallers();
+            // After the fall catcher on purpose: a player who died BELOW the
+            // floor is first pulled back onto the map by CatchFallers and
+            // then sent on to their checkpoint, so the checkpoint is the
+            // teleport that lands last and the ordering never leaves a corpse
+            // in the void.
+            RespawnPending();
+            // Round B / B3. After the respawn, so a player who just landed at
+            // their checkpoint is measured where they actually are; a barrier
+            // only ever talks, so its place in the tick is free.
+            HintBarriers();
+            // Round C / C8. After the barrier hint and before the eviction
+            // sweep, because both of those talk to players and the finale's
+            // own notice belongs in the same second as the line that earned
+            // it. Inert on every tick of every run that has not finished.
+            TickFinale();
             EvictDisconnected();
             TickVoidZones();
 
@@ -1303,6 +3500,20 @@ namespace PDungeon
         else
         {
             _fallCheckTimer -= diff;
+        }
+
+        // Round B / B5, on its own cadence and AFTER the 1 Hz branch. A player
+        // the respawn just teleported to their checkpoint is measured where
+        // they now are rather than where they died, the only ordering that
+        // cannot spring a trap at a position the player no longer occupies.
+        // Accumulating rather than counting down: the map ticks at 10 ms, so
+        // the remainder above 250 is a fraction of one tick and dropping it
+        // costs nothing.
+        _ambushTimer += diff;
+        if (_ambushTimer >= AMBUSH_SCAN_MS)
+        {
+            _ambushTimer = 0;
+            TickAmbushes();
         }
     }
 }

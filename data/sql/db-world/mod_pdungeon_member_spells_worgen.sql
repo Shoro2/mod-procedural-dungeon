@@ -1,0 +1,701 @@
+-- ----------------------------------------------------------------------------
+-- mod-procedural-dungeon: combat kits for pack 6 "Shadowfang Pack" (world DB)
+--
+-- 25 rows for the 8 members of pack 6 (see mod_pdungeon_packs_worgen.sql): three
+-- per trash creature, and FOUR for the BOSS 27580 Selas, which carries a second
+-- minDiff 1 row since Round C / C6. Column order and cadence rule match the
+-- shipped mod_pdungeon_member_spells.sql exactly:
+--
+--   MELEE + BOSS   position 1  cd 6000-8000 ms   minDiff 1
+--                  position 2  cd 8000-10000 ms  minDiff 50
+--                  position 3  cd 8000-12000 ms  minDiff 75
+--   RANGE          position 1  the slot-0 filler, cd 0, minDiff 1
+--                  position 2  cd 8000-10000 ms  minDiff 50
+--                  position 3  cd 8000-12000 ms  minDiff 75
+--   CC             ALWAYS cd 60000, and NEVER position 1
+--
+-- with that file's one Round C / C6 exception (operator, 2026-09-08: "2 Basis,
+-- dann je eine auf 50 und 75"): a BOSS carries a SECOND row at position 1 at
+-- cd 9000 ms, deliberately past the 6000-8000 band so that two base abilities
+-- together do not double what one boss put out before. `position` was never a
+-- database column - `slot` tells the RANGE filler apart and nothing else - so
+-- the boss's two position-1 rows are two rows at minDiff 1 sharing slot 1.
+--
+-- Inside a band the heavier ability takes the longer end: 6000 a light single
+-- weapon strike, 7000 a cleave or a normal single-target ability, 8000+ an AoE,
+-- a DoT, a channel or anything with a cast time.
+--
+-- ROW ORDER IS PRIORITY ORDER. The loader queries
+-- `ORDER BY entry, slot, minDiff, spellId` (PDv2PackMgr.cpp:243-245) and the AI
+-- casts the FIRST ready row (PDv2CreatureAI.cpp:1449-1471). The boss's two
+-- minDiff-1 rows therefore sort 16169 before 33813, i.e. the 7000 ms opener
+-- really is the higher-priority row and the 9000 ms one is the follow-up. (The
+-- first version of this file had 42397 @9000 sorting ahead of 70191 @7000 and
+-- said the opposite in its comment.)
+--
+-- Every damage figure below is the base value BEFORE the difficulty multiplier.
+-- GameClampDiff holds difficulty in [1, 100] (generator/PDv2GameMath.h:50-51,
+-- 175-182), so there is no "difficulty 0" state: the smallest multiplier the
+-- module can apply to these numbers is 102 % (100 + difficulty x 2, the deployed
+-- V2.Diff.DamagePctPerLevel; PDv2Scaling.cpp:128-131), and 250 % at difficulty
+-- 75, where the tier-75 rows unlock.
+--
+-- ----------------------------------------------------------------------------
+-- IDENTITY - how every id below was verified (2026-09-09, this box)
+--
+-- The authority is C:\wowstuff\dcore\Data\dbc\Spell.dbc (55100 records, 234
+-- fields, 936-byte records - the file the worldserver actually loads), NOT
+-- acore_world.spell_dbc, which is an unrelated custom FL table and holds NONE of
+-- these ids (verified: SELECT ID FROM spell_dbc WHERE ID IN (...) -> 0 rows).
+-- The 234-field layout comes from the 234-column CREATE TABLE spell_dbc in
+-- azerothcore-wotlk/data/sql/base/db_world/spell_dbc.sql, and every effect /
+-- aura / mechanic / target label is parsed live out of the core's own
+-- SharedDefines.h and SpellAuraDefines.h, so a label here cannot drift from the
+-- numbering the running worldserver.exe was built from.
+--
+-- That "the DBC is the authority" rule holds for Spell.dbc and for spell_dbc
+-- ONLY. It does NOT generalise: several DBC stores are loaded through
+-- LOAD_DBC(store, "File.dbc", "table_dbc") and the world table then overrides
+-- and extends the file. Two of them decide things this pack leans on - map_dbc
+-- (which is the only reason map 760 exists at all) and spelldifficulty_dbc. See
+-- the SPELLDIFFICULTY block.
+--
+-- 24 distinct spell ids, each checked for: identity (the spell IS what the
+-- comment claims), effect shape, implicit target, radius, cast time, mechanic /
+-- aura CC status, power cost, reach from where the mob will stand,
+-- EffectRealPointsPerLevel (a base-points reading alone misses spells that
+-- scale - see the 8599 finding below), EffectChainTargets (a base-points and
+-- radius reading alone misses spells that JUMP - see the 45031 finding below),
+-- AND SpellDifficulty (an identity reading alone misses spells the core SWAPS
+-- on an instance map - see the SPELLDIFFICULTY block below, which is why three
+-- rows of the previous revision are gone).
+--
+-- The damage column below is the id AS WRITTEN. Four ids are difficulty-swapped
+-- on map 760 and are marked (SD); for those the column carries the dungeon-NORMAL
+-- value the core actually casts, with the heroic value beside it. The SAME
+-- convention and the same (SD) marker now run through the per-row comments on the
+-- INSERT itself: an earlier revision marked them nowhere and quoted the HEROIC
+-- figure on two of the four (59021 as 6475-7525, 59126 as 8788-10212), which is
+-- the un-cast value on the only spawn mode map 760 can run.
+--
+--   id     name                dmg @80 (measured)      shape
+--   14516  Strike              weapon swing + 247      WEAPON_DAMAGE, single, 5 yd
+--   59021  Vicious Bite (SD)   3238 - 3762             SCHOOL_DAMAGE, single, 5 yd
+--                              (heroic 59021: 6475-7525; normal casts 55602)
+--   42395  Lacerating Slash    15615 (1735 x 9 @2 s)   PERIODIC_DAMAGE bleed 18 s, 5 yd
+--   48640  Strike              weapon swing x 1.50     WEAPON_PERCENT_DAMAGE, single, 5 yd
+--   50729  Carnivorous Bite    5725 - 6105             1710-2090 + bleed 803 x 5, 5 yd
+--   59126  Shadow Breath (SD)  6938 - 8062             SCHOOL_DAMAGE, CONE_ENEMY_24, 15 yd
+--                              (heroic 59126: 8788-10212; normal casts 57570)
+--   42746  Cleave              weapon swing x 1.10     WEAPON_PERCENT_DAMAGE, 5 yd,
+--                                                      EffectChainTargets 3 (melee chain)
+--   69900  Spirit Burst (SD)   3238 - 3762             SCHOOL_DAMAGE, TARGET_SRC_CASTER r15
+--                              (heroic casts 73046: 4625-5375, same shape)
+--   36965  Rend                11250 (2250 x 5 @3 s)   PERIODIC_DAMAGE bleed 15 s, 5 yd
+--   59992  Cleave              weapon swing + 240      WEAPON_DAMAGE, 5 yd,
+--                                                      EffectChainTargets 3 (melee chain)
+--   55249  Whirling Slash      5828 - 6172             2828-3172 + bleed 1000 x 3, SRC_CASTER r5
+--   11428  Knockdown (SD)      150 - 166 + 2 s stun    MOD_STUN, Mechanic 12 STUN, 5 yd -- THE ONE CC
+--                              (heroic casts 46183: the SAME 2 s MOD_STUN plus
+--                               weapon x 0.23-0.27 instead of the flat 150-166)
+--   69211  Shadow Bolt         1313 - 1687             SCHOOL_DAMAGE, 30 yd, 2.2 s cast
+--   54889  Shadow Shock        2960 - 3440             SCHOOL_DAMAGE, TARGET_SRC_CASTER r25
+--   61563  Corruption          9990 - 11610            PERIODIC_DAMAGE 6 x @2 s, 30 yd
+--   60015  Shadow Bolt         1273 - 1427             SCHOOL_DAMAGE, 40 yd, 3.0 s cast
+--   60016  Corruption          5400 (675 x 8 @3 s)     PERIODIC_DAMAGE 24 s, 30 yd, instant
+--   30854  Shadow Word: Pain   9000 (1500 x 6 @3 s)    PERIODIC_DAMAGE 18 s, 30 yd, instant
+--   69124  Seeping Darkness    4788 - 5912             1943-2257 + PERIODIC_DAMAGE 569-731
+--                                                      x 5 @2 s over 10 s, single target,
+--                                                      EffectChainTargets 0, 30 yd, 2.0 s
+--   40736  Death Blast         11563 - 13437           SCHOOL_DAMAGE, single, 60 yd, 2.5 s
+--   16169  Arcing Smash        weapon swing + 400      WEAPON_DAMAGE, CONE_ENEMY_24, radius 8
+--   33813  Hurtful Strike      12350 - 13650           SCHOOL_DAMAGE, single, 5 yd, instant
+--   42397  Rend Flesh          17525 - 18825           5850-7150 + bleed 2335 x 5, 5 yd
+--   28308  Hateful Strike      19975 - 27025           SCHOOL_DAMAGE, single, 5 yd, instant
+--
+-- EVERY one of the 24 is ManaCost 0 AND ManaCostPct 0, rangeMin 0,
+-- MaxTargetLevel 0, TargetCreatureType 0, EquippedItemClass -1 or 2, and none
+-- has a SpellDuration of -1 on a periodic aura. There is no longer a single
+-- mana-costing row in this file (the first version carried 48125 Shadow Word:
+-- Pain at 0 flat / 22%), which removes the whole CheckPower risk class rather
+-- than arguing it away.
+--
+-- ----------------------------------------------------------------------------
+-- CHAIN TARGETS - the field a radius reading does not see
+--
+-- Spell::SelectImplicitTargetObjectTargets calls SelectImplicitChainTargets
+-- unconditionally (Spell.cpp:1856) and that function fires whenever
+-- Effects[i].ChainTarget > 1 (Spell.cpp:1863-1888) - it never looks at
+-- EffectRadiusIndex. So a spell can hit several players with radius 0 and
+-- TARGET_UNIT_TARGET_ENEMY, which is exactly what the first version of this file
+-- got wrong about 45031 (see the EXCLUDED block).
+--
+-- All 24 ids were re-read for EffectChainTargets_1..3. Exactly two carry a
+-- chain, and both are MELEE-class rows on melee members:
+--
+--   42746 Cleave   DefenseType 2 MELEE, EffectChainTargets 3
+--   59992 Cleave   DefenseType 2 MELEE, EffectChainTargets 3
+--
+-- For SPELL_DAMAGE_CLASS_MELEE, SearchChainTargets (Spell.cpp:2137-2183; the
+-- front-arc filter is at :2182-2183) uses jumpRadius 10.0 with isBouncingFar
+-- FALSE, so searchRadius stays 10 yd, the HasInArc(PI) filter applies and every
+-- jump needs line of sight - a cleave that splashes onto players standing in
+-- front of the mob, which is what a cleave is. Per-jump falloff is
+-- SpellEffectInfo::DamageMultiplier (= EffectChainAmplitude,
+-- DBCStructure.h:1737) and it is 1.00 on both, so each splash takes full weapon
+-- damage. Both already ship that way: 59992 on 84264, 84284, 84288, 28349,
+-- 25352, 20403, 18871 and (in the concurrent cult pack) 29934, and 42746 on
+-- 11551, 30277 and 29309 - so the behaviour is corpus-normal and only the old
+-- "5 yd single" comment was wrong. NO role-1 row in this file chains, and the
+-- three ids the third review wave brought in (28308, 33813, 40736) are all
+-- EffectChainTargets 0, so the count above is still exactly two.
+--
+-- ----------------------------------------------------------------------------
+-- SPELLDIFFICULTY - the id in the row is NOT always the id the core casts
+--
+-- map 760 is an INSTANCE map. acore_world.map_dbc: ID 760, Directory 'FLPD',
+-- InstanceType 1 = MAP_INSTANCE (DBCEnums.h:347), MaxPlayers 5. Map.dbc on disk
+-- stops at 754, so 760 reaches sMapStore through that world table
+-- (DBCStores.cpp:358). MapEntry::IsDungeon() is therefore true
+-- (DBCStructure.h:1351), Map::IsDungeon() is true (Map.h:297), and
+-- MapInstanced::CreateInstanceForPlayer takes player->GetDifficulty(IsRaid())
+-- (MapInstanced.cpp:140) - the player's DUNGEON difficulty, which the module
+-- agrees with at PDMgr.cpp:122. GetSpawnMode() is therefore 0 (normal) or 1
+-- (heroic), never 2 or 3.
+--
+-- Every cast then runs through a substitution before the SpellInfo is even
+-- chosen:
+--
+--   Spell::Spell           m_spellInfo(sSpellMgr->GetSpellForDifficultyFromSpell(
+--                          info, caster))                       Spell.cpp:571-572
+--   SpellMgr::GetSpellIdForDifficulty                       SpellMgr.cpp:538-578
+--       returns SpellDifficultyEntry::SpellID[GetSpawnMode()] for any spell that
+--       has a difficulty id, on any dungeon or battleground map
+--
+-- and the searcher that decides "has a difficulty id" registers EVERY non-zero
+-- SpellID[x] of every record, not only index 0 (DBCStores.cpp:462-487), so a
+-- heroic-only rank maps back to its family just as its normal rank does. PDv2
+-- casts through DoCastVictim (PDv2CreatureAI.cpp:1471) -> Unit::CastSpell -> the
+-- Spell constructor, so the substitution is unavoidable.
+--
+-- THE TRAP THIS FILE FELL INTO TWICE. The store is NOT the DBC alone. It is
+-- loaded as LOAD_DBC(sSpellDifficultyStore, "SpellDifficulty.dbc",
+-- "spelldifficulty_dbc") (DBCStores.cpp:358), and LoadDBC calls
+-- storage.LoadFromDB after the file (DBCStores.cpp:239-240) -> DBCStore.cpp:74-76
+-- -> DBCDatabaseLoader::Load, whose last loop writes every world row straight
+-- into the index table (DBCDatabaseLoader.cpp:124-129). So the WORLD TABLE
+-- OVERRIDES AND EXTENDS THE FILE. Measured on this box 2026-09-09:
+-- SpellDifficulty.dbc has 581 records, acore_world.spelldifficulty_dbc has 604,
+-- and the merged searcher covers 2942 spell ids against the file's 1749. Reading
+-- only the .dbc finds two substituted ids in this file; reading what the core
+-- actually loads finds SEVEN.
+--
+-- Measured for all 24 ids of this file, both modes, after the merge:
+--
+--   59021 Vicious Bite    55602 / 59021   normal 3238-3762   heroic 6475-7525
+--   59126 Shadow Breath   57570 / 59126   normal 6938-8062   heroic 8788-10212
+--   69900 Spirit Burst    69900 / 73046   normal 3238-3762   heroic 4625-5375
+--   11428 Knockdown       11428 / 46183   normal 150-166     heroic weapon x0.23
+--                                         (the 2 s MOD_STUN is identical in both)
+--   the other 20 ids have no difficulty id in the file OR the world table
+--
+-- Those four keep their member's climb in BOTH modes, so they stay and are
+-- disclosed here rather than swapped. THREE ids did not, and are gone:
+--
+--   67860 Impale     diff 722 [65919, 67858, 67859, 67860]. 67860 is the
+--        25-man-heroic rank, which a 5-man map can never select: mode 0 casts
+--        65919 and mode 1 casts 67858, both 14138-15862. The row was the BOSS's
+--        tier-75 payload and was documented as 17672-19828, so the boss's
+--        tier-75 row was in fact LIGHTER than his tier-50 row (17525-18825) and
+--        "EVERY KIT CLIMBS" was false for him. Replaced by 28308 Hateful Strike.
+--   48130 Gore       diff 48130 [48130, 59264]. Correct on normal (12598-13402)
+--        but 26138-27862 on heroic, i.e. the BOSS's minDiff-1 row out-damaged
+--        both of his gated rows for any party on heroic. Replaced by 33813
+--        Hurtful Strike.
+--   57464 Shadow Bolt diff 57374 [57374, 57464]. 2529's tier-75 row: on normal
+--        the core casts 57374 for 2357-2643, BELOW that member's own tier-50 row
+--        (69124, 4788-5912). A difficulty-gated row that reduces output is the
+--        exact defect the climb block below says this file eliminated. Replaced
+--        by 40736 Death Blast.
+--
+-- The three replacements were picked from a Spell.dbc sweep filtered on the
+-- MERGED searcher, so none of them has a difficulty id at all - the id written in
+-- the row is the id the core casts, in both modes. ONE property is lost with
+-- 67860 and is stated rather than quietly dropped: nothing in this file ignores
+-- armour any more. acore_world.spell_custom_attr (423 rows) was re-queried for
+-- all 24 ids after the swap and returns ZERO, where 67860 was the file's one
+-- SPELL_ATTR0_CU_IGNORE_ARMOR (SpellInfo.h:192) hit. The boss's tier-75 payload
+-- is now ordinary mitigated single-target physical, which is why 19975-27025
+-- replaces a row that read as 17672-19828: at difficulty 75 the outgoing
+-- multiplier is 250 %, so ~50-68 k before armour against the ~44-50 k
+-- unmitigated the old row was claimed to do - and against the ~35-40 k it would
+-- actually have done. The boss keeps an AoE: his tier-0 16169 Arcing Smash is an
+-- 8 yd cone, and 59126 Shadow Breath (3854) and 55249 Whirling Slash (3859) are
+-- still the pack's other area rows. The trade is deliberate: an armour-ignoring
+-- cone that never fires is worth less than a mitigated hit that does.
+--
+-- ----------------------------------------------------------------------------
+-- SPELLSCRIPTS - two rows had one bound in acore_world.spell_script_names
+--
+-- A global SpellScript runs no matter which AI holds the caster, so PDv2's
+-- AllCreatureScript binder does NOT protect a pack from one. Every id considered
+-- for this pack was therefore looked up in that table (2787 rows), and two hits
+-- came back:
+--
+--   67879 Claw  -> spell_black_knight_ghoul_claw
+--        (boss_black_knight.cpp:450-470). Its OnEffectHitTarget handler calls
+--        GetCaster()->GetThreatMgr().ResetAllThreat() and then re-targets a
+--        RANDOM player within 30 yd. On a PDv2 mob that is a threat wipe and a
+--        forced target switch every time the row fires - a tank can never hold
+--        anything that carries it. It was the first version's 3852 opener; it is
+--        gone from this file. NOTE FOR A FUTURE CORPUS PASS, NOT FIXED HERE
+--        (other files, other owners): 67879 is also live on 84271, 84273, 31528
+--        and 31847, and appears in mod_pdungeon_member_spells_cult.sql (11551)
+--        and mod_pdungeon_member_spells_faceless.sql (31104).
+--
+--   41351 Curse of Vitality -> spell_black_temple_curse_of_vitality_aura.
+--        Considered as a caster tier-50 row and dropped for this reason before
+--        it ever reached a row.
+--
+-- No id in the 24 above has a spell_script_names row, a spell_linked_spell row
+-- (either side), an acore_world.spell_dbc override, a spell_group,
+-- spell_proc, spell_target_position, spell_jump_distance, spell_bonus_data,
+-- spell_required, spell_ranks or spell_area row. All of them were queried for
+-- the full set, and the same queries return 67879 and 41351, which is the
+-- evidence that they measure rather than agree.
+--
+-- ----------------------------------------------------------------------------
+-- SELF-BUFFS - 8599 Enrage is a Berserk-class buff, not a +10% one
+--
+-- The first version of this file carried 8599 Enrage on 3854 at tier 50 and on
+-- the boss at tier 50, described as "self damage + haste buff" on the strength
+-- of its base points. Measured WITH EffectRealPointsPerLevel:
+--
+--   8599 Enrage  eff1 SPELL_AURA_MOD_DAMAGE_PERCENT_DONE (school mask 1)
+--                     basePoints 10, EffectRealPointsPerLevel 1.0, baseLevel 1
+--                     -> 10 + (80-1) x 1.0 = +89% PHYSICAL DAMAGE at level 80
+--                eff2 SPELL_AURA_MOD_MELEE_HASTE +30%
+--                duration 120000 ms, i.e. the rest of the fight
+--
+-- An 89%-damage / 30%-haste self buff that never falls off is the run-killer
+-- class this project excludes by name. It is gone, and so is the whole
+-- self-buff category in this pack; the same measurement rejected 8269 Frenzy
+-- (+158 flat damage, +60% melee haste), 32714 Enrage (+50% melee haste) and
+-- 52071 Killing Rage (+100% melee haste, Selas's own). 7072 Wild Rage, the
+-- first version's 3859 tier-50 row, fails the opposite way: MOD_DAMAGE_DONE is
+-- a FLAT +25 damage at level 80, i.e. a measured no-op.
+--
+-- ----------------------------------------------------------------------------
+-- FILLERS - inside the shipped band
+--
+-- A slot-0 filler is cast whenever it is ready, so its output is damage divided
+-- by cast time. Measured against every filler LIVE in the database
+-- (SELECT spellId, GROUP_CONCAT(entry) FROM pdungeon_member_spells WHERE slot = 0
+-- GROUP BY spellId), so the entry lists below are shipped entries only - the two
+-- packs authored beside this one add more, and are deliberately not mixed in:
+--
+--   47857 Drain Life R9      133/s x 5 s / 5.0 s  =        133 dps   (84276)
+--   47809 Shadow Bolt R13    694 - 774   / 3.0 s  =  231 - 258 dps   (84263/84281/84287)
+--   42842 Frostbolt R16      803 - 865   / 3.0 s  =  268 - 288 dps   (84285)
+--   22088 Fireball           765 - 1035  / 2.5 s  =  306 - 414 dps   (30482/18859)
+--   60015 Shadow Bolt       1273 - 1427  / 3.0 s  =  424 - 476 dps   (30203/28350/31529/24919)
+--   69211 Shadow Bolt       1313 - 1687  / 2.2 s  =  597 - 767 dps   (32284/18870)
+--
+-- The first version gave 3853 the filler **61562 Shadow Bolt**: 4250-5750 on a
+-- 1.5 s cast = 2833-3833 dps, i.e. 3.7x to 5.0x the top of that band and ~10x
+-- the pack's own second caster. It is gone. This file's three fillers are 69211
+-- (597-767 dps) and 60015 twice (424-476 dps) - both already shipped as fillers
+-- on four and three corpus entries respectively, both 0 flat / 0 percent, both
+-- reaching well past the deployed V2.CastRangeYd of 25.0 (30 and 40 yd), and
+-- 69211 is the corpus ceiling rather than a new one.
+--
+-- Two casters sharing one filler id is corpus-normal: shipped pack 4 gives 60015
+-- to both 28350 and 30203.
+--
+-- ----------------------------------------------------------------------------
+-- EVERY KIT CLIMBS, and no boss row is a trash row of this pack
+--
+-- The first version had five measured no-ops (7122 Blood Tap 20, 22644 Blood
+-- Leech 240, 16509 Rend 135, 17228 Shadow Bolt Volley 128-172, 15588
+-- Thunderclap 251-259) sitting beside 17500-damage rows, three of them in a
+-- difficulty-GATED slot - so unlocking tier 75 made a mob hit for less than its
+-- own tier-0 row. All five are gone, and so are the three rows the
+-- SPELLDIFFICULTY block found doing the same thing by a different route.
+-- Measured per-member curves before the difficulty multiplier, at the DUNGEON-
+-- NORMAL substitution (weapon rows quoted for a dm 1.7 exp-0 uc1 swing of
+-- 317-397, and 1939-2698 for the exp-2 dm 4.6 boss - GenerateBaseDamage picks
+-- the base column by creature_template.exp, CreatureData.h:332-335):
+--
+--   3914  564-644  ->  3238-3762   ->  15615            climbing
+--   3854  476-596  ->  5725-6105   ->  6938-8062        climbing
+--   3857  349-437  ->  3238-3762   ->  11250            climbing
+--   3859  557-637  ->  5828-6172   ->  the CC           the CC is the tier-75 payload
+--   3853 1313-1687 ->  2960-3440   ->  9990-11610       climbing
+--   3855 1273-1427 ->  5400        ->  9000             climbing
+--   2529 1273-1427 ->  4788-5912   ->  11563-13437      climbing
+--   27580 2339-3098 / 12350-13650  ->  17525-18825  ->  19975-27025   climbing
+--
+-- and on dungeon-HEROIC only three NUMERIC cells move, all three upward, so every
+-- curve still climbs there too: 3914's tier-50 becomes 6475-7525, 3854's tier-75
+-- becomes 8788-10212 and 3857's tier-50 becomes 4625-5375. The boss's four rows
+-- and 2529's three are identical in both modes.
+--
+-- The FOURTH substituted cell moves DOWNWARD, and "all upward" is true only of
+-- the three numeric ones: 3859's tier-75 is the CC, 11428 -> 46183, which trades
+-- a flat 150-166 for WEAPON_PERCENT_DAMAGE 23-27 % = 73-107 against that member's
+-- own 317-397 swing. Nothing is concealed by it - the SPELLDIFFICULTY table above
+-- prints "heroic weapon x0.23" and the climb row reads "the CC" rather than a
+-- number, because the 2 s MOD_STUN is the payload and is identical in both modes
+-- - but the sentence is stated precisely here so the next reader does not have to
+-- re-derive which of the four it excludes. On map 760 none of this is reachable
+-- today: mapdifficulty_dbc holds exactly one row for 760 (id 857, Difficulty 0,
+-- MaxPlayers 5), so GetSpawnMode() is always 0.
+--
+-- (The boss's tier-0 row 16169 carries SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE, so
+-- it REPLACES the swing rather than adding to it: 1939-2698 + 400.)
+--
+-- BOSS ROW REUSE, measured across all five kit files at this commit. None of the
+-- boss's four rows is carried by any member of PACK 6, so a player who has
+-- cleared four pack-6 trash rooms still meets four new abilities in the boss
+-- room. Across the module the picture is:
+--
+--   16169 Arcing Smash    pack 6 BOSS t0 cd7000 | pack 7 TRASH 10488 t0 cd6000
+--                                               | pack 8 TRASH 31104 t0 cd6000
+--   33813 Hurtful Strike  pack 6 BOSS t0 cd9000 | carried by NO other pack
+--   42397 Rend Flesh      pack 6 BOSS t50       | pack 2 TRASH 84275 t0
+--                                               | pack 4 TRASH 28349 t50
+--                                               | pack 5 TRASH 19746 t75
+--   28308 Hateful Strike  pack 6 BOSS t75       | carried by NO other pack
+--
+-- (84275 Grotesque Brute and 84286 Disgusting Larva are pack 2 "Abyssal
+-- Broodpit", not pack 1 "Crypt Horrors" - an earlier revision of this table, and
+-- the review that produced it, both mislabelled them. Measured in the shipped
+-- mod_pdungeon_packs.sql at lines 136 and 142.)
+--
+-- An earlier revision of this file claimed 16169 was "used by no other pack in
+-- the module". That was FALSE when it was written: pack 7's 10488 Risen
+-- Construct already opened with it, and pack 8's 31104 has since. The claim is
+-- withdrawn rather than repaired by a swap, because id reuse across packs is
+-- corpus-normal by design (the fillers are shared deliberately) and because the
+-- two sibling files are being authored concurrently, so no "no other pack has
+-- it" claim about a generic melee id can stay true for long. The same caveat
+-- covers the two "NO other pack" cells above: they are true across all ten kit
+-- files at this commit and are stated as a measurement, not as a design promise.
+-- What carries the boss-identity argument instead is measurable and stable: his
+-- four rows are new to anyone who only fought THIS pack, his tier-75 row is the
+-- heaviest thing in his kit in BOTH dungeon modes, his health is 4.72x his own
+-- trash and his melee 6.5x. He no longer shares a row with any other BOSS: 67860
+-- Impale, which 84290 Mor'Kar carries at tier 50, left with the SpellDifficulty
+-- swap.
+--
+-- ----------------------------------------------------------------------------
+-- CC CLASSIFICATION (aura / mechanic read out of Spell.dbc, not guessed)
+--
+--  spell  name        why it is CC                                placed
+--  11428  Knockdown   Mechanic 12 STUN, aura SPELL_AURA_MOD_STUN  3859 @75
+--
+-- That is the WHOLE CC budget of pack 6: one row, on the melee member the scale
+-- ladder already marks as one of the biggest plain worgen, at cooldownMs 60000
+-- and minDiff 75, never in slot 0. SpellDuration is 2000 ms, so a 2 s stun on a
+-- 60 s cooldown that cannot chain. No other row in this file carries a CC
+-- mechanic or a CC aura - the whole file was re-scanned for the
+-- fear/stun/root/sleep/silence/disorient/horror/charm set. Despite the name
+-- there is no knock-back anywhere in this file, which is the one thing map 760's
+-- missing terrain could not survive.
+--
+-- MECHANIC_BLEED (15) on 42395, 36965, 55249, 50729 and 42397 is NOT CC -
+-- it is a damage-type tag, it is not in the operator's list, and the shipped
+-- file's own written doctrine already excludes snare and interrupt on the same
+-- grounds.
+--
+-- Two CC candidates were deliberately NOT taken, because the budget is one:
+--   7295 Soul Drain    3914 Rethilgore's OWN spell (smart_scripts) - but its
+--        effect2 is SPELL_AURA_MOD_ROOT for 10 s at 40 yd, which would be a
+--        SECOND CC and a far heavier one than the 2 s stun.
+--   53239 Axe Volley   27580 Selas's OWN opener - and the reason it could never
+--        have been used anyway: both of its effects target TARGET_UNIT_CASTER,
+--        a PERIODIC_TRIGGER_SPELL on the holder plus SPELL_AURA_MOD_ROOT on the
+--        holder. It would root the boss in place for 4 s every time it fired.
+--
+-- ----------------------------------------------------------------------------
+-- POWER COST
+--
+-- Six of the eight members are unit_class 1 (2529, 3854, 3857, 3859, 3914,
+-- 27580). creature_classlevelstats has basemana 0 for class 1 at every level, so
+-- Creature::SelectLevel gives them CreateMana 0 and Power(MANA) 0. From the
+-- engine, not from a rule of thumb: SpellInfo::CalcPowerCost adds
+-- ManaCostPercentage as a percentage OF GetCreateMana() - 0 - so a
+-- percentage-only cost resolves to 0, while a FLAT ManaCost is added
+-- unconditionally and Spell::CheckPower then fails with NO_POWER.
+--
+-- Every one of the 24 spell ids in this file is 0 flat AND 0 percent, on every
+-- member, filler and cooldown row alike. That is stronger than the rule needs
+-- and it is deliberate: Creature::Regenerate gives an in-combat creature only
+-- Spirit/5 + 17 mana per interval, so a percentage-cost row empties even a real
+-- pool in six to nine casts and then fails silently for the rest of the fight.
+-- The two unit_class 2 casters (3853, 3855) have 7988 mana at level 80 and never
+-- spend a point of it.
+--
+-- ----------------------------------------------------------------------------
+-- REACH - what "range" means for a PDv2 caster
+--
+-- UpdateCasterCombat plants a role-1 mob wherever it happens to be INSIDE
+-- V2.CastRangeYd - me->IsWithinCombatRange(victim, castRange), not "at exactly
+-- 25 yd" (PDv2CreatureAI.cpp:1490-1500) - and the cooldown is spent on the
+-- ATTEMPT (PDv2CreatureAI.cpp:1465-1470), so a spell that refuses for range
+-- costs the mob a whole rotation slot rather than being retried. Every row on a
+-- role-1 member here therefore reaches at least 25 yd: the fillers are 30/40/40
+-- yd, and the six cooldown rows are 25 (54889 is TARGET_SRC_CASTER with radius
+-- 25), 30, 30, 30, 30 and 60 yd (40736 Death Blast, RangeIndex 14). The
+-- self-centred rows that do NOT reach that far - 69900 radius 15 and 55249
+-- radius 5 - and every 5-yd row sit on melee members or on the boss, never on a
+-- role-1 row. No row anywhere in this file has a non-zero rangeMin.
+--
+-- ----------------------------------------------------------------------------
+-- FIVE NON-PROBLEMS, recorded so the next reader does not re-litigate them
+--
+--  * EquippedItemClass 2 on 14516 Strike, 48640 Strike and 59992 Cleave is not a
+--    creature problem: Spell::CheckItems returns SPELL_CAST_OK immediately for a
+--    non-player caster. (It IS a trap for custom PLAYER spells - a different
+--    table and a different problem.) Those three are the only non--1 values left
+--    in the file; the other 21 are -1.
+--  * PowerType 1 (rage) on 42746 Cleave, 36965 Rend, 16169 Arcing Smash and
+--    11428 Knockdown, and PowerType 3 (energy) on 59021 Vicious Bite, are not
+--    problems while the cost is 0/0: Spell::CheckPower compares GetPower(type)
+--    against the cost, and 0 < 0 is false. The other 19 are PowerType 0.
+--  * No id in this file carries a SPELL_EFFECT_DUMMY effect any more - the
+--    previous revision's 67860 Impale was the only one, and guard rule R4 (every
+--    effect a scriptless dummy) never bit on it anyway.
+--  * 69900 Spirit Burst carries ExcludeCasterAuraSpell = 69876 "Greater Invis",
+--    the ONLY aura gate anywhere in the 24 (CasterAuraState, TargetAuraState,
+--    Exclude*AuraState, CasterAuraSpell, TargetAuraSpell and
+--    ExcludeTargetAuraSpell are 0 on all of them). Spell::CheckCast refuses the
+--    cast while the CASTER holds that aura; no PDv2 mob can ever hold it - the
+--    module applies no auras at spawn and neither creature_template_addon row in
+--    this pack carries one - so it can never fire. Stated, not discovered.
+--  * FacingCasterFlags 1 (SPELL_FACING_FLAG_INFRONT) on EIGHT of the 24 - 40736,
+--    42395, 42397, 42746, 59021, 59992, 60015 and 69211 - is inert on a creature.
+--    Its only reader is Spell::CheckRange (Spell.cpp:7126), and that test is
+--    gated on m_caster->IsPlayer(), so no PDv2 mob is ever refused a cast for
+--    standing behind its target. Measured field by field out of Spell.dbc
+--    (column 20 of the 234, per the spell_dbc column list), with 133 Fireball,
+--    845 Cleave, 2098 Eviscerate and 25286 Heroic Strike read back as controls.
+--    An earlier review summarised this as seven ids; the count is eight.
+--
+-- ----------------------------------------------------------------------------
+-- EXCLUDED, and why - the spells these creatures own that are NOT used
+--
+--  45031 Shadow Bolt Volley  the second review wave's find, and the reason the
+--        IDENTITY table now carries an EffectChainTargets column at all. This
+--        file's earlier revision shipped it on 2529 at tier 50 and described it
+--        as "SINGLE target despite the name (TARGET_UNIT_TARGET_ENEMY,
+--        EffectRadiusIndex 0)". The radius reading is right and the conclusion
+--        is wrong: EffectChainTargets_1 is **3** and EffectChainAmplitude is
+--        1.00, so it hits up to three players for the FULL 4250-5750 each. As a
+--        DefenseType 1 MAGIC chain SearchChainTargets uses jumpRadius 10.0 with
+--        isBouncingFar TRUE, i.e. searchRadius = 10 x (targets-1) = 20 yd around
+--        the primary target and no front-arc filter (line of sight is still
+--        required). On a role-1 member that free-casts from 40 yd every 10 s
+--        that is 12750-17250 across the party per cast - not out of band per
+--        target, but a party-wide multiplier hidden inside a row that reads as
+--        single-target. Replaced by 69124 Seeping Darkness (chain 0), which is
+--        4788-5912 on ONE player and keeps 2529's curve where it was.
+--  67860 Impale / 48130 Gore / 57464 Shadow Bolt  the THIRD review wave's find:
+--        all three are difficulty-substituted on map 760, so the id in the row
+--        was not the id the core casts. See the SPELLDIFFICULTY block for the
+--        measurement and for what replaced each of them (28308 Hateful Strike,
+--        33813 Hurtful Strike, 40736 Death Blast). None of the three is wrong as
+--        a SPELL - 67860 in particular is a real 17672-19828 armour-ignoring
+--        cone - they are wrong as ROWS on a 5-man dungeon map, which can only
+--        ever select SpellID[0] or SpellID[1].
+--  67879 Claw            spell_script_names -> threat wipe + random retarget.
+--                        See the SPELLSCRIPTS block.
+--  53239 Axe Volley      (27580's own)  TARGET_UNIT_CASTER periodic trigger AND
+--                        TARGET_UNIT_CASTER MOD_ROOT - it roots the boss.
+--  52071 Killing Rage    (27580's own)  +100% melee haste for 6 s. Berserk class.
+--   7295 Soul Drain      (3914's own)   10 s MOD_ROOT at 40 yd - a second CC,
+--                        and its leech is basePoints 35 (a no-op) besides.
+--   7124 Arugal's Gift   (2529's own)   PERIODIC_DAMAGE 175-225 with
+--                        EffectAmplitude 60000 over a 300 s duration on a 2.5 s
+--                        cast - at most one or two ticks ever land in a fight,
+--                        and the cast time eats a melee member's swings.
+--   7107 Summon Wolfguard Worg (3854's own)  SPELL_EFFECT_SUMMON_PET.
+--   7489 Call Lupine Horror / 7487 Call Bleak Worg  SPELL_EFFECT_SUMMON. A
+--        summoned pet is not tracked by PDv2InstanceScript's _roomAlive counter
+--        and its despawn path is unaudited.
+--   7106 Dark Restore    (3854's own)   SPELL_EFFECT_HEAL - no self-heal loops;
+--        ModifyHealReceived is deliberately not hooked (PDv2Scaling.cpp:325-328).
+--    970 Shadow Word: Pain R1 (3855's own)  baseLevel 4; the level-80-scale
+--        30854 is used instead.
+--   8599 Enrage / 8269 Frenzy / 32714 Enrage / 7072 Wild Rage  see the
+--        SELF-BUFFS block.
+--  61562 Shadow Bolt     4250-5750 on a 1.5 s cast - see the FILLERS block.
+--  15588 Thunderclap / 22644 Blood Leech / 16509 Rend / 7122 Blood Tap /
+--  17228 Shadow Bolt Volley   measured no-ops at level 80 - see the climb block.
+--  13338 Curse of Tongues  MOD_CASTING_SPEED_NOT_STACK -50% with a 15 s duration
+--        against a 12 s row cooldown, i.e. ~100% uptime from difficulty 75 on
+--        every caster and healer in the room, for zero damage. Dropped rather
+--        than shipped with an operator note.
+--  48125 Shadow Word: Pain  the file's last mana-costing row (0 flat / 22%);
+--        30854 is the same effect at 0/0 and 6.5x the damage.
+--
+-- 69124 Seeping Darkness, the replacement, measured field by field: name
+-- 'Seeping Darkness', DefenseType 1, SchoolMask 32 SHADOW, Mechanic 0, range
+-- 0..30 yd, cast 2000 ms, duration 10000 ms, ManaCost 0 / ManaCostPct 0 /
+-- ManaCostPerLevel 0, PowerType 0, EquippedItemClass -1, MaxTargetLevel 0,
+-- TargetCreatureType 0, BaseLevel/SpellLevel/MaxLevel 0 (so no level cap eats
+-- the base points), Attributes 0x10 SPELL_ATTR0_IS_ABILITY only, InterruptFlags
+-- 0x2F with SPELL_INTERRUPT_FLAG_ABORT_ON_DMG (0x10) NOT set. effect1
+-- SCHOOL_DAMAGE on TARGET_UNIT_TARGET_ENEMY, bp 1942 die 315 -> 1943-2257, chain
+-- 0; effect2 APPLY_AURA / PERIODIC_DAMAGE on TARGET_UNIT_TARGET_ENEMY, bp 568
+-- die 163 -> 569-731 every 2000 ms for 10000 ms = 5 ticks, chain 0. No summon,
+-- knockback, pull, jump, heal, dispel, interrupt, threat or CC effect; no
+-- self-target; no triggered spell. It has no spell_script_names,
+-- spell_linked_spell, spell_custom_attr, spell_group, spell_proc,
+-- spell_jump_distance or acore_world.spell_dbc row, and no smart_scripts or core
+-- script casts it anywhere in AzerothCore - nothing can hijack it. It appears in
+-- no other pack file and in no other module. One property of it is worth stating
+-- rather than leaving to be found: its 10000 ms duration equals its row's
+-- cooldownMs, so from difficulty 50 on the DoT half runs at ~100 % uptime on
+-- 2529's current target. Sustained that is 4788-5912 per 10 s = 479-591 dps,
+-- against the 425-575 of the row it replaced, so it stays in band - it is a
+-- disclosure, not a balance problem, and the 13338 Curse of Tongues rejection
+-- above was about a debuff with no damage at all, not about uptime as such.
+--
+-- THE THREE THIRD-WAVE REPLACEMENTS, measured the same way. None of them has a
+-- SpellDifficulty id in the merged store, none has a spell_script_names,
+-- spell_linked_spell, spell_custom_attr, spell_group, spell_proc,
+-- spell_bonus_data, spell_target_position, spell_jump_distance, spell_required,
+-- spell_ranks, spell_area or acore_world.spell_dbc row, no smart_scripts row
+-- casts any of them (action_type IN (11, 85, 75, 86)), and none appears in any
+-- other pack file or module:
+--
+--   28308 Hateful Strike  BOSS t75. DefenseType 2 MELEE, SchoolMask 1 PHYSICAL,
+--        Mechanic 0, RangeIndex 2 (0..5 yd), instant, no duration, ManaCost
+--        0/0/0, PowerType 0, EquippedItemClass -1, MaxTargetLevel 0,
+--        TargetCreatureType 0, MaxTargets 0, BaseLevel/SpellLevel/MaxLevel 0.
+--        Attributes 0x0, AttributesEx 0x0, Ex2 0x0, Ex3 0x200
+--        SPELL_ATTR3_NOT_A_PROC only - one set bit across all four words.
+--        ONE effect: SCHOOL_DAMAGE on TARGET_UNIT_TARGET_ENEMY, bp 19974 die
+--        7051 -> 19975-27025, EffectRadiusIndex 0, chain 0, no trigger, no aura.
+--   33813 Hurtful Strike  BOSS t0 #2. DefenseType 2 MELEE, SchoolMask 1, RangeIndex
+--        2 (0..5 yd), instant, no duration, 0/0/0 cost, PowerType 0,
+--        EquippedItemClass -1, Attributes 0x0 / Ex 0x0 / Ex2 0x4 / Ex3 0x200. ONE
+--        effect: SCHOOL_DAMAGE on TARGET_UNIT_TARGET_ENEMY, bp 12349 die 1301 ->
+--        12350-13650, radius 0, chain 0. Same shape and weight as the 48130 Gore
+--        it replaces (12598-13402), and unlike it, mode-stable.
+--   40736 Death Blast  2529 t75. DefenseType 1 MAGIC, SchoolMask 32 SHADOW -
+--        2529's whole kit is shadow - Mechanic 0, RangeIndex 14 (0..60 yd), cast
+--        2500 ms, no duration, 0/0/0 cost, PowerType 0, EquippedItemClass -1,
+--        Attributes 0x10000 SPELL_ATTR0_NOT_SHAPESHIFTED (a player-form gate, dead
+--        on a creature) only. effect1 SCHOOL_DAMAGE on TARGET_UNIT_TARGET_ENEMY,
+--        bp 11562 die 1875 -> 11563-13437, radius 0, chain 0, no trigger.
+--        Its 2500 ms cast is why it sits at the 12000 ms end of the cadence band,
+--        per this file's own rule.
+--        effect2 IS DECLARED, AND IS INERT - stated because a reader will see it.
+--        It is SPELL_EFFECT_SCRIPT_EFFECT on the same target with basePoints
+--        41596. Spell::EffectScriptEffect (SpellEffects.cpp:3837-4038) switches on
+--        SpellFamilyName and then on the spell id; 40736 appears NOWHERE in the
+--        AzerothCore tree (grep over src/ -> 0 hits), so the switch falls through
+--        to the DB path at :4036-4037 (the LOG_DEBUG and then the operative call
+--        at 4037), ScriptsStart(sSpellScripts, id | effIndex
+--        << 24). acore_world.spell_scripts has 130 rows and NONE of them is any
+--        of this file's 24 ids, so that call finds nothing and returns. The
+--        basePoints 41596 is not a triggered spell - EffectTriggerSpell_2 is 0 -
+--        and it is not read by anything on this path. This is the same
+--        disposition guard rule R4 takes for a scriptless dummy: an extra effect
+--        that nothing implements does nothing, and effect1 carries the spell.
+--
+-- THIS FILE SHIPS ZERO creature_template AND ZERO spell_dbc ROWS.
+--
+-- The CREATE TABLE IF NOT EXISTS block below is REDUNDANCY, not an ordering fix,
+-- and an earlier revision of this file claimed the opposite. Measured:
+-- UpdateFetcher::PathCompare compares filename().string()
+-- (UpdateFetcher.cpp:521-524) and '.' (0x2E) sorts before '_' (0x5F). The
+-- CANONICAL creator of `pdungeon_member_spells` is
+-- 'mod_pdungeon_member_spells.sql' (line 238) - NOT 'mod_pdungeon_packs.sql',
+-- which creates `pdungeon_packs` and `pdungeon_pack_members` only - and by that
+-- rule it sorts BEFORE 'mod_pdungeon_member_spells_worgen.sql'. So the table
+-- already exists on a fresh database by the time this file runs. It is not the
+-- ONLY other creator, and an earlier revision of this sentence said it was: the
+-- '_cult' and '_faceless' kit files repeat the same CREATE, exactly as this one
+-- does. Nothing follows from that either - the rule turns on the '.' before the
+-- '_', so the canonical file sorts first against EVERY sibling, in any order the
+-- three of them land in. The block is kept because IF NOT EXISTS makes it free
+-- and it keeps this file applicable on its own, which is the same disposition
+-- both sibling packs took.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS `pdungeon_member_spells` (
+  `entry` INT UNSIGNED NOT NULL,
+  `spellId` INT UNSIGNED NOT NULL,
+  `slot` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `cooldownMs` INT UNSIGNED NOT NULL DEFAULT 8000,
+  `minDiff` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (`entry`, `spellId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Idempotent re-apply: delete this file's own entries, then insert. Never DROP -
+-- an operator who gave a creature of their own a kit keeps it. The delete is an
+-- EXPLICIT ENTRY LIST, not a BETWEEN: a range delete over 2529..27580 would wipe
+-- an operator's rows for twenty-five thousand unrelated templates and would
+-- reach into the entries the sibling packs authored alongside this one (cult
+-- 1853..11551, faceless 29309..31104). The list below is exactly the eight
+-- members of pack 6 and nothing else. It also still covers 3852, 3860 and 3927 -
+-- the three entries this revision REMOVED from the pack - so an operator who
+-- applied the first version does not keep three orphaned kits:
+DELETE FROM `pdungeon_member_spells` WHERE `entry` IN
+ (2529,3852,3853,3854,3855,3857,3859,3860,3914,3927,27580);
+
+INSERT INTO `pdungeon_member_spells`
+  (`entry`, `spellId`, `slot`, `cooldownMs`, `minDiff`, `enabled`) VALUES
+  -- ==========================================================================
+  -- PACK 6 "Shadowfang Pack" - MELEE (role 0)
+  -- ==========================================================================
+  -- 3914 Rethilgore  (unit_class 1, dm 1.7, 21368 hp, display 524 scale 1.15)
+  (3914, 14516, 1,  6000,  1, 1),  -- Strike            weapon + 247, 5 yd single         t0
+  (3914, 59021, 1, 10000, 50, 1),  -- Vicious Bite      3238-3762, 5 yd single            t50 (SD)
+  (3914, 42395, 1, 12000, 75, 1),  -- Lacerating Slash  15615 bleed over 18 s, 5 yd       t75
+  -- 3854 Shadowfang Wolfguard  (unit_class 1, dm 1.7, 16026 hp, display 203 scale 1.00)
+  (3854, 48640, 1,  6000,  1, 1),  -- Strike            weapon 150%, 5 yd single          t0
+  (3854, 50729, 1, 10000, 50, 1),  -- Carnivorous Bite  5725-6105 (hit + bleed), 5 yd     t50
+  (3854, 59126, 1, 12000, 75, 1),  -- Shadow Breath     6938-8062, 15 yd cone             t75 (SD)
+  -- 3857 Shadowfang Glutton  (unit_class 1, dm 1.7, 16026 hp, display 202 scale 1.00)
+  (3857, 42746, 1,  7000,  1, 1),  -- Cleave            weapon 110%, 5 yd, chain 3        t0
+  (3857, 69900, 1, 10000, 50, 1),  -- Spirit Burst      3238-3762, self-centred 15 yd     t50 (SD)
+  (3857, 36965, 1, 12000, 75, 1),  -- Rend              11250 bleed over 15 s, 5 yd       t75
+  -- 3859 Shadowfang Ragetooth  (unit_class 1, dm 1.7, 16026 hp, display 736 scale 1.15)
+  (3859, 59992, 1,  7000,  1, 1),  -- Cleave            weapon + 240, 5 yd, chain 3       t0
+  (3859, 55249, 1, 10000, 50, 1),  -- Whirling Slash    5828-6172, self-centred 5 yd      t50
+  (3859, 11428, 1, 60000, 75, 1),  -- Knockdown         2 s stun + 150-166  CC (STUN)     t75 (SD)
+  -- ==========================================================================
+  -- PACK 6 "Shadowfang Pack" - RANGE (role 1) - filler + two cooldown spells
+  -- ==========================================================================
+  -- 3853 Shadowfang Moonwalker  (unit_class 2, dm 1.7, 12822 hp / 7988 mana, display 729 scale 1.00)
+  (3853, 69211, 0,     0,  1, 1),  -- Shadow Bolt       1313-1687, 30 yd, 2.2 s, 0/0      t0 FILLER
+  (3853, 54889, 1, 10000, 50, 1),  -- Shadow Shock      2960-3440, self-centred 25 yd     t50
+  (3853, 61563, 1, 12000, 75, 1),  -- Corruption        9990-11610 over 12 s, 30 yd       t75
+  -- 3855 Shadowfang Darksoul  (unit_class 2, dm 1.7, 12822 hp / 7988 mana, display 657 scale 0.85)
+  (3855, 60015, 0,     0,  1, 1),  -- Shadow Bolt       1273-1427, 40 yd, 3.0 s, 0/0      t0 FILLER
+  (3855, 60016, 1, 10000, 50, 1),  -- Corruption        5400 over 24 s, 30 yd, instant    t50
+  (3855, 30854, 1, 12000, 75, 1),  -- Shadow Word: Pain 9000 over 18 s, 30 yd, instant    t75
+  -- 2529 Son of Arugal  (unit_class 1, dm 1.7, 16026 hp, display 1098 scale 1.45)
+  (2529, 60015, 0,     0,  1, 1),  -- Shadow Bolt       1273-1427, 40 yd, 3.0 s, 0/0      t0 FILLER
+  (2529, 69124, 1, 10000, 50, 1),  -- Seeping Darkness  4788-5912, 30 yd single, chain 0  t50
+  (2529, 40736, 1, 12000, 75, 1),  -- Death Blast       11563-13437, 60 yd, 2.5 s         t75
+  -- ==========================================================================
+  -- PACK 6 "Shadowfang Pack" - BOSS (role 2)
+  -- ==========================================================================
+  -- 27580 Selas  (unit_class 1, exp 2, dm 4.6, 75600 hp, display 26793 scale 3.00)
+  -- None of these four rows is carried by any member of THIS pack, and none of
+  -- them has a SpellDifficulty id, so on map 760 the core casts exactly what is
+  -- written here in BOTH dungeon modes. Two are other packs' trash rows and two
+  -- are carried by no other pack - the measured map is in the header. Rows sort
+  -- 16169 -> 33813 by spellId, so the 7000 ms opener is genuinely the
+  -- higher-priority row.
+  (27580, 16169, 1,  7000,  1, 1), -- Arcing Smash      weapon + 400, 8 yd cone           t0
+  -- Round C / C6: a second base ability per boss (operator, 2026-09-08: "2 Basis, dann je eine auf 50 und 75")
+  (27580, 33813, 1,  9000,  1, 1), -- Hurtful Strike    12350-13650, 5 yd single          t0 #2
+  (27580, 42397, 1, 10000, 50, 1), -- Rend Flesh        17525-18825 (hit + bleed), 5 yd   t50
+  (27580, 28308, 1, 12000, 75, 1); -- Hateful Strike    19975-27025, 5 yd single          t75

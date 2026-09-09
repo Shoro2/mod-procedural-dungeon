@@ -363,6 +363,22 @@ namespace PDungeon
 
         if (plan.isCreature)
         {
+            // NO SetReputationRewardDisabled here, unlike PDv2's SpawnTaggedMob
+            // and its critter loop, and the exemption is measured rather than
+            // assumed: PDWorldBuilder::MobEntry can only return NPC_TRASH_MELEE
+            // / _CASTER / _ELITE / _BOSS (PDWorldBuilder.cpp:287-300,
+            // PDDefines.h:55-60 = 910500-910503), and none of those four - nor
+            // the entrance NPC 910510 - has a creature_onkill_reputation row
+            // (measured 2026-09-09: count 0). v1 spawns only this module's own
+            // custom entries, so there is no stock faucet to shut off.
+            //
+            // WIDENING MobEntry TO A STOCK ENTRY REOPENS THAT HOLE. A stock
+            // creature can carry RewOnKillRepValue at MaxStanding REP_EXALTED
+            // with no turn-in and no NPC visit - which is exactly what pack 7's
+            // Scholomance trash does in v2 - so any change here that lets a
+            // non-910xxx entry through must set the flag on the summon, the way
+            // PDv2InstanceScript::SpawnTaggedMob does and for the reasons it
+            // records there.
             Position const pos(plan.x, plan.y, z + 0.5f, plan.o);
             TempSummon* summon = instance->SummonCreature(plan.entry, pos);
             if (!summon)

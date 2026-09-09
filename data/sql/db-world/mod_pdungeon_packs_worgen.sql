@@ -1,0 +1,564 @@
+-- ----------------------------------------------------------------------------
+-- mod-procedural-dungeon: pack 6 "Shadowfang Pack" (world database)
+--
+-- A worgen pack: seven Shadowfang Keep worgen at five sizes, led by a boss that
+-- is a DIFFERENT worgen model at twice the biggest trash scale. Every display
+-- id below was measured through CreatureDisplayInfo.dbc -> CreatureModelData.dbc
+-- on this box (2026-09-09), never inferred from a creature name:
+--
+--   display   203 -> model   44 Creature\Worgen\Worgen.mdx    scale 1.00  3854
+--   display   202 -> model   44 Creature\Worgen\Worgen.mdx    scale 1.00  3857
+--   display   729 -> model   44 Creature\Worgen\Worgen.mdx    scale 1.00  3853
+--   display   657 -> model   44 Creature\Worgen\Worgen.mdx    scale 0.85  3855
+--   display   736 -> model   44 Creature\Worgen\Worgen.mdx    scale 1.15  3859
+--   display   524 -> model   44 Creature\Worgen\Worgen.mdx    scale 1.15  3914
+--   display  1098 -> model   44 Creature\Worgen\Worgen.mdx    scale 1.45  2529
+--   display 26793 -> model 2888 Creature\NorthrendWorgen\NorthrendWorgen.mdx
+--                                                             scale 3.00  27580 (BOSS)
+--
+-- creature_template_model.DisplayScale is 1 on all eight, so the DBC scale is
+-- the scale that reaches the client.
+--
+-- The trash ladder 0.85 -> 1.45 is what makes seven bodies read as a PACK rather
+-- than seven copies; the boss then breaks that ladder on BOTH axes at once - a
+-- different model file at scale 3.00, more than twice the biggest trash member -
+-- which is what a boss silhouette has to do.
+--
+-- ONE model near-duplicate outside the pack, measured across every member of
+-- packs 1-8: 84277 Rotting Hound (pack 2) carries the SAME display 202 as 3857
+-- Shadowfang Glutton, at creature_template_model.DisplayScale 0.5 - a half-size
+-- worgen under another name. No other corpus member draws Worgen.mdx or
+-- NorthrendWorgen.mdx, and no boss shares a model with any other boss. The
+-- overlap is accepted: this pack's visual argument is the SCALE LADDER, not the
+-- worgen body, and a 0.5-scale hound reads as a different creature.
+--
+-- All eight are creature_template.type 7 HUMANOID, rank 1, exp 0 (exp 2 for the
+-- boss), npcflag 0, VehicleId 0, flags_extra 0, dynamicflags 0, unit_flags 0 or
+-- 0x40, unit_flags2 0x800 (REGENERATE_POWER), speed_walk 1.0 / speed_run
+-- 1.14286 on every one of them, and NONE carries a ScriptName. AIName 'SmartAI'
+-- on all eight is irrelevant: CreatureAISelector::SelectAI asks
+-- sScriptMgr->GetCreatureAI BEFORE the AIName factory
+-- (CreatureAISelector.cpp:78-89) and PDv2's binder is an AllCreatureScript that
+-- claims every ownerless non-critter on map 760 (PDv2CreatureAI.cpp:1903-1926).
+--
+-- creature_template_addon rows exist for exactly two members, and neither
+-- carries a spawn-time aura: 3853 (auras empty) and 3914 (auras NULL). 3914's
+-- row does carry visibilityDistanceType 3 = VISIBILITY_DISTANCE_LARGE 200.0f
+-- (ObjectDefines.h:35) against the 100 yd default, applied by
+-- Creature::LoadCreaturesAddon (Creature.cpp:2797-2799) to summons as well - so
+-- a Rethilgore is visible from twice as far as the rest of the room. Harmless
+-- and precedented (pack 4's 29974 and 30482 already carry the same override);
+-- stated so it is not discovered. The only other non-default column on either
+-- row is 3853's bytes2 = 1, the sheath state - it spawns with its weapon drawn.
+-- bytes1, emote, mount and path_id are 0 on both.
+--
+-- Factions, re-measured from FactionTemplate.dbc field 5:
+--   24 (Shadowfang, the seven trash) ourMask 0x8, friendMask 0x0, enemyMask 0x1
+--   16 (Monster, the boss)           ourMask 0x8, friendMask 0x0, enemyMask 0x1
+-- Both are hostile to players (enemyMask 0x1 = FACTION_MASK_PLAYER) and NEITHER
+-- is hostile to the other: 16's enemyFaction list is empty and 24's ourMask 0x8
+-- is not in 16's hostileMask 0x1, so the boss and the adds beside him cannot
+-- fight each other. friendMask 0x0 on both also means they will not call
+-- assistance for one another. Mixing factions inside one pack is corpus-normal -
+-- shipped pack 4 mixes five (14 / 16 / 21 / 974 / 2068) and pack 5 mixes three.
+--
+-- Measured on this box (2026-09-09) against the running acore_world:
+-- creature_template joined to creature_classlevelstats at level 80, so hp80 in
+-- the member comments below is the health the module will ACTUALLY hand the
+-- creature BEFORE the difficulty multiplier, not the template's own level-19
+-- number. Difficulty is clamped to [1, 100] by GameClampDiff
+-- (generator/PDv2GameMath.h:50-51,175-182), health is multiplied by
+-- 100 + difficulty x 5 percent and outgoing damage by 100 + difficulty x 2
+-- percent (PDv2Scaling.cpp:128-131 and 242-244; the deployed conf keys are 5 and 2),
+-- so the lowest multiplier this module can ever apply is 102 % of the numbers
+-- quoted here - there is no "difficulty 0" state.
+--
+-- ----------------------------------------------------------------------------
+-- THE TRASH ROSTER - WHY EVERY MEMBER IS DamageModifier 1.7
+--
+-- DamageModifier is applied straight to melee output in
+-- Creature::UpdateDamagePhysical (StatSystem.cpp:1171):
+--
+--   minDamage = ((weaponMinDamage + AttackPower/14 * BaseVariance)
+--                * DamageModifier * BaseAttackTime/1000) ...
+--
+-- with weaponMin/Max from Creature::SelectLevel (Creature.cpp:1538-1541,
+-- basedamage x1.0 / x1.5). PDv2 force-levels every spawn to 80
+-- (PDv2Scaling.cpp:215-230) and then applies the difficulty dial as a pure
+-- MULTIPLIER on top (PDv2Scaling.cpp:128-131), so a lopsided DamageModifier is
+-- amplified, never normalised.
+--
+-- WHICH weapon base is used is chosen by creature_template.exp, not by class
+-- alone: CreatureBaseStats::GenerateBaseDamage returns
+-- BaseDamage[info->expansion] (CreatureData.h:332-335) and that array is loaded
+-- column by column from creature_classlevelstats.damage_base / damage_exp1 /
+-- damage_exp2 (ObjectMgr.cpp:10808,10854). PDv2 never touches `exp`, so the
+-- expansion column still selects the base after the level-80 normalisation. At
+-- level 80, with BaseAttackTime 2000 and BaseVariance 1 on all eight:
+--
+--   exp 0, unit_class 1 (AP 642, damage_base 47.2377):   186.19 x dm .. 233.43 x dm
+--   exp 0, unit_class 2 (AP 608, damage_base 44.2013):   175.26 x dm .. 219.46 x dm
+--   exp 2, unit_class 1 (AP 642, damage_exp2 164.924):   421.56 x dm .. 586.49 x dm
+--
+-- The seven trash members are exp 0 and use the first two rows. The BOSS is
+-- exp 2 and uses the THIRD row - do not reuse the exp-0 form on him.
+--
+-- The FIRST version of this pack shipped 3852 Shadowfang Bloodhowler and 3860
+-- Shadowfang Tainted One, both at DamageModifier 7.5, where every other worgen
+-- in the Shadowfang block carries 1.7. Measured per 2.0 s swing, before the
+-- difficulty multiplier:
+--
+--   3852 (uc1, exp 0, dm 7.5)   1396 - 1751   ~787 dps   4.4x its own packmates
+--   3860 (uc2, exp 0, dm 7.5)   1314 - 1646   ~740 dps   4.4x its own packmates
+--   3927 (uc1, exp 0, dm 3.3)    614 -  770   ~346 dps   the old boss - out-hit 2.3x
+--   dm 1.7 trash (uc1, exp 0)    317 -  397   ~178 dps
+--   dm 1.7 trash (uc2, exp 0)    298 -  373   ~168 dps
+--
+-- Worse than a local imbalance: PDv2PackMgr::SelectSpawns fills ONE merged trash
+-- pool and one merged boss pool across every qualifying pack
+-- (PDv2PackMgr.cpp:454-464), so those two would have turned up as ordinary trash
+-- in Crypt Horrors, Barrow Dead and Legion Rift rooms, hitting three to four
+-- times harder than anything else in the room and above the previous
+-- module-wide trash ceiling (20427 Veneratus the Many, exp 1, 1027-1407,
+-- ~609 dps).
+--
+-- Both are gone. Every trash member of this pack now carries DamageModifier
+-- **1.7** - a spread of 1.00x, measured column by column - and the boss carries
+-- 4.6 on the exp-2 base, i.e. 6.5x his own trash (see the boss block). 3852 and
+-- 3860 are additionally unfinished templates (zero rows in `creature`, lootid 0,
+-- skinloot 0, 0 gold, no smart_scripts, no AIName, empty subname, speed_walk 1.2
+-- where the whole block is 1.0); the "economy-neutral filler" property the first
+-- pass valued them for is a symptom of that state, not a design.
+--
+-- Replacements, both faction 24, both Creature\Worgen\Worgen.mdx, both
+-- DamageModifier 1.7, both finished content with world spawns:
+--   3852 -> 3914 Rethilgore <The Cell Keeper>  uc1, 21368 hp, display  524 @1.15
+--            ONE world spawn, map 33
+--   3860 -> 2529 Son of Arugal                 uc1, 16026 hp, display 1098 @1.45
+--            ELEVEN world spawns, maps 0 and 33
+--
+-- 3914 Rethilgore is Shadowfang Keep's own first boss, subname and all, used
+-- here as TRASH. That is deliberate and it has precedent in the corpus (pack 5
+-- runs 20427 Veneratus the Many <Servant of Illidan> as trash), but note what
+-- follows from PDv2PackDraw::pickTrash drawing per slot WITH replacement
+-- (PDv2PackDraw.cpp:225-244,420-431): a five-mob room can contain up to five
+-- Rethilgores, each with the elite dragon and the <The Cell Keeper> title, and
+-- each dropping 5254 Rugged Spaulders - see the ECONOMY block.
+--
+-- ----------------------------------------------------------------------------
+-- THE BOSS - WHY IT IS 27580 SELAS AND NOT 3927 WOLF MASTER NANDOS
+--
+-- The first version shipped 3927 Wolf Master Nandos and failed every axis a boss
+-- is judged on:
+--
+--   health      32052 hp = 2.00x his own trash and 21% of the shipped boss floor
+--               (149560 / 252000 / 327600). With V2.BossRoomAdds = 2 in the
+--               deployed conf, and the adds drawn from the ROOM's pack, a Nandos
+--               beside a 50400 hp pack-8 add had 36% less health than the add
+--               standing next to him (32052 against 50400). Pack 8's seven trash
+--               measure 25200-50400, so six of the seven out-health him and the
+--               seventh (30176 Ahn'kahar Guardian, 25200) does not - "50400 hp
+--               each" was wrong, and so was the 57%, which is what 21368, this
+--               pack's biggest TRASH member, is below 50400.
+--   silhouette  the same Worgen.mdx as his own trash at 15% more scale than the
+--               biggest trash member - one more rung on a ladder the player had
+--               already seen four times.
+--   abilities   two of his four kit rows (42397 Rend Flesh, 8599 Enrage) were
+--               rows his own trash already carried, and his difficulty-75
+--               "reward" row 15588 Thunderclap measures 251-259 damage.
+--
+-- Every faction-24 stock creature was enumerated by hp80: the whole Shadowfang
+-- era tops out at 4275 Archmage Arugal / 10000 Arugal on 42740, which is 2.67x
+-- the trash and still under the 3-10x band a boss should sit in (and 10000
+-- carries unit_flags 0x300 IMMUNE_TO_PC/NPC, so it is unusable anyway). Every
+-- creature drawing Worgen.mdx or NorthrendWorgen.mdx was then enumerated the
+-- same way; exactly three land in the 48078-160260 band and two are
+-- disqualified:
+--
+--   30772 Frenzied Worgen (1)  126000  unit_flags 0x2000000 NOT_SELECTABLE, and
+--                                      a ' (1)' sniff-duplicate name suffix
+--   26683 Frenzied Worgen      126000  unit_flags 0x2000000 NOT_SELECTABLE
+--   27580 Selas                 75600  clean - taken
+--
+-- (17521 The Big Bad Wolf 322525 is 20x the trash, a rank 3 world boss and a
+-- comedy name; 9029 Eviscerator 38466 and 4279 Odo 26710 are under the band;
+-- 81211 Xaxtan and 930126 Packmaster Ragetooth are mod-turtle-content entries
+-- and a cross-module dependency this pack must not take.)
+--
+-- 27580 Selas, measured: type 7, unit_class 1, faction 16, rank 1, exp 2,
+-- DamageModifier 4.6, HealthModifier 6, npcflag 0, unit_flags 0x40,
+-- unit_flags2 0x800, flags_extra 0, VehicleId 0, ScriptName '',
+-- CreatureImmunitiesId 0 (no immunity row at all), no creature_template_addon
+-- row, one world spawn, no creature_queststarter / creature_questender row.
+--
+--   health      12600 (basehp2, exp 2) x HealthModifier 6 = 75600 hp = 4.72x the
+--               16026 melee trash - inside the 3-10x band - and 51% of the
+--               shipped 149560 floor, where Nandos was 21%.
+--   silhouette  Creature\NorthrendWorgen\NorthrendWorgen.mdx, a DIFFERENT model
+--               file from all seven trash members, at scale 3.00 against a trash
+--               ladder that stops at 1.45.
+--   abilities   four rows, NONE of which any member of this pack carries, NONE
+--               of them touched by SpellDifficulty (so the id written in the row
+--               is the id the core casts on map 760 - see the SPELLDIFFICULTY
+--               block in the kit file), and the difficulty-75 row is the heaviest
+--               thing in his kit (28308 Hateful Strike, 19975-27025) instead of
+--               the lightest. See mod_pdungeon_member_spells_worgen.sql, which
+--               also records which of those four ids other packs reuse.
+--   damage      dm 4.6 on the exp-2 base (421.56 .. 586.49 x dm) ->
+--               1939-2698 per 2.0 s swing, ~1159 dps, 6.5x his own trash, where
+--               Nandos at 3.3 was 1.94x and was out-hit 2.3x by two of his own
+--               trash members. The first fix pass computed this off damage_base
+--               (the exp-0 column) and understated it 2.26x as 857-1074; the
+--               real number is better for the design, so no row moved.
+--
+-- The first research pass rejected Selas because he "draws NorthrendWorgen and
+-- is visibly a different beast from the Shadowfang seven". That is exactly the
+-- property the pack was missing, and it is why he is here.
+--
+-- WHERE HE SITS IN THE MERGED BOSS POOL, and why it is disclosed. The boss pick
+-- ignores the room's pack: it always draws from the role-2 pool across ALL packs
+-- (PDv2PackDraw.cpp:145-152, in that file's own words), while the two
+-- V2.BossRoomAdds come from the ROOM's pack (PDv2PackDraw.cpp:420-431). Measured
+-- 2026-09-09 against the live acore_world, EACH BOSS AT ITS OWN BaseAttackTime,
+-- before the difficulty multiplier. BaseVariance and BaseAttackTime are
+-- per-template columns and three of these six do not swing at 2.0 s, so a single
+-- normalised swing column would be a fiction; dps is the comparable number:
+--
+--   27580 Selas               75600 hp   1939-2698 @2.0 s   ~1159 dps  <- the floor
+--   84288/84289/84290        149560 hp    962-1444 @3.0 s   ~ 401 dps  (shipped pack 3)
+--   29934 Acolyte of Agony   126000 hp   3125-4362 @2.0 s   ~1872 dps  (pack 7, cult)
+--   29309 Elder Nadox        214200 hp   3750-5235 @2.4 s   ~1872 dps  (pack 8, faceless)
+--   25352 Scourge Overlord   252000 hp   3162-4399 @2.0 s   ~1890 dps  (shipped pack 4)
+--   29620 Mal'Ganis          327600 hp   3162-4399 @2.0 s   ~1890 dps  (shipped pack 5)
+--
+-- 84288-84290 carry BaseVariance 0, so the AttackPower/14 term of
+-- Creature::UpdateDamagePhysical (StatSystem.cpp:1163-1172) is zero for them and
+-- the swing is (40.099 .. 60.149) x DamageModifier 8 x BaseAttackTime 3.0 s =
+-- 962-1444, i.e. 401 dps. An earlier revision of this file quoted them at
+-- 970-1290 / ~565 dps: the variance-1 form, rescaled to a 2.0 s basis it does not
+-- have. That overstated their dps by 1.41x, and both sibling pack files already
+-- carried the corrected number when this file was written. No conclusion in this
+-- block moves - correcting it only widens Selas's damage lead over the pack-3
+-- bosses, from 2.1x to 2.9x. The two rows marked (cult) and (faceless) belong to
+-- packs authored ALONGSIDE this one and were first read at commit 811aa18, when
+-- all three were still file-only. They are file-only no longer: re-measured
+-- 2026-09-09 against the live acore_world, pdungeon_packs holds ids 1-8,
+-- pdungeon_pack_members 76 rows and pdungeon_member_spells 226, so ALL SIX rows
+-- above are loaded and the merged role-2 pool is now EIGHT bosses, not five.
+--
+-- Every figure in this table, and in the merged-trash table below, is the
+-- dungeon-NORMAL one. Creature::UpdateEntry swaps the template for
+-- DifficultyEntry[GetSpawnMode() - 1] on heroic, and the pack-8 members do carry
+-- such clones - 29309 -> 31456 'Elder Nadox (1)' at DamageModifier 13 against
+-- 7.5, and 30111/30176/30179/30277/30278/30319/31104 -> 31475/31441/31471/31442/
+-- 31443/31472/31449, all at 13. None of them is reachable today: map 760 has
+-- exactly ONE mapdifficulty_dbc row (id 857, Difficulty 0, MaxPlayers 5), so the
+-- spawn mode is always 0 and the normal template is always the one that spawns.
+-- The figures are labelled anyway so they stay honest if a heroic row for 760 is
+-- ever added - the same latent condition the kit file's SPELLDIFFICULTY block
+-- names on the spell side. Every boss listed above carries difficulty_entry_1 =
+-- 0, and so does each of PACK 6'S OWN EIGHT: difficulty_entry_1..3 are 0 on all
+-- of them, measured column by column. This pack is mode-stable by construction.
+--
+-- So Selas is the SOFTEST boss in the merged pool on health - 75600 against a
+-- next-softest 126000, i.e. 1.67x, not the "factor of two" an earlier revision
+-- claimed against a pack-7 boss that has since been replaced. A pack-8-themed
+-- boss room hands him two adds of 25200-50400 hp. Those adds all land in
+-- 1872-1890 dps but at three different swings (30277 and 31104 3162-4399 @2.0 s,
+-- 30111 / 30179 / 30278 / 30319 3125-4362 @2.0 s, 30176 3794-5278 @2.4 s), so
+-- each of them out-damages him 1.6x and one holds two thirds of his health. And
+-- "add" does not mean "melee": the two boss-room adds go through the same
+-- pickTrash lambda as ordinary trash (PDv2PackDraw.cpp:225-244, called at :429)
+-- and its first line rolls caster-or-melee per slot at casterPct, 60 by default
+-- (PDv2PackDraw.h:89), so a pack-8 boss room can put two role-1 casters beside
+-- him instead. The health and dps envelope above covers them either way. That is
+-- a real improvement on what he replaced (Nandos at 32052 was BELOW such an add)
+-- and on the alternative the earlier pass weighed (4275 Archmage Arugal, 42740
+-- hp), and he clears the 3-10x-his-own-trash bar on health at 3.54x-5.90x.
+-- It is stated here so the first live run is judged against a known number.
+--
+-- Two more things about him the operator should know rather than discover:
+--   * he is faction 16, not 24 - a mixed-faction pack; see the faction block
+--     above, neither side is hostile to the other; and
+--   * quest 12164 "Hour of the Worg" (Grizzly Hills, level 73-75) lists 27580 as
+--     a kill objective, so a level-80 player who still has that quest in the log
+--     can collect the credit from a pack-6 boss room. It is one credit on an
+--     abandoned low-level quest, it costs nothing and skips no content, and no
+--     other member of this pack has any quest exposure at all
+--     (creature_queststarter, creature_questender and quest_template
+--     RequiredNpcOrGo* were checked for all eight).
+--
+-- ----------------------------------------------------------------------------
+-- WHERE THE PACK SITS IN THE MERGED TRASH POOL - it is now the FLOOR
+--
+-- Uniformising the pack at DamageModifier 1.7 removed the top outlier and made
+-- pack 6 the bottom one. Measured per member at level 80, expansion-correct,
+-- before the difficulty multiplier:
+--
+--   pack 6 (worgen)     12822 - 21368 hp    168 - 178 dps   <- lowest dps band
+--   pack 1 / 2          22434 - 32052 hp    262 - 282 dps
+--   pack 4              12600 - 25200 hp    250 - 252 dps
+--   pack 5               7373 - 36860 hp    184 - 609 dps
+--   pack 7 (cult)       12822 - 26710 hp    345 - 367 dps
+--   pack 8 (faceless)   25200 - 50400 hp   1872 - 1890 dps
+--
+-- A five-mob pack-6 room therefore delivers roughly 850-890 dps of melee
+-- against a pack-8 room's ~9400 - a ten- to elevenfold room-to-room swing at
+-- ONE difficulty setting. That is within stock-data variance and it is the direct consequence
+-- of removing the two DamageModifier 7.5 members, so it is not a defect; it is
+-- the first-run number the operator should meet here rather than in game. The
+-- levers if it plays too soft are the difficulty dial and `weight`, never
+-- HealthModifier or DamageModifier (shared columns other content reads).
+--
+-- One more merged-pool consequence: pickTrash falls back PER SLOT to the merged
+-- pool when the room's pack cannot fill the wanted role
+-- (PDv2PackDraw.cpp:225-244). Pack 2 "Abyssal Broodpit" is twelve members and
+-- all of them are role 0, so every caster slot in a pack-2 room already draws
+-- from the merged caster pool - which now includes 3853, 3855 and 2529. Worgen
+-- casters will appear in a demon pit. That is a pre-existing property of the
+-- design (pack-2 rooms already pull nerubian and scourge casters) and it is
+-- noted only because the scale ladder is this pack's whole visual argument and
+-- it leaks out of its own rooms.
+--
+-- ----------------------------------------------------------------------------
+-- EXCLUDED members, each for a MEASURED reason
+--
+--  3851 Shadowfang Whitescalp  creature_template_addon.auras = 7940 "Immunity:
+--       Frost" (SPELL_AURA_SCHOOL_IMMUNITY, duration -1) AND creature_immunities
+--       row -6 with SchoolMask 0x10 FROST. It would spawn permanently immune to
+--       a whole school: a frost mage or a frost death knight could never damage
+--       it, and PDv2InstanceScript's _roomAlive counter would never reach 0 for
+--       that player.
+--  3852 Shadowfang Bloodhowler  DamageModifier 7.5 - see the trash-roster block.
+--  3860 Shadowfang Tainted One  DamageModifier 7.5 - see the trash-roster block.
+--  3927 Wolf Master Nandos      not a step up on any axis - see the boss block.
+--  4279 Odo the Blindwatcher    right DamageModifier (1.7) but
+--       CreatureImmunitiesId -229 = MechanicsMask CHARM|DISORIENTED|FEAR|ROOT|
+--       SLEEP|SNARE|FREEZE|KNOCKOUT|POLYMORPH|BANISH|SHACKLE|TURN|DAZE|SAPPED.
+--       Tolerable on a boss, wrong on trash: no player could crowd-control it at
+--       all. 3886 Razorclaw the Butcher carries the same row AND dm 2.5.
+--  26683 / 30772 Frenzied Worgen  unit_flags 0x2000000 NOT_SELECTABLE.
+--  81211 Xaxtan / 930126 Packmaster Ragetooth  mod-turtle-content entries.
+--
+-- 3914 Rethilgore DOES carry a CreatureImmunitiesId, -93, but it is
+-- MechanicsMask 0x800010 = FEAR | HORROR only, with SchoolMask 0 - a worgen that
+-- cannot be feared, which is flavour rather than a wall and nothing like the
+-- 3851 school immunity. Recorded here rather than left to be discovered.
+--
+-- Joined with the with-replacement trash draw noted above, that has one worst
+-- case worth stating: a five-slot room CAN be five Rethilgores, i.e. a room in
+-- which no fear, howl of terror or psychic scream lands on anything. Stun, root,
+-- polymorph, sleep, banish and every other mechanic still work on all five,
+-- which is exactly what separates -93 from the fourteen mechanics of 4279 Odo's
+-- -229 that got Odo rejected. It costs a fear-based plan a pull, not a run.
+--
+-- ----------------------------------------------------------------------------
+-- ECONOMY - measured against creature_loot_template / item_template AND every
+-- Reference row they point at, not inferred from the lootid column
+--
+-- FOLLOW THE Reference COLUMN. A creature_loot_template row whose Reference is
+-- non-zero rolls a whole reference_loot_template tree instead of the item named
+-- in `Item`, and a row with GroupId != 0 at Chance 0 is an EQUAL-CHANCED group
+-- member (LootMgr.cpp:112-116) whose one-element group therefore fires on EVERY
+-- kill: LootTemplate::LootGroup::Roll (LootMgr.cpp:1262-1296) tries the
+-- explicitly-chanced list first, falls through to SelectRandomContainerElement
+-- over the equal-chanced one, and Process (:1409-1425) then recurses into the
+-- reference. An earlier revision of this block stopped at the direct rows and
+-- got two of its own statements backwards, including the operator-facing one
+-- about the boss. Reference is the loot-side analogue of SpellDifficulty (see
+-- the SPELLDIFFICULTY block in the kit file): in both cases the row names one
+-- id and the core resolves another, and in both cases reading the row alone is
+-- not a measurement.
+--
+-- ALL EIGHT members carry a native loot table (2529, 3853, 3854, 3855, 3857,
+-- 3859, 3914, 27580 - lootid non-zero on every one), seven are skinnable
+-- (skinloot 100005 / 100006 / 100007; the boss is skinloot 0), and gold spans
+-- 32-328 copper across the Shadowfang seven (3853 32-192, 3855 40-209,
+-- 3857 41-202, 3914 51-206, 2529 63-328, 3859 74-303, 3854 95-129) and
+-- 1231-2051 copper for the boss, before PDv2's own loot multiplier. Every
+-- Rate.Drop.Item.* key - Referenced, ReferencedAmount and GroupAmount included
+-- - is 1 in the deployed dcore\configs\worldserver.conf, so the table chances
+-- below apply unmodified, and PDv2's FL mats drop ON TOP of the creature's own
+-- loot rather than replacing it (PDv2InstanceScript.cpp:731; the only
+-- loot.clear() is for noLoot-flagged split children, :739-744).
+--
+-- ONE item is the only GUARANTEED blue in the pack, and it deserves a decision
+-- rather than a discovery:
+--
+--   3914 Rethilgore drops 5254 Rugged Spaulders (Quality 3 blue, item level 20)
+--   at Chance 100 / GroupId 0 - on EVERY kill, and he is trash, not a boss, and
+--   the trash draw is with replacement, so one room can produce up to five of
+--   them. It is worthless at level 80 (a few silver at a vendor) but it will
+--   land on every Rethilgore in every pack-6 room. This is a deliberate,
+--   measured trade: he is the ONLY faction-24 Worgen.mdx creature besides 2529
+--   that carries DamageModifier 1.7 without a school immunity or a full
+--   crowd-control immunity, and DamageModifier is the axis the review blocked
+--   on. If the blue flood is unwanted the fix is data, not code: drop this row's
+--   `weight`, or swap 3914 for 920 Nightbane Tainted One (faction 24,
+--   Worgen.mdx display 1098 @1.45, no blues) - which trades an economy nit for a
+--   damage and health outlier, since 920 is DamageModifier 1.0 and 4701 hp at
+--   level 80.
+--
+--   3914 is also the ONLY member of the pack whose loot table holds no Reference
+--   row at all - four direct rows and nothing else - which is precisely why the
+--   picture above fits him and fits nobody else in the roster.
+--
+-- The BOSS IS NOT LOOT-CLEAN, and an earlier revision of this block said he was.
+-- 27580 Selas carries FIVE creature_loot_template rows, not four: the greys and
+-- whites (43851 Fur Clothing Scraps 41.6%, 33470 Frostweave Cloth 25%, 33454
+-- Salted Venison 9.9%, 33444 Pungent Seal Whey 3.7%) PLUS (Item 1, Reference
+-- 1200375, Chance 0, GroupId 5) "World Loot Level 75", which by the group rule
+-- above fires on EVERY kill. Resolved recursively it reaches 266 leaf items, 35
+-- of them Quality 3:
+--
+--   group 1  1227375 / 1227476 / 1227577  @3.33 % each -> ~10 % chance of an
+--            ilvl-150/154/158 Quality-2 GREEN per boss kill
+--   group 2  1237375 / 1237476 / 1237577  @0.033 % each -> ~0.1 % chance of an
+--            ilvl-150/154/158 Quality-3 BLUE per boss kill
+--   group 0  1207583 @10 % (55 greys/whites), 1267579 @100 % (4 items, Q2-Q3 at
+--            ilvl 70-80), 1256875 @3 %, 1256883 @1 %; among the Q3 leaves are
+--            43876 Guide to Northern Cloth Scavenging @1 % and 43624 Titanium
+--            Lockbox @0.1 %
+--
+-- (33470's own row also carries Reference 1270002, so even the "Frostweave
+-- Cloth" line resolves rather than dropping the named item.)
+--
+-- SIX of the seven trash members - 2529, 3853, 3854, 3855, 3857 and 3859, i.e.
+-- everyone except 3914 - additionally carry (Item 33, Reference 1033000, Chance
+-- 0.5) "Shadowfang Keep BoEs": an eleven-item equal-chanced group of Quality-3
+-- blues (1318 Night Reaver, 1482 Shadowfang, 1483 Face Smasher, 1484 Witching
+-- Stave, 1489 Gloomshroud Armor, 1935 Assassin's Blade, 1974 Mindthrust
+-- Bracers, 2205 Duskbringer, 2292 Necrology Robes, 2807 Guillotine Axe, 3194
+-- Black Malice), plus a "World Loot Level 19/20" GroupId 5 reference that fires
+-- on every kill exactly the way the boss's does. So 5254 is NOT the only blue
+-- this pack can drop - it is the only CERTAIN one.
+--
+-- The boss-swap conclusion is untouched and still holds with room to spare: the
+-- previous boss 3927 dropped 3748 Feline Mantle (blue) at 60% and 6314
+-- Wolfmaster Cape (blue) at 40% on nearly every kill, against Selas's ~0.1%.
+-- Swapping the boss removed a blue flood as well as fixing the three step-up
+-- axes; only the stated facts underneath that conclusion were wrong.
+--
+-- No member of this pack drops anything above Quality 3, and nothing epic. That
+-- claim SURVIVES the deeper reading - fully resolved, the maximum quality
+-- across all eight trees is exactly 3 - it had simply never been tested by the
+-- reading that first produced it.
+--
+-- One gated row, stated so it is not discovered: 3855 Shadowfang Darksoul
+-- carries 6915 Large Soran'ruk Fragment at Chance 100 / QuestRequired 1. The
+-- quest gate means a level-80 PDv2 party never sees it.
+--
+-- ----------------------------------------------------------------------------
+-- theme 0 = any look, same as all five shipped packs: a pack whose theme is
+-- neither 0 nor the live V2.Theme is invisible to the loader and the dungeon
+-- fills with the placeholder creature (PDv2PackMgr.cpp:101,117-122). The deployed
+-- ProceduralDungeon.V2.Theme is 2 and the loader's WHERE accepts theme 0, so
+-- this pack is visible.
+--
+-- level_min/level_max 80/80 is the BAND SELECTOR, not a description of the
+-- creature: a pack enters the pool when [level_min, level_max] intersects the
+-- player's band [bandMin, bandMin+4]. These are native level 18-25 Shadowfang
+-- Keep creatures and a native level 75 Grizzly Hills worgen, but every spawn is
+-- force-levelled to 80 by OnBeforeCreatureSelectLevel (PDv2Scaling.cpp:215-230)
+-- regardless of what is written here.
+--
+-- rank 1 on every member, where the shipped packs' trash is rank 0. With every
+-- Rate.Creature.Elite.* key at 1 in the deployed worldserver.conf that costs and
+-- buys nothing beyond the gold dragon on the nameplate - it is a LOOK change, it
+-- is intentional (vanilla dungeon trash is elite), and the operator should
+-- expect it rather than report it.
+--
+-- The pack keeps the name 'Shadowfang Pack'. pdungeon_packs.name is read once at
+-- PDv2PackMgr.cpp:136 and never again - no log line, no command output, no UI -
+-- so it is an internal label, and renaming it now would only churn the
+-- identifier every report, review and queue entry about this pack already uses.
+--
+-- The CREATE TABLE IF NOT EXISTS blocks below are FREE INSURANCE, not an
+-- ordering fix, and the first version of this file claimed otherwise. Measured:
+-- UpdateFetcher::PathCompare compares filename().string()
+-- (UpdateFetcher.cpp:521-524), and '.' (0x2E) sorts before '_' (0x5F), so
+-- 'mod_pdungeon_packs.sql' - the file that owns these two CREATE statements -
+-- sorts BEFORE 'mod_pdungeon_packs_worgen.sql' on a fresh database as well as on
+-- this one. The same is true in the companion kit file, and this file's earlier
+-- claim that it was load-bearing THERE was also wrong: the CANONICAL creator of
+-- `pdungeon_member_spells` is 'mod_pdungeon_member_spells.sql' (line 238), and
+-- by the same rule it sorts before 'mod_pdungeon_member_spells_worgen.sql'.
+-- It is not the ONLY other creator, and an earlier revision of this sentence
+-- said it was: the concurrently authored '_cult' and '_faceless' kit files
+-- repeat the same CREATE, exactly as this file does, and the '_cult' and
+-- '_faceless' PACK files repeat the two above. Nothing follows from that - the
+-- rule is about the '.' before the '_', so the canonical file sorts first
+-- against EVERY sibling, and IF NOT EXISTS makes each repeat free. All of them
+-- are harmless duplication kept so each file applies on its own.
+--
+-- THIS FILE SHIPS ZERO creature_template ROWS AND ZERO UPDATES TO THEM, and zero
+-- spell_dbc rows. Every entry is stock 3.3.5a, none falls in 84263-84290, none is
+-- used by any OTHER pack (SELECT packId, entry FROM pdungeon_pack_members WHERE
+-- entry IN (...) returns exactly this pack's own eight rows, all at packId 6,
+-- and nothing else - it returned 0 rows before this file was applied) and no
+-- other module's SQL references any of them as a
+-- creature (a grep across modules/ hits only the coordinate fragment
+-- '...,2529.99,...' and the ITEM id 3914 in mod-turtle-content loot tables).
+--
+-- role: 0 melee, 1 range, 2 boss.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS `pdungeon_packs` (
+  `id` INT UNSIGNED NOT NULL,
+  `name` VARCHAR(64) NOT NULL,
+  -- 0 = ANY theme. See the header: this pack is worgen, which reads as well
+  -- in a dark Gilneas street as in a keep, so it is theme-agnostic.
+  `theme` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `level_min` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `level_max` TINYINT UNSIGNED NOT NULL DEFAULT 80,
+  `unlock_dlvl` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS `pdungeon_pack_members` (
+  `packId` INT UNSIGNED NOT NULL,
+  `entry` INT UNSIGNED NOT NULL,
+  `role` TINYINT UNSIGNED NOT NULL DEFAULT 0,
+  `casterSpellId` INT UNSIGNED NOT NULL DEFAULT 0,
+  `weight` SMALLINT UNSIGNED NOT NULL DEFAULT 100,
+  PRIMARY KEY (`packId`, `entry`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Idempotent re-apply: delete THIS pack's own rows, then insert. The delete is
+-- scoped to packId/id 6 alone - never a BETWEEN, never a DROP - so an operator
+-- who added packs of their own, and the concurrently authored sibling packs,
+-- keep every row they own.
+DELETE FROM `pdungeon_pack_members` WHERE `packId` = 6;
+DELETE FROM `pdungeon_packs` WHERE `id` = 6;
+
+INSERT INTO `pdungeon_packs`
+  (`id`, `name`, `theme`, `level_min`, `level_max`, `unlock_dlvl`, `enabled`) VALUES
+  (6, 'Shadowfang Pack', 0, 80, 80, 0, 1);
+
+-- casterSpellId is the role-1 member's FALLBACK filler and nothing more:
+-- PDv2CreatureAI::BuildKit reads it only when no slot-0 row survived
+-- (PDv2CreatureAI.cpp:1405-1409), and a role-1 member with casterSpellId 0 AND
+-- no member_spells rows is silently DEMOTED to melee at load
+-- (PDv2PackMgr.cpp:169-176). Each of the three values below is identical to that
+-- member's own slot-0 row in mod_pdungeon_member_spells_worgen.sql, the way the
+-- shipped files keep them, and each reaches at least
+-- ProceduralDungeon.V2.CastRangeYd (25.0 in the DEPLOYED
+-- dcore\configs\modules\mod_procedural_dungeon.conf): 69211 Shadow Bolt 30 yd,
+-- 60015 Shadow Bolt 40 yd (SpellRange.dbc, measured).
+INSERT INTO `pdungeon_pack_members`
+  (`packId`, `entry`, `role`, `casterSpellId`, `weight`) VALUES
+  -- Pack 6 "Shadowfang Pack" - 8 members: 4 melee, 3 range, 1 boss.
+  -- Every trash member is faction 24, rank 1, exp 0, DamageModifier 1.7
+  -- (317-397 per 2.0 s swing for uc1, 298-373 for uc2 - a 1.06x spread).
+  -- MELEE (role 0)
+  (6, 3914, 0,     0, 100),  -- Rethilgore            uc1, 21368 hp, display 524  @1.15 - imm -93
+  (6, 3854, 0,     0, 100),  -- Shadowfang Wolfguard  uc1, 16026 hp, display 203  @1.00 - line-holder
+  (6, 3857, 0,     0, 100),  -- Shadowfang Glutton    uc1, 16026 hp, display 202  @1.00 - the feeder
+  (6, 3859, 0,     0, 100),  -- Shadowfang Ragetooth  uc1, 16026 hp, display 736  @1.15 - carries the CC
+  -- RANGE (role 1) - casterSpellId mirrors the member's own slot-0 filler
+  (6, 3853, 1, 69211, 100),  -- Shadowfang Moonwalker uc2, 12822 hp, 7988 mana, display 729 @1.00
+  (6, 3855, 1, 60015, 100),  -- Shadowfang Darksoul   uc2, 12822 hp, 7988 mana, display 657 @0.85
+  (6, 2529, 1, 60015, 100),  -- Son of Arugal         uc1, 16026 hp, display 1098 @1.45 - replaces 3860
+  -- BOSS (role 2) - faction 16, exp 2, dm 4.6 -> 1939-2698 per swing
+  (6, 27580, 2,    0, 100);  -- Selas   BOSS, 75600 hp, display 26793 NorthrendWorgen @3.00

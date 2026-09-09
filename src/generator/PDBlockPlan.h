@@ -18,6 +18,11 @@
 #ifndef MOD_PDUNGEON_BLOCK_PLAN_H
 #define MOD_PDUNGEON_BLOCK_PLAN_H
 
+// Only for PD_CELLS_PER_BLOCK, the unit a block's doorway cells are counted
+// in (LaneCellsForSocket below). PDv2WorldMath.h is header-only, engine-free
+// and includes nothing of ours, so this cannot cycle.
+#include "PDv2WorldMath.h"
+
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -53,6 +58,31 @@ namespace PDungeon
         SOCKET_W = 8u
     };
 
+    // The socket on the far side of the same block edge: a run leaving block A
+    // through `bit` enters its neighbour through this one, and a barrier that
+    // seals one doorway has to seal both halves of it. Not a single socket bit
+    // in - SOCKET_E out, the generator's own long-standing fallback; every
+    // caller either passes one of the four bits or checks first.
+    unsigned OppositeSocket(unsigned bit);
+
+    // The two doorway cells the socket `bit` names on a block's OWN edge, as
+    // (row, col) pairs in the kit's cell frame: row 0 is the north edge, col 0
+    // the west one, and the doorway is the two centre cells of the other axis.
+    //   N  (0, 3) (0, 4)      S  (7, 3) (7, 4)
+    //   W  (3, 0) (4, 0)      E  (3, 7) (4, 7)
+    // `outRowCol[i][0]` is the row, `outRowCol[i][1]` the column - and the
+    // walk grid's x axis is the COLUMN one (PDv2WorldMath.h: v runs east along
+    // the columns, u runs south along the rows), which is the argument order a
+    // caller has to get right.
+    //
+    // Engine-free and public on purpose (B3-B5 Task 2 review, Important 1):
+    // this table used to be a lambda inside SpawnBarriers, where no harness
+    // could reach it, so a kit change or a SOCKET_* renumber would have
+    // shipped a portcullis standing in a wall instead of turning `pdblock
+    // --batch` red. Same fallback as OppositeSocket for a bit that is not one
+    // of the four.
+    void LaneCellsForSocket(unsigned bit, int outRowCol[2][2]);
+
     // Index into the kit's role table;
     // chunkId = 2000 + alt * 1000 + roleIndex * 100 + mask.
     enum class BlockRole : uint8_t
@@ -75,18 +105,28 @@ namespace PDungeon
     // cannot drift silently.
     int AltCountFor(BlockRole role);
 
+    // Round B chain arithmetic (spec 2026-09-02 §2), pure and draw-free so the
+    // engine, the planner and the harness agree by construction.
+    //   total    = max(2, rooms + bossRooms)
+    //   pockets  = min(branches, total / 3, (total - 1 - N) / 2)   N = max(1, bossRooms)
+    //   chainLen = total - pockets
+    //   boss k   = round(k * (chainLen - 1) / N), k = 1..N
+    int PocketCountFor(int rooms, int bossRooms, int branches);
+    int BossChainIndex(int chainLen, int bossRooms, int k);
+
     struct BlockCfg
     {
         uint32_t seed = 0;
         int rooms = 3;              // ROOM blocks, before boss rooms are added
         int bossRooms = 1;
         int fieldBlocks = 8;        // planning field is fieldBlocks square
-        int loopChancePct = 15;     // chance to keep a non-MST edge
+        int detourChancePct = 33;   // Round B (B0b): chance per boss segment that a loop room hangs off the run
         int originBX = 256;         // global block coord of the field origin
         int originBY = 256;
         int theme = 1;
         int maxTries = 12;          // seed+n retries before giving up
         int maxDeadEnds = 2;        // stub corridors attached after the loops
+        int branches = 2;           // Round B: pocket rooms hanging off the spine (V2.Branches)
     };
 
     struct PlacedBlock
@@ -99,6 +139,16 @@ namespace PDungeon
         int roomId = -1;            // -1 for corridor blocks
         int depth = 0;              // BFS depth from the entrance, rooms only
         int alt = 0;                // visual alternate, < AltCountFor(role)
+
+        // Round B. Spine rooms carry their chain index; pocket rooms (dead
+        // ends off a spine room) carry the chain index of the room they hang
+        // off; loop rooms (B0b: beside a straight run, entered from the run
+        // and left back into it) carry the chain index of the spine room
+        // their run leads into. -1 means "not that kind of block". B1/B3/B4
+        // read nothing else.
+        int chainIndex = -1;
+        int branchOf = -1;
+        int detourOf = -1;
     };
 
     struct BlockPlan
@@ -111,6 +161,34 @@ namespace PDungeon
 
         PlacedBlock const* At(int bx, int by) const;
     };
+
+    // Reads of a generated plan. ChainLength is 0 for a plan without chain
+    // fields. SegmentOf: 0 for the entrance, k for a spine room in boss k's
+    // segment (boss k included), a pocket's host segment, a loop room's run
+    // segment, -1 for corridors.
+    int ChainLength(BlockPlan const& plan);
+    int SegmentOf(BlockPlan const& plan, PlacedBlock const& block);
+
+    // Round B / B3-B5: the corridor run behind socket `bit` of block `from`.
+    // Walks corridor blocks, ignores chest stubs, continues straight through a
+    // loop attachment, and returns the index of the first ROOM reached. -1
+    // when the run ends in a stub, in nothing, at the far side of a loop strip
+    // or at a fork - `junction` says which (nullptr when the caller does not
+    // care). `outRun`, when given, collects the corridor blocks walked, in
+    // order; it is cleared first.
+    //
+    // This is the SAME walk ValidateBlockPlan's spine and pocket rules run, so
+    // the run a barrier seals and the run the validator proved are one run.
+    int RunFromSocket(BlockPlan const& plan, size_t from, unsigned bit,
+                      std::vector<size_t>* outRun, bool* junction);
+
+    // The socket of chain room `chainIndex` that the corridor run from chain
+    // room `chainIndex - 1` arrives through, or 0 when there is none (chain
+    // index below 1, a plan without chain fields, or no single-run join).
+    // `outRun`, when given, receives that run's corridor blocks in WALKING
+    // order - from `chainIndex - 1` toward `chainIndex`, which is the
+    // direction B3's barrier and B4's patrol think in.
+    unsigned SpineRunInto(BlockPlan const& plan, int chainIndex, std::vector<size_t>* outRun);
 
     // Deterministic: the same cfg always yields the same plan on any compiler,
     // because every draw goes through PDRandom's hand-rolled helpers.

@@ -19,6 +19,7 @@
 #include "ChatCommand.h"
 #include "PDClientLink.h"
 #include "PDDefines.h"
+#include "PDv2InstanceScript.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
 #include "PDv2UILink.h"
@@ -27,6 +28,8 @@
 #include "generator/PDBlockPlan.h"
 
 #include <sstream>
+#include <string>
+#include <vector>
 
 using namespace Acore::ChatCommands;
 using namespace PDungeon;
@@ -46,9 +49,12 @@ public:
     {
         static ChatCommandTable v2Table =
         {
-            { "gen",   HandleV2GenCommand,   SEC_GAMEMASTER, Console::Yes },
-            { "enter", HandleV2EnterCommand, SEC_GAMEMASTER, Console::No  },
-            { "info",  HandleV2InfoCommand,  SEC_GAMEMASTER, Console::No  }
+            { "gen",    HandleV2GenCommand,    SEC_GAMEMASTER, Console::Yes },
+            { "enter",  HandleV2EnterCommand,  SEC_GAMEMASTER, Console::No  },
+            { "info",   HandleV2InfoCommand,   SEC_GAMEMASTER, Console::No  },
+            // Console::No like its two in-game siblings: the answer is about
+            // the dungeon the CALLER stands in, and a console has no instance.
+            { "patrol", HandleV2PatrolCommand, SEC_GAMEMASTER, Console::No  }
         };
         static ChatCommandTable pdungeonTable =
         {
@@ -194,18 +200,107 @@ private:
         return true;
     }
 
+    // A SNAPSHOT of every patroller in the dungeon the caller stands in, taken
+    // the moment they type it - which is the point: the operator sees a mob
+    // somewhere it should not be, types this, and the answer is on screen
+    // before the mob has moved again.
+    //
+    // One line per patroller, formatted by the AI (PDv2MobAI::PatrolStateLine,
+    // which documents what each field proves). It is a companion to
+    // `ProceduralDungeon.V2.Patrol.Debug`, not a replacement: the config key
+    // records what HAPPENED over a whole run in the worldserver log, this
+    // command answers what IS true right now without touching the log at all.
+    static bool HandleV2PatrolCommand(ChatHandler* handler)
+    {
+        if (!RequireEnabled(handler))
+        {
+            return true;
+        }
+
+        Player* player = handler->GetPlayer();
+        if (!player)
+        {
+            return false;
+        }
+
+        // The v2 instance script, not the map id: a GM standing on map 760
+        // outside a generated run has no dungeon to report on, and saying so is
+        // more useful than an empty list.
+        PDv2InstanceScript const* instance =
+            dynamic_cast<PDv2InstanceScript const*>(player->GetInstanceScript());
+        if (!instance)
+        {
+            handler->SendSysMessage("pdungeon v2: you are not standing in a v2 dungeon.");
+            return true;
+        }
+
+        std::vector<std::string> const lines = instance->PatrolSnapshot();
+        if (lines.empty())
+        {
+            handler->SendSysMessage("pdungeon v2: no patrol member alive in this dungeon "
+                                    "(one patrol per corridor between two rooms; they are "
+                                    "killable).");
+            return true;
+        }
+
+        handler->PSendSysMessage("pdungeon v2: {} patrol creature(s):", uint32(lines.size()));
+        for (std::string const& line : lines)
+        {
+            handler->SendSysMessage(line.c_str());
+        }
+        // Named here rather than in the lines, so the reading of the lines is
+        // one lookup away when this is the first time an operator sees them.
+        handler->SendSysMessage("pdungeon v2: walkable 0 + spline RUNNING = a spline nobody "
+                                "owns; walkable 0 + top CHASE = an unreachable chase; "
+                                "walkable 1 + following 1 = the module chose that cell.");
+        // Round D / D2. The second field of every line is the role: `leader`
+        // with the two GLOBAL beat cells its tag carries, or `follower k of
+        // guid N`. A follower with top FOLLOW is in formation; top IDLE on a
+        // follower means its leader is gone and the file has dissolved.
+        handler->SendSysMessage("pdungeon v2: role `leader beat (x,y)->(x,y)` walks the beat; "
+                                "`follower k of guid N` walks behind it - top FOLLOW is in "
+                                "formation, top IDLE means its leader is gone.");
+        return true;
+    }
+
     static bool HandleV2InfoCommand(ChatHandler* handler)
     {
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
         handler->PSendSysMessage("pdungeon v2: {} | map {} | floorZ {:.2f} | rooms {}+{} | "
-                                 "field {} blocks | origin ({},{})",
+                                 "field {} blocks | origin ({},{}) | pockets {} | detour {}%",
                                  cfg.enabled ? "enabled" : "disabled", cfg.mapId, cfg.floorZ,
                                  cfg.rooms, cfg.bossRooms, cfg.fieldBlocks,
-                                 cfg.originBX, cfg.originBY);
+                                 cfg.originBX, cfg.originBY, cfg.branches, cfg.detourChancePct);
+        // Round B / B3-B5, the run-shaping keys. They are read live, so this
+        // line is the only place an operator can confirm that the
+        // `.reload config` they just ran actually reached the module.
+        // No ambush radius on this line since Round C / C2: the trap fires on
+        // the corridor block a player stands in, so there is no distance left
+        // for an operator to confirm.
+        // Round D / D2 appends the file's size ladder to the patrol field:
+        // `x1/2/3@50/75` reads "one creature, two from difficulty 50, three
+        // from 75", and the two numbers are the LIVE keys rather than the
+        // defaults - which is the whole reason this line exists.
+        handler->PSendSysMessage("pdungeon v2: barrier {}% | patrol hp {}% x1/2/3@{}/{} "
+                                 "follow {:.1f} yd | ambush {}% x{}",
+                                 cfg.barrierPct, cfg.patrolHealthMultPct,
+                                 cfg.patrolSize2Diff, cfg.patrolSize3Diff,
+                                 cfg.patrolFollowDistYd,
+                                 cfg.ambushChancePct, cfg.ambushMobs);
         // 0 here means mod_pdungeon_chunk_meta.sql never reached the world DB
-        // - the one failure that makes every mob stand still.
-        handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded",
-                                 uint32(sPDv2Mgr->WalkMaskCount()));
+        // - the one failure that makes every mob stand still. The second count
+        // is the same rows decoded a second time with their KINDS kept (Round
+        // B / B1 - what the cache and the spawns stand on: the loop-room chest
+        // on `chest`, B2's placement on `boss`/`spawns`, and a vetoed pick on
+        // `entry`). Both maps are filled from one row in one loop, so the two
+        // numbers MUST match: a malformed `anchors` blob is logged at load and
+        // stored empty rather than dropped, so it never shrinks the second
+        // count. They are printed side by side so a later change that splits
+        // the two load paths shows up on this line instead of in game as rooms
+        // whose mobs quietly stand on the overflow ring.
+        handler->PSendSysMessage("pdungeon v2: {} walk mask(s) loaded, {} with typed anchors",
+                                 uint32(sPDv2Mgr->WalkMaskCount()),
+                                 uint32(sPDv2Mgr->RoomAnchorChunkCount()));
         // The same failure class, one table over: 0 packs means
         // mod_pdungeon_packs.sql never landed and every room falls back to the
         // placeholder creature; 0 affixes means mod_pdungeon_affixes.sql did

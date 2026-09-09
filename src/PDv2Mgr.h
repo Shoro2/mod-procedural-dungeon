@@ -21,6 +21,8 @@
 #include "generator/PDBlockPlan.h"
 #include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
+#include "generator/PDv2SpawnAnchors.h"
+#include "generator/PDv2WalkGrid.h"
 #include "generator/PDv2WorldMath.h"
 
 #include <array>
@@ -61,7 +63,8 @@ namespace PDungeon
         int         fieldBlocks = 8;
         int         originBX = 256;      // 256/8 = tile 32
         int         originBY = 256;
-        int         loopChancePct = 15;
+        int         detourChancePct = 33;  // Round B (B0b): chance per boss segment of a loop room (V2.DetourChance)
+        int         branches = 2;        // Round B: pocket rooms per layout (V2.Branches)
         int         theme = 1;
         std::string manifestPath;        // where `v2 gen` writes the manifest
 
@@ -100,6 +103,71 @@ namespace PDungeon
         // or a display problem - it costs nothing else, since the props are
         // decoration and no mechanic reads them.
         bool        decorEnable = true;
+
+        // Round B / B3-B5 (2026-09-03). All eight are read live in LoadConfig
+        // and none is persisted with a layout: they change what a RUN does,
+        // not what a plan is, so a `.reload config` retunes the next barrier,
+        // the next patroller and the next ambush without rerolling anybody's
+        // dungeon.
+
+        // B3. Share of a boss segment's planned trash that must fall before
+        // the portcullis in front of that segment's boss room opens. The boss
+        // room's own pack is not in the denominator (design §B3.1).
+        int         barrierPct = 50;
+        // The portcullis' facing, in radians, for the two lane orientations -
+        // conf keys rather than constants so the operator can calibrate the
+        // model against the doorway in game without a rebuild.
+        float       barrierOrientNS = 0.0f;
+        float       barrierOrientEW = 1.5708f;
+
+        // B4. The patroller's health as a percent of the trash it is drawn
+        // from, through SpawnTaggedMob's baseHealthOverride. Never below 100:
+        // a patrol that is weaker than the pack it came from is not a threat
+        // on the road, it is loot walking towards the player.
+        int         patrolHealthMultPct = 300;
+
+        // Round D / D2. Where the single file grows: one creature below
+        // Size2Diff, two from it, three from Size3Diff, measured against the
+        // run's frozen 1..100 difficulty. Read live like everything else here,
+        // and read at SPAWN time only - a `.reload config` retunes the next
+        // dungeon rather than adding a mob to a corridor a player is standing
+        // in. Neither is clamped against the other: Size3Diff <= Size2Diff
+        // merely makes the two-mob band empty, which is a legitimate thing for
+        // an operator to type and not a mistake to refuse.
+        int         patrolSize2Diff = 50;
+        int         patrolSize3Diff = 75;
+        // How far behind the creature in front of it a follower walks, times
+        // its rank - so the file is FollowDistYd, 2x, 3x behind the leader. A
+        // yard value rather than cells: MoveFollow is an engine call and its
+        // range is in yards, and the lane is 16.67 yd wide, so the default 3.0
+        // keeps the whole file inside it however the corridor turns.
+        //
+        // Round D / D2 (Task 3 review I1): read on every follow DECISION, not
+        // merely on every follow ISSUE. The core's follow generator freezes its
+        // range at construction, so the AI compares the live product against
+        // the distance it last issued and re-issues when the two differ - which
+        // is what makes `.reload config` re-space a file that is already
+        // walking, exactly as the conf.dist for this key promises.
+        float       patrolFollowDistYd = 3.0f;
+
+        // Round C. The patrol diagnostics switch, and the only reason the AI
+        // logs anything per leg. OFF by default and expected to stay off
+        // everywhere but a run an operator is actively watching: the lines are
+        // per waypoint, per movement inform and per evade, which is exactly
+        // what someone hunting a patroller wants and exactly what the host
+        // does not. Read live like every other V2 knob, so `.reload config`
+        // arms it on a dungeon that is already being walked.
+        bool        patrolDebug = false;
+
+        // B5. Chance per boss segment that one of its corridors is armed, how
+        // many mobs the trap spawns, and the stun it opens with (0 = no stun).
+        // The chance is read live and is not a layout input - BuildAmbushPlan
+        // draws on its own stream. No radius: since Round C / C2 the trap
+        // fires on the player standing in the corridor BLOCK, which needs no
+        // tuning constant at all (PDv2InstanceScript.h, TickAmbushes).
+        int         ambushChancePct = 50;
+        int         ambushMobs = 4;
+        uint32_t    ambushStunSpell = 20170;
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the
@@ -148,7 +216,14 @@ namespace PDungeon
     // from the stream, so a v1 seed no longer reproduces its stored layout.
     // Every stored dungeon rerolls once on first entry; dlvl/dxp are
     // untouched by design (layout columns update via ON DUPLICATE KEY only).
-    constexpr uint32_t PD_LAYOUT_VERSION = 2;
+    //
+    // v3 (2026-09-02, Round B): the chain generator replaces scatter + MST -
+    // rooms are laid as one path through the boss rooms with pockets,
+    // `gen_branches` joins the generation inputs, and `gen_loop_pct` carries
+    // V2.DetourChance (B0b: loop rooms; the forward-cut mechanism the key was
+    // named for is withdrawn). Every stored layout rerolls once; dlvl/dxp
+    // untouched, as before.
+    constexpr uint32_t PD_LAYOUT_VERSION = 3;
 
     class PDv2Mgr
     {
@@ -238,12 +313,33 @@ namespace PDungeon
 
         size_t WalkMaskCount() const { return _walkMasks.size(); }
 
+        // Round D / D2. The same row's patrol clearance layer, in the shape
+        // BuildWalkGrid's PatrolLayerProvider wants: three 64-byte grids in the
+        // walk mask's own cell order, or null pointers for a chunk that
+        // publishes none. Null is not an error - a `pdungeon_chunk_meta` that
+        // predates D2 has no such columns at all, and every cell is then read
+        // as free, which is exactly what this module did before the layer
+        // existed.
+        PatrolLayers PatrolLayersFor(int chunkId) const;
+
+        // How many chunks came with a clearance layer. 0 says the kit or the
+        // database is older than D2, which is the one thing about this feature
+        // an operator has to be able to tell from the outside.
+        size_t PatrolLayerCount() const { return _chunkPatrol.size(); }
+
         // The kit's anchor points for a chunk (entry, boss, chest, spawns), in
         // the block-local FLPD-BLOCK-1 frame, or nullptr for a chunk with none
         // - which every corridor is. Loaded beside the walk masks out of the
         // same `pdungeon_chunk_meta` row, so the two can never describe
         // different kits. The decor planner keeps its props clear of these.
         std::vector<DecorAnchor> const* AnchorsFor(int chunkId) const;
+
+        // The same row's anchors with their KINDS kept (entry, boss, chest,
+        // spawns) - what the spawn veto's fallback, the loop-room chest and
+        // B2's spawn placement read (B1's altar read `entry` too, until Round
+        // C / C5 dropped it). nullptr for a chunk the SQL does not know.
+        RoomAnchors const* RoomAnchorsFor(int chunkId) const;
+        size_t RoomAnchorChunkCount() const { return _chunkRoomAnchors.size(); }
 
         // The chunk's structural GameObject props (fountain, cave-in, ...),
         // or nullptr - most corridors have none. Same lifetime and source as
@@ -277,7 +373,19 @@ namespace PDungeon
         std::unordered_map<uint32_t, std::shared_ptr<BlockPlan const>> _plans;
         std::unordered_map<uint32_t, PDv2AccountState> _accounts;
         std::unordered_map<int, std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK>> _walkMasks;
+        // Round D / D2, one entry per chunk that HAS a layer - not per chunk,
+        // so PatrolLayerCount() answers the question an operator asks. The
+        // three grids live in one record because they are one measurement: a
+        // clearance without its offset is a number nobody can walk to.
+        struct PatrolLayerBytes
+        {
+            std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK> clear{};
+            std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK> du{};
+            std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK> dv{};
+        };
+        std::unordered_map<int, PatrolLayerBytes> _chunkPatrol;
         std::unordered_map<int, std::vector<DecorAnchor>> _chunkAnchors;
+        std::unordered_map<int, RoomAnchors> _chunkRoomAnchors;
         std::unordered_map<int, std::vector<KitProp>> _chunkProps;
         std::vector<DecorRule> _decorRules;
         std::vector<CritterRule> _critterRules;

@@ -52,8 +52,36 @@ public:
     }
 };
 
+// Round C / C8: the way home after the last boss. Click, not automatic - the
+// cache beside Chromie is looted first (operator decision 2026-09-08).
+//
+// PDv2's portal, spawned by PDv2InstanceScript's finale rather than by a
+// world-DB spawn, and unrelated to go_pdungeon_exit above (that one is v1's,
+// GO 910032, and goes to the player's hearth). It lives in this file because
+// this is where the module's GameObject click scripts live and adding a .cpp
+// would cost a cmake re-configure for eleven lines.
+//
+// A GameObjectScript rather than the FL-wide Data2/`event_scripts` recipe the
+// stock Azealia portals use (777000, 222000, 223000): that recipe needs a
+// world-DB script row per portal, and this one needs no row at all.
+class go_pdungeon_azealia_portal : public GameObjectScript
+{
+public:
+    go_pdungeon_azealia_portal() : GameObjectScript("go_pdungeon_azealia_portal") { }
+
+    bool OnGossipHello(Player* player, GameObject* /*go*/) override
+    {
+        // game_tele 20040 `flraidazealia` (acore_world), map 727 = Azealia.
+        // The same arrival spot all nine FL dungeon exits already use, so a
+        // player leaving the Depths lands where they would from anywhere else.
+        player->TeleportTo(727, 13611.1f, 13655.7f, 9.87548f, 4.7776f);
+        return true;
+    }
+};
+
 void AddPDExitObjectScripts()
 {
     new go_pdungeon_exit();
     new go_pdungeon_shrine();
+    new go_pdungeon_azealia_portal();
 }

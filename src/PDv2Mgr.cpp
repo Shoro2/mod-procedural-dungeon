@@ -46,7 +46,22 @@ namespace PDungeon
         _config.fieldBlocks = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.FieldBlocks", 8);
         _config.originBX = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBX", 256);
         _config.originBY = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.OriginBY", 256);
-        _config.loopChancePct = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.LoopChance", 15);
+        // Round B (B0b): the chance, per boss segment, that a loop room hangs
+        // off the spine's corridor run. Clamped into a percent; persisted in
+        // the gen_loop_pct column, whose name predates the loop rooms.
+        _config.detourChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.DetourChance", 33)));
+
+        // Round B: pocket rooms hanging off the spine. Clamped into [0, 255]
+        // because the value is persisted: pdungeon_account.gen_branches is
+        // TINYINT UNSIGNED, so an operator typo above it makes SavePlanToDB
+        // fail under strict sql_mode and the layout that was just generated is
+        // never stored - the same reason the percent above is clamped. The
+        // planner's own arithmetic bounds the effective value far lower; the
+        // ceiling here only keeps the column writable.
+        _config.branches = std::min(255, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Branches", 2)));
+
         _config.theme = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.Theme", 1);
         _config.manifestPath = sConfigMgr->GetOption<std::string>(
             "ProceduralDungeon.V2.ManifestPath", "");
@@ -80,10 +95,61 @@ namespace PDungeon
         _config.decorEnable = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Decor.Enable", true);
 
-        LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{})",
+        // Round B / B3: a percent handed straight to a threshold test, so it
+        // gets the same [0, 100] clamp the affix share does. 0 opens every
+        // barrier on the first kill of its segment, 100 demands all of it.
+        _config.barrierPct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Barrier.Pct", 50)));
+        // Radians, deliberately unclamped: an orientation is periodic, so
+        // there is no value an operator could type that means nothing.
+        _config.barrierOrientNS = sConfigMgr->GetOption<float>(
+            "ProceduralDungeon.V2.Barrier.OrientNS", 0.0f);
+        _config.barrierOrientEW = sConfigMgr->GetOption<float>(
+            "ProceduralDungeon.V2.Barrier.OrientEW", 1.5708f);
+
+        // B4: never below 100. The patroller is drawn from the trash pool and
+        // is meant to be the hardest thing in the corridor; a multiplier under
+        // 100 would make it the softest thing in the dungeon.
+        _config.patrolHealthMultPct = std::max(100, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Patrol.HealthMult", 300));
+
+        // Round D / D2: both are compared against the run's 1..100 dial, so
+        // they are clamped into that range and into nothing else. The two are
+        // deliberately NOT clamped against each other - PDv2Mgr.h says why.
+        _config.patrolSize2Diff = std::min(100, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Patrol.Size2Diff", 50)));
+        _config.patrolSize3Diff = std::min(100, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Patrol.Size3Diff", 75)));
+        // Never below zero: a negative follow distance is not a formation, it
+        // is MoveFollow aiming at a point on the far side of the leader. Not
+        // clamped from above - a wide file is a look, not a fault.
+        _config.patrolFollowDistYd = std::max(0.0f, sConfigMgr->GetOption<float>(
+            "ProceduralDungeon.V2.Patrol.FollowDistYd", 3.0f));
+
+        // Round C: off. Every AI diagnostic in PDv2CreatureAI.cpp reads this
+        // key on the tick that would log, so `.reload config` both arms and
+        // disarms it mid-run - which is the whole point, because the evidence
+        // it produces is wanted for one pull and not for the rest of the run.
+        _config.patrolDebug = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Patrol.Debug", false);
+
+        // B5: a percent roll like the ones above, and a mob count the spawn
+        // ring can actually seat (0 disarms the ambush without disarming
+        // anything else). V2.Ambush.RadiusYd is gone since Round C / C2 - the
+        // trigger is the corridor block and has no radius to read.
+        _config.ambushChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Ambush.Chance", 50)));
+        _config.ambushMobs = std::min(8, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Ambush.Mobs", 4)));
+        // Unclamped on purpose: 0 means "no stun at all", and any other id is
+        // the operator's choice of spell, which this module must not overrule.
+        _config.ambushStunSpell = sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Ambush.StunSpell", 20170);
+
+        LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} detour {}%",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,
-                 _config.originBX, _config.originBY);
+                 _config.originBX, _config.originBY, _config.branches, _config.detourChancePct);
         if (_config.enabled && _config.manifestPath.empty())
         {
             LOG_WARN(PD_LOG, "PDv2: ProceduralDungeon.V2.ManifestPath is empty - `.pdungeon v2 gen` "
@@ -119,8 +185,19 @@ namespace PDungeon
         // field with the room count keeps cells-per-room roughly constant, so a
         // small dungeon is small instead of sparse. The room cap
         // (PD_GAME_ROOMS_CAP_MEASURED) still keeps big layouts inside the tile.
-        cfg.fieldBlocks = std::min(_config.fieldBlocks, GameFieldBlocksForRooms(cfg.rooms));
-        cfg.loopChancePct = _config.loopChancePct;
+        //
+        // The field follows the TOTAL room count, bosses included: the layout
+        // seats rooms + bossRooms cells, and sizing it from cfg.rooms alone
+        // proposed a field that provably cannot hold the plan. A dlvl-30
+        // account that picks two rooms runs six rooms (2 + 4 bosses), and six
+        // rooms do not exist on the 3x3 field the old expression handed it -
+        // MIN_ROOM_GAP 2 admits at most 5 cells on 3x3, so every attempt failed
+        // and the player got "no valid layout" (final review of B0, 2026-09-03).
+        // The live default is unmoved: 5 + 1 = 24 cells still asks for 5x5.
+        cfg.fieldBlocks = std::min(_config.fieldBlocks,
+                                   GameFieldBlocksForRooms(cfg.rooms + cfg.bossRooms));
+        cfg.detourChancePct = _config.detourChancePct;
+        cfg.branches = _config.branches;
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;
         cfg.theme = themeOverride ? themeOverride : _config.theme;
@@ -164,18 +241,21 @@ namespace PDungeon
         // pack at all against v1's level-80 stock. Seeding the row from the
         // cached state keeps a first `v2 gen` from silently disagreeing with
         // the state the server has been using since login.
+
+        // gen_loop_pct carries V2.DetourChance since B0b
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
-            "gen_loop_pct, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
-            "cfg_packs) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
+            "gen_loop_pct, gen_branches, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
+            "cfg_packs) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE theme = VALUES(theme), "
             "layout_seed = VALUES(layout_seed), layout_version = VALUES(layout_version), "
             "gen_rooms = VALUES(gen_rooms), gen_boss_rooms = VALUES(gen_boss_rooms), "
             "gen_field_blocks = VALUES(gen_field_blocks), gen_origin_bx = VALUES(gen_origin_bx), "
-            "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct)",
+            "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct), "
+            "gen_branches = VALUES(gen_branches)",
             accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
-            cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.loopChancePct,
+            cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.detourChancePct, cfg.branches,
             state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct, state.cfgBandMin, packs);
     }
 
@@ -312,7 +392,7 @@ namespace PDungeon
 
         QueryResult result = CharacterDatabase.Query(
             "SELECT layout_seed, layout_version, theme, gen_rooms, gen_boss_rooms, "
-            "gen_field_blocks, gen_origin_bx, gen_origin_by, gen_loop_pct "
+            "gen_field_blocks, gen_origin_bx, gen_origin_by, gen_loop_pct, gen_branches "
             "FROM pdungeon_account WHERE accountId = {}", accountId);
         if (!result)
         {
@@ -342,7 +422,8 @@ namespace PDungeon
         cfg.fieldBlocks = fields[5].Get<uint8>();
         cfg.originBX = fields[6].Get<uint16>();
         cfg.originBY = fields[7].Get<uint16>();
-        cfg.loopChancePct = fields[8].Get<uint8>();
+        cfg.detourChancePct = fields[8].Get<uint8>();
+        cfg.branches = fields[9].Get<uint8>();
 
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))
@@ -414,7 +495,9 @@ namespace PDungeon
     void PDv2Mgr::LoadChunkMeta()
     {
         _walkMasks.clear();
+        _chunkPatrol.clear();
         _chunkAnchors.clear();
+        _chunkRoomAnchors.clear();
         _chunkProps.clear();
 
         // Highest kit version wins per chunk id: rows are read in ascending
@@ -431,9 +514,36 @@ namespace PDungeon
         // describe the same block, and reading them from a second query - or
         // worse, a second file - is how a kit regeneration ends up half
         // applied.
-        QueryResult result = WorldDatabase.Query(
-            "SELECT chunkId, kitVersion, walkMask, anchors, theme "
-            "FROM pdungeon_chunk_meta ORDER BY kitVersion");
+        //
+        // Round D / D2's three clearance columns are asked for ONLY when they
+        // exist. `mod_pdungeon_chunk_meta.sql` adds them with an
+        // information_schema-guarded ALTER of its own, so on a server whose
+        // updater has run they are always there - but a server with SQL updates
+        // switched off, or one that has not restarted since the kit was
+        // regenerated, still has to load its walk masks. Naming a missing
+        // column would fail the WHOLE query and leave the dungeon with no grid
+        // at all ("0 masks = mobs stand still"), which is a far worse outcome
+        // than patrols walking cell centres for one more restart. The probe is
+        // one row at startup, and it is the only second query in this function
+        // - the DATA still comes out of a single row per chunk.
+        bool hasPatrolLayer = false;
+        if (QueryResult probe = WorldDatabase.Query(
+                "SELECT COUNT(*) FROM information_schema.COLUMNS "
+                "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pdungeon_chunk_meta' "
+                "AND COLUMN_NAME IN ('patrolClear', 'patrolDu', 'patrolDv')"))
+        {
+            hasPatrolLayer = probe->Fetch()[0].Get<uint64>() == 3;
+        }
+
+        std::string query =
+            "SELECT chunkId, kitVersion, walkMask, anchors, theme";
+        if (hasPatrolLayer)
+        {
+            query += ", patrolClear, patrolDu, patrolDv";
+        }
+        query += " FROM pdungeon_chunk_meta ORDER BY kitVersion";
+
+        QueryResult result = WorldDatabase.Query(query);
         if (!result)
         {
             LOG_ERROR(PD_LOG, "PDv2: pdungeon_chunk_meta has no rows - "
@@ -467,6 +577,57 @@ namespace PDungeon
             auto& slot = _walkMasks[chunkId];
             std::copy(mask.begin(), mask.end(), slot.begin());
 
+            // Round D / D2, the clearance layer. ALL THREE OR NONE: a clearance
+            // without its offset is a number nobody can walk to, and half a
+            // layer would send patrols to cell centres it had already decided
+            // were tight. A NULL, an empty string or a blob of the wrong length
+            // therefore leaves the chunk out of _chunkPatrol entirely, which
+            // BuildWalkGrid reads as "every walkable cell is free" - today's
+            // behaviour, and the right answer for theme 1, which places no
+            // facades at all.
+            if (hasPatrolLayer)
+            {
+                std::vector<uint8_t> layer[3];
+                bool ok = true;
+                for (int i = 0; i < 3 && ok; ++i)
+                {
+                    Field const& f = fields[5 + i];
+                    if (f.IsNull())
+                    {
+                        ok = false;
+                        break;
+                    }
+                    std::string const text = f.Get<std::string>();
+                    if (text.empty())
+                    {
+                        ok = false;
+                        break;
+                    }
+                    ok = DecodeWalkMaskRle(text, layer[i]) &&
+                         layer[i].size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK;
+                    if (!ok)
+                    {
+                        LOG_ERROR(PD_LOG, "PDv2: chunk {} has a malformed patrol clearance "
+                                          "column {} - that chunk's cells are read as free",
+                                  chunkId, i);
+                    }
+                }
+                if (ok)
+                {
+                    auto& p = _chunkPatrol[chunkId];
+                    std::copy(layer[0].begin(), layer[0].end(), p.clear.begin());
+                    std::copy(layer[1].begin(), layer[1].end(), p.du.begin());
+                    std::copy(layer[2].begin(), layer[2].end(), p.dv.begin());
+                }
+                else
+                {
+                    // A row that overwrites a lower kitVersion has to overwrite
+                    // its layer too, or a chunk would keep the clearance of a
+                    // kit it no longer is.
+                    _chunkPatrol.erase(chunkId);
+                }
+            }
+
             // A chunk with no anchors is ordinary - every corridor variant has
             // none - so an empty list is stored rather than nothing, and only
             // a malformed one is worth a line. It costs the decor planner its
@@ -480,6 +641,21 @@ namespace PDungeon
                 anchors.clear();
             }
             _chunkAnchors[chunkId] = std::move(anchors);
+
+            // Round B / B1: the same text, decoded a second time with the
+            // KINDS kept. Not derived from the flat list - that one has
+            // deliberately thrown the kinds away - and stored for every chunk
+            // so a corridor answers an empty RoomAnchors rather than nullptr
+            // for the wrong reason. A malformed blob is reported and whatever
+            // the scanner got is stored as it stands - every reader gates on
+            // the has* flags, so a half-decoded row degrades to "no entry for
+            // that chunk" exactly like a missing anchor.
+            RoomAnchors typed;
+            if (!DecodeRoomAnchors(anchorText, typed))
+            {
+                LOG_ERROR(PD_LOG, "PDv2: chunk {} has a malformed typed anchors field", chunkId);
+            }
+            _chunkRoomAnchors[chunkId] = std::move(typed);
 
             // The structural props ride the same column. A malformed list is
             // reported and dropped like a malformed anchor list - the block
@@ -498,8 +674,18 @@ namespace PDungeon
         } while (result->NextRow());
 
         LOG_INFO(PD_LOG, "PDv2: loaded {} walk mask(s) from pdungeon_chunk_meta "
-                         "across all themes ({} for configured theme {}, {} malformed)",
-                 uint32(_walkMasks.size()), configThemeRows, _config.theme, bad);
+                         "across all themes ({} for configured theme {}, {} malformed), "
+                         "{} with a patrol clearance layer",
+                 uint32(_walkMasks.size()), configThemeRows, _config.theme, bad,
+                 uint32(_chunkPatrol.size()));
+        if (!hasPatrolLayer)
+        {
+            // Not an error: the module works without it, patrols simply walk
+            // cell centres. But it IS the difference between "the fix is in"
+            // and "the fix is compiled in and doing nothing", so it says so.
+            LOG_INFO(PD_LOG, "PDv2: pdungeon_chunk_meta has no patrol clearance columns - "
+                             "patrols walk cell centres until the kit v38 SQL is applied");
+        }
         if (configThemeRows == 0)
         {
             LOG_ERROR(PD_LOG, "PDv2: configured theme {} has NO chunk-meta rows - "
@@ -515,10 +701,27 @@ namespace PDungeon
         return it == _walkMasks.end() ? nullptr : it->second.data();
     }
 
+    PatrolLayers PDv2Mgr::PatrolLayersFor(int chunkId) const
+    {
+        auto it = _chunkPatrol.find(chunkId);
+        if (it == _chunkPatrol.end())
+        {
+            return PatrolLayers{};      // three nulls = every cell free
+        }
+        return PatrolLayers{ it->second.clear.data(), it->second.du.data(),
+                             it->second.dv.data() };
+    }
+
     std::vector<DecorAnchor> const* PDv2Mgr::AnchorsFor(int chunkId) const
     {
         auto it = _chunkAnchors.find(chunkId);
         return it == _chunkAnchors.end() ? nullptr : &it->second;
+    }
+
+    RoomAnchors const* PDv2Mgr::RoomAnchorsFor(int chunkId) const
+    {
+        auto it = _chunkRoomAnchors.find(chunkId);
+        return it == _chunkRoomAnchors.end() ? nullptr : &it->second;
     }
 
     std::vector<KitProp> const* PDv2Mgr::PropsFor(int chunkId) const

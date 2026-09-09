@@ -34,7 +34,7 @@
 //   cl /std:c++17 /EHsc /W4 /O2 /I src tests\blockplan_harness.cpp
 //      src\generator\PDBlockPlan.cpp src\generator\PDv2WalkGrid.cpp
 //      src\generator\PDv2LinkState.cpp src\generator\PDv2DecorPlan.cpp
-//      src\generator\PDv2PackDraw.cpp
+//      src\generator\PDv2PackDraw.cpp src\generator\PDv2AmbushPlan.cpp
 //      /Fe:pdblock.exe
 
 // MSVC deprecates std::fopen in favour of fopen_s, which is a Microsoft
@@ -45,12 +45,15 @@
 #endif
 
 #include "generator/PDBlockPlan.h"
+#include "generator/PDv2AmbushPlan.h"
 #include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
 #include "generator/PDv2LinkState.h"
 #include "generator/PDv2PackDraw.h"
+#include "generator/PDv2SpawnAnchors.h"
 #include "generator/PDv2WalkGrid.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -141,6 +144,20 @@ namespace
     // parsed out of the SQL the kit generator emits alongside the ADTs.
     std::map<int, std::vector<uint8_t>> g_masks;
 
+    // Round D / D2, the clearance layer that rides in the same rows: three more
+    // RLE1 byte grids per chunk, in the walk mask's own cell order. Kept in a
+    // map of its own rather than beside the mask because a chunk MAY have none
+    // - the kit task flips the staging independently of this one, and this
+    // harness has to be runnable on either side of that flip.
+    struct PatrolLayerBytes
+    {
+        std::vector<uint8_t> clear;
+        std::vector<uint8_t> du;    // still biased by +32, as the wire has it
+        std::vector<uint8_t> dv;
+    };
+
+    std::map<int, PatrolLayerBytes> g_patrol;
+
     bool LoadMasks(char const* sqlPath)
     {
         FILE* fh = std::fopen(sqlPath, "rb");
@@ -159,6 +176,14 @@ namespace
         std::fclose(fh);
 
         // Rows look like:  (2005, @KIT, 1, 'room', 5, 'RLE1:â€¦', '{â€¦}')
+        // and, since kit v26 (Round D / D2), with three more RLE1 strings
+        // between the walk mask and the anchors JSON:
+        //   (2005, @KIT, 1, 'room', 5, 'RLE1:walk', 'RLE1:clear', 'RLE1:du',
+        //    'RLE1:dv', '{â€¦}')
+        // BOTH shapes are read. The kit task flips the staging on its own
+        // schedule, so a row with a single RLE1 is not an error - it is a kit
+        // that predates the clearance layer, and the module reads exactly that
+        // case as 15/0/0 on every walkable cell.
         size_t at = 0;
         while (true)
         {
@@ -167,21 +192,51 @@ namespace
             size_t const idStart = open + 6;
             int const chunkId = std::atoi(blob.substr(idStart, 12).c_str());
 
-            size_t const rle = blob.find("'RLE1:", idStart);
-            if (rle == std::string::npos) break;
-            size_t const rleEnd = blob.find('\'', rle + 1);
-            if (rleEnd == std::string::npos) break;
+            // The row ends where the next one begins. Without that bound a row
+            // that carries no layer would borrow the NEXT row's strings and
+            // describe one chunk with another chunk's clearance.
+            size_t const nextRow = blob.find("\n    (", idStart);
+            size_t const stop = (nextRow == std::string::npos) ? blob.size() : nextRow;
 
-            std::vector<uint8_t> mask;
-            if (DecodeWalkMaskRle(blob.substr(rle + 1, rleEnd - rle - 1), mask) &&
-                mask.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK)
+            std::vector<std::vector<uint8_t>> grids;
+            size_t scan = idStart;
+            while (grids.size() < 4)
             {
-                g_masks[chunkId] = mask;
+                size_t const rle = blob.find("'RLE1:", scan);
+                if (rle == std::string::npos || rle >= stop) break;
+                size_t const rleEnd = blob.find('\'', rle + 1);
+                if (rleEnd == std::string::npos || rleEnd > stop) break;
+                std::vector<uint8_t> one;
+                if (!DecodeWalkMaskRle(blob.substr(rle + 1, rleEnd - rle - 1), one) ||
+                    one.size() != PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK)
+                {
+                    break;
+                }
+                grids.push_back(std::move(one));
+                scan = rleEnd + 1;
             }
-            at = rleEnd;
+            if (grids.empty())
+            {
+                break;      // no mask at all - the file is not the one we think
+            }
+
+            g_masks[chunkId] = grids[0];
+            // ALL THREE OR NONE, the rule PDv2Mgr::LoadChunkMeta keeps for the
+            // same reason: a clearance without its offset is a number nobody
+            // can walk to.
+            if (grids.size() == 4)
+            {
+                PatrolLayerBytes layer;
+                layer.clear = grids[1];
+                layer.du = grids[2];
+                layer.dv = grids[3];
+                g_patrol[chunkId] = layer;
+            }
+            at = stop;
         }
-        std::printf("  %u walk mask(s) from %s\n",
-                    static_cast<unsigned>(g_masks.size()), sqlPath);
+        std::printf("  %u walk mask(s), %u clearance layer(s) from %s\n",
+                    static_cast<unsigned>(g_masks.size()),
+                    static_cast<unsigned>(g_patrol.size()), sqlPath);
         return !g_masks.empty();
     }
 
@@ -189,6 +244,28 @@ namespace
     {
         auto it = g_masks.find(chunkId);
         return it == g_masks.end() ? nullptr : it->second.data();
+    }
+
+    // The harness's PatrolLayerProvider, the shape PDv2Mgr::PatrolLayersFor
+    // answers on the server: three byte pointers, or three nulls for a chunk
+    // with no layer - which BuildWalkGrid reads as "every walkable cell free".
+    PatrolLayers PatrolLayersForChunk(int chunkId)
+    {
+        auto it = g_patrol.find(chunkId);
+        if (it == g_patrol.end())
+        {
+            return PatrolLayers{};
+        }
+        return PatrolLayers{ it->second.clear.data(), it->second.du.data(),
+                             it->second.dv.data() };
+    }
+
+    // Whether the staging this run read carries the layer at all. The two
+    // clearance pins below are stated for both worlds, because the answer is a
+    // property of the kit on disk and not of this code.
+    bool KitHasPatrolLayer()
+    {
+        return !g_patrol.empty();
     }
 
     // --- kit metadata, for the surface-class oracle -------------------------
@@ -203,6 +280,10 @@ namespace
         std::vector<DecorAnchor> anchors;
         std::vector<KitProp> props;
         int declaredProps = 0;      // kit_meta's own "goProps" count
+        // Round B / B1: the same anchors span, decoded with its KINDS kept.
+        // The flat list above stays what the decor clearance reads.
+        std::string anchorsJson;
+        RoomAnchors typed;
     };
 
     std::map<int, KitChunk> g_kit;
@@ -257,6 +338,8 @@ namespace
                 std::string const span = blob.substr(anc, end - anc);
                 DecodeAnchorList(span, chunk.anchors);
                 DecodePropList(span, chunk.props);
+                chunk.anchorsJson = span;
+                DecodeRoomAnchors(span, chunk.typed);
             }
 
             size_t const gp = blob.find("\"goProps\"", at);
@@ -287,6 +370,98 @@ namespace
         return it == g_kit.end() ? nullptr : &it->second.anchors;
     }
 
+    // Round B: the spine in one glance - the chain in order, every pocket
+    // with its host, every loop room with the run it hangs off, the segments.
+    // Printed by the single layout and by --path, and quoted by the operator
+    // document.
+    std::string ChainSummary(BlockPlan const& plan)
+    {
+        int const len = ChainLength(plan);
+        std::vector<PlacedBlock const*> chain(static_cast<size_t>(len), nullptr);
+        std::vector<PlacedBlock const*> pockets;
+        std::vector<PlacedBlock const*> loops;
+        int bosses = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.chainIndex >= 0) chain[static_cast<size_t>(b.chainIndex)] = &b;
+            if (b.branchOf >= 0) pockets.push_back(&b);
+            if (b.detourOf >= 0) loops.push_back(&b);
+            if (b.role == BlockRole::RoomBoss) ++bosses;
+        }
+
+        std::string out;
+        char buf[128];
+        std::snprintf(buf, sizeof(buf), "chain (%d rooms, %d boss): ", len, bosses);
+        out += buf;
+        for (int i = 0; i < len; ++i)
+        {
+            PlacedBlock const* b = chain[static_cast<size_t>(i)];
+            if (!b)
+            {
+                out += (i ? " -> ?" : "?");
+                continue;
+            }
+            char const tag = b->role == BlockRole::RoomEntrance ? 'E'
+                           : b->role == BlockRole::RoomBoss     ? 'B' : 'R';
+            std::snprintf(buf, sizeof(buf), "%s%c#%d (%d,%d)", i ? " -> " : "", tag, i, b->bx, b->by);
+            out += buf;
+        }
+        out += '\n';
+
+        if (!pockets.empty())
+        {
+            out += "pockets:";
+            for (PlacedBlock const* p : pockets)
+            {
+                std::snprintf(buf, sizeof(buf), "  R#%d + pocket (%d,%d)",
+                              p->branchOf, p->bx, p->by);
+                out += buf;
+            }
+            out += '\n';
+        }
+
+        if (!loops.empty())
+        {
+            out += "loops:";
+            for (PlacedBlock const* l : loops)
+            {
+                std::snprintf(buf, sizeof(buf), "  R#%d run + loop room (%d,%d) [segment %d]",
+                              l->detourOf, l->bx, l->by, SegmentOf(plan, *l));
+                out += buf;
+            }
+            out += '\n';
+        }
+
+        int segStart = 1;
+        int k = 0;
+        for (int i = 1; i < len; ++i)
+        {
+            PlacedBlock const* b = chain[static_cast<size_t>(i)];
+            if (!b || b->role != BlockRole::RoomBoss) continue;
+            ++k;
+            int inSegment = 0;
+            for (PlacedBlock const* p : pockets)
+            {
+                if (p->branchOf >= segStart && p->branchOf < i) ++inSegment;
+            }
+            // A loop room belongs to the segment of the spine room its run
+            // leads INTO, and that room may be the boss itself - so the upper
+            // bound is inclusive here where the pocket line's is not (a boss
+            // never hosts a pocket).
+            int loopsIn = 0;
+            for (PlacedBlock const* l : loops)
+            {
+                if (l->detourOf >= segStart && l->detourOf <= i) ++loopsIn;
+            }
+            std::snprintf(buf, sizeof(buf),
+                          "segment %d: chain %d..%d, pockets %d, loops %d, boss B#%d\n",
+                          k, segStart, i, inSegment, loopsIn, i);
+            out += buf;
+            segStart = i + 1;
+        }
+        return out;
+    }
+
     void PrintOne(uint32_t seed, int rooms)
     {
         BlockCfg const cfg = MakeCfg(seed, rooms);
@@ -307,7 +482,9 @@ namespace
         std::printf("seed %u (effective %u): %d blocks = %d rooms + %d corridors\n",
                     seed, plan.effectiveSeed, static_cast<int>(plan.blocks.size()),
                     roomCount, corridorCount);
-        std::printf("E = entrance, B = boss, R = room, | - + = corridor\n\n");
+        std::printf("E = entrance, B = boss, R = spine room, r = pocket room, o = loop room, "
+                    "D = dead end, | - + = corridor\n\n");
+        std::printf("%s\n", ChainSummary(plan).c_str());
         std::printf("%s\n", AsciiBlockDump(plan).c_str());
 
         std::string const manifest = EmitManifest(plan, 1);
@@ -572,6 +749,1185 @@ namespace
         return true;
     }
 
+    // The Bresenham sampler Round B shipped, kept ONLY as the reference the
+    // supercover test is measured against (research c-research-patrol-ambush.md
+    // A1: it skips one cell at every minor-axis transition).
+    bool LegacyLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b)
+    {
+        int const steps = std::max(std::abs(b.x - a.x), std::abs(b.y - a.y));
+        if (steps == 0)
+        {
+            return grid.At(a.x, a.y);
+        }
+        for (int i = 0; i <= steps; ++i)
+        {
+            double const t = static_cast<double>(i) / steps;
+            int const x = static_cast<int>(std::lround(a.x + (b.x - a.x) * t));
+            int const y = static_cast<int>(std::lround(a.y + (b.y - a.y) * t));
+            if (!grid.At(x, y))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // Independent reference: sample the segment between the two cell centres
+    // at 1/64 of a cell and demand that every sampled cell is walkable. Slower
+    // and cruder than the DDA, which is the point - it shares no code with it.
+    bool SampledLineWalkable(WalkGrid const& grid, GridPoint a, GridPoint b)
+    {
+        int const steps = 64 * std::max(1, std::max(std::abs(b.x - a.x), std::abs(b.y - a.y)));
+        for (int i = 0; i <= steps; ++i)
+        {
+            double const t = static_cast<double>(i) / steps;
+            double const fx = a.x + (b.x - a.x) * t;
+            double const fy = a.y + (b.y - a.y) * t;
+            int const x = static_cast<int>(std::floor(fx + 0.5));
+            int const y = static_cast<int>(std::floor(fy + 0.5));
+            if (!grid.At(x, y))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    // One 8x8 grid per kit chunk, built the way BuildWalkGrid copies a mask
+    // (PDv2WalkGrid.cpp:79-90: mask[row * PD_CELLS_PER_BLOCK + col] with row
+    // the cell's y and col its x, so At(x, y) reads mask[y * 8 + x]).
+    WalkGrid GridFromMask(uint8_t const* mask)
+    {
+        WalkGrid g;
+        g.originBX = 0;
+        g.originBY = 0;
+        g.width = PD_CELLS_PER_BLOCK;
+        g.height = PD_CELLS_PER_BLOCK;
+        g.cells.assign(mask, mask + PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK);
+        return g;
+    }
+
+    // The supercover pair counts over the whole kit, `approved,rejected;`.
+    // Captured by RUNNING `pdblock --batch` and reading the "supercover pair
+    // counts moved" message, never by reasoning about the value. `rejected` is
+    // the size of the defect the Round C fix removes: pairs the shipped
+    // Bresenham sampler approved and the supercover test does not.
+    char const* const PD_SUPERCOVER_PAIRS_PIN = "291480,9604;";
+
+    // Over EVERY kit walk mask and every ordered pair of its walkable cells:
+    //   (1) whatever the supercover test approves, the sampled reference approves too
+    //       (no approved segment leaves the mask);
+    //   (2) approved(supercover) is a subset of approved(legacy) - the fix only
+    //       removes approvals;
+    //   (3) the legacy sampler approves strictly more pairs (the defect exists).
+    // The pair counts are pinned so a later change to the test is visible.
+    void CheckSupercover(std::map<int, std::vector<uint8_t>> const& masks,
+                         uint64_t& approved, uint64_t& rejectedByFix)
+    {
+        approved = 0;
+        rejectedByFix = 0;
+        for (auto const& kv : masks)
+        {
+            WalkGrid const g = GridFromMask(kv.second.data());
+            for (int ay = 0; ay < g.height; ++ay)
+            {
+                for (int ax = 0; ax < g.width; ++ax)
+                {
+                    if (!g.At(ax, ay))
+                    {
+                        continue;
+                    }
+                    for (int by = 0; by < g.height; ++by)
+                    {
+                        for (int bx = 0; bx < g.width; ++bx)
+                        {
+                            if (!g.At(bx, by))
+                            {
+                                continue;
+                            }
+                            GridPoint const a{ ax, ay }, b{ bx, by };
+                            bool const ok = GridLineWalkable(g, a, b);
+                            bool const legacy = LegacyLineWalkable(g, a, b);
+                            if (ok)
+                            {
+                                ++approved;
+                                Check(SampledLineWalkable(g, a, b),
+                                      "supercover approved a segment that leaves the walk mask",
+                                      static_cast<uint32_t>(kv.first));
+                                Check(legacy, "supercover approved a segment the legacy sampler refused",
+                                      static_cast<uint32_t>(kv.first));
+                            }
+                            else if (legacy)
+                            {
+                                ++rejectedByFix;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Check(rejectedByFix > 0, "the legacy sampler approved nothing the supercover test rejects (vacuous)", 0);
+    }
+
+    // The corner half of the supercover rule, on geometry a kit rebuild cannot
+    // move (Round C / C1 Task 1 review, Important 2).
+    //
+    // CheckSupercover above cannot see that half at all: its sampled reference
+    // rounds with `floor(f + 0.5)`, which at an exact corner names the UPPER
+    // cell only, so it is strictly LOOSER than the DDA there and can never
+    // object to a corner rule that is dropped, widened or narrowed. Until this
+    // table existed the only thing between such a change and a green batch was
+    // PD_SUPERCOVER_PAIRS_PIN - and a pin's documented failure mode is to be
+    // re-captured by whoever moved the kit.
+    //
+    // Each case is an 8x8 grid, walkable everywhere except the cells it names,
+    // with the verdict written out by hand from the geometry rather than read
+    // off a run: a corner tie needs equal 2-adic valuation of |dx| and |dy|, so
+    // a 45 degree line ties at EVERY step and a 3:1 line (|dx| = 1, |dy| = 3)
+    // ties exactly once, at t = 1/2. Every blocked cell below is one the
+    // segment only ever STRADDLES - none of them lies on the supercover path -
+    // so a case that flips can only have flipped because the corner rule did.
+    struct CornerCase
+    {
+        char const* name;
+        GridPoint a;
+        GridPoint b;
+        std::vector<GridPoint> blocked;
+        bool expected;
+    };
+
+    void CheckCornerRule()
+    {
+        std::vector<CornerCase> const cases = {
+            // 45 degrees: (0,0) -> (3,3) ties at (0.5,0.5), (1.5,1.5) and
+            // (2.5,2.5). The first tie straddles (1,0) and (0,1); the cells
+            // actually entered are the diagonal (0,0) (1,1) (2,2) (3,3).
+            { "45 deg with both straddling cells open must be APPROVED",
+              { 0, 0 }, { 3, 3 }, {}, true },
+            { "45 deg with the x-side straddling cell (1,0) blocked must be REFUSED",
+              { 0, 0 }, { 3, 3 }, { { 1, 0 } }, false },
+            { "45 deg with the y-side straddling cell (0,1) blocked must be REFUSED",
+              { 0, 0 }, { 3, 3 }, { { 0, 1 } }, false },
+            // 3:1, one tie and it is at t = 1/2 exactly: (0,0) -> (1,3) enters
+            // (0,0) (0,1), crosses the corner at (0.5,1.5) straddling (1,1) and
+            // (0,2), then enters (1,2) (1,3). Neither straddling cell is on
+            // that path.
+            { "3:1 crossing a corner at t = 1/2 with both straddling cells open must be APPROVED",
+              { 0, 0 }, { 1, 3 }, {}, true },
+            { "3:1 at t = 1/2 with the x-side straddling cell (1,1) blocked must be REFUSED",
+              { 0, 0 }, { 1, 3 }, { { 1, 1 } }, false },
+            { "3:1 at t = 1/2 with the y-side straddling cell (0,2) blocked must be REFUSED",
+              { 0, 0 }, { 1, 3 }, { { 0, 2 } }, false },
+            // Axis-aligned: no tie is possible (a tie needs steps left on BOTH
+            // axes), so a one-cell-wide corridor has to stay walkable. This is
+            // the case a "test both neighbours on every step" reading of the
+            // corner rule breaks, and no pin in this file would notice.
+            { "a horizontal line along an open row walled on both sides must be APPROVED",
+              { 0, 4 }, { 7, 4 },
+              { { 0, 3 }, { 1, 3 }, { 2, 3 }, { 3, 3 }, { 4, 3 }, { 5, 3 }, { 6, 3 }, { 7, 3 },
+                { 0, 5 }, { 1, 5 }, { 2, 5 }, { 3, 5 }, { 4, 5 }, { 5, 5 }, { 6, 5 }, { 7, 5 } },
+              true },
+            { "a vertical line along an open column walled on both sides must be APPROVED",
+              { 4, 0 }, { 4, 7 },
+              { { 3, 0 }, { 3, 1 }, { 3, 2 }, { 3, 3 }, { 3, 4 }, { 3, 5 }, { 3, 6 }, { 3, 7 },
+                { 5, 0 }, { 5, 1 }, { 5, 2 }, { 5, 3 }, { 5, 4 }, { 5, 5 }, { 5, 6 }, { 5, 7 } },
+              true },
+            // The same 45 degree geometry walked BACKWARDS. Every case above
+            // runs with b.x >= a.x and b.y >= a.y, so sx = sy = +1 and the two
+            // corner reads are always At(x + 1, y) / At(x, y + 1); a
+            // regression that got the sign wrong - At(x - sx, y), or a rule
+            // applied only on a positive delta - would pass the whole table
+            // above, pass CheckSupercover (blind at corners, see the note over
+            // the table) and move PD_SUPERCOVER_PAIRS_PIN, which is the
+            // failure mode this oracle exists to replace (Round C / C1 Task 6
+            // review, Important 1). The function IS called in both directions
+            // in production: SimplifyGridPath probes path[anchor] ->
+            // path[probe] while the AI probes here -> target.
+            //
+            // (3,3) -> (0,0) ties at (2.5,2.5) first, straddling (2,3) on the
+            // x side and (3,2) on the y side; the cells actually entered are
+            // the diagonal (3,3) (2,2) (1,1) (0,0), so neither blocked cell
+            // lies on the path.
+            { "45 deg BACKWARDS with both straddling cells open must be APPROVED",
+              { 3, 3 }, { 0, 0 }, {}, true },
+            { "45 deg BACKWARDS with the x-side straddling cell (2,3) blocked must be REFUSED",
+              { 3, 3 }, { 0, 0 }, { { 2, 3 } }, false },
+            { "45 deg BACKWARDS with the y-side straddling cell (3,2) blocked must be REFUSED",
+              { 3, 3 }, { 0, 0 }, { { 3, 2 } }, false },
+        };
+
+        for (CornerCase const& c : cases)
+        {
+            std::vector<uint8_t> mask(PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK, 1);
+            for (GridPoint const& p : c.blocked)
+            {
+                mask[static_cast<size_t>(p.y) * PD_CELLS_PER_BLOCK + p.x] = 0;
+            }
+            WalkGrid const g = GridFromMask(mask.data());
+            Check(GridLineWalkable(g, c.a, c.b) == c.expected, c.name, 0);
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Round D / D1 - the patrol planner, on hand-built grids.
+    //
+    // After Round C's patrol fix the operator's complaint was no longer that
+    // the patroller walked THROUGH walls - the supercover test ended that -
+    // but that it walked "in einer geraden linie durch ecken von haeusern und
+    // objekte hindurch". Both halves are outside what a cell mask can see:
+    // SimplifyGridPath's diagonal legs graze the facades that intrude up to
+    // 6.1 yd into a corridor mouth (audit 104), and nothing in the grid knows
+    // that the module itself stood a prop on a walkable cell. FindPatrolPath
+    // answers with axis-aligned legs down the middle of the lane instead, by
+    // charging for a turn, for a cell that touches a wall and for a cell a
+    // prop stands on.
+    //
+    // Hand grids rather than kit masks, for the reason CheckCornerRule gives:
+    // a rule a kit rebuild can move is not a rule. Every expected number below
+    // is derived in the comment beside it, never read off a run.
+    // ------------------------------------------------------------------
+
+    // An 8x8 hand grid from eight row strings, '#' blocked and anything else
+    // walkable, row 0 the north edge and column 0 the west edge - the
+    // orientation BuildWalkGrid lays a kit mask out in, so the picture in the
+    // source reads the way the dungeon does.
+    WalkGrid GridFromRows(char const* const* rows)
+    {
+        std::vector<uint8_t> mask(PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK, 0);
+        for (int y = 0; y < PD_CELLS_PER_BLOCK; ++y)
+        {
+            Check(std::strlen(rows[y]) == static_cast<size_t>(PD_CELLS_PER_BLOCK),
+                  "a hand grid row is not eight cells wide", 0);
+            for (int x = 0; x < PD_CELLS_PER_BLOCK; ++x)
+            {
+                mask[static_cast<size_t>(y) * PD_CELLS_PER_BLOCK + x] =
+                    rows[y][x] == '#' ? 0 : 1;
+            }
+        }
+        return GridFromMask(mask.data());
+    }
+
+    // A prop mask in FindPatrolPath's own indexing: sized like grid.cells,
+    // 1 where a prop stands.
+    std::vector<uint8_t> PropMask(WalkGrid const& grid, std::vector<GridPoint> const& props)
+    {
+        std::vector<uint8_t> mask(grid.cells.size(), 0);
+        for (GridPoint const& p : props)
+        {
+            mask[static_cast<size_t>(p.y) * grid.width + p.x] = 1;
+        }
+        return mask;
+    }
+
+    // Independent re-derivation of what a CELL path costs under PatrolCost:
+    // 10 per cell entered, +30 whenever the direction changes (the first step
+    // is free - a patroller starts with no incoming direction), +20 when the
+    // entered cell has a blocked or out-of-bounds 4-neighbour, +60 when a prop
+    // stands on it, and - since Round D / D2 - +8 per quarter-yard of clearance
+    // MISSING from the entered cell, which is nothing at all on a grid without
+    // the layer and on every cell the kit calls free. It shares no code with
+    // FindPatrolPath's search, which is the point: the search picks a route,
+    // this says what the route costs, and the two can disagree. -1 means the
+    // path is not a chain of single 4-neighbour steps over walkable cells at
+    // all - a finding in itself, since the planner must never emit one, and the
+    // reason the operator pin below can print a cost the search never told it.
+    //
+    // minClearQ is deliberately NOT re-derived here. It BLOCKS rather than
+    // charges, so a path that crosses a cell below it is a path the search must
+    // never have returned; pricing it would turn a finding into a number.
+    int PatrolCellPathCost(WalkGrid const& grid, std::vector<GridPoint> const& path,
+                           std::vector<uint8_t> const* propCells,
+                           PatrolCost const& cost = PatrolCost{})
+    {
+        if (path.empty() || !grid.At(path.front().x, path.front().y))
+        {
+            return -1;
+        }
+        int total = 0;
+        int pdx = 0, pdy = 0;
+        for (size_t i = 1; i < path.size(); ++i)
+        {
+            int const dx = path[i].x - path[i - 1].x;
+            int const dy = path[i].y - path[i - 1].y;
+            if (std::abs(dx) + std::abs(dy) != 1 || !grid.At(path[i].x, path[i].y))
+            {
+                return -1;
+            }
+            total += cost.step;
+            if (i > 1 && (dx != pdx || dy != pdy))
+            {
+                total += cost.turn;
+            }
+            if (!grid.At(path[i].x, path[i].y - 1) || !grid.At(path[i].x + 1, path[i].y) ||
+                !grid.At(path[i].x, path[i].y + 1) || !grid.At(path[i].x - 1, path[i].y))
+            {
+                total += cost.wallAdjacent;
+            }
+            size_t const at = static_cast<size_t>(path[i].y) * grid.width + path[i].x;
+            if (propCells && at < propCells->size() && (*propCells)[at] != 0)
+            {
+                total += cost.propCell;
+            }
+            // Through the module's own accessor, so a grid with no layer and a
+            // cell off the grid answer here exactly as they answer the engine.
+            int const clear = static_cast<int>(PatrolInfoAt(grid, path[i]).clear);
+            if (clear < static_cast<int>(PD_PATROL_CLEAR_FREE))
+            {
+                total += cost.tightPerQuarter *
+                         (static_cast<int>(PD_PATROL_CLEAR_FREE) - clear);
+            }
+            pdx = dx;
+            pdy = dy;
+        }
+        return total;
+    }
+
+    // Direction changes in a cell path. Only meaningful for unit steps, and
+    // PatrolCellPathCost above is what verifies those.
+    int PatrolTurns(std::vector<GridPoint> const& path)
+    {
+        int turns = 0;
+        for (size_t i = 2; i < path.size(); ++i)
+        {
+            if (path[i].x - path[i - 1].x != path[i - 1].x - path[i - 2].x ||
+                path[i].y - path[i - 1].y != path[i - 1].y - path[i - 2].y)
+            {
+                ++turns;
+            }
+        }
+        return turns;
+    }
+
+    // The contract a patrol leg has to keep, and the whole reason D1 exists:
+    // every leg axis-aligned (dx == 0 or dy == 0 - never a diagonal that cuts
+    // a house corner) and every cell it crosses walkable. Walked cell by cell
+    // here rather than through GridLineWalkable, so an axis-aligned leg is
+    // judged without the DDA it would otherwise be judged by.
+    void CheckPatrolLegs(WalkGrid const& grid, std::vector<GridPoint> const& way,
+                         char const* whatDiagonal, char const* whatUnwalkable,
+                         uint32_t seed)
+    {
+        for (size_t i = 1; i < way.size(); ++i)
+        {
+            int const dx = way[i].x - way[i - 1].x;
+            int const dy = way[i].y - way[i - 1].y;
+            Check(dx == 0 || dy == 0, whatDiagonal, seed);
+            if (dx != 0 && dy != 0)
+            {
+                continue;   // a diagonal has no cells to walk; the Check above said so
+            }
+            int const sx = (dx > 0) - (dx < 0);
+            int const sy = (dy > 0) - (dy < 0);
+            int const steps = std::abs(dx) + std::abs(dy);
+            for (int s = 0; s <= steps; ++s)
+            {
+                Check(grid.At(way[i - 1].x + sx * s, way[i - 1].y + sy * s),
+                      whatUnwalkable, seed);
+            }
+        }
+    }
+
+    // Gives a hand-built grid a clearance layer. `clearRows` is the same 8x8
+    // picture the mask rows are, ONE HEX DIGIT per cell (0..f quarter-yards, f
+    // = 15 = free); '#' reads as 0 so a wall row can be copied across
+    // unchanged. Offsets start at zero and the one case that cares about them
+    // writes them cell by cell - a clearance and an offset are independent
+    // measurements and the cases that test one must not be told the other.
+    void SetPatrolClear(WalkGrid& g, char const* const* clearRows)
+    {
+        g.patrolClear.assign(g.cells.size(), 0);
+        g.patrolDu.assign(g.cells.size(), 0);
+        g.patrolDv.assign(g.cells.size(), 0);
+        for (int y = 0; y < PD_CELLS_PER_BLOCK; ++y)
+        {
+            Check(std::strlen(clearRows[y]) == static_cast<size_t>(PD_CELLS_PER_BLOCK),
+                  "a hand clearance row is not eight cells wide", 0);
+            for (int x = 0; x < PD_CELLS_PER_BLOCK; ++x)
+            {
+                char const c = clearRows[y][x];
+                int v = 0;
+                if (c >= '0' && c <= '9')
+                {
+                    v = c - '0';
+                }
+                else if (c >= 'a' && c <= 'f')
+                {
+                    v = 10 + (c - 'a');
+                }
+                g.patrolClear[static_cast<size_t>(y) * g.width + x] =
+                    static_cast<uint8_t>(v);
+            }
+        }
+    }
+
+    void CheckPatrolPlanner()
+    {
+        // Two lane cells wide, walls on both sides - the corridor shape the
+        // whole kit is built from. Used by cases (a), (c) and (d).
+        char const* const laneRows[PD_CELLS_PER_BLOCK] = {
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+            "###..###",
+        };
+
+        // (a) THE TURN PENALTY. From (3,0) to (4,7) every shortest route is the
+        //     same eight steps - one east, seven south, in any order - so a
+        //     uniform-cost A* may hand back a staircase, and Round B's did.
+        //     Exactly two of those routes carry ONE turn: switch column on the
+        //     first step or on the last. Every lane cell touches the wall
+        //     beside it, so the wall charge is the same 8 * 20 on all of them
+        //     and the turn count is all that is left to choose by:
+        //     8 * 10 + 30 + 8 * 20 = 270 for a one-turn route, +30 for each
+        //     further turn.
+        {
+            WalkGrid const g = GridFromRows(laneRows);
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, path),
+                  "the patrol planner found no route along an open two-cell lane", 0);
+            Check(path.size() == 9,
+                  "the patrol planner lengthened the lane beat - (3,0) to (4,7) is eight "
+                  "steps and a turn penalty must not buy detours", 0);
+            Check(PatrolTurns(path) == 1,
+                  "the patrol planner returned a zigzag down a straight lane - the turn "
+                  "penalty is not biting", 0);
+            Check(PatrolCellPathCost(g, path, nullptr) == 270,
+                  "the lane beat no longer costs 8 * 10 + 30 + 8 * 20 = 270", 0);
+
+            // The equal-length staircase it must have refused: the same eight
+            // steps, two turns, so +30 and nothing gained.
+            std::vector<GridPoint> const zigzag = {
+                { 3, 0 }, { 3, 1 }, { 3, 2 }, { 3, 3 },
+                { 4, 3 }, { 4, 4 }, { 4, 5 }, { 4, 6 }, { 4, 7 } };
+            Check(PatrolCellPathCost(g, zigzag, nullptr) == 300,
+                  "the two-turn staircase of the same length no longer costs 300 - the "
+                  "case above compares against nothing", 0);
+            Check(PatrolCellPathCost(g, path, nullptr) <
+                  PatrolCellPathCost(g, zigzag, nullptr),
+                  "the patrol planner's lane beat is not cheaper than the staircase", 0);
+
+            std::vector<GridPoint> merged = path;
+            MergeCollinear(merged);
+            Check(merged.size() == 3,
+                  "MergeCollinear left a one-turn lane beat with something other than "
+                  "start, corner and goal", 0);
+            Check(merged.front() == path.front() && merged.back() == path.back(),
+                  "MergeCollinear moved an endpoint of the lane beat", 0);
+            CheckPatrolLegs(g, merged,
+                            "a lane beat leg is diagonal",
+                            "a lane beat leg crosses an unwalkable cell", 0);
+        }
+
+        // (b) THE WALL PENALTY. A 6x6 room (x 1..6, y 1..6) with a doorway on
+        //     the west wall at (0,2) and one on the east wall at (7,4), two
+        //     cells apart. The first step has to be east into (1,2) and the
+        //     last east into (7,4), so every 9-step route is E^a S S E^b with
+        //     a >= 1 and b >= 1: two turns, and only WHERE it crosses is free.
+        //     Wall charges: the ring cells x == 1, x == 6, y == 1, y == 6 all
+        //     touch the surrounding wall - except (1,2) and (6,4), whose
+        //     outward neighbour is the doorway - and (7,4) itself, whose east
+        //     neighbour is off the grid.
+        //       a = 1: (1,3) (1,4) (7,4) charged -> 90 + 60 + 60 = 210
+        //       a = 6: (6,2) (6,3) (7,4) charged -> 210
+        //       a = 2..5: (7,4) alone charged    -> 90 + 60 + 20 = 170
+        //     So the crossing runs through the interior, four ways tied at 170
+        //     (the tie is A*'s to break); an 11-step route cannot beat it,
+        //     because two more steps cost 20 before any charge.
+        {
+            char const* const roomRows[PD_CELLS_PER_BLOCK] = {
+                "########",
+                "#......#",
+                ".......#",
+                "#......#",
+                "#.......",
+                "#......#",
+                "#......#",
+                "########",
+            };
+            WalkGrid const g = GridFromRows(roomRows);
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 0, 2 }, { 7, 4 }, nullptr, path),
+                  "the patrol planner found no way across a 6x6 room", 0);
+            Check(path.size() == 10,
+                  "the room crossing is no longer the nine steps its two doorways are "
+                  "apart", 0);
+            Check(PatrolTurns(path) == 2,
+                  "the room crossing takes more than the two turns two offset doorways "
+                  "force", 0);
+            Check(PatrolCellPathCost(g, path, nullptr) == 170,
+                  "the room crossing no longer costs 9 * 10 + 2 * 30 + 20 = 170", 0);
+
+            // The edge-hugging route the wall penalty exists to refuse: down
+            // the west wall first, then along row 4.
+            std::vector<GridPoint> const hugger = {
+                { 0, 2 }, { 1, 2 }, { 1, 3 }, { 1, 4 }, { 2, 4 },
+                { 3, 4 }, { 4, 4 }, { 5, 4 }, { 6, 4 }, { 7, 4 } };
+            Check(PatrolCellPathCost(g, hugger, nullptr) == 210,
+                  "the wall-hugging crossing of the same length no longer costs 210 - "
+                  "the case above compares against nothing", 0);
+
+            for (GridPoint const& p : path)
+            {
+                bool const ring = p.x == 1 || p.x == 6 || p.y == 1 || p.y == 6;
+                bool const forced = (p.x == 1 && p.y == 2) || (p.x == 6 && p.y == 4);
+                Check(!ring || forced,
+                      "the room crossing hugs the wall band instead of using the "
+                      "interior cells", 0);
+            }
+
+            std::vector<GridPoint> merged = path;
+            MergeCollinear(merged);
+            Check(merged.size() == 4,
+                  "MergeCollinear left the two-turn room crossing with something other "
+                  "than start, two corners and goal", 0);
+            CheckPatrolLegs(g, merged,
+                            "a room crossing leg is diagonal",
+                            "a room crossing leg crosses an unwalkable cell", 0);
+        }
+
+        // (c) THE PROP CHARGE, with a way around. The same lane, one prop on
+        //     the west lane cell at (3,4). The east-first route never touches
+        //     column 3 again and stays at 270; the route that stays west until
+        //     the last step pays the prop, 270 + 60 = 330; every two-turn route
+        //     is 300 at best. So the answer is unique, and it is the free lane.
+        {
+            WalkGrid const g = GridFromRows(laneRows);
+            std::vector<uint8_t> const props = PropMask(g, { { 3, 4 } });
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, &props, path),
+                  "the patrol planner found no route along a lane with one prop in it", 0);
+            Check(path.size() == 9,
+                  "dodging one prop cost the lane beat its length", 0);
+            Check(PatrolCellPathCost(g, path, &props) == 270,
+                  "the prop-dodging lane beat no longer costs 270 - it is paying for a "
+                  "prop or for a second turn", 0);
+            for (size_t i = 1; i < path.size(); ++i)
+            {
+                Check(path[i].x == 4,
+                      "the patrol beat walked the propped lane cell with the other lane "
+                      "cell free", 0);
+            }
+
+            std::vector<GridPoint> const throughProp = {
+                { 3, 0 }, { 3, 1 }, { 3, 2 }, { 3, 3 }, { 3, 4 },
+                { 3, 5 }, { 3, 6 }, { 3, 7 }, { 4, 7 } };
+            Check(PatrolCellPathCost(g, throughProp, &props) == 330,
+                  "the propped lane route of the same length no longer costs 330 - the "
+                  "case above compares against nothing", 0);
+        }
+
+        // (d) THE PROP CHARGE, with no way around: both lane cells of row 4
+        //     propped. A prop is a COST, not a wall, so the beat must still
+        //     exist - it simply pays 60 once, 270 + 60 = 330, and keeps its one
+        //     turn. A planner that treated a prop as blocked would answer "no
+        //     route" here and that patrol would stand still for the whole run.
+        {
+            WalkGrid const g = GridFromRows(laneRows);
+            std::vector<uint8_t> const props = PropMask(g, { { 3, 4 }, { 4, 4 } });
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, &props, path),
+                  "a lane propped across its full width became impassable - a prop is a "
+                  "cost, not a wall", 0);
+            Check(path.size() == 9,
+                  "the beat through a fully propped lane row is no longer eight steps", 0);
+            Check(PatrolTurns(path) == 1,
+                  "the beat through a fully propped lane row bought turns it cannot use", 0);
+            Check(PatrolCellPathCost(g, path, &props) == 330,
+                  "the beat through a fully propped lane row no longer costs 270 + 60", 0);
+            bool crossed = false;
+            for (GridPoint const& p : path)
+            {
+                size_t const at = static_cast<size_t>(p.y) * g.width + p.x;
+                if (at < props.size() && props[at] != 0)
+                {
+                    crossed = true;
+                }
+            }
+            Check(crossed,
+                  "the beat through a fully propped lane row crossed no prop at all - the "
+                  "case is vacuous", 0);
+        }
+
+        // --- Round D / D2, the clearance layer -----------------------------
+        //
+        // Everything above runs on grids with NO layer, which is the first
+        // thing D2 has to keep true: those five cases still pass, so a kit that
+        // predates the layer plans exactly the routes it planned before.
+
+        // (e) THE HARD HALF. The same lane, but the west lane cell is a house
+        //     front all the way down: clear 2 = 0.5 yd, under minClearQ's 4.
+        //     Column 3 is therefore BLOCKED for a patrol and the only route is
+        //     column 4 - which is what "the passage is not in the middle of the
+        //     lane" looks like to the planner. The start (3,0) is not judged
+        //     (the creature is already standing there), so the beat opens with
+        //     the step east that gets it out of the pinch.
+        {
+            char const* const clearRows[PD_CELLS_PER_BLOCK] = {
+                "###2f###", "###2f###", "###2f###", "###2f###",
+                "###2f###", "###2f###", "###2f###", "###2f###",
+            };
+            WalkGrid g = GridFromRows(laneRows);
+            SetPatrolClear(g, clearRows);
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, path),
+                  "the patrol planner found no route down a lane whose west cells are "
+                  "tight - the start cell must never be judged", 0);
+            Check(path.size() == 9,
+                  "avoiding the tight lane column cost the beat its length", 0);
+            for (size_t i = 1; i < path.size(); ++i)
+            {
+                Check(path[i].x == 4,
+                      "the patrol beat entered a lane cell with 0.5 yd of clearance - "
+                      "minClearQ is not blocking", 0);
+            }
+            Check(PatrolCellPathCost(g, path, nullptr) == 270,
+                  "the clear-column beat no longer costs 270 - it is paying a tight "
+                  "charge it should never have entered", 0);
+        }
+
+        // (f) THE SOFT HALF, on its own. Column 3 at clear 8 (2.0 yd) is above
+        //     minClearQ, so nothing is blocked and only the charge can decide:
+        //     8 * (15 - 8) = 56 per column-3 cell entered against 0 for column
+        //     4. The planner must still walk the wide half, and must do it
+        //     WITHOUT lengthening the beat - a cost that bought a detour would
+        //     be a cost that is too big.
+        {
+            char const* const clearRows[PD_CELLS_PER_BLOCK] = {
+                "###8f###", "###8f###", "###8f###", "###8f###",
+                "###8f###", "###8f###", "###8f###", "###8f###",
+            };
+            WalkGrid g = GridFromRows(laneRows);
+            SetPatrolClear(g, clearRows);
+            std::vector<GridPoint> path;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, path),
+                  "the patrol planner found no route down a lane with a merely narrow "
+                  "west column", 0);
+            Check(path.size() == 9, "the narrow-column beat is no longer eight steps", 0);
+            for (size_t i = 1; i < path.size(); ++i)
+            {
+                Check(path[i].x == 4,
+                      "the patrol beat walked the narrow lane column with the wide one "
+                      "free - tightPerQuarter is not biting", 0);
+            }
+            // The route down the narrow column, which the charge has to lose
+            // to: same length, same one turn, seven cells at 56.
+            std::vector<GridPoint> const narrow = {
+                { 3, 0 }, { 3, 1 }, { 3, 2 }, { 3, 3 }, { 3, 4 },
+                { 3, 5 }, { 3, 6 }, { 3, 7 }, { 4, 7 } };
+            Check(PatrolCellPathCost(g, narrow, nullptr) == 270 + 7 * 56,
+                  "the narrow-column route of the same length no longer costs 270 + "
+                  "7 * 56 - the case above compares against nothing", 0);
+            Check(PatrolCellPathCost(g, path, nullptr) <
+                  PatrolCellPathCost(g, narrow, nullptr),
+                  "the wide-column beat is not cheaper than the narrow one", 0);
+        }
+
+        // (g) THE FALLBACK. Row 4 is pinched across its FULL width - clear 2 on
+        //     both lane cells, the city straight with two deep houses facing
+        //     each other. At the shipped minClearQ there is no beat at all, and
+        //     the planner says so rather than squeezing; the caller's second
+        //     pass at minClearQ 0 then finds one and pays 8 * 13 = 104 for the
+        //     one pinched cell it must cross. A planner that never refused
+        //     would hide the pinch; one that had no fallback would leave that
+        //     corridor's patrol standing still for the whole run.
+        {
+            char const* const clearRows[PD_CELLS_PER_BLOCK] = {
+                "###ff###", "###ff###", "###ff###", "###ff###",
+                "###22###", "###ff###", "###ff###", "###ff###",
+            };
+            WalkGrid g = GridFromRows(laneRows);
+            SetPatrolClear(g, clearRows);
+
+            std::vector<GridPoint> path;
+            Check(!FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, path),
+                  "a lane row pinched below a yard on BOTH cells still planned at the "
+                  "shipped minClearQ - the hard half is not hard", 0);
+
+            PatrolCost loose;
+            loose.minClearQ = 0;
+            std::vector<GridPoint> fallback;
+            Check(FindPatrolPath(g, { 3, 0 }, { 4, 7 }, nullptr, fallback, loose),
+                  "the minClearQ 0 fallback found no route down a fully pinched lane - "
+                  "that patrol would stand still for the whole run", 0);
+            Check(fallback.size() == 9,
+                  "the fallback beat through a pinched lane row is no longer eight steps", 0);
+            Check(PatrolTurns(fallback) == 1,
+                  "the fallback beat bought turns to dodge a pinch it cannot dodge", 0);
+            Check(PatrolCellPathCost(g, fallback, nullptr) == 270 + 104,
+                  "the fallback beat no longer costs 270 + 8 * 13 - it is crossing more "
+                  "than the one pinched cell", 0);
+        }
+
+        // (h) THE WAYPOINT ITSELF. PatrolPointToWorld must move the waypoint to
+        //     the cell's clear point and STILL leave it inside that cell, for
+        //     every offset the kit can publish - the extreme is +-16
+        //     quarter-yards = 4.0 yd against a half-cell of 4.17. Asserted by
+        //     round-tripping through WorldToCell rather than by re-deriving the
+        //     arithmetic, so this cannot agree with a wrong PatrolPointToWorld
+        //     by sharing its mistake. All nine offset pairs, because the two
+        //     axes attach to world x and y in opposite senses and a sign error
+        //     in one of them is invisible while both are tested together.
+        {
+            char const* const openRows[PD_CELLS_PER_BLOCK] = {
+                "........", "........", "........", "........",
+                "........", "........", "........", "........",
+            };
+            char const* const freeRows[PD_CELLS_PER_BLOCK] = {
+                "ffffffff", "ffffffff", "ffffffff", "ffffffff",
+                "ffffffff", "ffffffff", "ffffffff", "ffffffff",
+            };
+            int const offsets[3] = { -16, 0, 16 };
+            for (int du : offsets)
+            {
+                for (int dv : offsets)
+                {
+                    WalkGrid g = GridFromRows(openRows);
+                    SetPatrolClear(g, freeRows);
+                    for (size_t i = 0; i < g.cells.size(); ++i)
+                    {
+                        g.patrolDu[i] = static_cast<int8_t>(du);
+                        g.patrolDv[i] = static_cast<int8_t>(dv);
+                    }
+                    for (int y = 0; y < g.height; ++y)
+                    {
+                        for (int x = 0; x < g.width; ++x)
+                        {
+                            GridPoint const cell{ x, y };
+                            double wx = 0.0, wy = 0.0;
+                            PatrolPointToWorld(g, cell, wx, wy);
+                            int gcx = 0, gcy = 0;
+                            WorldToCell(wx, wy, gcx, gcy);
+                            int wantX = 0, wantY = 0;
+                            g.GlobalFromLocalCell(cell, wantX, wantY);
+                            Check(gcx == wantX && gcy == wantY,
+                                  "a patrol clear point left its own cell - the kit's "
+                                  "offset cap and PatrolPointToWorld disagree", 0);
+
+                            // And it really MOVED: a zero offset is the centre,
+                            // anything else is a quarter-yard off it in the
+                            // stated direction. Without this the round trip
+                            // above would pass on a PatrolPointToWorld that
+                            // ignored the layer entirely.
+                            double cx = 0.0, cy = 0.0;
+                            CellCentreToWorld(wantX, wantY, cx, cy);
+                            double const wantDx = -du * 0.25;
+                            double const wantDy = -dv * 0.25;
+                            Check(std::fabs((wx - cx) - wantDx) < 1e-9 &&
+                                  std::fabs((wy - cy) - wantDy) < 1e-9,
+                                  "PatrolPointToWorld did not shift the waypoint by the "
+                                  "stored offset", 0);
+                        }
+                    }
+                }
+            }
+
+            // A grid with NO layer answers the cell centre, which is what keeps
+            // every pre-D2 kit walking exactly where it walked before.
+            WalkGrid const bare = GridFromRows(openRows);
+            double bx = 0.0, by = 0.0, cx = 0.0, cy = 0.0;
+            PatrolPointToWorld(bare, { 5, 2 }, bx, by);
+            int wantX = 0, wantY = 0;
+            bare.GlobalFromLocalCell({ 5, 2 }, wantX, wantY);
+            CellCentreToWorld(wantX, wantY, cx, cy);
+            Check(std::fabs(bx - cx) < 1e-9 && std::fabs(by - cy) < 1e-9,
+                  "a grid without a clearance layer no longer answers the cell centre", 0);
+        }
+    }
+
+    // MergeCollinear keeps the endpoints and every turn, and nothing else.
+    // Hand paths, so the rule is stated rather than measured.
+    void CheckMergeCollinear()
+    {
+        {
+            // Three east, two south, one east: two turns, so four waypoints.
+            std::vector<GridPoint> path = {
+                { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 4, 2 } };
+            MergeCollinear(path);
+            Check(path.size() == 4 &&
+                  path[0] == GridPoint{ 0, 0 } && path[1] == GridPoint{ 3, 0 } &&
+                  path[2] == GridPoint{ 3, 2 } && path[3] == GridPoint{ 4, 2 },
+                  "MergeCollinear dropped a turn, invented one, or moved an endpoint", 0);
+        }
+        {
+            // A straight run collapses to its two ends and no further.
+            std::vector<GridPoint> path = { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 } };
+            MergeCollinear(path);
+            Check(path.size() == 2 &&
+                  path[0] == GridPoint{ 0, 0 } && path[1] == GridPoint{ 3, 0 },
+                  "MergeCollinear did not collapse a straight run to its two ends", 0);
+        }
+        {
+            // Degenerate inputs: nothing to merge, nothing to crash on. The AI
+            // hands this function whatever the planner returned, including the
+            // single cell of a from == to beat.
+            std::vector<GridPoint> two = { { 2, 2 }, { 2, 5 } };
+            MergeCollinear(two);
+            Check(two.size() == 2, "MergeCollinear touched a two-point path", 0);
+            std::vector<GridPoint> one = { { 2, 2 } };
+            MergeCollinear(one);
+            Check(one.size() == 1 && one[0] == GridPoint{ 2, 2 },
+                  "MergeCollinear touched a one-point path", 0);
+            std::vector<GridPoint> none;
+            MergeCollinear(none);
+            Check(none.empty(), "MergeCollinear invented a waypoint out of an empty path", 0);
+        }
+        {
+            // The property behind all of it: no three consecutive waypoints of
+            // a merged path may be collinear, or something was kept that is not
+            // a turn. A zigzag - every step a turn - must therefore survive
+            // whole.
+            std::vector<GridPoint> path = {
+                { 0, 0 }, { 1, 0 }, { 1, 1 }, { 2, 1 }, { 2, 2 } };
+            std::vector<GridPoint> const before = path;
+            MergeCollinear(path);
+            Check(path.size() == before.size() &&
+                  std::equal(path.begin(), path.end(), before.begin()),
+                  "MergeCollinear merged a path that turns at every step", 0);
+        }
+    }
+
+    // A cell's clear point in YARDS, computed independently of the module: the
+    // engine works in 1/12-yard integers and this works in doubles, so the
+    // checks below cannot agree with a wrong MergeClearPoints by sharing its
+    // arithmetic. PatrolInfoAt is the only thing shared, deliberately - a
+    // second decoder of the layer would be testing the wrong thing.
+    // grid.x is the v axis and grid.y the u axis, the pairing BuildWalkGrid
+    // lays the mask down with.
+    void ClearPointYd(WalkGrid const& grid, GridPoint cell, double& px, double& py)
+    {
+        PatrolCellInfo const info = PatrolInfoAt(grid, cell);
+        px = (static_cast<double>(cell.x) + 0.5) * PD_CELL_SIZE_YD +
+             static_cast<double>(info.dv) * PD_PATROL_QUARTER_YD;
+        py = (static_cast<double>(cell.y) + 0.5) * PD_CELL_SIZE_YD +
+             static_cast<double>(info.du) * PD_PATROL_QUARTER_YD;
+    }
+
+    // What a MERGED beat has to keep, judged against the raw cell chain it was
+    // merged from. Two statements, and the second is this harness's answer to
+    // the check it cannot make:
+    //
+    //   (1) every cell a leg covers has its clear point within `toleranceQ`
+    //       quarter-yards of that leg's line - the contract MergeClearPoints
+    //       exists to keep, re-derived here in yards;
+    //   (2) the line never leaves the BAND of cells the leg covers - the
+    //       leg's own column or row, half a cell either side of its centre -
+    //       by more than the same tolerance.
+    //
+    // (2) is the stand-in for the measurement that would settle this properly:
+    // "every point of the walked segment keeps a yard of clearance from every
+    // facade box". That needs the built ADTs and this harness has no terrain at
+    // all, so what is asserted instead is the geometric consequence that
+    // matters - a leg that stays inside its own column cannot be inside the
+    // house on the far side of the lane, and the clearance layer is what puts
+    // it in the free half of that column.
+    void CheckMergedBeat(WalkGrid const& grid, std::vector<GridPoint> const& raw,
+                         std::vector<GridPoint> const& merged, int toleranceQ,
+                         char const* whatOff, char const* whatBand, uint32_t seed)
+    {
+        if (merged.size() < 2 || raw.size() < 2)
+        {
+            return;
+        }
+
+        double const tol = static_cast<double>(toleranceQ) * PD_PATROL_QUARTER_YD;
+        double const half = PD_CELL_SIZE_YD / 2.0;
+        // Doubles against an integer test: a clear point exactly on the
+        // tolerance passes the engine's `<=` and must not fail here on the last
+        // bit of a division.
+        double const eps = 1e-6;
+
+        size_t cursor = 0;
+        for (size_t m = 1; m < merged.size(); ++m)
+        {
+            // The merged list is a SUBSEQUENCE of the raw chain, so both ends
+            // of every leg are found by walking the chain forwards once.
+            while (cursor < raw.size() && !(raw[cursor] == merged[m - 1]))
+            {
+                ++cursor;
+            }
+            size_t const a = cursor;
+            size_t b = cursor;
+            while (b < raw.size() && !(raw[b] == merged[m]))
+            {
+                ++b;
+            }
+            if (a >= raw.size() || b >= raw.size())
+            {
+                Check(false, "a merged beat is not a subsequence of the cell chain it was "
+                             "merged from", seed);
+                return;
+            }
+            cursor = b;
+
+            double ax = 0.0, ay = 0.0, bx = 0.0, by = 0.0;
+            ClearPointYd(grid, merged[m - 1], ax, ay);
+            ClearPointYd(grid, merged[m], bx, by);
+            double const dx = bx - ax;
+            double const dy = by - ay;
+            double const len = std::sqrt(dx * dx + dy * dy);
+            if (len < eps)
+            {
+                Check(false, "a merged beat has two waypoints on the same clear point", seed);
+                continue;
+            }
+
+            // Which axis the leg runs along, in CELLS. Every leg is
+            // axis-aligned in cells (CheckPatrolLegs says so separately) even
+            // though the line between two clear points is not: the band is the
+            // column or row of cells the leg covers, half a cell either side of
+            // its centre, and along the axis it reaches half a cell past the
+            // first and last cell centres.
+            bool const alongX = merged[m - 1].y == merged[m].y;
+            double const bandCentre = alongX
+                ? (static_cast<double>(merged[m - 1].y) + 0.5) * PD_CELL_SIZE_YD
+                : (static_cast<double>(merged[m - 1].x) + 0.5) * PD_CELL_SIZE_YD;
+            double alongMin = 0.0, alongMax = 0.0;
+            for (size_t k = a; k <= b; ++k)
+            {
+                double const centre = alongX
+                    ? (static_cast<double>(raw[k].x) + 0.5) * PD_CELL_SIZE_YD
+                    : (static_cast<double>(raw[k].y) + 0.5) * PD_CELL_SIZE_YD;
+                if (k == a || centre - half < alongMin)
+                {
+                    alongMin = centre - half;
+                }
+                if (k == a || centre + half > alongMax)
+                {
+                    alongMax = centre + half;
+                }
+            }
+
+            // (1) THE MERGE'S OWN CONTRACT: every cell this leg covers is
+            //     passed within the tolerance of its clear point.
+            for (size_t k = a; k <= b; ++k)
+            {
+                double px = 0.0, py = 0.0;
+                ClearPointYd(grid, raw[k], px, py);
+                double const cross = dx * (py - ay) - dy * (px - ax);
+                Check(std::fabs(cross) / len <= tol + eps, whatOff, seed);
+            }
+
+            // (2) THE WALKED LINE, sampled end to end every half yard, against
+            //     that band. A creature walks the straight line between two
+            //     clear points (MovePoint with no path generation on a map with
+            //     no mmaps), so this is the ground it really crosses. Both
+            //     directions are asserted: across the band, which is the wall
+            //     the operator sees, and along it, which would catch a waypoint
+            //     that left its own cell - the property case (h) round-trips
+            //     for the encoding, here re-asserted over the shipped kit.
+            int const samples = static_cast<int>(len / 0.5) + 1;
+            for (int s = 0; s <= samples; ++s)
+            {
+                double const t = static_cast<double>(s) / static_cast<double>(samples);
+                double const sx = ax + t * dx;
+                double const sy = ay + t * dy;
+                double const across = alongX ? sy : sx;
+                double const along = alongX ? sx : sy;
+                Check(std::fabs(across - bandCentre) <= half + tol + eps, whatBand, seed);
+                Check(along >= alongMin - tol - eps && along <= alongMax + tol + eps,
+                      whatBand, seed);
+            }
+        }
+    }
+
+    // MergeClearPoints: the cell rule of MergeCollinear plus the clear points.
+    // Hand grids, so the rule is stated rather than measured - the operator
+    // beats measure it.
+    void CheckMergeClearPoints()
+    {
+        // One open column down an 8x8 grid; the beat is the eight cells of
+        // column 4, which is a single straight run with no turn in it at all.
+        char const* const openRows[PD_CELLS_PER_BLOCK] = {
+            "........", "........", "........", "........",
+            "........", "........", "........", "........",
+        };
+        char const* const freeRows[PD_CELLS_PER_BLOCK] = {
+            "ffffffff", "ffffffff", "ffffffff", "ffffffff",
+            "ffffffff", "ffffffff", "ffffffff", "ffffffff",
+        };
+        std::vector<GridPoint> const lane = {
+            { 4, 0 }, { 4, 1 }, { 4, 2 }, { 4, 3 },
+            { 4, 4 }, { 4, 5 }, { 4, 6 }, { 4, 7 } };
+
+        // (a) A RUN OF IDENTICAL OFFSETS IS STILL A STRAIGHT LINE. Every cell's
+        //     clear point sits 1.5 yd east of its centre, so the passage is
+        //     off-centre but straight, and the eight cells must still collapse
+        //     to two waypoints: the whole line lies on the line between them.
+        //     This is the half of the rule that keeps the beats short.
+        {
+            WalkGrid g = GridFromRows(openRows);
+            SetPatrolClear(g, freeRows);
+            for (size_t i = 0; i < g.cells.size(); ++i)
+            {
+                g.patrolDv[i] = static_cast<int8_t>(6);     // +1.5 yd east, every cell
+            }
+            std::vector<GridPoint> path = lane;
+            MergeClearPoints(g, path);
+            Check(path.size() == 2 && path.front() == lane.front() &&
+                  path.back() == lane.back(),
+                  "MergeClearPoints split a straight run whose clear points are all "
+                  "offset the same way - an off-centre passage is still a straight line",
+                  0);
+            CheckMergedBeat(g, lane, path, PD_PATROL_MERGE_TOLERANCE_Q,
+                            "a merged leg of the identical-offset lane passes a clear point "
+                            "further than the tolerance",
+                            "a merged leg of the identical-offset lane leaves its own cell "
+                            "band", 0);
+        }
+
+        // (b) A WOBBLE MID-RUN IS A WAYPOINT. The same lane, all offsets zero
+        //     except cell (4,4), whose clear point sits 1.0 yd east - the lane
+        //     jogging around one house that leans in. Every break below is the
+        //     perpendicular distance of a clear point from the line the merge
+        //     is about to draw, in quarter-yards (the tolerance is 2 = 0.5 yd):
+        //       run (4,0)..(4,4): (4,3) lies 3.0 q off it -> the extension is
+        //       refused and (4,3) is kept, the last cell of the straight part;
+        //       run (4,3)..(4,5): the wobble cell lies 4.0 q off -> (4,4) is
+        //       kept, which is the whole point of this case;
+        //       run (4,4)..(4,6): (4,5) lies exactly 2.0 q off -> inside the
+        //       tolerance, so it merges;
+        //       run (4,4)..(4,7): (4,5) is now 2.7 q off it -> refused, and
+        //       (4,6) is kept.
+        //     Five waypoints, and the wobble cell is one of them. With
+        //     MergeCollinear this beat is two waypoints and the walked line
+        //     misses the jog by the full yard.
+        {
+            WalkGrid g = GridFromRows(openRows);
+            SetPatrolClear(g, freeRows);
+            // +1.0 yd east on the one cell
+            g.patrolDv[static_cast<size_t>(4) * g.width + 4] = static_cast<int8_t>(4);
+            std::vector<GridPoint> path = lane;
+            MergeClearPoints(g, path);
+
+            std::vector<GridPoint> const want = {
+                { 4, 0 }, { 4, 3 }, { 4, 4 }, { 4, 6 }, { 4, 7 } };
+            Check(path.size() == want.size() &&
+                  std::equal(path.begin(), path.end(), want.begin()),
+                  "MergeClearPoints no longer splits a lane that wobbles by a yard "
+                  "mid-run - the beat would walk straight past the jog", 0);
+
+            bool kept = false;
+            for (GridPoint const& p : path)
+            {
+                if (p == GridPoint{ 4, 4 })
+                {
+                    kept = true;
+                }
+            }
+            Check(kept, "MergeClearPoints dropped the one cell whose clear point moved", 0);
+
+            CheckMergedBeat(g, lane, path, PD_PATROL_MERGE_TOLERANCE_Q,
+                            "a merged leg of the wobbling lane passes a clear point further "
+                            "than the tolerance",
+                            "a merged leg of the wobbling lane leaves its own cell band", 0);
+
+            // And the comparison this case exists to make: the old merge keeps
+            // the two ends and nothing else, so the wobble is walked over.
+            std::vector<GridPoint> old = lane;
+            MergeCollinear(old);
+            Check(old.size() == 2,
+                  "MergeCollinear no longer collapses the wobbling lane to two points - "
+                  "the case above compares against nothing", 0);
+        }
+
+        // (c) WITHOUT A LAYER THE TWO MERGES ARE ONE FUNCTION. Every cell reads
+        //     as its own centre, so nothing can deviate from a straight line
+        //     and the clear-point merge has to answer exactly what the cell
+        //     merge answers - which is what keeps a kit that predates D2, and
+        //     every hand grid in this file, walking the beats it always walked.
+        {
+            WalkGrid const bare = GridFromRows(openRows);
+            std::vector<std::vector<GridPoint>> const cases = {
+                lane,
+                { { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 4, 2 } },
+                { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 2, 1 }, { 2, 2 } },
+                { { 2, 2 }, { 2, 5 } },
+                { { 2, 2 } },
+                {},
+            };
+            for (std::vector<GridPoint> const& c : cases)
+            {
+                std::vector<GridPoint> a = c;
+                std::vector<GridPoint> b = c;
+                MergeCollinear(a);
+                MergeClearPoints(bare, b);
+                Check(a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin()),
+                      "MergeClearPoints and MergeCollinear disagree on a grid with no "
+                      "clearance layer", 0);
+            }
+        }
+
+        // (d) A TURN IS A WAYPOINT WHATEVER THE CLEAR POINTS SAY, and the
+        //     merged list is a SUBSEQUENCE of the chain it was merged from.
+        //     Those two together are what keeps every leg axis-aligned in
+        //     cells, which is D1's promise to the creature AI and the reason
+        //     the AI may walk a leg with MovePoint and no path generation. The
+        //     offsets here are deliberately violent - alternating ends of the
+        //     cell - so the tolerance test fires on nearly every step and the
+        //     turn rule is what has to survive it.
+        //
+        //     This case replaces an idempotency check, and the reason it is not
+        //     one is worth stating: MergeClearPoints is NOT idempotent, because
+        //     re-running it sees only the waypoints that survived and can merge
+        //     a cell whose objection was raised by a neighbour that is no longer
+        //     in the list. It is defined over the RAW chain FindPatrolPath
+        //     returns, and no call site ever hands it anything else.
+        {
+            char const* const bendRows[PD_CELLS_PER_BLOCK] = {
+                "........", "........", "........", "........",
+                "........", "........", "........", "........",
+            };
+            WalkGrid g = GridFromRows(bendRows);
+            SetPatrolClear(g, freeRows);
+            for (size_t i = 0; i < g.cells.size(); ++i)
+            {
+                g.patrolDu[i] = static_cast<int8_t>((i % 2) ? 12 : -12);
+                g.patrolDv[i] = static_cast<int8_t>((i % 3) ? -12 : 12);
+            }
+            // Three east, two south, one east: two turns, at (3,0) and (3,2).
+            std::vector<GridPoint> const raw = {
+                { 0, 0 }, { 1, 0 }, { 2, 0 }, { 3, 0 }, { 3, 1 }, { 3, 2 }, { 4, 2 } };
+            std::vector<GridPoint> path = raw;
+            MergeClearPoints(g, path);
+
+            Check(path.front() == raw.front() && path.back() == raw.back(),
+                  "MergeClearPoints moved an endpoint of a bent beat", 0);
+            bool haveFirst = false, haveSecond = false;
+            size_t cursor = 0;
+            for (GridPoint const& p : path)
+            {
+                while (cursor < raw.size() && !(raw[cursor] == p))
+                {
+                    ++cursor;
+                }
+                Check(cursor < raw.size(),
+                      "MergeClearPoints returned a waypoint that is not a cell of the "
+                      "chain it merged, or returned them out of order", 0);
+                if (p == GridPoint{ 3, 0 })
+                {
+                    haveFirst = true;
+                }
+                if (p == GridPoint{ 3, 2 })
+                {
+                    haveSecond = true;
+                }
+            }
+            Check(haveFirst && haveSecond,
+                  "MergeClearPoints dropped a turn - a leg of this beat is diagonal and "
+                  "the creature would walk it as a straight line across the corner", 0);
+            CheckPatrolLegs(g, path, "a merged leg of the bent beat is diagonal",
+                            "a merged leg of the bent beat crosses an unwalkable cell", 0);
+            CheckMergedBeat(g, raw, path, PD_PATROL_MERGE_TOLERANCE_Q,
+                            "a merged leg of the bent beat passes a clear point further "
+                            "than the tolerance",
+                            "a merged leg of the bent beat leaves its own cell band", 0);
+        }
+    }
+
     // Forward (block-local, the spawn path) and inverse (world -> cell, the AI
     // path) must agree, or creatures would chase mirrored positions. The u/v
     // to row/col pairing below IS the axis mapping - if someone swaps it, this
@@ -623,6 +1979,81 @@ namespace
         return true;
     }
 
+    // The derivation Round C / C2 hangs the ambush trigger on: a world
+    // position taken anywhere inside block (bx, by) must divide back to that
+    // block. TickAmbushes fires on `gcx / PD_CELLS_PER_BLOCK == spot.bx &&
+    // gcy / PD_CELLS_PER_BLOCK == spot.by` and on nothing else - there is no
+    // radius left to absorb a mistake here, so a division that stopped naming
+    // the block would either kill every ambush in the dungeon silently or fire
+    // one from the corridor next door.
+    //
+    // BOTH paths, deliberately. The engine hands WorldToCell a Player's float
+    // position, while the arm side computes the centre in double and
+    // BlockToWorld narrows it to float (PDv2Mgr.cpp:465-475). The block centre
+    // sits EXACTLY on the cell 3/4 boundary on both axes (mid = BLOCK/2 =
+    // 4 * CELL), so the two paths may legitimately name different CELLS there
+    // - which is why the patrol beat block below reproduces the narrowing
+    // before it derives a start cell. What must never differ is the BLOCK the
+    // two divide to, because the coarse question is the only one the ambush
+    // trigger asks.
+    void RunBlockDerivationChecks()
+    {
+        double const mid = PD_BLOCK_SIZE_YD / 2.0;
+
+        // Both corners of the block field, the operator's own origin, and the
+        // ambush pin's own segment-1 corridor block (259,259) - the block this
+        // trigger is actually pinned on, so the check samples the layout it
+        // guards rather than a neighbour of it. Block 511 sits at about
+        // -17066 yd, so the sign of x/y is covered as well.
+        struct Blk { int bx; int by; };
+        Blk const blocks[4] = { { 0, 0 }, { 256, 256 }, { 259, 259 }, { 511, 511 } };
+
+        // Block-local (u, v) in yards: the near corner cell, the centre (both
+        // axes exactly on the cell 3/4 boundary), the far corner cell, and
+        // 4 * CELL = 33.3333 on one axis only - ON that same boundary in u,
+        // mid-cell in v, so the one-sided case is covered too. 33.3 would sit
+        // a third of a yard BELOW the boundary and prove nothing.
+        struct Pt { double u; double v; char const* what; };
+        Pt const points[4] = {
+            { 0.5, 0.5, "(0.5,0.5)" },
+            { mid, mid, "(mid,mid)" },
+            { 66.6, 66.6, "(66.6,66.6)" },
+            { 4.0 * PD_CELL_SIZE_YD, 0.5, "(33.3333,0.5)" },
+        };
+
+        char msg[192];
+        for (Blk const& b : blocks)
+        {
+            for (Pt const& p : points)
+            {
+                double x = 0.0, y = 0.0;
+                BlockLocalToWorld(b.bx, b.by, p.u, p.v, x, y);
+
+                int gcx = 0, gcy = 0;
+                WorldToCell(x, y, gcx, gcy);
+                std::snprintf(msg, sizeof(msg),
+                              "block (%d,%d) local %s divides to block (%d,%d) - double path",
+                              b.bx, b.by, p.what,
+                              gcx / PD_CELLS_PER_BLOCK, gcy / PD_CELLS_PER_BLOCK);
+                Check(gcx >= 0 && gcy >= 0 &&
+                      gcx / PD_CELLS_PER_BLOCK == b.bx &&
+                      gcy / PD_CELLS_PER_BLOCK == b.by, msg, 0);
+
+                // The narrowing the engine cannot avoid: a Player's position
+                // is a float, and so is everything BlockToWorld hands back.
+                int fcx = 0, fcy = 0;
+                WorldToCell(static_cast<float>(x), static_cast<float>(y), fcx, fcy);
+                std::snprintf(msg, sizeof(msg),
+                              "block (%d,%d) local %s divides to block (%d,%d) - float path",
+                              b.bx, b.by, p.what,
+                              fcx / PD_CELLS_PER_BLOCK, fcy / PD_CELLS_PER_BLOCK);
+                Check(fcx >= 0 && fcy >= 0 &&
+                      fcx / PD_CELLS_PER_BLOCK == b.bx &&
+                      fcy / PD_CELLS_PER_BLOCK == b.by, msg, 0);
+            }
+        }
+    }
+
     void PrintPath(uint32_t seed, int rooms)
     {
         BlockPlan plan;
@@ -634,7 +2065,7 @@ namespace
 
         WalkGrid grid;
         std::string err;
-        if (!BuildWalkGrid(plan, MaskFor, &grid, &err))
+        if (!BuildWalkGrid(plan, MaskFor, &grid, &err, PatrolLayersForChunk))
         {
             std::printf("walk grid FAILED: %s\n", err.c_str());
             return;
@@ -642,6 +2073,8 @@ namespace
         std::printf("grid %dx%d cells, %u walkable (%.1f%%)\n", grid.width, grid.height,
                     static_cast<unsigned>(grid.WalkableCount()),
                     100.0 * grid.WalkableCount() / (grid.width * grid.height));
+
+        std::printf("\n%s\n", ChainSummary(plan).c_str());
 
         PlacedBlock const& entrance = plan.blocks[static_cast<size_t>(plan.entranceIndex)];
         PlacedBlock const& boss = plan.blocks[static_cast<size_t>(plan.bossIndex)];
@@ -754,6 +2187,96 @@ namespace
     // input range rather than sampled. Each sweep reports ONE check per dlvl so
     // the failure counter stays readable; the message carries the exact input
     // that broke, which is the part a reader needs.
+
+    // --- Round B chain arithmetic (spec 2026-09-02 §2) ----------------------
+    //
+    // Pure functions, so they are checked against a table rather than against
+    // themselves: pockets = min(branches, total / 3, (total - 1 - N) / 2),
+    // chainLen = total - pockets, boss k at round(k * (L - 1) / N).
+    void RunChainMathChecks()
+    {
+        char msg[200];
+        struct Row { int rooms; int boss; int branches; int pockets; int chainLen; int b1; int b2; };
+        Row const rows[] = {
+            {  1, 1, 2, 0,  2, 1, -1 },
+            {  2, 1, 2, 0,  3, 2, -1 },
+            {  3, 1, 2, 1,  3, 2, -1 },
+            {  5, 1, 2, 2,  4, 3, -1 },
+            {  8, 1, 2, 2,  7, 6, -1 },
+            { 12, 2, 2, 2, 12, 6, 11 },
+            { 15, 2, 2, 2, 15, 7, 14 },
+            {  5, 1, 0, 0,  6, 5, -1 },
+            {  1, 2, 2, 0,  3, 1,  2 },
+            {  5, 1, 9, 2,  4, 3, -1 },
+            { 15, 2, 9, 5, 12, 6, 11 },
+            {  5, 0, 2, 1,  4, 3, -1 },     // bossRooms 0 still means one boss
+        };
+        for (Row const& r : rows)
+        {
+            int const pockets = PocketCountFor(r.rooms, r.boss, r.branches);
+            std::snprintf(msg, sizeof(msg), "PocketCountFor(%d,%d,%d) = %d, want %d",
+                          r.rooms, r.boss, r.branches, pockets, r.pockets);
+            Check(pockets == r.pockets, msg, 0);
+
+            int const total = std::max(2, r.rooms + r.boss);
+            int const chainLen = total - pockets;
+            std::snprintf(msg, sizeof(msg), "chainLen for (%d,%d,%d) = %d, want %d",
+                          r.rooms, r.boss, r.branches, chainLen, r.chainLen);
+            Check(chainLen == r.chainLen, msg, 0);
+
+            int const b1 = BossChainIndex(chainLen, r.boss, 1);
+            std::snprintf(msg, sizeof(msg), "boss 1 for (%d,%d,%d) at %d, want %d",
+                          r.rooms, r.boss, r.branches, b1, r.b1);
+            Check(b1 == r.b1, msg, 0);
+            if (r.b2 >= 0)
+            {
+                int const b2 = BossChainIndex(chainLen, r.boss, 2);
+                std::snprintf(msg, sizeof(msg), "boss 2 for (%d,%d,%d) at %d, want %d",
+                              r.rooms, r.boss, r.branches, b2, r.b2);
+                Check(b2 == r.b2, msg, 0);
+            }
+        }
+
+        // Every legal engine request seats N distinct bosses at index >= 1:
+        // chainLen - 1 >= N is what the host clamp guarantees. The boss loop
+        // runs to 4 because GameBossRooms(30) is 4 and the conf's DlvlCap is
+        // 30 - stopping at 3 left the top of the engine's band unmeasured.
+        for (int rooms = 1; rooms <= 15; ++rooms)
+        {
+            for (int boss = 1; boss <= 4; ++boss)
+            {
+                int const total = std::max(2, rooms + boss);
+                int const chainLen = total - PocketCountFor(rooms, boss, 2);
+                std::snprintf(msg, sizeof(msg),
+                              "the pocket clamp left no room for the bosses at (%d rooms, %d boss)",
+                              rooms, boss);
+                Check(chainLen - 1 >= boss, msg, 0);
+                int last = 0;
+                for (int k = 1; k <= boss; ++k)
+                {
+                    int const idx = BossChainIndex(chainLen, boss, k);
+                    std::snprintf(msg, sizeof(msg),
+                                  "boss positions not strictly increasing at (%d rooms, %d boss): "
+                                  "boss %d at %d, previous at %d",
+                                  rooms, boss, k, idx, last);
+                    Check(idx > last && idx <= chainLen - 1, msg, 0);
+                    last = idx;
+                }
+                std::snprintf(msg, sizeof(msg),
+                              "the last boss is not the last chain room at (%d rooms, %d boss)",
+                              rooms, boss);
+                Check(last == chainLen - 1, msg, 0);
+            }
+        }
+
+        // The struct defaults the later tasks rely on.
+        PlacedBlock const fresh;
+        Check(fresh.chainIndex == -1 && fresh.branchOf == -1 && fresh.detourOf == -1,
+              "PlacedBlock chain fields must default to -1", 0);
+        BlockCfg const cfg;
+        Check(cfg.branches == 2, "BlockCfg::branches must default to 2", 0);
+        Check(cfg.detourChancePct == 33, "BlockCfg::detourChancePct must default to 33", 0);
+    }
 
     void RunGameMathChecks()
     {
@@ -1123,14 +2646,28 @@ namespace
     // regenerates a different dungeon.
     void RunLayoutFreezeCheck()
     {
-        // Re-pinned 2026-08-30 with PD_LAYOUT_VERSION 2 (dead-end stubs and
-        // visual alternates enter the draw stream). The v1 pin was
-        // 551 / E;13df5510; the bump is the documented answer to this check
-        // moving - every stored seed rerolls once, by design.
+        // Re-pinned for B2's third Room look: AltCountFor(Room) is 3, so the
+        // room's alt draw maps one unchanged raw value onto 0..2 instead of
+        // 0..1 and this layout's two spine rooms became alt 2 (chunk 4011).
+        // The manifest keeps its LENGTH - a four-digit id either way - and
+        // only the CRC moves, which is exactly why the trailer is pinned
+        // beside the byte count. PD_LAYOUT_VERSION stays 3 (spec decision 10;
+        // nothing is deployed). The pin before this one was 403 / E;c1478940
+        // (B0b's loop rooms: one Chance per boss segment before any chain
+        // step), before that 383 / E;0eeda3ad (B0b task 1, the shortcut draw
+        // withdrawn), the B0 pin 363 / E;a5019024, the v2 pin
+        // 571 / E;85fc0e4c, the v1 pin 551 / E;13df5510.
         uint32_t const PINNED_SEED = 12345u;
         int const PINNED_ROOMS = 5;
-        size_t const PINNED_BYTES = 571;
-        char const* const PINNED_TRAILER = "E;85fc0e4c\n";
+        size_t const PINNED_BYTES = 403;
+        char const* const PINNED_TRAILER = "E;6576f540\n";
+        // The failure message names the pin this one REPLACED, so whoever
+        // reads it can tell a fresh move from the B0b re-roll. Kept as
+        // constants beside the live pin: the message used to pair the current
+        // byte count with the previous trailer, which read as a third value
+        // that never existed.
+        size_t const PREVIOUS_BYTES = 403;
+        char const* const PREVIOUS_TRAILER = "E;c1478940";
 
         BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
         cfg.bossRooms = 1;
@@ -1146,14 +2683,17 @@ namespace
         size_t const trailer = std::strlen(PINNED_TRAILER);
         std::string const actualTrailer =
             m.size() >= trailer ? m.substr(m.size() - trailer) : m;
-        char msg[200];
+        char msg[256];
         std::snprintf(msg, sizeof(msg),
-                      "pinned manifest is %d bytes / %.*s, was %d / %s - the "
-                      "bossRooms=1 layout MOVED",
+                      "pinned manifest is %d bytes / %.*s, the pin says %d / %.*s "
+                      "(the pin before B0b was %d / %s) - the bossRooms=1 "
+                      "layout MOVED",
                       static_cast<int>(m.size()),
                       static_cast<int>(actualTrailer.size() ? actualTrailer.size() - 1 : 0),
                       actualTrailer.c_str(),
-                      static_cast<int>(PINNED_BYTES), "E;13df5510");
+                      static_cast<int>(PINNED_BYTES),
+                      static_cast<int>(trailer ? trailer - 1 : 0), PINNED_TRAILER,
+                      static_cast<int>(PREVIOUS_BYTES), PREVIOUS_TRAILER);
         Check(m.size() == PINNED_BYTES, msg, PINNED_SEED);
 
         bool const same = m.size() >= trailer &&
@@ -1166,9 +2706,10 @@ namespace
     // Structure first - every (role, mask, alt) the planner can emit must have
     // a walk mask in the shipped SQL, or a dungeon would generate a chunkId the
     // server cannot path over (the "0 masks = mobs stand still" failure, but
-    // per block). Then non-vacuity over real seeds: both alternates of a
-    // family and at least one dead end must actually OCCUR, or the draws are
-    // dead code the batch quietly stopped exercising.
+    // per block). Then non-vacuity over real seeds: every alternate a family
+    // ships (the Room's third one included) and at least one dead end must
+    // actually OCCUR, or the draws are dead code the batch quietly stopped
+    // exercising.
     void RunPhase2Checks(int seeds)
     {
         // Rooms ship all 15 masks; straight corridors the two facing pairs;
@@ -1179,10 +2720,14 @@ namespace
         for (int base : themeBases)
         for (unsigned m = 1; m <= 15; ++m)
         {
-            for (int alt = 0; alt < AltCountFor(BlockRole::Room); ++alt)
+            // Round B / B2: each ROLE is bounded by its OWN alt count, not by
+            // the room's. The three no longer agree - the 33 yd platform is
+            // Room-only - and sweeping the entrance and the boss up to the
+            // room's count would demand ids the kit never ships.
+            for (BlockRole role : { BlockRole::Room, BlockRole::RoomEntrance,
+                                    BlockRole::RoomBoss })
             {
-                for (BlockRole role : { BlockRole::Room, BlockRole::RoomEntrance,
-                                        BlockRole::RoomBoss })
+                for (int alt = 0; alt < AltCountFor(role); ++alt)
                 {
                     int const id = base + alt * 1000 + static_cast<int>(role) * 100
                                  + static_cast<int>(m);
@@ -1215,6 +2760,7 @@ namespace
         }
 
         bool sawAltRoom = false;
+        bool sawAlt2Room = false;
         bool sawAltStraight = false;
         bool sawDeadEnd = false;
         for (int i = 0; i < seeds; ++i)
@@ -1242,6 +2788,11 @@ namespace
                                         b.role == BlockRole::RoomEntrance ||
                                         b.role == BlockRole::RoomBoss;
                     if (isRoom) sawAltRoom = true;
+                    // The third look is Room-only, so it needs its own
+                    // witness: sawAltRoom is already true from an alt-1
+                    // entrance or boss and would hide an alt-2 draw that
+                    // never happens.
+                    if (b.role == BlockRole::Room && b.alt == 2) sawAlt2Room = true;
                     if (b.role == BlockRole::CorridorStraight) sawAltStraight = true;
                 }
             }
@@ -1252,6 +2803,7 @@ namespace
                           "stub pass is dead code", 0);
         Check(sawAltRoom, "no seed produced an alt-1 room - the alternate draw "
                           "is dead code", 0);
+        Check(sawAlt2Room, "no seed produced an alt-2 (33 yd) room", 0);
         Check(sawAltStraight, "no seed produced an S-curve corridor", 0);
     }
 
@@ -1290,6 +2842,8 @@ namespace
                 PlacedBlock const& b = city.blocks[k];
                 if (a.bx != b.bx || a.by != b.by || a.role != b.role ||
                     a.socketMask != b.socketMask || a.alt != b.alt ||
+                    a.chainIndex != b.chainIndex || a.branchOf != b.branchOf ||
+                    a.detourOf != b.detourOf ||
                     b.chunkId - a.chunkId != 10000)
                 {
                     same = false;
@@ -1300,7 +2854,7 @@ namespace
 
             WalkGrid grid;
             std::string why;
-            if (!BuildWalkGrid(city, MaskFor, &grid, &why))
+            if (!BuildWalkGrid(city, MaskFor, &grid, &why, PatrolLayersForChunk))
             {
                 Check(false, "theme-2 walk grid failed to build", seed);
                 continue;
@@ -1311,69 +2865,656 @@ namespace
         }
     }
 
-    // Exactly `bossRooms` rooms carry the boss role, the entrance never does,
-    // and bossIndex still points at the deepest of them. Run over its own seeds
-    // rather than the batch's, because the batch only ever asks for one boss.
-    void RunBossRoomChecks(int seeds)
+    // --- Round B: the spine (spec 2026-09-02 §7.1) --------------------------
+    //
+    // Re-derived from the plan's blocks and sockets, never from the planner's
+    // own bookkeeping, so a bug in the validator cannot hide here (the same
+    // stance EdgesAgree takes). Runs over its own seeds and its own room /
+    // boss matrix, because the batch only ever asks for one boss room.
+    // Socket flood from `startBlock`, never entering `skipBlock` (-1 = none).
+    void FloodFrom(BlockPlan const& plan, int startBlock, int skipBlock, std::vector<bool>& seen)
     {
-        char msg[160];
-        for (int bossRooms = 1; bossRooms <= 3; ++bossRooms)
+        std::map<std::pair<int, int>, size_t> index;
+        for (size_t i = 0; i < plan.blocks.size(); ++i)
         {
-            // Rooms enough that the deepest few are never forced to be the
-            // entrance's neighbours - 8 is what dlvl 5 already unlocks.
-            int const rooms = 8;
+            index[std::make_pair(plan.blocks[i].bx, plan.blocks[i].by)] = i;
+        }
+        seen.assign(plan.blocks.size(), false);
+        if (startBlock < 0 || startBlock == skipBlock)
+        {
+            return;
+        }
+        std::vector<size_t> stack;
+        stack.push_back(static_cast<size_t>(startBlock));
+        seen[static_cast<size_t>(startBlock)] = true;
+        struct Dir { unsigned bit; int dx; int dy; };
+        Dir const dirs[4] = { { SOCKET_N, 0, -1 }, { SOCKET_E, 1, 0 }, { SOCKET_S, 0, 1 }, { SOCKET_W, -1, 0 } };
+        while (!stack.empty())
+        {
+            size_t const at = stack.back();
+            stack.pop_back();
+            PlacedBlock const& b = plan.blocks[at];
+            for (Dir const& d : dirs)
+            {
+                if (!(b.socketMask & d.bit)) continue;
+                auto it = index.find(std::make_pair(b.bx + d.dx, b.by + d.dy));
+                if (it == index.end()) continue;
+                if (static_cast<int>(it->second) == skipBlock) continue;
+                if (seen[it->second]) continue;
+                seen[it->second] = true;
+                stack.push_back(it->second);
+            }
+        }
+    }
+
+    // Walk the corridor run behind one socket of block `from` and report the
+    // first ROOM it reaches: -1 when the run ends in a chest stub or in
+    // nothing. Deliberately the harness's own walk rather than a call into
+    // ValidateBlockPlan - the validator grew the same rule in this wave and
+    // the point of these checks is that a bug in it cannot hide here.
+    //
+    // B0b: `attachments` holds the two cells of a loop room's run that carry
+    // the strip. They are the only three-socket corridors a layout admits, and
+    // a run entering one along the run leaves it straight ahead; entered from
+    // the strip side it is the end of the walk, not a through route.
+    int RoomAtEndOf(BlockPlan const& plan, size_t from, unsigned bit,
+                    std::set<size_t> const& attachments)
+    {
+        struct Dir { unsigned bit; int dx; int dy; unsigned opp; };
+        Dir const dirs[4] = {
+            { SOCKET_N,  0, -1, SOCKET_S },
+            { SOCKET_E,  1,  0, SOCKET_W },
+            { SOCKET_S,  0,  1, SOCKET_N },
+            { SOCKET_W, -1,  0, SOCKET_E },
+        };
+        std::map<std::pair<int, int>, size_t> index;
+        for (size_t i = 0; i < plan.blocks.size(); ++i)
+        {
+            index[std::make_pair(plan.blocks[i].bx, plan.blocks[i].by)] = i;
+        }
+        size_t prev = from;
+        unsigned entry = bit;
+        for (size_t steps = 0; steps <= plan.blocks.size(); ++steps)
+        {
+            Dir const* in = nullptr;
+            for (Dir const& d : dirs) if (d.bit == entry) in = &d;
+            if (!in) return -1;
+            auto it = index.find(std::make_pair(plan.blocks[prev].bx + in->dx,
+                                                plan.blocks[prev].by + in->dy));
+            if (it == index.end()) return -1;
+            size_t const at = it->second;
+            PlacedBlock const& b = plan.blocks[at];
+            if (b.roomId >= 0) return static_cast<int>(at);
+            if (b.role == BlockRole::CorridorDeadEnd) return -1;
+            unsigned next = 0;
+            int outs = 0;
+            for (Dir const& d : dirs)
+            {
+                if (!(b.socketMask & d.bit) || d.bit == in->opp) continue;
+                auto n = index.find(std::make_pair(b.bx + d.dx, b.by + d.dy));
+                if (n != index.end() &&
+                    plan.blocks[n->second].role == BlockRole::CorridorDeadEnd) continue;
+                ++outs;
+                next = d.bit;
+            }
+            if (outs != 1)
+            {
+                bool const isAttachment = attachments.count(at) != 0;
+                bool const alongRun = (b.socketMask & entry) != 0;
+                // The one sanctioned fork: a loop attachment entered ALONG the
+                // run continues straight through it.
+                if (isAttachment && alongRun && outs == 2)
+                {
+                    next = entry;
+                }
+                else if (isAttachment && !alongRun)
+                {
+                    // Entered from the STRIP side (the entry socket is not one
+                    // of the attachment's own): design 2026-09-03 §4 calls that
+                    // the end of the strip, not a fork. The engine's WalkRun
+                    // ends the run here WITHOUT reporting a junction; the walk
+                    // ends either way, which is all this one returns.
+                    return -1;
+                }
+                else
+                {
+                    return -1;      // a junction, and the junction rule catches it
+                }
+            }
+            prev = at;
+            entry = next;
+        }
+        return -1;
+    }
+
+    void RunChainChecks(int seeds, bool& sawPocket, bool& sawDetour)
+    {
+        char msg[224];
+        // The engine's real configuration space, not a diagonal of it:
+        // bossRooms reaches 4 at the conf's DlvlCap 30, branches and
+        // detourChancePct are both operator keys whose extremes sit on their
+        // own draw streams (PDRandom's no-draw contract at a single candidate
+        // and at Chance 0/100), and bossRooms 0 is reachable from the server
+        // config for an account with no row.
+        struct Combo
+        {
+            int rooms;
+            int bossRooms;
+            int branches = 2;
+            int detourPct = 15;
+        };
+        Combo const combos[] = {
+            { 8, 1 }, { 8, 2 }, { 8, 3 }, { 15, 2 }, { 3, 1 }, { 1, 1 },
+            { 4, 4 }, { 2, 4 }, { 1, 4 },                   // dlvl 30's boss count
+            { 8, 1, 0, 15 },                                // V2.Branches 0: no pockets at all
+            { 8, 1, 2, 0 },                                 // V2.DetourChance 0: Chance draws nothing
+            { 8, 1, 2, 100 },                               // V2.DetourChance 100: same, other way
+            { 5, 0, 2, 15 },                                // bossRooms 0 still means one boss
+        };
+        for (Combo const& combo : combos)
+        {
+            // Per COMBO, not per seed: the two DetourChance edge combos assert
+            // over the whole sample (100 must yield at least one loop room,
+            // 0 must yield none), which is a statement about the draw, not
+            // about any single layout.
+            bool sawDetourHere = false;
             for (int i = 0; i < seeds; ++i)
             {
                 uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
-                BlockCfg cfg = MakeCfg(seed, rooms);
-                cfg.bossRooms = bossRooms;
+                BlockCfg cfg = MakeCfg(seed, combo.rooms);
+                cfg.bossRooms = combo.bossRooms;
+                cfg.branches = combo.branches;
+                cfg.detourChancePct = combo.detourPct;
 
                 BlockPlan plan;
                 if (!GenerateBlockPlan(cfg, &plan))
                 {
-                    std::snprintf(msg, sizeof(msg), "generation failed with %d boss room(s)",
-                                  bossRooms);
+                    std::snprintf(msg, sizeof(msg),
+                                  "generation failed with %d rooms + %d boss, branches %d, loop %d%%",
+                                  combo.rooms, combo.bossRooms, combo.branches, combo.detourPct);
                     Check(false, msg, seed);
                     continue;
                 }
 
-                int found = 0;
-                int shallowestBoss = 1 << 30;
-                int deepestBoss = -1;
-                int deepestOther = -1;
-                for (PlacedBlock const& b : plan.blocks)
+                // Own arithmetic, deliberately not PocketCountFor. N is the
+                // boss count the PLANNER seats - one even when the config says
+                // zero - and the pocket ceiling is cfg.branches, not the 2 this
+                // used to hardcode.
+                int const N = std::max(1, combo.bossRooms);
+                int const total = std::max(2, combo.rooms + combo.bossRooms);
+                int wantPockets = std::min(std::max(0, cfg.branches), total / 3);
+                wantPockets = std::min(wantPockets, std::max(0, (total - 1 - N) / 2));
+                int const wantChain = total - wantPockets;
+
+                std::vector<int> chainBlock(static_cast<size_t>(wantChain), -1);
+                int pockets = 0, rooms = 0, bosses = 0, strays = 0;
+                for (size_t k = 0; k < plan.blocks.size(); ++k)
                 {
-                    if (b.role == BlockRole::RoomBoss)
+                    PlacedBlock const& b = plan.blocks[k];
+                    if (b.roomId < 0)
                     {
-                        ++found;
-                        shallowestBoss = (b.depth < shallowestBoss) ? b.depth : shallowestBoss;
-                        deepestBoss = (b.depth > deepestBoss) ? b.depth : deepestBoss;
+                        Check(b.chainIndex < 0 && b.branchOf < 0 && b.detourOf < 0,
+                              "a corridor block carries chain fields", seed);
+                        continue;
                     }
-                    else if (b.roomId >= 0 && b.role != BlockRole::RoomEntrance)
+                    ++rooms;
+                    if (b.role == BlockRole::RoomBoss) ++bosses;
+                    if (b.chainIndex >= 0)
                     {
-                        deepestOther = (b.depth > deepestOther) ? b.depth : deepestOther;
+                        if (b.chainIndex < wantChain && chainBlock[static_cast<size_t>(b.chainIndex)] < 0)
+                        {
+                            chainBlock[static_cast<size_t>(b.chainIndex)] = static_cast<int>(k);
+                        }
+                        else
+                        {
+                            ++strays;
+                        }
+                    }
+                    else if (b.branchOf >= 0)
+                    {
+                        ++pockets;
+                    }
+                    else if (b.detourOf >= 0)
+                    {
+                        // A loop room (B0b) is a legitimate third kind of room;
+                        // it is counted and checked in its own pass below.
+                    }
+                    else
+                    {
+                        ++strays;
+                    }
+                }
+                Check(strays == 0, "a room is neither on the chain, a pocket nor a loop room (or a chain index repeats)", seed);
+                std::snprintf(msg, sizeof(msg), "%d pocket(s), want %d", pockets, wantPockets);
+                Check(pockets == wantPockets, msg, seed);
+                Check(bosses == N, "boss room count does not match the config", seed);
+                bool chainComplete = true;
+                for (int idx : chainBlock) if (idx < 0) chainComplete = false;
+                Check(chainComplete, "a chain index is missing", seed);
+                if (!chainComplete) continue;
+                if (pockets > 0) sawPocket = true;
+
+                // Entrance, last boss, boss positions by the formula.
+                Check(plan.entranceIndex == chainBlock[0] &&
+                      plan.blocks[static_cast<size_t>(chainBlock[0])].role == BlockRole::RoomEntrance,
+                      "chain 0 is not the entrance", seed);
+                Check(plan.bossIndex == chainBlock[static_cast<size_t>(wantChain - 1)] &&
+                      plan.blocks[static_cast<size_t>(plan.bossIndex)].role == BlockRole::RoomBoss,
+                      "bossIndex is not the last chain room, or it is not a boss", seed);
+                std::vector<bool> isBossIdx(static_cast<size_t>(wantChain), false);
+                for (int k = 1; k <= N; ++k)
+                {
+                    int const want = (2 * k * (wantChain - 1) + N) / (2 * N);
+                    isBossIdx[static_cast<size_t>(want)] = true;
+                    std::snprintf(msg, sizeof(msg), "boss %d is not at chain index %d", k, want);
+                    Check(plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(want)])].role == BlockRole::RoomBoss,
+                          msg, seed);
+                }
+                for (int idx = 1; idx < wantChain; ++idx)
+                {
+                    PlacedBlock const& b = plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(idx)])];
+                    Check(isBossIdx[static_cast<size_t>(idx)] == (b.role == BlockRole::RoomBoss),
+                          "a boss sits off its formula position", seed);
+                    // Every spine room that is not a boss is a plain Room: the
+                    // entrance role belongs to chain 0 alone (final review, M1).
+                    if (!isBossIdx[static_cast<size_t>(idx)])
+                    {
+                        Check(b.role == BlockRole::Room, "a spine room carries the wrong role", seed);
+                    }
+                    // SegmentOf agrees with the formula.
+                    int wantSeg = N;
+                    for (int k = 1; k <= N; ++k)
+                    {
+                        if (idx <= (2 * k * (wantChain - 1) + N) / (2 * N)) { wantSeg = k; break; }
+                    }
+                    Check(SegmentOf(plan, b) == wantSeg, "SegmentOf disagrees with the boss positions", seed);
+                }
+                Check(SegmentOf(plan, plan.blocks[static_cast<size_t>(chainBlock[0])]) == 0,
+                      "the entrance is not segment 0", seed);
+
+                // Loop rooms (B0b): re-derived from the sockets. R has exactly
+                // two opposite sockets; the corners, the two attachment cells
+                // and the straight middle cell have exactly the masks the
+                // geometry demands; the run's two ends are chain rooms
+                // detourOf-1 and detourOf (either orientation).
+                //
+                // Placed BEFORE the spine-adjacency walk, not after the pocket
+                // pass: the attachment cells are the only corridors the walk is
+                // allowed to pass straight through, so it needs the set.
+                //
+                // The mask without sockets that lead to chest stubs - the same
+                // normalisation the junction rule and the corridor walk use.
+                auto const StubsOff = [&](PlacedBlock const* c) -> unsigned
+                {
+                    unsigned out = 0;
+                    for (unsigned bit = 1; c && bit <= SOCKET_W; bit <<= 1)
+                    {
+                        if (!(c->socketMask & bit)) continue;
+                        int ex = 0, ey = 0;
+                        if (bit == SOCKET_N) ey = -1; else if (bit == SOCKET_S) ey = 1;
+                        else if (bit == SOCKET_W) ex = -1; else ex = 1;
+                        PlacedBlock const* n = plan.At(c->bx + ex, c->by + ey);
+                        if (n && n->role == BlockRole::CorridorDeadEnd) continue;
+                        out |= bit;
+                    }
+                    return out;
+                };
+                std::set<size_t> attachments;
+                std::vector<bool> loopInSegment(static_cast<size_t>(N + 1), false);
+                int loops = 0;
+                for (size_t at = 0; at < plan.blocks.size(); ++at)
+                {
+                    PlacedBlock const& b = plan.blocks[at];
+                    if (b.detourOf < 0) continue;
+                    ++loops;
+                    if (b.detourOf > 0 && b.detourOf < wantChain) sawDetourHere = true;
+                    Check(b.role == BlockRole::Room && b.chainIndex < 0 && b.branchOf < 0,
+                          "a loop room carries the wrong role or fields", seed);
+                    bool const intoOk = b.detourOf >= 1 && b.detourOf < wantChain;
+                    Check(intoOk, "a loop room's run leads into no chain room", seed);
+                    if (!intoOk) continue;
+                    int const seg = SegmentOf(plan, plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.detourOf)])]);
+                    Check(seg >= 1 && seg <= N && SegmentOf(plan, b) == seg, "a loop room is not in its run's segment", seed);
+                    if (seg >= 1 && seg <= N)
+                    {
+                        Check(!loopInSegment[static_cast<size_t>(seg)], "two loop rooms in one segment", seed);
+                        loopInSegment[static_cast<size_t>(seg)] = true;
+                    }
+                    // Stub-normalised throughout: the stub pass is free to hang
+                    // a chest alcove off any cell of the loop, the loop room
+                    // included (design 2026-09-03 §2.5).
+                    unsigned const m = StubsOff(&b);
+                    bool const opposite = (m == (SOCKET_N | SOCKET_S)) || (m == (SOCKET_E | SOCKET_W));
+                    Check(opposite, "a loop room does not have exactly two opposite sockets", seed);
+                    if (!opposite) continue;
+                    int dx = 0, dy = 0;
+                    if (m == (SOCKET_N | SOCKET_S)) { dx = 0; dy = 1; } else { dx = 1; dy = 0; }
+                    // The strip: S1 = R - d, S2 = R + d, both corners sharing a side t.
+                    PlacedBlock const* s1 = plan.At(b.bx - dx, b.by - dy);
+                    PlacedBlock const* s2 = plan.At(b.bx + dx, b.by + dy);
+                    unsigned const dBit = (dy > 0) ? SOCKET_S : SOCKET_E;
+                    unsigned const dOpp = (dy > 0) ? SOCKET_N : SOCKET_W;
+                    unsigned const s1Mask = StubsOff(s1);
+                    unsigned const s2Mask = StubsOff(s2);
+                    bool cornersOk = s1 && s2 && s1->roomId < 0 && s2->roomId < 0 &&
+                                     (s1Mask & dBit) && (s2Mask & dOpp);
+                    unsigned const t1 = s1Mask & ~dBit;
+                    unsigned const t2 = s2Mask & ~dOpp;
+                    cornersOk = cornersOk && t1 == t2 && (t1 == SOCKET_N || t1 == SOCKET_E || t1 == SOCKET_S || t1 == SOCKET_W)
+                                && t1 != dBit && t1 != dOpp;
+                    Check(cornersOk, "a loop room's corners are not two matching corner corridors", seed);
+                    if (!cornersOk) continue;
+                    int tx = 0, ty = 0;
+                    if (t1 == SOCKET_N) ty = -1; else if (t1 == SOCKET_S) ty = 1; else if (t1 == SOCKET_W) tx = -1; else tx = 1;
+                    unsigned const tOpp = (t1 == SOCKET_N) ? SOCKET_S : (t1 == SOCKET_S) ? SOCKET_N : (t1 == SOCKET_W) ? SOCKET_E : SOCKET_W;
+                    PlacedBlock const* m1 = plan.At(s1->bx + tx, s1->by + ty);
+                    PlacedBlock const* m2 = plan.At(s2->bx + tx, s2->by + ty);
+                    PlacedBlock const* mid = plan.At(b.bx + tx, b.by + ty);
+                    unsigned const attachMask = dBit | dOpp | tOpp;
+                    bool const runOk = m1 && m2 && mid && m1->roomId < 0 && m2->roomId < 0 && mid->roomId < 0 &&
+                                       StubsOff(m1) == attachMask && StubsOff(m2) == attachMask &&
+                                       StubsOff(mid) == (dBit | dOpp);
+                    Check(runOk, "a loop room's run is not the straight three-cell run with two attachments", seed);
+                    if (!runOk) continue;
+                    for (size_t k = 0; k < plan.blocks.size(); ++k)
+                    {
+                        if (&plan.blocks[k] == m1 || &plan.blocks[k] == m2) attachments.insert(k);
+                    }
+                    PlacedBlock const* e1 = plan.At(m1->bx - dx, m1->by - dy);
+                    PlacedBlock const* e2 = plan.At(m2->bx + dx, m2->by + dy);
+                    PlacedBlock const* into = &plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.detourOf)])];
+                    PlacedBlock const* before = &plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.detourOf - 1)])];
+                    bool const endsOk = (e1 == before && e2 == into) || (e1 == into && e2 == before);
+                    Check(endsOk, "a loop room's run does not join chain rooms detourOf-1 and detourOf", seed);
+
+                    // B0b §4, through the ENGINE's public walk: every socket of
+                    // a loop room leads into the strip (or, at most, into a
+                    // chest stub hanging off it), and the walk there ends at
+                    // the attachment cell it enters FROM THE STRIP SIDE. That
+                    // is the end of the strip, not a fork - so the answer is
+                    // "no room" WITHOUT a junction. This is the only place a
+                    // strip-side entry is reachable at all, so without it the
+                    // rule would be untested (B0b Task 2 review, item 1).
+                    for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                    {
+                        if (!(b.socketMask & bit)) continue;
+                        bool junction = true;
+                        int const to = RunFromSocket(plan, at, bit, nullptr, &junction);
+                        Check(to < 0 && !junction,
+                              "a walk out of a loop room does not end quietly at the strip", seed);
+                    }
+                }
+                Check(loops <= N, "more loop rooms than segments", seed);
+                Check(rooms == total + loops, "room count is not rooms + bossRooms + loop rooms", seed);
+                // Non-vacuity over the WHOLE sample, exactly like sawPocket -
+                // not a property of any single layout. Set here rather than
+                // from the DetourChance-100 combo alone: that combo already
+                // has its own per-combo assertion, and hanging the batch-wide
+                // one off it would make it true by construction.
+                if (loops > 0) sawDetour = true;
+
+                // Spine adjacency (spec 7.1 invariant 3, final review M2):
+                // consecutive chain rooms are joined by EXACTLY one corridor
+                // run. Construction guarantees it today and one pinned seed
+                // notices a move, but C5's respawn checkpoint and B5's patrol
+                // key off the physical order, so it is asserted per seed here
+                // - with the harness's own corridor walk, not the validator's.
+                for (int idx = 1; idx < wantChain; ++idx)
+                {
+                    size_t const from = static_cast<size_t>(chainBlock[static_cast<size_t>(idx - 1)]);
+                    int hits = 0;
+                    for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                    {
+                        if (!(plan.blocks[from].socketMask & bit)) continue;
+                        if (RoomAtEndOf(plan, from, bit, attachments) == chainBlock[static_cast<size_t>(idx)]) ++hits;
+                    }
+                    std::snprintf(msg, sizeof(msg),
+                                  "chain %d and %d are joined by %d corridor run(s), want 1",
+                                  idx - 1, idx, hits);
+                    Check(hits == 1, msg, seed);
+
+                    // Round B / B3-B5: the ENGINE's own reader of that same
+                    // run. SpineRunInto is what the barrier, the patrol and
+                    // the ambush plan will call, and it walks the planner's
+                    // shared WalkRun - so it is checked against the harness's
+                    // independent RoomAtEndOf rather than against itself.
+                    std::vector<size_t> run;
+                    unsigned const entryBit = SpineRunInto(plan, idx, &run);
+                    std::snprintf(msg, sizeof(msg),
+                                  "SpineRunInto found no run into chain %d", idx);
+                    Check(entryBit != 0, msg, seed);
+                    if (entryBit == 0) continue;
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "the run into chain %d is empty - a barrier would have no corridor to seal", idx);
+                    Check(!run.empty(), msg, seed);
+                    if (run.empty()) continue;
+
+                    bool allCorridors = true;
+                    for (size_t at : run)
+                    {
+                        PlacedBlock const& c = plan.blocks[at];
+                        if (c.roomId >= 0 || c.role == BlockRole::CorridorDeadEnd) allCorridors = false;
+                    }
+                    std::snprintf(msg, sizeof(msg),
+                                  "the run into chain %d holds a room or a chest stub", idx);
+                    Check(allCorridors, msg, seed);
+
+                    // WALKING ORDER, which is the half of the contract the
+                    // block indices alone do not state: run[0] touches chain
+                    // idx-1, run.back() touches chain idx, and every step in
+                    // between is one block. B3 seats its portcullis on the
+                    // last block, B4 starts its patrol there.
+                    auto const Adjacent = [&](PlacedBlock const& p, PlacedBlock const& q)
+                    {
+                        int const d = std::abs(p.bx - q.bx) + std::abs(p.by - q.by);
+                        return d == 1;
+                    };
+                    bool ordered = Adjacent(plan.blocks[run.front()],
+                                            plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(idx - 1)])]) &&
+                                   Adjacent(plan.blocks[run.back()],
+                                            plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(idx)])]);
+                    for (size_t k = 1; k < run.size(); ++k)
+                    {
+                        if (!Adjacent(plan.blocks[run[k - 1]], plan.blocks[run[k]])) ordered = false;
+                    }
+                    std::snprintf(msg, sizeof(msg),
+                                  "the run into chain %d is not a contiguous walk from %d to %d",
+                                  idx, idx - 1, idx);
+                    Check(ordered, msg, seed);
+
+                    // ...and it arrives through the socket SpineRunInto named:
+                    // walking that socket backwards out of chain idx must land
+                    // on chain idx-1, by the harness's own walk.
+                    std::snprintf(msg, sizeof(msg),
+                                  "SpineRunInto's socket for chain %d does not walk back to chain %d",
+                                  idx, idx - 1);
+                    Check(RoomAtEndOf(plan, static_cast<size_t>(chainBlock[static_cast<size_t>(idx)]),
+                                      entryBit, attachments) == chainBlock[static_cast<size_t>(idx - 1)],
+                          msg, seed);
+                }
+
+                // Round B / B5: the ambush plan over that same chain. At
+                // chance 100 the coin is off and what is left is a statement
+                // about WHERE a spot may sit - and the candidate set is
+                // re-derived here from the harness's own RoomAtEndOf, never
+                // from the SpineRunInto BuildAmbushPlan itself walks, so a bug
+                // in that walk cannot hide behind its own output.
+                {
+                    // Which rooms each corridor block reaches through its own
+                    // sockets, computed once for the layout. A corridor lies on
+                    // the run between two chain rooms exactly when it reaches
+                    // BOTH of them: consecutive chain rooms are joined by
+                    // exactly one run (asserted above), so there is no second
+                    // way to reach both. Loop-strip cells reach only their loop
+                    // room (RoomAtEndOf ends the walk at an attachment entered
+                    // from the strip side), chest stubs are skipped outright,
+                    // and a pocket corridor reaches its host and its pocket -
+                    // none of the three can qualify.
+                    std::vector<std::set<int>> reach(plan.blocks.size());
+                    for (size_t at = 0; at < plan.blocks.size(); ++at)
+                    {
+                        PlacedBlock const& c = plan.blocks[at];
+                        if (c.roomId >= 0 || c.role == BlockRole::CorridorDeadEnd) continue;
+                        for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                        {
+                            if (!(c.socketMask & bit)) continue;
+                            int const end = RoomAtEndOf(plan, at, bit, attachments);
+                            if (end >= 0) reach[at].insert(end);
+                        }
+                    }
+
+                    // The engine will hand BuildAmbushPlan the plan's own seed,
+                    // exactly like the decor, critter and patrol draws.
+                    std::vector<AmbushSpot> const hot = BuildAmbushPlan(plan, 100, plan.effectiveSeed);
+                    std::vector<AmbushSpot> const twice = BuildAmbushPlan(plan, 100, plan.effectiveSeed);
+                    bool determ = hot.size() == twice.size();
+                    for (size_t s = 0; determ && s < hot.size(); ++s)
+                    {
+                        determ = hot[s].blockIndex == twice[s].blockIndex &&
+                                 hot[s].bx == twice[s].bx && hot[s].by == twice[s].by &&
+                                 hot[s].segment == twice[s].segment;
+                    }
+                    Check(determ, "two ambush plans from the same seed differ", seed);
+                    Check(BuildAmbushPlan(plan, 0, plan.effectiveSeed).empty(),
+                          "an ambush spot appeared at chance 0", seed);
+
+                    int prevBoss = 0;
+                    for (int k = 1; k <= N; ++k)
+                    {
+                        // The harness's own boss formula, the one the checks
+                        // above use - not BossChainIndex.
+                        int const bossAt = (2 * k * (wantChain - 1) + N) / (2 * N);
+                        std::set<size_t> segRun;
+                        for (int step = prevBoss + 1; step <= bossAt; ++step)
+                        {
+                            for (size_t at = 0; at < plan.blocks.size(); ++at)
+                            {
+                                if (reach[at].count(chainBlock[static_cast<size_t>(step - 1)]) != 0 &&
+                                    reach[at].count(chainBlock[static_cast<size_t>(step)]) != 0)
+                                {
+                                    segRun.insert(at);
+                                }
+                            }
+                        }
+
+                        int spotsHere = 0;
+                        for (AmbushSpot const& s : hot)
+                        {
+                            if (s.segment != k) continue;
+                            ++spotsHere;
+                            Check(s.blockIndex < plan.blocks.size(),
+                                  "an ambush spot indexes past the plan", seed);
+                            if (s.blockIndex >= plan.blocks.size()) continue;
+                            Check(plan.blocks[s.blockIndex].bx == s.bx &&
+                                  plan.blocks[s.blockIndex].by == s.by,
+                                  "an ambush spot's coordinates are not its own block's", seed);
+                            std::snprintf(msg, sizeof(msg),
+                                          "segment %d's ambush spot is not a corridor on one of that segment's spine runs", k);
+                            Check(segRun.count(s.blockIndex) != 0, msg, seed);
+                        }
+                        std::snprintf(msg, sizeof(msg),
+                                      "segment %d has %d ambush spot(s) at chance 100, want %d",
+                                      k, spotsHere, segRun.empty() ? 0 : 1);
+                        Check(spotsHere == (segRun.empty() ? 0 : 1), msg, seed);
+                        prevBoss = bossAt;
+                    }
+
+                    for (AmbushSpot const& s : hot)
+                    {
+                        std::snprintf(msg, sizeof(msg),
+                                      "an ambush spot carries segment %d, outside 1..%d", s.segment, N);
+                        Check(s.segment >= 1 && s.segment <= N, msg, seed);
                     }
                 }
 
-                std::snprintf(msg, sizeof(msg), "%d block(s) carry the boss role, asked for %d",
-                              found, bossRooms);
-                Check(found == bossRooms, msg, seed);
+                // Pockets: host is an ordinary spine room, one pocket per host,
+                // in the host's segment - and physically what the fields claim:
+                // with the HOST removed, a flood from the pocket reaches no
+                // spine room at all.
+                std::vector<bool> hosted(static_cast<size_t>(wantChain), false);
+                for (size_t at = 0; at < plan.blocks.size(); ++at)
+                {
+                    PlacedBlock const& b = plan.blocks[at];
+                    if (b.branchOf < 0) continue;
+                    Check(b.role == BlockRole::Room, "a pocket is not a plain room", seed);
+                    bool const hostOk = b.branchOf >= 1 && b.branchOf < wantChain - 1 &&
+                                        !isBossIdx[static_cast<size_t>(b.branchOf)];
+                    Check(hostOk, "pocket hosted on the entrance, a boss or off the chain", seed);
+                    if (!hostOk) continue;
+                    Check(!hosted[static_cast<size_t>(b.branchOf)], "two pockets on one host", seed);
+                    hosted[static_cast<size_t>(b.branchOf)] = true;
+                    Check(SegmentOf(plan, b) ==
+                          SegmentOf(plan, plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.branchOf)])]),
+                          "a pocket is not in its host's segment", seed);
 
-                PlacedBlock const& entrance = plan.blocks[static_cast<size_t>(plan.entranceIndex)];
-                Check(entrance.role == BlockRole::RoomEntrance &&
-                      plan.entranceIndex != plan.bossIndex,
-                      "the entrance was flagged as a boss room", seed);
+                    std::vector<bool> seen;
+                    FloodFrom(plan, static_cast<int>(at), chainBlock[static_cast<size_t>(b.branchOf)], seen);
+                    bool touchesSpine = false;
+                    for (size_t k = 0; k < plan.blocks.size(); ++k)
+                    {
+                        if (seen[k] && plan.blocks[k].chainIndex >= 0) touchesSpine = true;
+                    }
+                    Check(!touchesSpine, "a dead-end pocket reaches the spine around its host", seed);
+                }
 
-                PlacedBlock const& boss = plan.blocks[static_cast<size_t>(plan.bossIndex)];
-                Check(boss.role == BlockRole::RoomBoss,
-                      "bossIndex does not point at a boss room", seed);
+                // No junction that is not a stub: a corridor block has exactly
+                // two sockets leading to non-stub blocks - three for a loop
+                // attachment, the only fork B0b sanctions.
+                for (size_t k = 0; k < plan.blocks.size(); ++k)
+                {
+                    PlacedBlock const& b = plan.blocks[k];
+                    if (b.roomId >= 0 || b.role == BlockRole::CorridorDeadEnd) continue;
+                    int through = 0;
+                    struct Dir { unsigned bit; int dx; int dy; };
+                    Dir const dirs[4] = { { SOCKET_N, 0, -1 }, { SOCKET_E, 1, 0 }, { SOCKET_S, 0, 1 }, { SOCKET_W, -1, 0 } };
+                    for (Dir const& d : dirs)
+                    {
+                        if (!(b.socketMask & d.bit)) continue;
+                        PlacedBlock const* n = plan.At(b.bx + d.dx, b.by + d.dy);
+                        if (n && n->role != BlockRole::CorridorDeadEnd) ++through;
+                    }
+                    Check(through == (attachments.count(k) ? 3 : 2),
+                          "a corridor block is a junction (not a loop attachment)", seed);
+                }
 
-                // "The N DEEPEST": every boss room is at least as deep as every
-                // other room, and bossIndex is the deepest of the boss rooms.
-                Check(shallowestBoss >= deepestOther,
-                      "a non-boss room is deeper than a boss room", seed);
-                Check(boss.depth == deepestBoss,
-                      "bossIndex is not the deepest boss room", seed);
+                // Boss cut property: without boss block k nothing behind it is
+                // reachable from the entrance.
+                for (int idx = 1; idx < wantChain; ++idx)
+                {
+                    if (!isBossIdx[static_cast<size_t>(idx)]) continue;
+                    std::vector<bool> seen;
+                    FloodFrom(plan, plan.entranceIndex, chainBlock[static_cast<size_t>(idx)], seen);
+                    for (size_t k = 0; k < plan.blocks.size(); ++k)
+                    {
+                        PlacedBlock const& b = plan.blocks[k];
+                        // detourOf is "behind" as well: a loop room whose run
+                        // leads into chain room detourOf hangs off the corridor
+                        // between detourOf-1 and detourOf, so a detourOf past
+                        // the removed boss puts the whole strip behind it.
+                        bool const behind = b.chainIndex > idx || b.branchOf > idx || b.detourOf > idx;
+                        if (behind && seen[k])
+                        {
+                            std::snprintf(msg, sizeof(msg), "boss at chain %d can be bypassed", idx);
+                            Check(false, msg, seed);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            // The detour draw, asserted where PDRandom does NOT draw at all:
+            // at 100 every segment wants a loop room, at 0 none does, so both
+            // are statements about the whole sample rather than about a seed.
+            if (combo.detourPct >= 100)
+            {
+                std::snprintf(msg, sizeof(msg), "no loop room at all over %d seeds with DetourChance 100 (%d rooms + %d boss)",
+                              seeds, combo.rooms, combo.bossRooms);
+                Check(sawDetourHere, msg, 0);
+            }
+            if (combo.detourPct <= 0)
+            {
+                Check(!sawDetourHere, "a loop room appeared with DetourChance 0", 0);
             }
         }
     }
@@ -2178,17 +4319,37 @@ namespace
     //
     // If either of these fails after a deliberate decor/critter rule
     // change, that is the change being noticed, not the pin being wrong -
-    // update it in the same commit as the draw-order comment. Captured by
-    // RUNNING `pdblock --decor-batch` and reading the "plan moved" failure
-    // message, not by reasoning about what it should be - and only after
-    // items 1, 2 and 5 had landed, since all three can move these streams.
-    // Captured by running `pdblock --decor-batch` (seed 12345, 5 rooms, the
-    // shipped fixtures) and reading the "plan moved" failure message, after
-    // items 1, 2 and 5 had landed.
+    // update it in the same commit as the draw-order comment.
+    //
+    // Re-captured for B2's third Room look, and the pin itself says WHY the
+    // diff is wider than "the two rooms that became alt 2 moved":
+    // AltCountFor(Room) went 2 -> 3, so the alt draw is UniformInt(0, 2) where
+    // it was UniformInt(0, 1). The raw word is the same one - only the mapping
+    // moved, % 3 instead of % 2 - and that re-rolls a Room block's alt with
+    // probability 2/3, so SEVERAL rooms changed chunkId, not only the two that
+    // came out alt 2 (chunk 4011, the 33 yd platform). Each of those moved on
+    // its OWN new walk mask, which is what both plans place against: three
+    // rooms here (259,259 / 261,260 / 260,262). The other four blocks in the
+    // diff are corridors (261,259 / 258,260 / 260,260 / 262,260), whose
+    // chunkIds cannot move at all because AltCountFor is untouched for their
+    // roles - those four moved through a LOCAL shift of the shared
+    // decor/critter stream, and that shift cancels out again rather than
+    // running to the end of the layout: every block from 258,261 on is
+    // byte-identical, and 260,262 moved while sitting between unmoved
+    // neighbours on both sides.
+    // (2026-09-03, B0b's loop rooms: the per-segment detour Chance draws land
+    // before the first chain step. Earlier that day, B0b task 1: the pocket's
+    // forward-cut draw was withdrawn. 2026-09-02, Round B: the chain generator
+    // replaced scatter + MST.)
+    //
+    // CAPTURE PROCEDURE, every time: run `pdblock --decor-batch` (seed 12345,
+    // 5 rooms, the shipped fixtures) and paste the value out of the "plan
+    // moved" failure message - never by reasoning about what it should be -
+    // and only once every change that can move these streams has landed.
     char const* const PD_DECOR_PLAN_PIN =
-        "261,257,1,910020,56.666666,20.833333,0.000000;261,257,4,910050,10.000000,54.166666,3.141593;261,257,5,910051,20.833333,10.000000,4.712389;261,257,5,910051,10.000000,20.833333,3.141593;261,257,6,910054,10.000000,45.833333,3.141593;261,257,7,910055,45.833333,56.666666,1.570796;261,257,10,910060,56.666666,10.000000,5.497787;261,257,10,910060,10.000000,56.666666,2.356194;261,257,13,910070,20.833333,20.833333,0.000000;256,258,1,910020,29.166666,10.000000,4.712389;256,258,1,910020,26.666666,62.500000,3.141593;256,258,1,910020,45.833333,10.000000,4.712389;256,258,4,910050,10.000000,54.166666,3.141593;256,258,5,910051,45.833333,56.666666,1.570796;256,258,5,910051,20.833333,56.666666,1.570796;256,258,6,910054,10.000000,20.833333,3.141593;256,258,8,910056,10.000000,45.833333,3.141593;256,258,13,910070,29.166666,20.833333,0.000000;256,258,13,910070,45.833333,20.833333,0.000000;257,258,9,910052,31.666666,45.833333,0.000000;261,258,9,910052,54.166666,26.666666,4.712389;256,259,3,910020,62.500000,26.666666,4.712389;257,259,1,910020,10.000000,20.833333,3.141593;257,259,1,910020,10.000000,12.500000,3.141593;257,259,1,910020,10.000000,54.166666,3.141593;257,259,4,910050,10.000000,45.833333,3.141593;257,259,4,910050,56.666666,45.833333,0.000000;257,259,5,910051,45.833333,56.666666,1.570796;257,259,6,910054,26.666666,62.500000,3.141593;257,259,7,910055,45.833333,10.000000,4.712389;257,259,8,910056,20.833333,56.666666,1.570796;257,259,10,910060,10.000000,56.666666,2.356194;257,259,13,910070,45.833333,20.833333,0.000000;257,259,13,910070,29.166666,45.833333,0.000000;257,259,13,910070,20.833333,29.166666,0.000000;258,259,9,910052,62.500000,26.666666,4.712389;259,259,9,910052,26.666666,20.833333,3.141593;260,259,3,910020,26.666666,62.500000,3.141593;260,259,9,910052,31.666666,45.833333,0.000000;261,259,9,910052,26.666666,62.500000,3.141593;262,259,9,910052,26.666666,12.500000,3.141593;256,260,9,910052,20.833333,26.666666,4.712389;257,260,3,910020,45.833333,31.666666,1.570796;258,260,3,910020,4.166667,26.666666,4.712389;258,260,9,910052,54.166666,26.666666,4.712389;256,261,9,910052,45.833333,18.333333,4.712389;257,261,3,910020,20.833333,26.666666,4.712389;257,261,9,910052,26.666666,54.166666,3.141593;258,261,1,910020,56.666666,12.500000,0.000000;258,261,1,910020,56.666666,29.166666,0.000000;258,261,6,910054,10.000000,20.833333,3.141593;258,261,10,910060,48.333333,56.666666,0.785398;258,261,10,910060,18.333333,10.000000,3.926991;258,261,13,910070,20.833333,45.833333,0.000000;259,261,3,910020,26.666666,20.833333,3.141593;259,261,9,910052,62.500000,26.666666,4.712389;256,262,3,910020,26.666666,62.500000,3.141593;256,262,9,910052,4.166667,26.666666,4.712389;257,262,3,910020,26.666666,20.833333,3.141593;258,262,9,910052,31.666666,45.833333,0.000000;259,262,1,910020,10.000000,54.166666,3.141593;259,262,1,910020,4.166667,26.666666,4.712389;259,262,4,910050,56.666666,29.166666,0.000000;259,262,4,910050,56.666666,20.833333,0.000000;259,262,5,910051,26.666666,4.166667,3.141593;259,262,5,910051,45.833333,56.666666,1.570796;259,262,8,910056,45.833333,10.000000,4.712389;259,262,11,910062,48.333333,56.666666,0.785398;259,262,11,910062,56.666666,10.000000,5.497787;259,262,13,910070,20.833333,45.833333,0.000000;259,262,13,910070,20.833333,29.166666,0.000000;259,262,13,910070,45.833333,29.166666,0.000000;260,262,3,910020,26.666666,4.166667,3.141593;260,262,9,910052,26.666666,62.500000,3.141593;261,262,3,910020,31.666666,45.833333,0.000000;262,262,1,910020,18.333333,12.500000,3.141593;262,262,2,910021,56.666666,20.833333,0.000000;262,262,2,910021,29.166666,56.666666,1.570796;262,262,4,910050,10.000000,20.833333,3.141593;262,262,4,910050,45.833333,56.666666,1.570796;262,262,5,910051,10.000000,45.833333,3.141593;262,262,7,910055,56.666666,12.500000,0.000000;262,262,8,910056,56.666666,29.166666,0.000000;262,262,10,910060,48.333333,56.666666,0.785398;262,262,11,910062,56.666666,10.000000,5.497787;262,262,13,910070,20.833333,29.166666,0.000000;262,262,13,910070,45.833333,29.166666,0.000000;262,262,14,910073,29.166666,12.500000,0.000000;262,262,14,910073,45.833333,20.833333,0.000000";
+        "258,257,1,910020,18.333333,12.500000,3.141593;258,257,4,910050,56.666666,20.833333,0.000000;258,257,5,910051,10.000000,20.833333,3.141593;258,257,5,910051,56.666666,29.166666,0.000000;258,257,6,910054,29.166666,10.000000,4.712389;258,257,7,910055,10.000000,45.833333,3.141593;258,257,10,910060,18.333333,10.000000,3.926991;258,257,10,910060,48.333333,56.666666,0.785398;258,257,11,910062,10.000000,56.666666,2.356194;258,257,11,910062,56.666666,10.000000,5.497787;259,258,3,910020,45.833333,18.333333,4.712389;258,259,9,910052,26.666666,45.833333,3.141593;258,259,12,910063,26.666666,26.666666,3.926991;259,259,1,910020,26.666666,62.500000,3.141593;259,259,4,910050,4.166667,26.666666,4.712389;259,259,7,910055,12.500000,26.666666,4.712389;259,259,11,910062,48.333333,18.333333,5.497787;259,259,11,910062,18.333333,18.333333,3.926991;259,259,13,910070,29.166666,20.833333,0.000000;259,259,13,910070,29.166666,45.833333,0.000000;260,259,9,910052,26.666666,45.833333,3.141593;258,260,3,910020,20.833333,26.666666,4.712389;260,260,3,910020,26.666666,54.166666,3.141593;260,260,9,910052,62.500000,26.666666,4.712389;260,260,12,910063,26.666666,26.666666,3.926991;261,260,1,910020,18.333333,45.833333,3.141593;261,260,1,910020,12.500000,26.666666,4.712389;261,260,1,910020,26.666666,12.500000,3.141593;261,260,4,910050,48.333333,29.166666,0.000000;261,260,6,910054,26.666666,54.166666,3.141593;261,260,7,910055,18.333333,20.833333,3.141593;261,260,10,910060,18.333333,48.333333,2.356194;261,260,11,910062,48.333333,18.333333,5.497787;261,260,11,910062,18.333333,18.333333,3.926991;261,260,13,910070,29.166666,45.833333,0.000000;262,260,3,910020,62.500000,26.666666,4.712389;258,261,1,910020,29.166666,10.000000,4.712389;258,261,1,910020,18.333333,12.500000,3.141593;258,261,1,910020,29.166666,56.666666,1.570796;258,261,5,910051,56.666666,29.166666,0.000000;258,261,5,910051,10.000000,54.166666,3.141593;258,261,6,910054,45.833333,56.666666,1.570796;258,261,7,910055,20.833333,56.666666,1.570796;258,261,10,910060,10.000000,56.666666,2.356194;258,261,11,910062,48.333333,56.666666,0.785398;258,261,11,910062,56.666666,10.000000,5.497787;258,261,13,910070,20.833333,20.833333,0.000000;258,261,13,910070,45.833333,29.166666,0.000000;258,261,13,910070,20.833333,45.833333,0.000000;262,261,3,910020,45.833333,31.666666,1.570796;260,262,1,910020,29.166666,10.000000,4.712389;260,262,1,910020,10.000000,54.166666,3.141593;260,262,1,910020,10.000000,45.833333,3.141593;260,262,6,910054,20.833333,56.666666,1.570796;260,262,7,910055,56.666666,20.833333,0.000000;260,262,8,910056,56.666666,12.500000,0.000000;260,262,10,910060,56.666666,10.000000,5.497787;261,262,3,910020,26.666666,45.833333,3.141593;261,262,9,910052,26.666666,54.166666,3.141593;262,262,1,910020,26.666666,4.166667,3.141593;262,262,2,910021,20.833333,56.666666,1.570796;262,262,2,910021,10.000000,20.833333,3.141593;262,262,7,910055,56.666666,29.166666,0.000000;262,262,10,910060,18.333333,10.000000,3.926991;262,262,11,910062,10.000000,56.666666,2.356194;262,262,13,910070,29.166666,12.500000,0.000000;262,262,14,910073,29.166666,20.833333,0.000000;262,262,14,910073,45.833333,29.166666,0.000000;262,262,14,910073,29.166666,45.833333,0.000000;260,263,3,910020,4.166667,26.666666,4.712389;260,263,9,910052,12.500000,26.666666,4.712389";
     char const* const PD_CRITTER_PLAN_PIN =
-        "257,258,4,26525,29.166666,54.166666;257,258,4,26525,29.166666,29.166666;257,259,1,32428,29.166666,12.500000;257,259,1,32428,45.833333,20.833333;257,259,3,2110,29.166666,54.166666;258,259,4,26525,29.166666,29.166666;259,259,4,26525,29.166666,29.166666;256,260,4,26525,54.166666,29.166666;256,260,4,26525,29.166666,29.166666;257,260,4,26525,54.166666,29.166666;257,260,4,26525,29.166666,29.166666;256,261,4,26525,29.166666,29.166666;256,261,4,26525,54.166666,29.166666;258,261,1,32428,20.833333,29.166666;258,261,1,32428,29.166666,45.833333;258,261,2,23086,45.833333,29.166666;258,261,2,23086,29.166666,12.500000;258,262,4,26525,29.166666,54.166666;258,262,4,26525,29.166666,29.166666;259,262,1,32428,29.166666,29.166666;259,262,1,32428,20.833333,45.833333;259,262,2,23086,45.833333,20.833333;262,262,1,32428,29.166666,12.500000;262,262,2,23086,20.833333,20.833333;262,262,6,26525,29.166666,20.833333";
+        "259,259,1,32428,29.166666,45.833333;259,259,1,32428,29.166666,29.166666;259,259,2,23086,29.166666,20.833333;261,260,1,32428,29.166666,29.166666;261,260,2,23086,29.166666,20.833333;258,261,1,32428,29.166666,45.833333;258,261,2,23086,45.833333,45.833333;258,261,2,23086,45.833333,29.166666;258,261,3,2110,29.166666,20.833333;260,261,4,26525,29.166666,29.166666;262,261,4,26525,29.166666,29.166666;262,261,4,26525,54.166666,29.166666;260,262,2,23086,20.833333,29.166666;260,262,2,23086,29.166666,29.166666;262,262,1,32428,45.833333,20.833333;262,262,2,23086,20.833333,20.833333;262,262,2,23086,45.833333,45.833333";
 
     bool CheckDecorPlanPinned(std::string& why)
     {
@@ -2248,6 +4409,286 @@ namespace
         {
             why = "the critter plan moved: " + got;
             return false;
+        }
+        return true;
+    }
+
+    // Round B: the chain itself, pinned. RunLayoutFreezeCheck pins the
+    // manifest bytes and would notice most draw-order moves, but two
+    // different chains can in principle emit the same block set; this pin
+    // reads the chain order, the pockets and the loop rooms directly.
+    // Format: chain cells `|` pockets `host>x,y;` `|` loops `into>x,y;`.
+    // Captured by RUNNING `pdblock --batch` and reading the "the chain moved"
+    // message, never by reasoning about the value.
+    char const* const PD_CHAIN_PIN = "258,261;259,259;261,260;262,262;|1>258,257;2>260,262;|";
+
+    // A SECOND chain, because the pin above ends in an empty loop field: seed
+    // 12345 draws no loop room at the default DetourChance, so it pins the
+    // chain and the pockets and says nothing about where a loop strip lands.
+    // 12348 carries one. Without this a B0b regression that only moved loop
+    // rooms would pass every pin in the file (B0b Task 2 review, item 3).
+    // Captured the same way: by RUNNING `pdblock --batch` and reading the
+    // "the loop chain moved" message, never by reasoning about the value.
+    char const* const PD_CHAIN_PIN_LOOP =
+        "263,259;259,259;258,257;260,256;|2>257,258;1>260,260;|1>261,258;";
+
+    std::string ChainPinString(BlockPlan const& plan)
+    {
+        int const len = ChainLength(plan);
+        std::vector<PlacedBlock const*> chain(static_cast<size_t>(len), nullptr);
+        std::vector<PlacedBlock const*> pockets;
+        std::vector<PlacedBlock const*> loops;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.chainIndex >= 0) chain[static_cast<size_t>(b.chainIndex)] = &b;
+            if (b.branchOf >= 0) pockets.push_back(&b);
+            if (b.detourOf >= 0) loops.push_back(&b);
+        }
+        std::string got;
+        char buf[64];
+        for (PlacedBlock const* b : chain)
+        {
+            std::snprintf(buf, sizeof(buf), "%d,%d;", b ? b->bx : -1, b ? b->by : -1);
+            got += buf;
+        }
+        got += '|';
+        for (PlacedBlock const* p : pockets)
+        {
+            std::snprintf(buf, sizeof(buf), "%d>%d,%d;", p->branchOf, p->bx, p->by);
+            got += buf;
+        }
+        got += '|';
+        for (PlacedBlock const* l : loops)
+        {
+            std::snprintf(buf, sizeof(buf), "%d>%d,%d;", l->detourOf, l->bx, l->by);
+            got += buf;
+        }
+        return got;
+    }
+
+    bool CheckChainPinned(std::string& why)
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(MakeCfg(12345u, 5), &plan))
+        {
+            why = "the pinned chain could not generate a layout";
+            return false;
+        }
+        std::string const got = ChainPinString(plan);
+        if (got != PD_CHAIN_PIN)
+        {
+            why = "the chain moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    bool CheckLoopChainPinned(std::string& why)
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(MakeCfg(12348u, 5), &plan))
+        {
+            why = "the pinned loop chain could not generate a layout";
+            return false;
+        }
+        std::string const got = ChainPinString(plan);
+        if (got != PD_CHAIN_PIN_LOOP)
+        {
+            why = "the loop chain moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    // Round B / B5: the ambush plan, pinned. It draws on its OWN stream
+    // (layoutSeed ^ PD_AMBUSH_SEED_MIX), which is exactly why it needs a pin
+    // of its own: the layout freeze, the two chain pins and the spawn-draw
+    // pins are blind to it by construction, so nothing else in this file
+    // would notice an ambush corridor moving.
+    //
+    // Chance 100 so the pin states WHERE the spots are rather than how the
+    // coin fell. Format: `bx,by,segment;` per spot, in segment order.
+    // Captured by RUNNING `pdblock --batch` and reading the "the ambush plan
+    // moved" message, never by reasoning about the value.
+    char const* const PD_AMBUSH_PLAN_PIN = "262,261,1;";
+
+    // The shipped default of V2.Ambush.Chance. Mirrored here rather than
+    // exported from the generator on purpose: the chance is an operator key
+    // read live from the .conf, not a layout input, so the generator must not
+    // own a default for it - the batch's yield line just needs to report
+    // against the number the server ships with.
+    //
+    // That number is OWNED in two places, and this mirror has to be re-read
+    // against both if either moves: src/PDv2Mgr.cpp:120-121 (LoadConfig's
+    // GetOption fallback) and conf/mod_procedural_dungeon.conf.dist:623 (the
+    // shipped line). Nothing here goes red when they drift - the yield line
+    // would simply report against the old number.
+    int const PD_AMBUSH_DEFAULT_CHANCE_PCT = 50;
+
+    std::string AmbushPinString(std::vector<AmbushSpot> const& spots)
+    {
+        std::string got;
+        for (AmbushSpot const& s : spots)
+        {
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "%d,%d,%d;", s.bx, s.by, s.segment);
+            got += buf;
+        }
+        return got;
+    }
+
+    bool CheckAmbushPlanPinned(std::string& why)
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(MakeCfg(12345u, 5), &plan))
+        {
+            why = "the pinned ambush plan could not generate a layout";
+            return false;
+        }
+        std::string const got = AmbushPinString(BuildAmbushPlan(plan, 100, plan.effectiveSeed));
+        if (got.empty())
+        {
+            // A pin that reads "" would go on passing after the plan stopped
+            // producing anything at all - the one failure a string compare
+            // alone cannot tell from success.
+            why = "the pinned ambush plan is empty at chance 100";
+            return false;
+        }
+        if (got != PD_AMBUSH_PLAN_PIN)
+        {
+            why = "the ambush plan moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    // The SECOND ambush pin, and the only one that can see the coin. Every
+    // other ambush check in this file runs at chance 0 or 100, and
+    // PDRandom::Chance draws NOTHING at either (PDRandom.h:58-69) - so between
+    // them they pin WHERE a spot lands and say nothing at all about the draw
+    // sequence around it.
+    //
+    // This one runs at a mid chance on a FOUR-boss layout, so Chance is drawn
+    // four times and the pick is drawn wherever a segment offers two or more
+    // candidates. A regression in the draw ORDER - a chance skipped for a
+    // segment with no geometry, a pick taken when the coin said no, the two
+    // swapped - moves this string and nothing else in the file.
+    //
+    // The 50 is a literal and deliberately NOT PD_AMBUSH_DEFAULT_CHANCE_PCT:
+    // this pin is about the draw sequence at a mid chance, and an operator
+    // changing what the server ships with must not turn the batch red.
+    //
+    // Captured by RUNNING `pdblock --batch` and reading the "the mid-chance
+    // ambush plan moved" message, never by reasoning about the value.
+    char const* const PD_AMBUSH_PLAN_PIN_MID = "258,262,1;261,262,2;";
+
+    bool CheckAmbushPlanMidPinned(std::string& why)
+    {
+        // Four bosses on four rooms: the largest boss count the game math ever
+        // asks for (GameBossRooms(30)) and the shortest layout that carries it,
+        // so all four segments are short enough to differ in candidate count.
+        BlockCfg cfg = MakeCfg(12345u, 4);
+        cfg.bossRooms = 4;
+        BlockPlan plan;
+        if (!GenerateBlockPlan(cfg, &plan))
+        {
+            why = "the mid-chance ambush pin could not generate a layout";
+            return false;
+        }
+        std::string const got = AmbushPinString(BuildAmbushPlan(plan, 50, plan.effectiveSeed));
+        if (got.empty())
+        {
+            // Same trap as the pin above: at a mid chance an empty result is a
+            // legal SHAPE, but not for this seed - it means the draw stopped
+            // producing, which a string compare against "" would call a pass.
+            why = "the mid-chance ambush plan is empty";
+            return false;
+        }
+        if (got != PD_AMBUSH_PLAN_PIN_MID)
+        {
+            why = "the mid-chance ambush plan moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    // Round B / B3-B5: the doorway table the barrier seals, and the socket
+    // mirror it seals the other half through. Both used to live inside
+    // PDv2InstanceScript.cpp - a lambda and an anonymous namespace - where no
+    // harness could reach them (B3-B5 Task 2 review, Important 1). A kit
+    // change, a SOCKET_* renumber or a transposed row/col would have shipped a
+    // portcullis standing in a wall; now it turns this batch red.
+    //
+    // Not "captured by running": this table is a fixed geometric fact of the
+    // 8x8 cell block, so it is written out by hand from the kit's own layout
+    // and the two implementations have to agree with IT, not the other way
+    // round.
+    bool CheckLaneCellsPinned(std::string& why)
+    {
+        struct Row
+        {
+            unsigned bit;
+            unsigned opposite;
+            int      cells[2][2];   // (row, col) x 2
+            char const* name;
+        };
+        Row const rows[4] = {
+            { SOCKET_N, SOCKET_S, { { 0, 3 }, { 0, 4 } }, "N" },
+            { SOCKET_S, SOCKET_N, { { 7, 3 }, { 7, 4 } }, "S" },
+            { SOCKET_W, SOCKET_E, { { 3, 0 }, { 4, 0 } }, "W" },
+            { SOCKET_E, SOCKET_W, { { 3, 7 }, { 4, 7 } }, "E" },
+        };
+        char buf[192];
+        for (Row const& r : rows)
+        {
+            int got[2][2] = { { -1, -1 }, { -1, -1 } };
+            LaneCellsForSocket(r.bit, got);
+            for (int i = 0; i < 2; ++i)
+            {
+                if (got[i][0] != r.cells[i][0] || got[i][1] != r.cells[i][1])
+                {
+                    std::snprintf(buf, sizeof(buf),
+                                  "lane cell %d of socket %s is (%d,%d), want (%d,%d)",
+                                  i, r.name, got[i][0], got[i][1], r.cells[i][0], r.cells[i][1]);
+                    why = buf;
+                    return false;
+                }
+            }
+            if (OppositeSocket(r.bit) != r.opposite)
+            {
+                std::snprintf(buf, sizeof(buf), "OppositeSocket(%s) is %u, want %u",
+                              r.name, OppositeSocket(r.bit), r.opposite);
+                why = buf;
+                return false;
+            }
+            if (OppositeSocket(OppositeSocket(r.bit)) != r.bit)
+            {
+                std::snprintf(buf, sizeof(buf), "OppositeSocket does not round trip on %s", r.name);
+                why = buf;
+                return false;
+            }
+            // The mirror's lane cells sit on the FACING edge, which is what
+            // makes the two halves of a sealed doorway one lane: the pinned
+            // axis flips from 0 to last (or back) and the free axis is
+            // untouched.
+            int opp[2][2] = { { -1, -1 }, { -1, -1 } };
+            LaneCellsForSocket(OppositeSocket(r.bit), opp);
+            bool const vertical = (r.bit == SOCKET_N || r.bit == SOCKET_S);
+            for (int i = 0; i < 2; ++i)
+            {
+                int const pinnedAxis = vertical ? opp[i][0] : opp[i][1];
+                int const freeAxis = vertical ? opp[i][1] : opp[i][0];
+                int const wantPinned = (vertical ? r.cells[i][0] : r.cells[i][1]) == 0
+                                     ? PD_CELLS_PER_BLOCK - 1 : 0;
+                if (pinnedAxis != wantPinned || freeAxis != (vertical ? r.cells[i][1] : r.cells[i][0]))
+                {
+                    std::snprintf(buf, sizeof(buf),
+                                  "socket %s's mirror lane cell %d is (%d,%d) - not the facing edge",
+                                  r.name, i, opp[i][0], opp[i][1]);
+                    why = buf;
+                    return false;
+                }
+            }
         }
         return true;
     }
@@ -2616,6 +5057,18 @@ namespace
     // to fill a trash slot with), and a room themed to pack 2 must still get
     // caster picks - from the merged pool, since pack 2 has none of its own -
     // while its melee slots stay pack 2.
+    //
+    // Packs 4-8 are absent BY DESIGN and adding them would be a regression.
+    // Live there are eight (4 "Barrow Dead" and 5 "Legion Rift" from
+    // `_undead_demon.sql`, then Round C's 6 "Shadowfang Pack", 7 "Cult of the
+    // Damned" and 8 "Ahn'kahet Deep"), and every one of the five carries melee
+    // AND caster AND boss - which is to say every one of them is the EASY
+    // case. The two rules this fixture exists to hold are only expressible by
+    // the awkward shapes of packs 1-3: a pack with no caster of its own, and a
+    // pack with no trash at all. Mixing the easy packs in would move every pin
+    // in this section and buy no coverage. The pool that DOES track the live
+    // tables' growth is the boss one, and BossDrawPackPools below says why it
+    // stays frozen too.
     PackPools ThemeCoherencePackPools()
     {
         PackPools pools;
@@ -2748,13 +5201,1493 @@ namespace
         }
     }
 
+    // --- Round C / C6: a boss appears at most once per run -----------------
+    //
+    // The evidence this check exists for is a real run, not a hypothesis: the
+    // host log of 2026-09-08 02:06 (`Server_2026-09-08_02_06_43.log:890` and
+    // `:943`) spawned entry 29620 'Dreadlord Mal'Ganis' in BOTH boss rooms of
+    // instance 5. Nothing was broken - the draw was one independent uniform
+    // pick per boss room over the whole role-2 pool, so a repeat was the
+    // design (`.superpowers/sdd/c-research-bosses-triangles.md` §1.5).
+    //
+    // The five entries below WERE the whole live role-2 pool when this pin was
+    // captured, taken from `pdungeon_pack_members WHERE role = 2` on
+    // 2026-09-08 (research §1.4): 84288 Dralak, 84289 Lord Maltrion, 84290
+    // Mor'Kar (pack 3), 25352 Scourge Overlord (pack 4), 29620 Dreadlord
+    // Mal'Ganis (pack 5). Five is what makes this fixture able to say anything
+    // at all: the rule binds only while the pool holds MORE distinct bosses
+    // than the run has boss rooms, and the game math asks for up to four
+    // (`GameBossRooms(30)`), so a three-boss fixture would go vacuous exactly
+    // where the rule matters most.
+    //
+    // THE LIVE POOL IS NO LONGER FIVE, AND THIS FIXTURE STAYS AT FIVE ON
+    // PURPOSE. Round C added three packs - 6 "Shadowfang Pack" (boss 27580
+    // Selas), 7 "Cult of the Damned" (29934 Acolyte of Agony) and 8 "Ahn'kahet
+    // Deep" (29309 Elder Nadox) - so `WHERE role = 2` returns EIGHT rows on a
+    // database with all four pack files applied (measured 2026-09-09: 8 packs,
+    // 76 members, 226 kit rows).
+    //
+    // This is a FROZEN SAMPLE, not a mirror of the tables, and nothing in this
+    // file reads the database - the harness is engine-free and cannot. Do NOT
+    // "re-sync" it when a pack is added. Growing it to eight would DESTROY the
+    // property the pin beside it is built on: four boss rooms out of five
+    // bosses is the TIGHTEST the rule ever runs, with exactly one entry left
+    // un-drawn, and four out of eight leaves four spare and would pass under a
+    // rule that filtered one draw too late. The fixture is sized for the
+    // branch, and the branch has not changed. What a new pack DOES owe this
+    // file is a check that the shape assumptions still hold: more distinct
+    // bosses than `GameBossRooms(V2.DlvlCap)` boss rooms (8 > 4 today, so the
+    // no-repeat clause binds on every real run and BossFallbackPackPools below
+    // stays the only place the other clause is reachable at all).
+    //
+    // Packs 4 and 5 carry no trash member here. That costs the boss draw
+    // nothing - the boss slot is exempt from theming and always draws from
+    // the role-2 pool across every pack (PDv2PackDraw.h) - and it keeps
+    // `trashPackIds` the same two-pack list the theme fixture uses, so this
+    // fixture differs from it in the boss pool ALONE.
+    PackPools BossDrawPackPools()
+    {
+        PackPools pools = ThemeCoherencePackPools();
+        pools.boss = {
+            {3, 84288, PACK_ROLE_BOSS}, {3, 84289, PACK_ROLE_BOSS},
+            {3, 84290, PACK_ROLE_BOSS}, {4, 25352, PACK_ROLE_BOSS},
+            {5, 29620, PACK_ROLE_BOSS},
+        };
+        return pools;
+    }
+
+    // The room list the ENGINE builds from a plan: rooms only, in plan order,
+    // the entrance skipped because an arriving player must not already be in
+    // combat (`PDv2InstanceScript.cpp:1059-1070`). Reproduced here rather
+    // than called, because that file includes DatabaseEnv.h and can never
+    // link into this harness - the same reason CheckRoomThemeCoherent
+    // re-implements the slicing.
+    SpawnSelectInputs RoomsOfPlan(BlockPlan const& plan)
+    {
+        SpawnSelectInputs in;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.roomId < 0 || b.role == BlockRole::RoomEntrance)
+            {
+                continue;
+            }
+            RoomRequest room;
+            room.roomIndex = static_cast<int>(in.rooms.size());
+            room.isBoss = b.role == BlockRole::RoomBoss;
+            in.rooms.push_back(room);
+        }
+        // The shipped knobs, matching FixedSpawnInputs() above, so the two
+        // spawn-draw fixtures differ in their POOLS and their room list and
+        // not in the numbers that steer the stream.
+        in.spawnsPerRoom = 5;
+        in.bossRoomAdds = 2;
+        in.casterPct = 40;
+        in.bandMin = 76;
+        in.affixPct = 40;
+        return in;
+    }
+
+    // The first pick of every boss room, in room order. Same slicing as
+    // PDv2PackMgr::SelectSpawns and as RunPackThemeChecks above: a boss room
+    // is 1 + bossRoomAdds picks and the boss is its FIRST one, which is the
+    // slot the instance script keys run completion on.
+    std::vector<uint32_t> BossPicksOf(std::vector<SpawnPick> const& flat,
+                                      SpawnSelectInputs const& in)
+    {
+        std::vector<uint32_t> picks;
+        size_t cursor = 0;
+        for (RoomRequest const& room : in.rooms)
+        {
+            int const trashWanted = room.isBoss ? in.bossRoomAdds : in.spawnsPerRoom;
+            size_t const got = static_cast<size_t>(trashWanted + (room.isBoss ? 1 : 0));
+            size_t const end = (cursor + got <= flat.size()) ? cursor + got : flat.size();
+            if (room.isBoss && cursor < end)
+            {
+                picks.push_back(flat[cursor].entry);
+            }
+            cursor = end;
+        }
+        return picks;
+    }
+
+    // Over a tenth of the batch, on real generated layouts: no boss entry may
+    // appear twice in one run WHILE the pool allows it. `layoutsChecked` is
+    // the non-vacuity counter - a fixture or a generator change that stopped
+    // producing multi-boss layouts would otherwise turn this whole check into
+    // a silent pass.
+    void RunBossNoRepeatChecks(int seeds, int& layoutsChecked)
+    {
+        PackPools const pools = BossDrawPackPools();
+        // Two, three and four boss rooms: 2 is what the operator's own run
+        // had, 4 is the most the game math ever asks for (`GameBossRooms(30)`)
+        // and also where a lost rule is most visible, and the room counts are
+        // the shortest layouts that carry each.
+        struct BossCombo { int rooms; int bossRooms; };
+        BossCombo const combos[] = { { 5, 2 }, { 6, 3 }, { 4, 4 } };
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 1u;
+            for (BossCombo const& combo : combos)
+            {
+                BlockCfg cfg = MakeCfg(seed, combo.rooms);
+                cfg.bossRooms = combo.bossRooms;
+                BlockPlan plan;
+                if (!GenerateBlockPlan(cfg, &plan))
+                {
+                    // A layout that will not generate is RunBatch's business,
+                    // not this check's - failing it here would report the same
+                    // problem twice under a name that hides it.
+                    continue;
+                }
+
+                SpawnSelectInputs const in = RoomsOfPlan(plan);
+                std::vector<SpawnPick> flat;
+                if (!PDv2SelectSpawns(plan.effectiveSeed, in, pools, flat))
+                {
+                    Check(false, "the boss no-repeat draw refused to select", seed);
+                    continue;
+                }
+
+                std::vector<uint32_t> const bossPicks = BossPicksOf(flat, in);
+                // The rule binds only while the pool has MORE distinct bosses
+                // than the run has boss rooms. Below that, repeats are the
+                // designed fallback, and asserting distinctness would be
+                // asserting the opposite of the contract.
+                if (bossPicks.size() < 2 || pools.boss.size() <= bossPicks.size())
+                {
+                    continue;
+                }
+                ++layoutsChecked;
+
+                for (size_t a = 0; a + 1 < bossPicks.size(); ++a)
+                {
+                    for (size_t b = a + 1; b < bossPicks.size(); ++b)
+                    {
+                        char msg[192];
+                        std::snprintf(msg, sizeof msg,
+                                      "boss %u was drawn twice in one run (rooms %d, boss rooms %d, "
+                                      "boss slots %d and %d of %d, pool %d)",
+                                      bossPicks[a], combo.rooms, combo.bossRooms,
+                                      static_cast<int>(a), static_cast<int>(b),
+                                      static_cast<int>(bossPicks.size()),
+                                      static_cast<int>(pools.boss.size()));
+                        Check(bossPicks[a] != bossPicks[b], msg, seed);
+                    }
+                }
+            }
+        }
+    }
+
+    // The pinned no-repeat draw. Four boss rooms out of a five-boss pool is
+    // the tightest the rule ever runs - only one entry is left un-drawn - so
+    // a rule that filters the wrong way, filters one draw too late, or falls
+    // back to the full pool while fresh entries remain all move this string.
+    //
+    // It is also where the OLD draw's failure is loudest: four independent
+    // uniform picks out of five come back pairwise distinct only
+    // 5*4*3*2 / 5^4 = 19.2 % of the time, which is why this config, and not
+    // the batch alone, is what the rule was written against.
+    //
+    // Captured by RUNNING `pdblock --batch` and reading the "the pinned boss
+    // draw moved" message, never by reasoning about the value. The pre-C6
+    // draw answered "29620,84289,25352,84289;" on this very config - 84289
+    // Lord Maltrion in boss slots 1 AND 3 - which is the failure this rule
+    // was written against, measured rather than argued.
+    char const* const PD_BOSS_NOREPEAT_PIN = "29620,84289,84290,25352;";
+
+    bool CheckBossNoRepeatPinned(std::string& why)
+    {
+        // The same layout PD_AMBUSH_PLAN_PIN_MID uses: four bosses on four
+        // rooms, the largest boss count the game math ever asks for and the
+        // shortest layout that carries it.
+        BlockCfg cfg = MakeCfg(12345u, 4);
+        cfg.bossRooms = 4;
+        BlockPlan plan;
+        if (!GenerateBlockPlan(cfg, &plan))
+        {
+            why = "the boss no-repeat pin could not generate a layout";
+            return false;
+        }
+
+        SpawnSelectInputs const in = RoomsOfPlan(plan);
+        std::vector<SpawnPick> flat;
+        if (!PDv2SelectSpawns(plan.effectiveSeed, in, BossDrawPackPools(), flat))
+        {
+            why = "the pinned boss draw refused to select";
+            return false;
+        }
+
+        std::vector<uint32_t> const bossPicks = BossPicksOf(flat, in);
+        std::string got;
+        for (size_t i = 0; i < bossPicks.size(); ++i)
+        {
+            if (i > 0)
+            {
+                got += ',';
+            }
+            got += std::to_string(bossPicks[i]);
+        }
+        got += ';';
+
+        // A shape check before the string compare: if this layout ever stops
+        // carrying four boss rooms the pin would still compare equal to some
+        // shorter string, and the tightest case would silently stop running.
+        if (bossPicks.size() != 4)
+        {
+            why = "the pinned layout no longer has four boss rooms: " + got;
+            return false;
+        }
+        if (got != PD_BOSS_NOREPEAT_PIN)
+        {
+            why = "the pinned boss draw moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    // --- Round C / C6: the OTHER half of the same rule ---------------------
+    //
+    // The rule has two clauses and every fixture in this file could only ever
+    // reach one of them. `pick = fresh.empty() ? WeightedPick(bosses, rng) :
+    // WeightedPick(fresh, rng)` (PDv2PackDraw.cpp) never took its FIRST
+    // branch anywhere here: BossDrawPackPools is 5 bosses against at most 4
+    // rooms, FixedPackPools 2 against 1, ThemeCoherencePackPools 3 against 1,
+    // and NoBossPackPools skips the branch entirely - so design C6.2's
+    // "otherwise repeats are allowed" was asserted nowhere (Round C / C6
+    // Task 2 review, Important 1).
+    //
+    // It is unreachable in production TODAY (five bosses, GameBossRooms(30)
+    // = 4 at the shipped V2.DlvlCap = 30) and two operator-level moves make
+    // it live without a line of code changing: raising DlvlCap past 39 (5,
+    // then 6 boss rooms) or dropping one boss from the pool. What an untested
+    // branch would hide is not cosmetic - a WeightedPick over an EMPTY pool
+    // returns null, emit drops the pick without pushing, and
+    // PDv2PackMgr::SelectSpawns's fixed `1 + bossRoomAdds` slicing then reads
+    // that room's first TRASH pick as its boss and shifts every later room by
+    // one: a run that can never be completed, reported by nothing.
+    //
+    // Two bosses over three boss rooms is the smallest fixture on the other
+    // side of the gate: `bosses.size() (2) > bossRoomsTotal (3)` is false,
+    // `fresh` is never built, and every boss room draws from the full pool.
+    // Distinctness is deliberately NOT asserted - repeats ARE the contract
+    // here, and asserting against them would assert against the spec.
+    PackPools BossFallbackPackPools()
+    {
+        PackPools pools = ThemeCoherencePackPools();
+        pools.boss = {
+            {3, 84288, PACK_ROLE_BOSS}, {3, 84289, PACK_ROLE_BOSS},
+        };
+        return pools;
+    }
+
+    // Captured by RUNNING, like every other pin in this file: the placeholder
+    // "0,0,0;" was in the literal until the batch printed the real string.
+    // All THREE boss rooms drew 84289 - a repeat is not a failure here, it is
+    // the branch, and a pin that forbade one would forbid the contract.
+    char const* const PD_BOSS_FALLBACK_PIN = "84289,84289,84289;";
+
+    bool CheckBossFallbackPinned(std::string& why)
+    {
+        // The no-repeat pin's layout with one boss room fewer, so the two
+        // fixtures differ in the boss POOL and the boss COUNT and in nothing
+        // else that steers the stream.
+        BlockCfg cfg = MakeCfg(12345u, 4);
+        cfg.bossRooms = 3;
+        BlockPlan plan;
+        if (!GenerateBlockPlan(cfg, &plan))
+        {
+            why = "the boss fallback pin could not generate a layout";
+            return false;
+        }
+
+        SpawnSelectInputs const in = RoomsOfPlan(plan);
+        std::vector<SpawnPick> flat;
+        if (!PDv2SelectSpawns(plan.effectiveSeed, in, BossFallbackPackPools(), flat))
+        {
+            why = "the fallback boss draw refused to select";
+            return false;
+        }
+
+        std::vector<uint32_t> const bossPicks = BossPicksOf(flat, in);
+        std::string got;
+        for (size_t i = 0; i < bossPicks.size(); ++i)
+        {
+            if (i > 0)
+            {
+                got += ',';
+            }
+            got += std::to_string(bossPicks[i]);
+        }
+        got += ';';
+
+        if (bossPicks.size() != 3)
+        {
+            why = "the fallback layout no longer has three boss rooms: " + got;
+            return false;
+        }
+
+        // THE assertion of this fixture: every boss room still yields a boss,
+        // and it is one of the two the pool holds. A dropped pick would shift
+        // the slice and surface a TRASH entry in the boss slot, which is
+        // precisely what an empty-pool WeightedPick would cause and what no
+        // other check here would see.
+        for (uint32_t const entry : bossPicks)
+        {
+            if (entry != 84288u && entry != 84289u)
+            {
+                why = "a boss room drew an entry the two-boss pool does not hold: " + got;
+                return false;
+            }
+        }
+
+        if (got != PD_BOSS_FALLBACK_PIN)
+        {
+            why = "the pinned fallback boss draw moved: " + got;
+            return false;
+        }
+        return true;
+    }
+
+    // Round B: the field the ENGINE runs, over the engine's real configuration
+    // space rather than a diagonal of it. The fixed 8x8 batch never exercised
+    // a shrunken field at all, and the first version of this sweep walked
+    // `rooms = 1..15` with `bossRooms = GameBossRooms(rooms - 3)` - the player
+    // who always picks the maximum, one line through a two-dimensional space.
+    //
+    // The two axes are independent in the engine: dlvl decides the boss count
+    // (GameBossRooms) and the room CAP, the player's slider decides the rooms
+    // inside that cap, so a dlvl-30 account may run four boss rooms with one
+    // room or with fifteen. This mirrors PDv2Mgr::GeneratePlan exactly, with
+    // the configured V2.FieldBlocks at its default 8:
+    //
+    //     cfg.rooms       = GameClampRooms(<the player's choice>, dlvl)
+    //     cfg.bossRooms   = GameBossRooms(dlvl)
+    //     cfg.fieldBlocks = min(V2.FieldBlocks, GameFieldBlocksForRooms(rooms + bossRooms))
+    //
+    // Every row must generate on every seed, validate, and fit the manifest
+    // budget. `retries` is printed per row because it, not the failure count,
+    // is what would show the free-route rule starting to strain.
+    void RunEngineFieldSweep(int seeds)
+    {
+        int const confFieldBlocks = 8;      // V2.FieldBlocks, the shipped default
+        std::printf("engine-field sweep, %d seeds per row (branches 2, V2.FieldBlocks %d)\n",
+                    seeds, confFieldBlocks);
+        std::printf("   dlvl  rooms  boss  field  genfail  retries  maxManifest\n");
+        int const dlvls[4] = { 0, 10, 20, 30 };
+        for (int dlvl : dlvls)
+        {
+            int const boss = GameBossRooms(dlvl);
+            std::set<int> done;
+            int const choices[5] = { 1, 2, 3, 4, GameRoomsCap(dlvl) };
+            for (int choice : choices)
+            {
+                int const rooms = GameClampRooms(choice, dlvl);
+                if (!done.insert(rooms).second)
+                {
+                    continue;               // the clamp folded two choices onto one row
+                }
+                int const field = std::min(confFieldBlocks,
+                                           GameFieldBlocksForRooms(rooms + boss));
+                int failures = 0;
+                int retries = 0;
+                size_t maxManifest = 0;
+                for (int i = 0; i < seeds; ++i)
+                {
+                    uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 5u;
+                    BlockCfg cfg = MakeCfg(seed, rooms);
+                    cfg.bossRooms = boss;
+                    cfg.fieldBlocks = field;
+                    BlockPlan plan;
+                    if (!GenerateBlockPlan(cfg, &plan))
+                    {
+                        ++failures;
+                        continue;
+                    }
+                    if (plan.effectiveSeed != cfg.seed)
+                    {
+                        ++retries;
+                    }
+                    std::string err;
+                    Check(ValidateBlockPlan(plan, &err),
+                          err.empty() ? "sweep layout failed validation" : err.c_str(), seed);
+                    std::string const m = EmitManifest(plan, 99);
+                    maxManifest = (m.size() > maxManifest) ? m.size() : maxManifest;
+                }
+                std::printf("  %5d  %5d  %4d  %5d  %7d  %7d  %11d\n", dlvl, rooms, boss,
+                            field, failures, retries, static_cast<int>(maxManifest));
+                char msg[200];
+                std::snprintf(msg, sizeof(msg),
+                              "engine field %dx%d cannot seat %d room(s) + %d boss "
+                              "(dlvl %d) on %d of %d seeds",
+                              field, field, rooms, boss, dlvl, failures, seeds);
+                Check(failures == 0, msg, 0);
+                std::snprintf(msg, sizeof(msg),
+                              "an engine-field layout is over the manifest budget: "
+                              "%d B at dlvl %d, %d room(s) + %d boss",
+                              static_cast<int>(maxManifest), dlvl, rooms, boss);
+                Check(maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B), msg, 0);
+            }
+        }
+        std::printf("\n");
+    }
+
+    // Round B / B1: the typed anchors B2's spawn placement stands on (until
+    // Round C the altar stood on the entry one as well). Every room-role
+    // chunk publishes an entry on a walkable cell, the entry is the first
+    // point of the flat list (AnchorsFor[0] - the order 48 emits), boss rooms
+    // publish a boss, rooms a chest and spawns.
+    // Pinned on two chunks, captured by running: paste the value out of the
+    // "typed anchors ... moved" failure message, never by reasoning about
+    // what it should be. 12015 is an ordinary room (no boss, a chest, six
+    // spawns), 12215 a boss room (boss + chest + four elites).
+    char const* const PD_ROOM_ANCHOR_PIN_12015 =
+        "E29.1667,29.1667;C45.3333,45.3333;S25.3333,25.3333,melee;S25.3333,41.3333,melee;S41.3333,25.3333,melee;S41.3333,41.3333,melee;S33.3333,21.3333,caster;S33.3333,45.3333,caster;";
+    char const* const PD_ROOM_ANCHOR_PIN_12215 =
+        "E29.1667,29.1667;B33.3333,33.3333;C45.3333,33.3333;S25.3333,25.3333,elite;S25.3333,41.3333,elite;S41.3333,25.3333,elite;S41.3333,41.3333,elite;";
+
+    std::string RoomAnchorsString(RoomAnchors const& a)
+    {
+        char buf[96];
+        std::string s;
+        if (a.hasEntry) { std::snprintf(buf, sizeof(buf), "E%.4f,%.4f;", a.entry.u, a.entry.v); s += buf; }
+        if (a.hasBoss)  { std::snprintf(buf, sizeof(buf), "B%.4f,%.4f;", a.boss.u, a.boss.v); s += buf; }
+        if (a.hasChest) { std::snprintf(buf, sizeof(buf), "C%.4f,%.4f;", a.chest.u, a.chest.v); s += buf; }
+        for (SpawnAnchor const& p : a.spawns)
+        {
+            std::snprintf(buf, sizeof(buf), "S%.4f,%.4f,%s;", p.u, p.v, p.role.c_str());
+            s += buf;
+        }
+        return s;
+    }
+
+    // Round B / B2: WHERE the picks of one room stand. PlanSpawnPoints is
+    // pure geometry over the anchors above - it draws nothing - so a pin
+    // states the placement contract the instance script spawns on, and the
+    // sweep below proves the whole kit satisfies it rather than four chunks.
+    //
+    // The role vectors are the shipped shape of a pack: an ordinary room asks
+    // for four melee and one caster, a boss room for the boss itself (pick 0,
+    // PDv2PackMgr's contract) and two adds.
+    std::vector<int> RoomSpawnRoles()
+    {
+        return { SPAWN_ROLE_MELEE, SPAWN_ROLE_MELEE, SPAWN_ROLE_MELEE,
+                 SPAWN_ROLE_MELEE, SPAWN_ROLE_CASTER };
+    }
+
+    std::vector<int> BossSpawnRoles()
+    {
+        return { SPAWN_ROLE_BOSS, SPAWN_ROLE_MELEE, SPAWN_ROLE_MELEE };
+    }
+
+    std::string SpawnPointsString(std::vector<PDv2SpawnPoint> const& points)
+    {
+        char buf[64];
+        std::string s;
+        for (PDv2SpawnPoint const& p : points)
+        {
+            std::snprintf(buf, sizeof(buf), "%.4f,%.4f;", p.u, p.v);
+            s += buf;
+        }
+        return s;
+    }
+
+    // CAPTURE PROCEDURE, every time: run `pdblock --batch` and paste the
+    // value out of the "the spawn points of chunk N moved" failure message,
+    // never by reasoning about what it should be. 12015 is the 50 yd room
+    // (theme 2, alt 0) on its anchor ring, 12215 the boss room whose first
+    // pick takes the boss anchor, 4015 the new 33 yd room (theme 1, alt 2) on
+    // the scaled ring, and 13015 the blob room (theme 2, alt 1), whose
+    // anchors follow the outline rather than the ring.
+    char const* const PD_SPAWN_POINTS_PIN_12015 =
+        "25.3333,25.3333;25.3333,41.3333;41.3333,25.3333;41.3333,41.3333;33.3333,21.3333;";
+    char const* const PD_SPAWN_POINTS_PIN_12215 =
+        "33.3333,33.3333;25.3333,25.3333;25.3333,41.3333;";
+    char const* const PD_SPAWN_POINTS_PIN_4015 =
+        "28.0000,28.0000;28.0000,38.6667;38.6667,28.0000;38.6667,38.6667;33.3333,25.3333;";
+    char const* const PD_SPAWN_POINTS_PIN_13015 =
+        "20.8333,20.8333;20.8333,45.8333;45.8333,20.8333;45.8333,45.8333;12.5000,37.5000;";
+
+    // How many sockets a chunk id's low two digits open. The kit's mask is
+    // four bits (N, E, S, W); a corridor's anchor set has one arm per bit.
+    int SocketCountOf(int mask)
+    {
+        int n = 0;
+        for (int bit = 1; bit <= 8; bit <<= 1)
+        {
+            if (mask & bit)
+            {
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    void RunTypedAnchorChecks()
+    {
+        if (g_kit.empty()) return;
+        int roomChunks = 0;
+        int corridorChunks = 0;
+        int deadEndChunks = 0;
+        // Round B / B2: how many chunks of each room role the spawn-point
+        // sweep below actually walked, checked against role x alt x mask at
+        // the end. A sweep that silently stopped covering the new alt would
+        // otherwise pass by saying nothing.
+        int planned[3] = { 0, 0, 0 };
+        for (auto const& kv : g_kit)
+        {
+            int const id = kv.first;
+            int const role = (id % 1000) / 100;
+            KitChunk const& c = kv.second;
+            if (role > 2)
+            {
+                // Corridors are NOT anchor-less - a claim this comment made
+                // until the Task 1 review caught it. 48's anchors_for gives a
+                // corridor (roles 3..6: straight, corner, T, cross) one
+                // "patrol" spawn per OPEN socket, on that arm's far cell, and
+                // a dead-end stub (role 7, always a single socket) a chest on
+                // its junction square with no spawn at all. B4's patrol
+                // routes and B1's loop-room chest both stand on these, so
+                // they are pinned here rather than assumed.
+                if (role >= 3 && role <= 6 && SocketCountOf(id % 100) >= 2)
+                {
+                    ++corridorChunks;
+                    int patrols = 0;
+                    for (SpawnAnchor const& p : c.typed.spawns)
+                    {
+                        if (p.role == "patrol")
+                        {
+                            ++patrols;
+                        }
+                    }
+                    Check(patrols >= 2, "a corridor chunk publishes fewer than two patrol anchors",
+                          static_cast<uint32_t>(id));
+                }
+                if (role == 7)
+                {
+                    ++deadEndChunks;
+                    Check(c.typed.hasChest, "a dead-end chunk publishes no chest anchor",
+                          static_cast<uint32_t>(id));
+                }
+                continue;
+            }
+            ++roomChunks;
+            Check(c.typed.hasEntry, "a room chunk publishes no entry anchor", static_cast<uint32_t>(id));
+            if (!c.typed.hasEntry) continue;
+            int const row = static_cast<int>(c.typed.entry.u / PD_CELL_SIZE_YD);
+            int const col = static_cast<int>(c.typed.entry.v / PD_CELL_SIZE_YD);
+            bool const inside = row >= 0 && col >= 0 && row < PD_CELLS_PER_BLOCK && col < PD_CELLS_PER_BLOCK;
+            Check(inside && c.classes.size() == 64 && c.classes[static_cast<size_t>(row * PD_CELLS_PER_BLOCK + col)] == 'W',
+                  "a room chunk's entry anchor is not on a walkable cell", static_cast<uint32_t>(id));
+            Check(!c.anchors.empty() && c.anchors[0].u == c.typed.entry.u && c.anchors[0].v == c.typed.entry.v,
+                  "the entry anchor is not the first point of the flat anchor list", static_cast<uint32_t>(id));
+            if (role == 2)
+            {
+                Check(c.typed.hasBoss, "a boss chunk publishes no boss anchor", static_cast<uint32_t>(id));
+                Check(c.typed.spawns.size() >= 2, "a boss chunk publishes fewer than two spawn anchors", static_cast<uint32_t>(id));
+            }
+            if (role == 0)
+            {
+                Check(c.typed.hasChest, "a room chunk publishes no chest anchor", static_cast<uint32_t>(id));
+                Check(c.typed.spawns.size() >= 5, "a room chunk publishes fewer than five spawn anchors", static_cast<uint32_t>(id));
+            }
+            if (role == 1)
+            {
+                Check(c.typed.spawns.empty(), "the entrance chunk publishes spawn anchors", static_cast<uint32_t>(id));
+            }
+
+            // B2's placement, on EVERY room-role chunk the kit ships - role x
+            // alt x mask, both themes - not just the four pinned ones: a pick
+            // planted on a non-walkable cell is a mob that stands in the void
+            // or inside a wall, and only the sweep can find the one mask that
+            // does it. The entrance publishes no spawn anchors at all, so it
+            // is also the only geometry here that walks the 12 yd overflow
+            // circle.
+            std::vector<int> const roles = (role == 2) ? BossSpawnRoles() : RoomSpawnRoles();
+            std::vector<PDv2SpawnPoint> const points = PlanSpawnPoints(c.typed, role == 2, roles);
+            Check(points.size() == roles.size(),
+                  "PlanSpawnPoints returned a different number of points than picks",
+                  static_cast<uint32_t>(id));
+            ++planned[role];
+            for (PDv2SpawnPoint const& p : points)
+            {
+                int const prow = static_cast<int>(p.u / PD_CELL_SIZE_YD);
+                int const pcol = static_cast<int>(p.v / PD_CELL_SIZE_YD);
+                bool const on = prow >= 0 && pcol >= 0 &&
+                                prow < PD_CELLS_PER_BLOCK && pcol < PD_CELLS_PER_BLOCK &&
+                                c.classes.size() == 64 &&
+                                c.classes[static_cast<size_t>(prow * PD_CELLS_PER_BLOCK + pcol)] == 'W';
+                Check(on, "a planned spawn point is not on a walkable cell of its chunk",
+                      static_cast<uint32_t>(id));
+            }
+        }
+        Check(roomChunks > 0, "no room chunk in kit_meta.json", 0);
+        // Completeness of the sweep, not a sample of it: 15 masks in each of
+        // the two theme namespaces, times the alts that role ships. This is
+        // the check that goes red if the kit ever stops shipping the third
+        // Room look while AltCountFor still promises it.
+        for (int r = 0; r <= 2; ++r)
+        {
+            int const want = AltCountFor(static_cast<BlockRole>(r)) * 15 * 2;
+            char msg[160];
+            std::snprintf(msg, sizeof(msg),
+                          "the spawn-point sweep covered %d chunks of room role %d, "
+                          "the kit ships %d (alts x masks x themes)",
+                          planned[r], r, want);
+            Check(planned[r] == want, msg, 0);
+        }
+        // Non-vacuity: the two corridor rules above are silent on an empty
+        // set, and a kit that stopped shipping corridors would pass them.
+        Check(corridorChunks > 0, "no multi-socket corridor chunk in kit_meta.json", 0);
+        Check(deadEndChunks > 0, "no dead-end chunk in kit_meta.json", 0);
+        auto pin = [&](int id, char const* want)
+        {
+            auto it = g_kit.find(id);
+            if (it == g_kit.end()) { Check(false, "pinned chunk missing from kit_meta.json", static_cast<uint32_t>(id)); return; }
+            std::string const got = RoomAnchorsString(it->second.typed);
+            if (got != want)
+            {
+                std::string const why = "the typed anchors of chunk " + std::to_string(id) + " moved: " + got;
+                Check(false, why.c_str(), static_cast<uint32_t>(id));
+            }
+        };
+        pin(12015, PD_ROOM_ANCHOR_PIN_12015);
+        pin(12215, PD_ROOM_ANCHOR_PIN_12215);
+
+        auto pinPoints = [&](int id, bool bossRoom, std::vector<int> const& roles, char const* want)
+        {
+            auto it = g_kit.find(id);
+            if (it == g_kit.end()) { Check(false, "pinned chunk missing from kit_meta.json", static_cast<uint32_t>(id)); return; }
+            std::string const got = SpawnPointsString(PlanSpawnPoints(it->second.typed, bossRoom, roles));
+            if (got != want)
+            {
+                std::string const why = "the spawn points of chunk " + std::to_string(id) + " moved: " + got;
+                Check(false, why.c_str(), static_cast<uint32_t>(id));
+            }
+        };
+        pinPoints(12015, false, RoomSpawnRoles(), PD_SPAWN_POINTS_PIN_12015);
+        pinPoints(12215, true, BossSpawnRoles(), PD_SPAWN_POINTS_PIN_12215);
+        pinPoints(4015, false, RoomSpawnRoles(), PD_SPAWN_POINTS_PIN_4015);
+        pinPoints(13015, false, RoomSpawnRoles(), PD_SPAWN_POINTS_PIN_13015);
+
+        // Overflow, the path only a raised V2.SpawnsPerRoom reaches and the
+        // four pins never walk: 12015 publishes six spawn anchors, so eight
+        // picks must still come back as eight points - the six anchors first,
+        // then the legacy 12 yd circle around the block centre for the last
+        // two, angle by pick index over the count.
+        {
+            auto it = g_kit.find(12015);
+            if (it == g_kit.end())
+            {
+                Check(false, "pinned chunk missing from kit_meta.json", 12015u);
+            }
+            else
+            {
+                RoomAnchors const& a = it->second.typed;
+                Check(a.spawns.size() == 6, "chunk 12015 no longer publishes six spawn anchors", 12015u);
+                std::vector<int> const many(8, SPAWN_ROLE_MELEE);
+                std::vector<PDv2SpawnPoint> const points = PlanSpawnPoints(a, false, many);
+                Check(points.size() == 8, "the overflow plan did not return one point per pick", 12015u);
+                if (points.size() == 8 && a.spawns.size() == 6)
+                {
+                    for (size_t i = 0; i < 6; ++i)
+                    {
+                        bool onAnchor = false;
+                        for (SpawnAnchor const& s : a.spawns)
+                        {
+                            if (s.u == points[i].u && s.v == points[i].v) onAnchor = true;
+                        }
+                        Check(onAnchor, "an overflow plan left a published anchor unused", 12015u);
+                    }
+                    double const mid = PD_BLOCK_SIZE_YD / 2.0;
+                    for (size_t i = 6; i < 8; ++i)
+                    {
+                        double const angle = 2.0 * 3.14159265358979 * static_cast<double>(i) / 8.0;
+                        Check(std::fabs(points[i].u - (mid + std::cos(angle) * 12.0)) < 1e-9 &&
+                              std::fabs(points[i].v - (mid + std::sin(angle) * 12.0)) < 1e-9,
+                              "an overflow spawn point is not on the 12 yd circle", 12015u);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- the operator's Round B layout, pinned ------------------------------
+    //
+    // Not a synthetic seed. This is EXACTLY the dungeon account 32 walked on
+    // 2026-09-08 - the run whose patroller crossed walls and whose corridors
+    // never sprang, and the run every Round C fix is aimed at. The config is
+    // the account's own row (`acore_characters.pdungeon_account`, research
+    // c-research-patrol-ambush.md section C): layout_seed 2052467817, theme 2,
+    // cfg_rooms 13, gen_boss_rooms 2, gen_field_blocks 8, gen_origin 256/256,
+    // gen_loop_pct 33, gen_branches 2. PDv2Mgr::GeneratePlan builds the same
+    // BlockCfg out of those columns (PDv2Mgr.cpp:148-184), and the retry loop
+    // makes plan.effectiveSeed = cfg.seed + attempt (PDBlockPlan.cpp:1692,
+    // :1866) - so "attempt 0 succeeded" is itself part of what is pinned here.
+    //
+    // Three pins hold this one layout still, because a report that says "the
+    // patrol beat of the operator's run is clean" is worth nothing once the
+    // generator quietly hands that account a different dungeon.
+    uint32_t const PD_OPERATOR_SEED = 2052467817u;
+
+    BlockCfg OperatorCfg()
+    {
+        BlockCfg cfg;
+        cfg.seed = PD_OPERATOR_SEED;
+        cfg.rooms = 13;
+        cfg.bossRooms = 2;
+        cfg.fieldBlocks = 8;
+        cfg.detourChancePct = 33;
+        cfg.originBX = 256;
+        cfg.originBY = 256;
+        cfg.theme = 2;
+        cfg.branches = 2;
+        // maxTries and maxDeadEnds are left at their defaults, which is what
+        // the manager does too - it sets no other field.
+        return cfg;
+    }
+
+    // `blocks,rooms,boss;bytes;E;crc;`. The first three are the numbers the
+    // worldserver printed for this run (Server_2026-09-08_09_49_57.log:952 -
+    // "spawned 76 creature(s) in 16 room(s) (2 boss) from a 49-block plan");
+    // `rooms` is counted the way SpawnFromPlan counts it into _run.roomsTotal
+    // (PDv2InstanceScript.cpp:1034-1045, :1099): every block with a roomId
+    // EXCEPT the entrance, loop rooms included.
+    //
+    // The manifest byte count and CRC trailer are the same instrument
+    // RunLayoutFreezeCheck uses, added here for the reason that check exists
+    // (Round C / C1 Task 3 review, Important 2): three counts do not detect a
+    // layout that keeps its block, room and boss totals and rearranges
+    // everything, and this pin is the ONLY guard on the promise that an
+    // account which already owns a dungeon gets the same one back on the next
+    // restore. EmitManifest(plan, 1) writes one `B;bx;by;chunkId;0;mask` line
+    // per block sorted by (by, bx) plus a CRC32 over the whole body, so length
+    // + trailer is a byte identity for the placed layout. seq 1, matching
+    // RunLayoutFreezeCheck; the seq goes into the head line, so it is part of
+    // the CRC. Captured by RUNNING.
+    char const* const PD_OPERATOR_PLAN_PIN = "49,16,2;1081;E;2ae1a357;";
+
+    // `i:waypoints:cells:cost:offsetSum;` per CORRIDOR of the chain - the
+    // merged waypoint count, the raw cell count, the PatrolCost total and the
+    // sum of |du| + |dv| over the beat SpawnPatrols hands the corridor into
+    // chain room i, planned on the grid WITH every barrier sealed, the way the
+    // engine plans it.
+    //
+    // Round D / D2 changed BOTH halves of this pin.
+    //
+    // The DERIVATION is now doorway to doorway over every corridor of the
+    // chain. Task 3 review I2: this block still built Round B's beat - block
+    // centre of the run's last corridor to the block centre of the previous
+    // boss ROOM, one per boss SEGMENT - which ends inside a room and which the
+    // engine has not planned since D2. The pin passed and pinned nothing the
+    // server does; a pin that cannot fail is worse than no pin, because it
+    // reads as coverage.
+    //
+    // The fifth FIELD is the clearance layer's own measurement: how far off the
+    // cell centres the beat walks, in quarter-yards, summed over the raw cell
+    // chain. 0 means the beat walks centres - which is what a kit without the
+    // layer publishes and what this module did before D2.
+    //
+    // Why TWO strings. Whether the staged kit carries the layer is a property
+    // of the kit on disk, and the kit half of D2 flips the staging on its own
+    // schedule; this harness has to be green on either side of that flip. The
+    // no-layer pin is the beat over a pre-D2 kit, the layered pin the beat over
+    // kit v38. Both captured by RUNNING - the layered one against the kit v26
+    // SQL that script 48 generated for this round, which is the same data the
+    // flip puts into the staging.
+    //
+    // The D1 pin this replaces was `1:8:121:2900;2:10:138:3450;` over boss
+    // segments, for the record.
+    //
+    // The D2 FOLLOW-UP moved the LAYERED string once more, and only it: the
+    // merge is MergeClearPoints now, so a straight run of cells splits wherever
+    // the passage moves more than half a yard off the line the merge would
+    // draw, and the waypoint counts (the second field) went UP. Nothing else in
+    // the string can move with it - cells, cost and offsetSum are all read off
+    // the RAW chain, which no merge touches. The no-layer string is unchanged
+    // and must stay so: with no clearance layer every cell reads as its own
+    // centre, and the two merges are then the same function.
+    //
+    // The layered string it replaced, for the record - the same twelve beats
+    // merged on cells alone:
+    //   1:2:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:2:8:250:62;
+    //   5:4:16:1458:278;6:3:15:950:142;7:2:24:1282:296;8:2:8:250:62;
+    //   9:2:16:1082:204;10:2:16:1154:204;11:2:16:482:124;12:3:14:1368:214;
+    // Corridor 7 is the one to read: 24 cells said in 2 waypoints became 15,
+    // i.e. fourteen legs where one straight line used to cut across every jog
+    // the kit measured. Corridor 3 did not move at all - a passage whose clear
+    // points really are collinear still merges to its two ends.
+    char const* const PD_OPERATOR_PATROL_PIN_NOLAYER =
+        "1:2:24:610:0;2:2:8:210:0;3:2:8:210:0;4:2:8:170:0;5:3:16:460:0;"
+        "6:3:15:390:0;7:2:24:570:0;8:2:8:170:0;9:2:16:410:0;10:2:16:410:0;"
+        "11:2:16:370:0;12:3:14:400:0;";
+    char const* const PD_OPERATOR_PATROL_PIN =
+        "1:10:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:6:8:250:62;"
+        "5:6:16:1458:278;6:8:15:950:142;7:15:24:1282:296;8:6:8:250:62;"
+        "9:7:16:1082:204;10:5:16:1154:204;11:10:16:482:124;12:6:14:1368:214;";
+
+    // PD_PATROL_CLEAR_PIN: the distribution of `patrolClear` over every
+    // WALKABLE cell of every chunk of the staged kit, 16 buckets, printed as
+    // `b0:b1:...:b15;`. Non-walkable cells are left out on purpose - the kit
+    // publishes 0 for them and they would bury the shape of the thing being
+    // measured under one enormous bucket 0.
+    //
+    // This is the pin that says the layer is REAL: a kit with no layer puts
+    // every walkable cell in bucket 15 (the module reads an absent layer as
+    // "free"), so the no-layer string is a single number and the layered string
+    // is the actual spread of the city theme's passages. Both captured by
+    // RUNNING, the layered one over the kit v26 SQL script 48 generated for
+    // this round.
+    char const* const PD_PATROL_CLEAR_PIN_NOLAYER = "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:8410:;";
+    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:350:75:632:61:6955:;";
+
+    // The histogram itself, over g_masks and g_patrol rather than over a built
+    // grid: this is a statement about the KIT, and a grid only ever holds the
+    // blocks one layout happened to place.
+    std::string PatrolClearHistogram()
+    {
+        unsigned bucket[16] = { 0 };
+        for (auto const& kv : g_masks)
+        {
+            auto const layer = g_patrol.find(kv.first);
+            for (size_t c = 0; c < kv.second.size(); ++c)
+            {
+                if (!kv.second[c])
+                {
+                    continue;       // not floor - the kit publishes 0/32/32
+                }
+                unsigned v = PD_PATROL_CLEAR_FREE;
+                if (layer != g_patrol.end() && c < layer->second.clear.size())
+                {
+                    v = layer->second.clear[c];
+                }
+                if (v > PD_PATROL_CLEAR_FREE)
+                {
+                    v = PD_PATROL_CLEAR_FREE;   // the module clamps too
+                }
+                ++bucket[v];
+            }
+        }
+        std::string out;
+        char buf[32];
+        for (unsigned b : bucket)
+        {
+            std::snprintf(buf, sizeof buf, "%u:", b);
+            out += buf;
+        }
+        out += ";";
+        return out;
+    }
+
+    void RunPatrolClearanceChecks()
+    {
+        if (g_masks.empty())
+        {
+            return;     // the honest skip every kit-wide check in this file makes
+        }
+
+        std::string const got = PatrolClearHistogram();
+        std::printf("  patrol clearance: %s over %u chunk(s), %u with a layer\n",
+                    got.c_str(), static_cast<unsigned>(g_masks.size()),
+                    static_cast<unsigned>(g_patrol.size()));
+
+        char const* const want =
+            KitHasPatrolLayer() ? PD_PATROL_CLEAR_PIN : PD_PATROL_CLEAR_PIN_NOLAYER;
+        std::string const msg = "the kit's patrol clearance histogram moved: " + got +
+                                " - the pin says " + want;
+        Check(got == want, msg.c_str(), 0);
+
+        if (!KitHasPatrolLayer())
+        {
+            return;
+        }
+
+        // With a layer present the shape has to be a shape. Theme 2 stands a
+        // house on both flanks of every lane, so a kit whose every walkable
+        // cell came out free would mean the sampler never saw a facade - the
+        // exact failure the kit task is asked to STOP on, restated here so the
+        // module side cannot ship a layer it silently reads as nothing.
+        size_t tight = 0;
+        size_t below = 0;
+        for (auto const& kv : g_patrol)
+        {
+            auto const mask = g_masks.find(kv.first);
+            if (mask == g_masks.end())
+            {
+                continue;
+            }
+            for (size_t c = 0; c < mask->second.size(); ++c)
+            {
+                if (!mask->second[c] || c >= kv.second.clear.size())
+                {
+                    continue;
+                }
+                if (kv.second.clear[c] < PD_PATROL_CLEAR_FREE)
+                {
+                    ++tight;
+                }
+                if (kv.second.clear[c] < PatrolCost{}.minClearQ)
+                {
+                    ++below;
+                }
+            }
+        }
+        Check(tight > 0,
+              "the staged kit publishes a clearance layer in which no walkable cell is "
+              "anything but free - the sampler saw no facade at all", 0);
+        std::printf("  patrol clearance: %u walkable cell(s) below free, %u below "
+                    "minClearQ\n", static_cast<unsigned>(tight),
+                    static_cast<unsigned>(below));
+
+        // Every chunk that publishes a layer publishes all three grids of it,
+        // and every offset is inside the +-16 quarter-yard cap the kit promises
+        // and PatrolPointToWorld relies on to keep a waypoint in its own cell.
+        for (auto const& kv : g_patrol)
+        {
+            Check(kv.second.clear.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK &&
+                  kv.second.du.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK &&
+                  kv.second.dv.size() == PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK,
+                  "a chunk's patrol clearance layer is not three 64-cell grids",
+                  static_cast<uint32_t>(kv.first));
+            for (size_t c = 0; c < kv.second.du.size(); ++c)
+            {
+                int const du = static_cast<int>(kv.second.du[c]) - 32;
+                int const dv = static_cast<int>(kv.second.dv[c]) - 32;
+                Check(du >= -16 && du <= 16 && dv >= -16 && dv <= 16,
+                      "a kit clear point sits more than 4 yd off its cell centre - it "
+                      "would leave the cell it belongs to",
+                      static_cast<uint32_t>(kv.first));
+            }
+        }
+    }
+
+    // `chance50:<n>;chance100:<bx,by,seg;...>`. At the shipped default this
+    // layout arms NOTHING - the two Chance(50) coins came up 70 and 94
+    // (research c-research-ambush-trigger.md), which is why the operator saw
+    // no ambush and why the trigger geometry was never actually exercised. At
+    // chance 100 the same layout offers two corridors, so the candidate lists
+    // are populated and only the coin was in the way. Captured by RUNNING.
+    char const* const PD_OPERATOR_AMBUSH_PIN =
+        "chance50:0;chance100:259,259,1;257,258,2;";
+
+    // Why Task 4 replaces the 9 yd disc, in one table (research
+    // c-research-ambush-trigger.md, "Per-kind lane geometry"; measured over the
+    // whole t1b kit by sampling the walk mask at 0.5 yd and maximising a
+    // player's closest approach to the block centre over every socket pair).
+    // NO CODE BELOW DEPENDS ON IT - it is the record of a measurement that
+    // decided a design, kept beside the layout it was measured against.
+    //
+    //   kind                      chunks                best approach   in 9 yd?
+    //   corridor_straight alt 0   2305 2310 12305 12310  8.08 yd         yes - unavoidable
+    //   corridor_straight alt 1   3305 3310 13305 13310  11.43 yd        no - the centre
+    //                             ((4,4) is wall)                        pillar gives a dogleg
+    //   corridor_corner           2403 2406 2409 2412    11.20-11.43 yd  no - and here the
+    //                             + the 124xx twins                      SHORTEST line dodges
+    //   corridor_t                2507 2511 2513 2514    11.20-11.43 yd  no on a turn,
+    //                             + the 125xx twins                      yes straight through
+    //   corridor_cross            2615 12615             11.43 yd        no on a turn,
+    //                                                                    yes straight through
+    //   corridor_dead_end         2701 2702 2704 2708    n/a, one socket  never a candidate
+    //
+    // The 11.2-11.8 yd figures are all one number: the junction square is the
+    // four centre cells, half-width 8.33 yd, so its CORNERS sit at
+    // 8.33 * sqrt(2) = 11.79 yd from the centre, and a turn's geodesic touches
+    // exactly that corner. The square's inscribed disc is 8.33 yd, which is why
+    // a straight-through transit cannot dodge a 9 yd trap and a turn always
+    // can. The two spots of the sibling seed 298623763 are the same story
+    // measured on a real layout: segment 1 at (260,260) - corridor_t NES, chunk
+    // 12507, transit S to N - would have fired at ~0 yd, and segment 2 at
+    // (256,263) - corridor_corner NE, chunk 12403, transit E to N - would NOT,
+    // at 11.79 yd. A trap half the corridor kinds can be walked past is not a
+    // trap, so C2 fires on the player's CELL being in the spot's block instead,
+    // which has no tuning constant and no per-kind behaviour at all.
+
+    // The operator's layout end to end: the plan itself, the patrol beats the
+    // creature AI would walk on it, and the ambush spots it arms.
+    void RunOperatorLayoutChecks()
+    {
+        BlockPlan plan;
+        if (!GenerateBlockPlan(OperatorCfg(), &plan))
+        {
+            Check(false, "the operator's own configuration no longer generates a layout",
+                  PD_OPERATOR_SEED);
+            return;
+        }
+
+        Check(plan.effectiveSeed == PD_OPERATOR_SEED,
+              "the operator's layout now needs a retry - effectiveSeed is no longer the "
+              "stored seed, so the account's dungeon changed under it",
+              PD_OPERATOR_SEED);
+
+        int rooms = 0, boss = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.roomId >= 0 && b.role != BlockRole::RoomEntrance)
+            {
+                ++rooms;
+            }
+            if (b.role == BlockRole::RoomBoss)
+            {
+                ++boss;
+            }
+        }
+        {
+            // The manifest's own bytes, not a summary of them: EmitManifest
+            // ends in "E;%08x\n", so the last 11 characters are the trailer and
+            // the newline is dropped to keep the pin one line.
+            std::string const manifest = EmitManifest(plan, 1);
+            std::string trailer =
+                manifest.size() >= 11 ? manifest.substr(manifest.size() - 11) : manifest;
+            if (!trailer.empty() && trailer.back() == '\n')
+            {
+                trailer.pop_back();
+            }
+            char buf[128];
+            std::snprintf(buf, sizeof buf, "%u,%d,%d;%u;%s;",
+                          static_cast<unsigned>(plan.blocks.size()), rooms, boss,
+                          static_cast<unsigned>(manifest.size()), trailer.c_str());
+            std::string const msg =
+                std::string("the operator's layout moved: ") + buf +
+                " - the worldserver logged 49,16,2; for this account on 2026-09-08, "
+                "and the manifest of that layout was " + PD_OPERATOR_PLAN_PIN;
+            Check(std::string(buf) == PD_OPERATOR_PLAN_PIN, msg.c_str(), PD_OPERATOR_SEED);
+        }
+
+        {
+            // plan.effectiveSeed, never cfg.seed - the engine passes that one
+            // in SpawnAmbushPlan (PDv2InstanceScript.cpp:2509-2510 at
+            // de46c40; the function name is the durable half of this cite -
+            // the line moved twice inside Round C alone), and on a layout that
+            // needed a retry the two differ and the spots would come off a
+            // stream the run never used.
+            //
+            // The 50 is a LITERAL, for the reason PD_AMBUSH_PLAN_PIN_MID states
+            // above: an operator moving what the server ships with must not turn
+            // the batch red, and the label below hard-codes "chance50:" anyway,
+            // so a constant here would print a number drawn at some other
+            // chance under a label that says 50.
+            std::string got = "chance50:";
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "%u;",
+                          static_cast<unsigned>(
+                              BuildAmbushPlan(plan, 50, plan.effectiveSeed).size()));
+            got += buf;
+            got += "chance100:";
+            for (AmbushSpot const& spot : BuildAmbushPlan(plan, 100, plan.effectiveSeed))
+            {
+                std::snprintf(buf, sizeof buf, "%d,%d,%d;", spot.bx, spot.by, spot.segment);
+                got += buf;
+            }
+            std::string const msg = "the operator's ambush spots moved: " + got;
+            Check(got == PD_OPERATOR_AMBUSH_PIN, msg.c_str(), PD_OPERATOR_SEED);
+        }
+
+        if (g_masks.empty())
+        {
+            // Same rule as every other walk-grid check in this file: without the
+            // kit metadata a pass would be faked, and a skip is the honest
+            // answer. The two pins above need no masks and have already run.
+            return;
+        }
+
+        WalkGrid grid;
+        std::string gridErr;
+        if (!BuildWalkGrid(plan, MaskFor, &grid, &gridErr, PatrolLayersForChunk))
+        {
+            Check(false, gridErr.empty() ? "the operator's layout has no walk grid"
+                                         : gridErr.c_str(), PD_OPERATOR_SEED);
+            return;
+        }
+
+        // PDv2CreatureAI.cpp:51 (SNAP_RADIUS_CELLS) and
+        // PDv2InstanceScript.cpp:91 (SPAWN_FALLBACK_SNAP_CELLS) are the same 2
+        // for the same reason; the beat below walks through both of them.
+        int const snapCells = 2;
+        int const chainLen = ChainLength(plan);
+        int const bossRooms = std::max(1, plan.config.bossRooms);
+        std::string beats;
+
+        // SEALED, the way the run set-up seals it: SpawnBarriers runs to
+        // completion for every segment BEFORE SpawnPatrols is called
+        // (PDv2InstanceScript.cpp:306, :311), so the grid a patroller plans its
+        // first beat on already has both portcullises down. Sealing it here is
+        // not decoration - it is the only way this pin can claim to be the beat
+        // the engine hands out.
+        //
+        // What a barrier seals is the DOORWAY into boss room k and nothing
+        // else: LaneCellsForSocket names the two lane cells on the boss block's
+        // entry edge, and the same two on the neighbouring corridor's opposite
+        // edge, because a creature snapping within two cells could otherwise
+        // step straight across (:1956-1957, :2004). It does NOT seal a boss
+        // room's exit, which is why segment 2's beat - out of the corridor in
+        // front of boss 2, back to boss room 1 - has a route from the start:
+        // SpineRunInto answers with the ENTRY socket, boss 1 sits mid-chain,
+        // and the patroller approaches it from the far side.
+        //
+        // EvaluateBarrier(k) can lift a barrier immediately at spawn time, but
+        // only for a segment that planned no trash at all; this layout spawned
+        // 76 creatures in 16 rooms, so neither of its two is in that case.
+        {
+            size_t sealed = 0;
+            for (int k = 1; k <= bossRooms; ++k)
+            {
+                int const bossChain = BossChainIndex(chainLen, plan.config.bossRooms, k);
+                std::vector<size_t> run;
+                unsigned const bit = SpineRunInto(plan, bossChain, &run);
+                if (!bit || run.empty() ||
+                    (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W))
+                {
+                    continue;   // the engine skips the barrier here too (:1908-1930)
+                }
+                PlacedBlock const* bossBlock = nullptr;
+                for (PlacedBlock const& b : plan.blocks)
+                {
+                    if (b.chainIndex == bossChain)
+                    {
+                        bossBlock = &b;     // last match, the way SpineRunInto picks it
+                    }
+                }
+                if (!bossBlock)
+                {
+                    continue;
+                }
+                struct Side { PlacedBlock const* block; unsigned edge; };
+                Side const sides[2] = { { bossBlock, bit },
+                                        { &plan.blocks[run.back()], OppositeSocket(bit) } };
+                for (Side const& s : sides)
+                {
+                    int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+                    LaneCellsForSocket(s.edge, cells);
+                    for (int i = 0; i < 2; ++i)
+                    {
+                        // (row, col) -> (x = col, y = row), the one translation
+                        // SpawnBarriers' laneCells lambda does (:1883-1894).
+                        GridPoint const p = grid.LocalFromGlobalCell(
+                            s.block->bx * PD_CELLS_PER_BLOCK + cells[i][1],
+                            s.block->by * PD_CELLS_PER_BLOCK + cells[i][0]);
+                        if (grid.InBounds(p.x, p.y))
+                        {
+                            // A doorway lane cell is floor on both sides by
+                            // construction - that is what makes it a doorway.
+                            // If the (row, col) -> (x, y) translation above were
+                            // swapped, this is where it would show: the seal
+                            // would land on the wall band beside the lane and
+                            // the beats below would move for a reason that has
+                            // nothing to do with barriers.
+                            Check(grid.At(p.x, p.y),
+                                  "a barrier lane cell of the operator's layout was already "
+                                  "unwalkable before it was sealed - the lane cell mapping is wrong",
+                                  PD_OPERATOR_SEED);
+                            grid.cells[static_cast<size_t>(p.y) * grid.width + p.x] = 0;
+                            ++sealed;
+                        }
+                    }
+                }
+            }
+            // Two boss segments, two lane cells on each of the two sides. A
+            // silent 0 here would mean the beats below were planned on the open
+            // layout after all, which is the mistake this block exists to fix.
+            Check(sealed == static_cast<size_t>(bossRooms) * 4,
+                  "the operator's barriers sealed a different number of lane cells than "
+                  "four per boss segment - the beats below are no longer the engine's",
+                  PD_OPERATOR_SEED);
+        }
+
+        // Round D / D2 re-derives this block DOORWAY TO DOORWAY, exactly the
+        // way SpawnPatrols derives it now (Task 3 review I2). Until this edit
+        // the beats here were still Round B's - block centre of the run's last
+        // corridor to the block centre of the previous boss ROOM, a beat that
+        // ends INSIDE a room, which design D2.1 forbids and which the engine
+        // has not planned since D2. The pin passed and pinned nothing the
+        // server does.
+        //
+        // One beat per CORRIDOR now, i = 1..chainLen-1, and both ends are
+        // doorway LANE cells rather than block centres:
+        //
+        //   goal  = LaneCellsForSocket(OppositeSocket(bit)) on run.back(), the
+        //           corridor's half of the doorway into chain room i - the very
+        //           pair SpawnBarriers seals alongside the room's half
+        //   start = the doorway of run.front() that faces room i-1, read off
+        //           the block STEP between those two, because SpineRunInto
+        //           names a socket for the other end only
+        auto laneCell = [](PlacedBlock const& block, unsigned edge, int& gcx, int& gcy)
+        {
+            int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+            LaneCellsForSocket(edge, cells);
+            gcx = block.bx * PD_CELLS_PER_BLOCK + cells[0][1];
+            gcy = block.by * PD_CELLS_PER_BLOCK + cells[0][0];
+        };
+
+        int corridors = 0;
+        int fellBack = 0;
+        for (int i = 1; i < chainLen; ++i)
+        {
+            char buf[80];
+
+            std::vector<size_t> run;
+            unsigned const bit = SpineRunInto(plan, i, &run);
+            if (!bit || run.empty() ||
+                (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W))
+            {
+                // The engine skips this corridor too, with a LOG_WARN: two
+                // rooms joined directly, or a join that is not one straight
+                // run. Not a failure here either - but the pin below names
+                // every corridor that DID produce a beat, so a corridor that
+                // silently stops producing one still moves the pin.
+                continue;
+            }
+
+            PlacedBlock const* before = nullptr;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                // Last match, the way SpineRunInto picks it; chainIndex is -1
+                // on everything that is not a spine room.
+                if (b.chainIndex == i - 1)
+                {
+                    before = &b;
+                }
+            }
+            if (!before)
+            {
+                Check(false, "a corridor of the operator's layout has no chain room in "
+                             "front of it to start its beat at", PD_OPERATOR_SEED);
+                continue;
+            }
+
+            PlacedBlock const& firstBlock = plan.blocks[run.front()];
+            PlacedBlock const& lastBlock = plan.blocks[run.back()];
+
+            // bx grows EAST, by grows SOUTH - the same table PDBlockPlan's
+            // StepFor uses, and the same one SpawnPatrols re-types.
+            int const dbx = before->bx - firstBlock.bx;
+            int const dby = before->by - firstBlock.by;
+            unsigned startBit = 0;
+            if (dbx == 0 && dby == -1)
+            {
+                startBit = SOCKET_N;
+            }
+            else if (dbx == 0 && dby == 1)
+            {
+                startBit = SOCKET_S;
+            }
+            else if (dbx == -1 && dby == 0)
+            {
+                startBit = SOCKET_W;
+            }
+            else if (dbx == 1 && dby == 0)
+            {
+                startBit = SOCKET_E;
+            }
+            Check(startBit != 0,
+                  "a corridor of the operator's layout is not adjacent to the chain room "
+                  "in front of it - its beat has no start doorway", PD_OPERATOR_SEED);
+            if (!startBit)
+            {
+                continue;
+            }
+            ++corridors;
+
+            int startCellX = 0, startCellY = 0;
+            int goalCellX = 0, goalCellY = 0;
+            laneCell(firstBlock, startBit, startCellX, startCellY);
+            laneCell(lastBlock, OppositeSocket(bit), goalCellX, goalCellY);
+
+            // BOTH ends snapped, the way SpawnPatrols snaps them - and the goal
+            // end is the one that needs it: the barriers above have already
+            // taken a boss corridor's goal lane cell out of the grid, so the
+            // snap ends that beat one cell short of the closed gate instead of
+            // failing to plan at all.
+            GridPoint const rawStart = grid.LocalFromGlobalCell(startCellX, startCellY);
+            GridPoint const rawGoal = grid.LocalFromGlobalCell(goalCellX, goalCellY);
+            GridPoint from{ 0, 0 };
+            GridPoint to{ 0, 0 };
+            if (!NearestWalkable(grid, rawStart.x, rawStart.y, snapCells, from) ||
+                !NearestWalkable(grid, rawGoal.x, rawGoal.y, snapCells, to))
+            {
+                Check(false, "a doorway end of an operator corridor beat is more than two "
+                             "cells off the walkable surface", PD_OPERATOR_SEED);
+                std::snprintf(buf, sizeof buf, "%d:0:0:0:0;", i);
+                beats += buf;
+                continue;
+            }
+
+            // THE ENGINE'S TWO PASSES, in the engine's order: the shipped
+            // PatrolCost first, then minClearQ 0. `propCells` is null on
+            // purpose - the prop mask is built from the GameObjects the
+            // instance spawned and this harness has no engine to spawn them, so
+            // the beat below is the layout's floor and the engine can only ever
+            // pay MORE for it.
+            std::vector<GridPoint> path;
+            if (!FindPatrolPath(grid, from, to, nullptr, path))
+            {
+                PatrolCost loose;
+                loose.minClearQ = 0;
+                bool const ok = FindPatrolPath(grid, from, to, nullptr, path, loose);
+                Check(ok, "an operator corridor beat has no route at all, even with the "
+                          "clearance floor dropped - that patrol would stand still for "
+                          "the whole run", PD_OPERATOR_SEED);
+                if (!ok)
+                {
+                    std::snprintf(buf, sizeof buf, "%d:0:0:0:0;", i);
+                    beats += buf;
+                    continue;
+                }
+                ++fellBack;
+            }
+            size_t const cells = path.size();
+            // The chain as the planner returned it, kept for the merge check
+            // below: a merged beat only says which of these cells survived as
+            // waypoints, so the raw chain is what the walked legs are judged
+            // against.
+            std::vector<GridPoint> const rawChain = path;
+            // The harness's own re-derivation, on the RAW cell chain (the only
+            // form it is defined for) and before the merge touches it -
+            // merging changes how many points describe the route, never the
+            // route, so this is the merged beat's cost as well. -1 would mean
+            // the planner emitted something that is not a chain of single
+            // 4-neighbour steps, which the Check below states outright rather
+            // than letting a negative number sail into the pin.
+            int const beatCost = PatrolCellPathCost(grid, path, nullptr);
+            Check(beatCost > 0,
+                  "an operator corridor beat is not a chain of single 4-neighbour steps "
+                  "over walkable cells", PD_OPERATOR_SEED);
+
+            // The fifth field, new with D2: how far off the cell CENTRES this
+            // beat actually walks, summed over every cell of the raw chain in
+            // quarter-yards. 0 means the kit published no clearance layer (or a
+            // perfectly centred one); a large number is the measurement that
+            // makes this round's claim - the passage really is off-centre and
+            // the waypoints really do follow it.
+            int offsetSum = 0;
+            for (GridPoint const& p : path)
+            {
+                PatrolCellInfo const info = PatrolInfoAt(grid, p);
+                offsetSum += std::abs(static_cast<int>(info.du)) +
+                             std::abs(static_cast<int>(info.dv));
+            }
+
+            // THE ENGINE'S MERGE, which since the D2 follow-up is the
+            // clear-point one: a straight run of cells collapses only while the
+            // line between the surviving ends still passes every dropped cell's
+            // clear point within half a yard. That is why the waypoint counts
+            // in the pin below are HIGHER than D1's - each extra one is a place
+            // the passage moves - and it is what the check under it measures.
+            MergeClearPoints(grid, path);
+
+            // What the merge promised, re-derived in yards over the raw chain,
+            // and the closest this harness can get to "the walked line keeps
+            // its clearance": every cell a leg covers is passed within the
+            // tolerance, and the line never leaves the leg's own column or row
+            // of cells by more than that. The proper measurement - the walked
+            // segment against every facade box - needs the built ADTs, which
+            // this harness does not have and never will.
+            CheckMergedBeat(grid, rawChain, path, PD_PATROL_MERGE_TOLERANCE_Q,
+                            "a merged patrol leg of the operator's layout passes a cell's "
+                            "clear point further than the merge tolerance",
+                            "a merged patrol leg of the operator's layout leaves the band "
+                            "of cells it covers",
+                            PD_OPERATOR_SEED);
+
+            // The point of the whole block. Round C asked only that a leg stay
+            // ON the mask; D1 asks for more, because the operator's complaint
+            // was about legs that were on the mask and still cut through a
+            // house corner: every leg AXIS-ALIGNED, every cell it crosses
+            // walkable. Judged three ways - cell by cell (CheckPatrolLegs), by
+            // the supercover test the engine uses, and by the independent
+            // sampled reference that shares no code with either.
+            CheckPatrolLegs(grid, path,
+                            "a patrol leg of the operator's layout is diagonal - it can cut "
+                            "a house corner the walk mask does not know about",
+                            "a patrol leg of the operator's layout crosses an unwalkable cell",
+                            PD_OPERATOR_SEED);
+            for (size_t w = 1; w < path.size(); ++w)
+            {
+                Check(GridLineWalkable(grid, path[w - 1], path[w]),
+                      "a patrol leg of the operator's layout crosses an unwalkable cell",
+                      PD_OPERATOR_SEED);
+                Check(SampledLineWalkable(grid, path[w - 1], path[w]),
+                      "a patrol leg of the operator's layout leaves the walk mask "
+                      "(sampled reference)", PD_OPERATOR_SEED);
+            }
+
+            std::snprintf(buf, sizeof buf, "%d:%u:%u:%d:%d;", i,
+                          static_cast<unsigned>(path.size()),
+                          static_cast<unsigned>(cells), beatCost, offsetSum);
+            beats += buf;
+        }
+
+        Check(corridors > 0,
+              "the operator's layout produced no corridor beat at all - the worldserver "
+              "placed patrols on it, so this derivation has lost the run",
+              PD_OPERATOR_SEED);
+        if (fellBack)
+        {
+            std::printf("  operator layout: %d corridor beat(s) needed the minClearQ 0 "
+                        "fallback\n", fellBack);
+        }
+
+        // TWO PINS, one per world, because whether the staged kit carries the
+        // clearance layer is a property of the kit on disk and not of this
+        // code: the module task and the kit task land independently, and this
+        // harness has to be green on either side of the staging flip. The
+        // no-layer pin is what a kit that predates D2 plans (offsetSum 0
+        // throughout, and D1's costs); the layered pin is what the v38 kit
+        // plans. Both captured by RUNNING.
+        char const* const want =
+            KitHasPatrolLayer() ? PD_OPERATOR_PATROL_PIN : PD_OPERATOR_PATROL_PIN_NOLAYER;
+        std::string const msg =
+            "the operator's patrol beats moved: " + beats + " - the pin says " + want +
+            " (i:waypoints:cells:cost:offsetSum, doorway to doorway)";
+        Check(beats == want, msg.c_str(), PD_OPERATOR_SEED);
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
 
         RunLinkStateChecks();
         RunGameMathChecks();
+        // Once, not per seed, and before anything that needs a layout: the
+        // block derivation is a property of PDv2WorldMath.h alone, and it is
+        // what Round C / C2's ambush trigger stands on.
+        RunBlockDerivationChecks();
+        RunChainMathChecks();
         RunLayoutFreezeCheck();
+        RunTypedAnchorChecks();
+        // Outside the mask guard on purpose: the corner cases are hand-built
+        // 8x8 grids, so they hold the no-corner-cutting rule still even on a
+        // box with no kit staged - which is exactly where the pin below cannot.
+        CheckCornerRule();
+        // Round D / D1, and outside the mask guard for the same reason as the
+        // corner cases above: the patrol planner's turn, wall and prop rules
+        // are stated on hand grids, so they hold on a box with no kit staged.
+        CheckPatrolPlanner();
+        CheckMergeCollinear();
+        // The D2 follow-up's merge, beside the one it replaces and for the
+        // same reason: hand grids, so the rule holds on a box with no kit.
+        CheckMergeClearPoints();
+        // Round D / D2. It carries a mask guard of its OWN, because the
+        // clearance histogram is a statement about the staged kit: with no
+        // kit on disk it skips rather than pinning an empty one.
+        RunPatrolClearanceChecks();
+        if (!g_masks.empty())
+        {
+            // Once, not per seed: the supercover test is a property of the KIT
+            // masks, not of any layout. Skipped without the kit metadata for
+            // the same reason as every other walk-grid check in this file -
+            // a faked pass is worse than a skip.
+            uint64_t approved = 0, rejected = 0;
+            CheckSupercover(g_masks, approved, rejected);
+            char buf[64];
+            std::snprintf(buf, sizeof buf, "%llu,%llu;",
+                          static_cast<unsigned long long>(approved),
+                          static_cast<unsigned long long>(rejected));
+            std::string const msg = std::string("supercover pair counts moved: ") + buf;
+            Check(std::string(buf) == PD_SUPERCOVER_PAIRS_PIN, msg.c_str(), 0);
+        }
+        // Once, not per seed, and outside the mask guard: this is ONE stored
+        // layout - the operator's - and two of its three pins need no kit at
+        // all.
+        RunOperatorLayoutChecks();
         {
             // Two statements, not one call: argument evaluation order is
             // unspecified, and why.c_str() must not be taken before
@@ -2772,9 +6705,55 @@ namespace
             bool const ok = CheckNoBossSpawnDrawPinned(why);
             Check(ok, why.c_str(), 12345u);
         }
-        // A tenth of the batch is plenty for three boss-room counts: the
-        // property is structural, not statistical.
-        RunBossRoomChecks(count / 10 + 1);
+        {
+            std::string why;
+            bool const ok = CheckChainPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // The loop-carrying twin of the pin above, same two-statements
+            // shape for the same argument-evaluation-order reason.
+            std::string why;
+            bool const ok = CheckLoopChainPinned(why);
+            Check(ok, why.c_str(), 12348u);
+        }
+        {
+            // B5's own stream: no other pin in this file can see it move.
+            // Same two-statements shape for the same reason.
+            std::string why;
+            bool const ok = CheckAmbushPlanPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // The mid-chance twin of the pin above - the only check in the
+            // file that runs where Chance actually draws. Same two-statements
+            // shape for the same argument-evaluation-order reason.
+            std::string why;
+            bool const ok = CheckAmbushPlanMidPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // Seed-free: the doorway table and the socket mirror are geometry,
+            // not a draw.
+            std::string why;
+            bool const ok = CheckLaneCellsPinned(why);
+            Check(ok, why.empty() ? "the lane-cell table moved" : why.c_str(), 0);
+        }
+        // A tenth of the batch, over thirteen (rooms, bossRooms, branches,
+        // detourChancePct) combos: the spine properties are STRUCTURAL and
+        // hold per seed, so the sample size only decides how much of the draw
+        // space gets walked, never whether a rule is true.
+        //
+        // sawPocket is the STATISTICAL one - non-vacuity over the sample, not
+        // a property of any single layout. It is safe at the mandated 500 (a
+        // tenth of it is 51 seeds per combo, and the seeds are fixed, so the
+        // answer is deterministic per generator version). At a much smaller
+        // --batch it could in principle go red without anything being wrong.
+        bool sawPocket = false;
+        bool sawDetour = false;
+        RunChainChecks(count / 10 + 1, sawPocket, sawDetour);
+        Check(sawPocket, "no seed in the sample produced a pocket - the pocket pass is dead code", 0);
+        Check(sawDetour, "no seed in the sample produced a loop room - the detour draw is dead code", 0);
         RunPhase2Checks(count / 10 + 1);
         RunThemeParityChecks(count / 10 + 1);
         // Same tenth-of-the-batch reasoning: one pack per room is structural
@@ -2786,6 +6765,38 @@ namespace
             std::string why;
             bool const ok = CheckEligibleTrashPackFilter(why);
             Check(ok, why.empty() ? "eligible trash pack filter failed" : why.c_str(), 0);
+        }
+        {
+            // Round C / C6. Same tenth-of-the-batch reasoning as the theme
+            // checks: no-repeat is a property of ONE run's boss rooms, so the
+            // sample size only decides how much of the draw space is walked.
+            //
+            // The counter is not decoration: the check quietly skips every
+            // layout whose boss rooms are not outnumbered by the pool, so
+            // "0 failures" over 0 examined layouts would read exactly like a
+            // pass.
+            int bossNoRepeatLayouts = 0;
+            RunBossNoRepeatChecks(count / 10 + 1, bossNoRepeatLayouts);
+            Check(bossNoRepeatLayouts > 0,
+                  "no layout in the sample had two or more boss rooms with a pool big "
+                  "enough to forbid a repeat - the boss no-repeat check is vacuous", 0);
+        }
+        {
+            // The tightest case, pinned. Same two-statements-not-one-call
+            // shape as every other pin here, for the same
+            // argument-evaluation-order reason.
+            std::string why;
+            bool const ok = CheckBossNoRepeatPinned(why);
+            Check(ok, why.c_str(), 12345u);
+        }
+        {
+            // The other side of that gate: a pool too small to forbid a
+            // repeat, where the run must still get one boss per boss room.
+            // Same two-statements-not-one-call shape, for the same
+            // argument-evaluation-order reason.
+            std::string why;
+            bool const ok = CheckBossFallbackPinned(why);
+            Check(ok, why.empty() ? "the fallback boss draw failed" : why.c_str(), 12345u);
         }
 
         // The city cap must hold like the mine cap - its ids are one digit
@@ -2813,10 +6824,27 @@ namespace
             Check(measuredCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
         }
 
+        RunEngineFieldSweep(count);
+
         size_t maxManifest = 0;
         int longestPath = 0;
         int minBlocks = 1 << 30;
         int maxBlocks = 0;
+        // minPockets starts at 0, not at a sentinel: `--batch 0` runs no seed
+        // at all, and a summary line reading "pockets per layout: 1073741824..0"
+        // is a worse answer than "0..0".
+        int minPockets = 0, maxPockets = 0;
+        // B0b yield: how many boss segments across the whole batch ended up
+        // with a loop room. 33 % per segment is a chance, not a quota, and the
+        // geometry has to fit as well - so the summary reports what the sample
+        // actually produced rather than what the config asked for.
+        int loopRoomsSeen = 0, segmentsSeen = 0, loopLayouts = 0;
+        // B5 yield, on the same denominator: how many boss segments across the
+        // batch drew an ambush at the shipped default (V2.Ambush.Chance 50).
+        // A chance, not a quota - and a segment with no spine corridor at all
+        // cannot carry one however the coin falls.
+        int ambushesSeen = 0;
+        bool sawLayout = false;
 
         for (int i = 0; i < count; ++i)
         {
@@ -2851,13 +6879,18 @@ namespace
             Check(same, "two runs of the same seed differ", seed);
 
             // The room count must be what was asked for; a planner that quietly
-            // drops rooms would make dlvl meaningless.
+            // drops rooms would make dlvl meaningless. Loop rooms are the one
+            // legitimate extra: B0b adds them ON TOP of the budget, so a layout
+            // whose segment drew one has exactly one room more.
             int rooms_found = 0;
+            int loopsHere = 0;
             for (PlacedBlock const& b : plan.blocks)
             {
                 if (b.roomId >= 0) ++rooms_found;
+                if (b.detourOf >= 0) ++loopsHere;
             }
-            Check(rooms_found == rooms + 1, "room count does not match the config", seed);
+            Check(rooms_found == rooms + 1 + loopsHere,
+                  "room count does not match the config plus the loop rooms", seed);
 
             // Entrance and boss must be distinct blocks.
             Check(plan.entranceIndex != plan.bossIndex, "entrance and boss are the same block", seed);
@@ -2894,7 +6927,7 @@ namespace
             {
                 WalkGrid grid;
                 std::string gridErr;
-                if (!BuildWalkGrid(plan, MaskFor, &grid, &gridErr))
+                if (!BuildWalkGrid(plan, MaskFor, &grid, &gridErr, PatrolLayersForChunk))
                 {
                     Check(false, gridErr.c_str(), seed);
                 }
@@ -2923,10 +6956,36 @@ namespace
             int const blocks = static_cast<int>(plan.blocks.size());
             minBlocks = (blocks < minBlocks) ? blocks : minBlocks;
             maxBlocks = (blocks > maxBlocks) ? blocks : maxBlocks;
+
+            int pocketsHere = 0;
+            for (PlacedBlock const& b : plan.blocks)
+            {
+                if (b.branchOf >= 0) ++pocketsHere;
+            }
+            loopRoomsSeen += loopsHere;
+            segmentsSeen += std::max(1, cfg.bossRooms);
+            ambushesSeen += static_cast<int>(
+                BuildAmbushPlan(plan, PD_AMBUSH_DEFAULT_CHANCE_PCT, plan.effectiveSeed).size());
+            ++loopLayouts;
+            minPockets = (!sawLayout || pocketsHere < minPockets) ? pocketsHere : minPockets;
+            maxPockets = (pocketsHere > maxPockets) ? pocketsHere : maxPockets;
+            sawLayout = true;
         }
+
+        // Statistical over the whole sample, exactly like sawPocket and
+        // sawDetour above: at chance 50 over the mandated 500 seeds a zero
+        // here means the draw is dead code, not that the coin was unlucky.
+        // Guarded by sawLayout so `--batch 0` says nothing rather than lying.
+        Check(!sawLayout || ambushesSeen > 0,
+              "no seed in the sample drew an ambush at the default chance - the ambush draw is dead code", 0);
 
         if (longestPath) std::printf("longest room-to-room path: %d cells\n", longestPath);
         std::printf("blocks per layout: %d..%d\n", minBlocks, maxBlocks);
+        std::printf("pockets per layout: %d..%d\n", minPockets, maxPockets);
+        std::printf("loop rooms: %d of %d segments carry one (%d layouts)\n",
+                    loopRoomsSeen, segmentsSeen, loopLayouts);
+        std::printf("ambushes: %d of %d segments at the default chance %d%%\n",
+                    ambushesSeen, segmentsSeen, PD_AMBUSH_DEFAULT_CHANCE_PCT);
         std::printf("largest manifest  : %d bytes (budget 2048)\n", static_cast<int>(maxManifest));
         std::printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
         std::printf("%s\n", g_failures == 0 ? "ALL CHECKS PASS" : "FAILURES");

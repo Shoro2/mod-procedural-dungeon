@@ -130,7 +130,7 @@ ProceduralDungeon.Rooms.SizeMax = 11
 #
 #    ProceduralDungeon.LoopChance
 #        Description: Percent chance to keep a non-MST connection as an
-#                     extra loop corridor (shortcuts, alternate routes).
+#                     extra loop corridor (alternate routes).
 #        Default:     15
 
 ProceduralDungeon.LoopChance = 15
@@ -295,13 +295,30 @@ ProceduralDungeon.V2.OriginBX = 256
 ProceduralDungeon.V2.OriginBY = 256
 
 #
-#    ProceduralDungeon.V2.LoopChance
-#        Description: Percent chance to keep a non-MST edge, which is what makes
-#                     a layout a graph rather than a tree.
-#        Default:     15
+#    ProceduralDungeon.V2.DetourChance
+#        Description: Round B: percent chance, per boss segment, that a loop
+#                     room hangs off the main path - out of a straight corridor
+#                     run to the side, around a corner into an extra room, out
+#                     of its far side and back into the run two cells further.
+#                     One per segment at most; the room is additional to the
+#                     room count. Replaces V2.LoopChance, now withdrawn.
+#                     Stored per account as gen_loop_pct with the layout.
+#        Default:     33
 #
 
-ProceduralDungeon.V2.LoopChance = 15
+ProceduralDungeon.V2.DetourChance = 33
+
+#
+#    ProceduralDungeon.V2.Branches
+#        Description: Round B: pocket rooms hanging off the main path, at most
+#                     one per ordinary spine room and never more than a third
+#                     of the rooms. Pockets come out of the same room budget,
+#                     so the total room count does not change. Stored per
+#                     account as gen_branches with the layout.
+#        Default:     2
+#
+
+ProceduralDungeon.V2.Branches = 2
 
 #
 #    ProceduralDungeon.V2.Theme
@@ -530,4 +547,247 @@ ProceduralDungeon.V2.AggroRangeYd = 20.0
 #
 
 ProceduralDungeon.V2.Decor.Enable = 1
+
+#
+#    ProceduralDungeon.V2.Barrier.Pct
+#        Description: Round B (2026-09-03): how much of a boss segment must be
+#                     cleared before the portcullis in front of that segment's
+#                     boss room opens, in percent of the trash the layout
+#                     PLANNED for that segment's rooms.
+#
+#                     The boss room's own pack is deliberately not counted -
+#                     it stands behind the barrier, and a segment whose only
+#                     room is its boss (dlvl 30 with a low room count) would
+#                     otherwise seal itself for ever. A segment with nothing
+#                     planned in front of its boss opens immediately.
+#
+#                     Patrol and ambush mobs never count towards it either:
+#                     they are risk on the road, not progress.
+#        Default:     50 (0 = never sealed - the barrier opens the moment it is
+#                     placed, since no kill is required; 100 = clear it all)
+#
+
+ProceduralDungeon.V2.Barrier.Pct = 50
+
+#
+#    ProceduralDungeon.V2.Barrier.OrientNS
+#    ProceduralDungeon.V2.Barrier.OrientEW
+#        Description: Round B (2026-09-03): the portcullis' facing in RADIANS,
+#                     one value per lane orientation - NS for a doorway on a
+#                     block's north or south edge, EW for its west or east one.
+#
+#                     Two conf keys rather than two constants because the right
+#                     number depends on how the model is authored, and finding
+#                     it means standing in front of one in game. Calibrate with
+#                     `.reload config`; no rebuild and no re-roll is needed,
+#                     the next barrier that is placed uses the new value.
+#        Default:     0.0 / 1.5708 (that is pi/2, a quarter turn)
+#
+
+ProceduralDungeon.V2.Barrier.OrientNS = 0.0
+ProceduralDungeon.V2.Barrier.OrientEW = 1.5708
+
+#
+#    ProceduralDungeon.V2.Patrol.HealthMult
+#        Description: Round B (2026-09-03): the health of a patrolling creature,
+#                     in percent of the trash mob it is drawn from - applied
+#                     like every other health lever in this module, on top of
+#                     the difficulty scale. EVERY member of a patrol gets it,
+#                     the followers included.
+#
+#                     Since Round D (2026-09-08) there is one patrol per
+#                     CORRIDOR - every corridor run between two rooms of the
+#                     chain, not one per boss segment - and it walks that
+#                     corridor doorway to doorway, never into a room. It is
+#                     meant to be a real fight in a narrow place, so values
+#                     below 100 are refused: a patrol softer than the pack it
+#                     came from is loot walking towards the player, not a
+#                     threat.
+#
+#                     Killing it moves no counter and opens no barrier.
+#        Default:     300
+#
+
+ProceduralDungeon.V2.Patrol.HealthMult = 300
+
+#
+#    ProceduralDungeon.V2.Patrol.Size2Diff
+#    ProceduralDungeon.V2.Patrol.Size3Diff
+#        Description: Round D (2026-09-08): where a patrol grows from one
+#                     creature to two and from two to three, on the run's own
+#                     1..100 difficulty dial (the same dial `.pdungeon v2 set
+#                     difficulty` moves). A run at difficulty 49 gets files of
+#                     one, at 50 files of two, at 75 files of three.
+#
+#                     The members walk in SINGLE FILE: pick 0 of the corridor's
+#                     draw leads and walks the planned beat, the others follow
+#                     it at V2.Patrol.FollowDistYd times their rank. That is
+#                     what keeps a bigger patrol from costing more paths - one
+#                     patrol is one route however many creatures it has.
+#
+#                     Read live, but read at SPAWN time: changing either key
+#                     retunes the next dungeon, not the corridor a player is
+#                     standing in. Both are clamped into 1..100 and NOT against
+#                     each other - Size3Diff at or below Size2Diff simply makes
+#                     the two-mob band empty, which is a legitimate thing to
+#                     ask for.
+#        Default:     50 / 75
+#
+
+ProceduralDungeon.V2.Patrol.Size2Diff = 50
+ProceduralDungeon.V2.Patrol.Size3Diff = 75
+
+#
+#    ProceduralDungeon.V2.Patrol.FollowDistYd
+#        Description: Round D (2026-09-08): how far behind the leader the first
+#                     follower of a patrol walks, in yards. Follower k keeps k
+#                     times this distance, so a file of three is 3.0 and 6.0 yd
+#                     long at the default.
+#
+#                     Read live and used on every follow decision, so
+#                     `.reload config` re-spaces the files of a dungeon that is
+#                     already being walked. The corridor lane is 16.67 yd wide,
+#                     so anything up to about 8 yd keeps the whole file inside
+#                     it however the corridor turns. Negative values are
+#                     refused (that would put the follower in front).
+#        Default:     3.0
+#
+
+ProceduralDungeon.V2.Patrol.FollowDistYd = 3.0
+
+#
+#    ProceduralDungeon.V2.Patrol.Debug
+#        Description: Round C (2026-09-08): per-leg diagnostics for the
+#                     patrolling creatures, in the worldserver log under
+#                     `module.pdungeon`. 0 = silent, 1 = talkative. OFF
+#                     everywhere but a run somebody is actively watching -
+#                     these lines are per waypoint, per movement inform and per
+#                     evade, which is a lot of log for a dungeon full of mobs
+#                     and no use at all to anyone not hunting a patroller.
+#
+#                     Read LIVE on the tick that would log, so `.reload config`
+#                     both arms and disarms it without a restart and without
+#                     re-rolling anything - turn it on, pull the patroller,
+#                     turn it back off.
+#
+#                     What it prints, all prefixed `PDv2 patrol:` except the
+#                     chase verdict, which is `PDv2 chase:`
+#
+#                       * one line per LEG - the waypoint, its cell, the world
+#                         point, where the creature stands, the top movement
+#                         generator and the distance. A leg is a few cells, and
+#                         a cell is 8.33 yd, so a distance in the hundreds is
+#                         not a leg.
+#                       * one line per movement inform, INCLUDING the ones the
+#                         module drops - that is the only way to see a leg that
+#                         ended without anyone noticing.
+#                       * three lines per EVADE plus one when the creature
+#                         reaches home: position, home, the motion stack, and
+#                         whether the movement spline is finalized. The last of
+#                         the three is the decisive one - `splineFinalized 1`
+#                         is a creature that has actually stopped.
+#                       * one line per patroller on its first tick, naming its
+#                         idle movement slot, its wander distance and whether
+#                         it is levitating.
+#                       * one line per CHASE decision, but only when the
+#                         verdict or the motion stack changed - so a fight in
+#                         which nothing moves costs one line.
+#
+#                     `.pdungeon v2 patrol` (GM) answers the same question for
+#                     RIGHT NOW, one line per patroller, without the log and
+#                     without this key.
+#        Default:     0
+#
+
+ProceduralDungeon.V2.Patrol.Debug = 0
+
+#
+#    ProceduralDungeon.V2.Ambush.Chance
+#        Description: Round B (2026-09-03): percent chance, per boss segment,
+#                     that one of the corridors on the way to its boss room is
+#                     armed with an ambush. At most one per segment, and a
+#                     segment whose runs hold no usable corridor gets none.
+#
+#                     Read live like the decor rules: it is not part of what a
+#                     layout IS, so changing it re-arms the next run rather
+#                     than re-rolling anybody's dungeon.
+#
+#                     WHAT FIRES an armed corridor, since Round C (2026-09-08):
+#                     standing in it. The whole 66.67 yd block is the trigger -
+#                     the player's walk-grid cell is compared against the
+#                     spot's block, and that cell has to be floor - so every
+#                     corridor kind behaves the same and there is no distance
+#                     to tune. Each armed corridor is named in the worldserver
+#                     log at build time with its segment, block, chunk and
+#                     centre, which is how an "it never fired" is checked
+#                     against the layout that was actually walked.
+#        Default:     50
+#
+
+ProceduralDungeon.V2.Ambush.Chance = 50
+
+#
+#    ProceduralDungeon.V2.Ambush.Mobs
+#        Description: Round B (2026-09-03): how many creatures an ambush spawns
+#                     around the player it fires on. They fight, scale and drop
+#                     loot like any dungeon mob but count towards nothing - not
+#                     the run total, not a room, not a barrier.
+#
+#                     Clamped to 0..8: the spawn pattern beside the player is
+#                     a fixed table of eight distinct places (two ranks of
+#                     four, at 6 yd and 2 yd along the corridor, 4 yd either
+#                     side of it), and past the eighth the table repeats and
+#                     would stack mobs inside each other. 0 leaves the trigger
+#                     and the stun in place with nothing to fight.
+#
+#                     Read when an instance BUILDS its dungeon, not when the
+#                     ambush fires: the creatures are drawn once and stored
+#                     with the spot, so a .reload config takes effect for the
+#                     next dungeon that is built and leaves a standing run
+#                     alone. Chance is read per build the same way; StunSpell
+#                     is the only one of the three read at fire time, and
+#                     therefore the only one that changes a standing run.
+#        Default:     4
+#
+
+ProceduralDungeon.V2.Ambush.Mobs = 4
+
+#
+#    ProceduralDungeon.V2.Ambush.RadiusYd
+#        REMOVED in Round C (2026-09-08). The setting no longer exists; a line
+#        left over in a deployed .conf is ignored and can be deleted.
+#
+#        It used to say how close a player had to come to an armed corridor's
+#        centre, flat, before the trap fired - default 9.0 yd. That worked on a
+#        straight corridor and nowhere else: the four centre cells of a block
+#        form a junction square of half-width 8.33 yd, so a straight transit
+#        passes its inscribed disc at 8.08 yd, while the shortest walking line
+#        through a corner, a T or a cross hugs the square's corner at
+#        8.33 * sqrt(2) = 11.79 yd and missed the disc entirely - as did the
+#        dogleg around the centre pillar of the alt-1 straight, at 11.43 yd.
+#        Four of the kit's five corridor kinds - corner, T, cross and the
+#        alt-1 straight with its centre pillar - could be walked past; only
+#        the plain straight ever passed close enough to fire.
+#
+#        Widening the radius would have closed the hole with a number that
+#        silently breaks the day the kit's corridor width changes. The trigger
+#        is the corridor BLOCK instead - see V2.Ambush.Chance above.
+#
+
+#
+#    ProceduralDungeon.V2.Ambush.StunSpell
+#        Description: Round B (2026-09-03): the aura an ambush applies to the
+#                     player it fires on, with the player as the caster. The
+#                     default is the generic 2-second "Stun" (20170): aura-only,
+#                     flat duration, mechanic 12, and it releases itself - so
+#                     the client shows a real stun with a debuff icon and no
+#                     code has to remember to take it off.
+#
+#                     0 means the ambush spawns its mobs without a stun. Any
+#                     other id is used as given; a spell that does not stun
+#                     simply makes the ambush a plain spawn.
+#        Default:     20170
+#
+
+ProceduralDungeon.V2.Ambush.StunSpell = 20170
 

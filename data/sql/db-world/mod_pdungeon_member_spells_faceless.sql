@@ -1,0 +1,633 @@
+-- ----------------------------------------------------------------------------
+-- mod-procedural-dungeon: combat kits for pack 8 "Ahn'kahet Deep" (world DB)
+--
+-- 25 rows for the 8 members of pack 8 (see
+-- mod_pdungeon_packs_faceless.sql) - three per creature, and FOUR for the
+-- BOSS 29309 Elder Nadox, which gained a second minDiff 1 row in Round C /
+-- C6 the same way 25352 and 29620 did. Column order and cadence rule match
+-- the shipped mod_pdungeon_member_spells.sql exactly:
+--
+--   MELEE + BOSS   position 1  cd 6000-8000 ms   minDiff 1
+--                  position 2  cd 8000-10000 ms  minDiff 50
+--                  position 3  cd 8000-12000 ms  minDiff 75
+--   RANGE          position 1  the slot-0 filler, cd 0, minDiff 1
+--                  position 2  cd 8000-10000 ms  minDiff 50
+--                  position 3  cd 8000-12000 ms  minDiff 75
+--   CC             ALWAYS cd 60000, and NEVER position 1
+--
+-- with that file's one Round C / C6 exception: a BOSS carries a SECOND row at
+-- position 1 at cd 9000 ms, past the 6000-8000 band on purpose, so two base
+-- abilities do not double a boss's output. Trash kits are unchanged.
+--
+-- `slot` is 0 for the filler and 1 for everything else; the "position" of a
+-- non-filler row is carried by minDiff, not by slot, exactly as the two
+-- shipped kit files do it. Row order is priority order - the loader queries
+-- ORDER BY entry, slot, minDiff, spellId and the AI casts the first ready row
+-- (PDv2PackMgr.cpp:229-232, PDv2CreatureAI.cpp:1436-1455). NOTE, because it
+-- changes how much a weak gated row costs: the base row sorts FIRST, so it is
+-- cast whenever it is off cooldown and a gated row only ever fills the GAP
+-- between base casts. A gated row never replaces the base row - it competes
+-- with the mob standing there auto-attacking.
+--
+-- Every id below was checked against Data\dbc\Spell.dbc (55100 records - the
+-- file the worldserver actually loads, NOT acore_world.spell_dbc, which is an
+-- unrelated custom table and holds none of these ids) on 2026-09-09, with the
+-- same guard the two sibling packs use: identity (the spell is what the
+-- comment claims, not merely that some spell exists at that id), a slot-0
+-- filler range >= 25 yd, flat ManaCost 0 on every 0-mana creature, CC at
+-- cd 60000 and never in slot 0, no summon/knockback/pull/jump effect, no heal,
+-- no self-damage, no scriptless-dummy-only spell, no zero-radius area target,
+-- no infinite-duration periodic aura, no rangeMin, and no (entry, spellId)
+-- primary-key duplicate.
+--
+-- ----------------------------------------------------------------------------
+-- FIX PASS 2026-09-09 - the eight rows the two adversarial reviews changed
+--
+-- The first cut of this file shipped three rows that were provably broken and
+-- five that measured outside the module's own band. Each is listed with the
+-- reading that condemned it; the full measurements are in the level-80 table
+-- and the EXCLUDED table further down.
+--
+--   30277 t50  56643 Triple Slash  -> 16509 Rend
+--          56643's ONLY effect is SPELL_AURA_PERIODIC_TRIGGER_SPELL on
+--          TARGET_UNIT_CASTER, and HandlePeriodicTriggerSpellAuraTick casts
+--          the trigger AT THE AURA HOLDER (SpellAuraEffects.cpp) - so 56645
+--          (WEAPON_PERCENT_DAMAGE 50) lands on the SLASHER, three times per
+--          cast. Measured at level 80: 790-1100 per tick, ~2370-3300 of self
+--          damage per cast and NOTHING on the player. Spell::CheckCast skips
+--          the explicit-target test for exactly this shape (Spell.cpp:5875-
+--          5883) and Unit::SpellHitResult cannot miss a self hit, so nothing
+--          in the core stops it.
+--   29309 t50  26662 Berserk       -> 32714 Enrage
+--          MOD_DAMAGE_PERCENT_DONE 500 (miscValue 127 = ALL schools) +
+--          MOD_MELEE_HASTE 150 for 300 s on a 10 000 ms row = a permanent x6
+--          damage / x2.5 swing-speed multiplier from difficulty 50 on. Worse,
+--          effect 3 is SPELL_AURA_LINKED -> 64112, which HandleAuraLinked
+--          casts on apply: MOD_INCREASE_SPEED 150, MECHANIC_IMMUNITY_MASK
+--          1630 (charm/confuse/disarm/distract/grip/ROOT/sleep) and MOD_SCALE
+--          25. That is a boss that cannot be rooted, outruns the group and
+--          hits for six times its already boss-tier swing. In stock AC 26662
+--          is not a rotation ability at all - boss_elder_nadox.cpp:38 comments
+--          it "Enraged if too far away from home" and fires it once, guarded
+--          by !HasAura, as an anti-kite valve.
+--   31104 t0   67879 Claw          -> 16169 Arcing Smash
+--          NOT a Spell.dbc problem - a DATABASE one. acore_world.
+--          spell_script_names binds 67879 to `spell_black_knight_ghoul_claw`,
+--          and a global SpellScript runs no matter which CreatureAI is bound,
+--          so PDv2's binder does not protect against it. That script's
+--          OnEffectHitTarget does GetThreatMgr().ResetAllThreat() and then
+--          SelectTarget(Random, 0, 30 yd) + AttackStart - i.e. the Watcher
+--          would wipe its threat table and jump to a RANDOM player every 6
+--          seconds (boss_black_knight.cpp:450-469).
+--   30319 t0   61562 Shadow Bolt   -> 69211 Shadow Bolt  (FILLER + casterSpellId)
+--          61562 measures 4250-5750 per cast (basePoints 4249 + d1501) at a
+--          1500 ms cast time, and CastFiller has no gap of its own - the
+--          module's own comment is "back to back for as long as the mob
+--          holds" (PDv2CreatureAI.cpp:1459-1471). That is ~3330 sustained dps
+--          from ONE trash caster, against the 450-682 dps the module's own
+--          fillers deliver (60015 = 450, 69211 = 682, 22088 = 360, shipped
+--          47809 = 245). Five times the band. The spell itself is fine - it
+--          is now 30179's t75 row, where a 12 000 ms cooldown turns the same
+--          4250-5750 into ~420 dps.
+--   30176 t50  22644 Blood Leech   -> 50729 Carnivorous Bite
+--          SPELL_EFFECT_HEALTH_LEECH is a heal by another name and guard rule
+--          R3 only tests for SPELL_EFFECT_HEAL by id. Magnitude failed too:
+--          240 at level 80 (30 + 3.0/level x 70 levels) against the 2371-3299
+--          of the row above it.
+--   30111 t50   9034 Immolate      -> 54889 Shadow Shock
+--          326 per cast (116 direct + 30 x 7 ticks) against 61567 Fireball's
+--          4163-4837 in the same kit - one thirteenth.
+--   30179 t75  47960 Shadowflame   -> 61562 Shadow Bolt
+--          544 per cast (136 x 4 ticks) against a 1273-1427 filler.
+--   29309 t75  54889 Shadow Shock  -> 59126 Shadow Breath
+--          Not a fault - a step-up. With 26662 gone the boss's whole kit was
+--          weaker than his own trash's, and his DamageModifier is 7.5 -
+--          exactly his trash's - so his auto-attack is no step up either:
+--          1872 melee dps against their 1872-1890. 59126 at 8788-10212 is the
+--          pack's heaviest single row and is what makes 29309 read as a boss
+--          without a multiplier.
+--          CORRECTED 2026-09-09: an earlier cut of this entry said his
+--          BaseAttackTime 2400 against their 2000 makes him "swing for LESS
+--          per second than they do". That is FALSE. Unit::GetAPMultiplier
+--          (Unit.cpp:13652-13655) multiplies the swing by the attack time and
+--          dps divides by it again, so creature melee dps is INDEPENDENT of
+--          attack speed - 2400 ms buys him a BIGGER swing (3750-5235 against
+--          their 3125-4399) at the same dps, not a slower one. The conclusion
+--          the sentence supported is unchanged and now rests on the
+--          DamageModifier instead.
+--
+-- One review recommendation was measured and REFUSED, with the reading:
+-- swapping 30278's t75 `17228 Shadow Bolt Volley` for `48687 Shadow Bolt
+-- Volley`. Read as raw base points 17228 looks like 128+d45 against 48687's
+-- 549+d193. But 17228 carries SPELL_ATTR0_SCALES_WITH_CREATURE_LEVEL
+-- (0x00080000) and SpellLevel 20, so SpellEffectInfo::CalcValue multiplies it
+-- by BaseDamage[exp2]@80 / BaseDamage[exp2]@20 = x18.19 (SpellInfo.cpp:
+-- 489-517). Measured on the creature: 17228 = 2328-3128, 48687 = 549-741. The
+-- swap would have made that row FOUR TIMES WEAKER - the exact fault it was
+-- meant to cure. 17228 stays.
+--
+-- ----------------------------------------------------------------------------
+-- WHAT EVERY ROW IS WORTH AT LEVEL 80, MEASURED
+--
+-- The numbers below are SpellEffectInfo::CalcValue re-implemented against
+-- Spell.dbc for a level-80 caster of that creature's unit_class and
+-- expansion: EffectBasePoints + EffectRealPointsPerLevel x (80 - max(BaseLevel,
+-- SpellLevel)) + the EffectDieSides band + the ATTR0 0x00080000 creature-level
+-- factor, times the periodic tick count (SpellDuration / EffectAuraPeriod).
+-- "swing" is the creature's own auto-attack from Unit::CalculateMinMaxDamage
+-- (StatSystem.cpp:1163-1172) with creature_classlevelstats(80).damage_exp2,
+-- DamageModifier 7.5 and the `x BaseAttackTime/1000` factor of
+-- Unit::GetAPMultiplier (Unit.cpp:13652-13655) that the first cut of this
+-- table left out. Because the swing carries the attack time and dps divides it
+-- out again, every member's MELEE dps is the same whatever its BaseAttackTime:
+-- 1890 for the three unit_class 1 nerubians, 1872 for the five unit_class 2
+-- members including the boss. The corrected cross-pack figures live in
+-- mod_pdungeon_packs_faceless.sql; the swing cells below are per swing.
+--
+--   entry  swing @80        row                        damage/cast    cd     ~dps
+--   30176  3794-5278/2.4s   48640 Strike (150 % wpn)    2371-3299    6000     472
+--                           50729 Carnivorous Bite      5725-6105   10000     592
+--                           69900 Spirit Burst          3238-3762   12000     292
+--   30277  3162-4399/2.0s   42746 Cleave (110 % wpn)    1739-2419    7000     297
+--                           16509 Rend  460 x 5 ticks        2300   10000     230
+--                           56646 Enrage  (no damage)           -   12000       -
+--   31104  3162-4399/2.0s   16169 Arcing Smash (wpn+400) 1981-2599   6000     382
+--                           50729 Carnivorous Bite      5725-6105   10000     592
+--                           60845 Shadow Nova           2775-3225   12000     250
+--   30111  3125-4362/2.0s   61567 Fireball              4163-4837    7000     643
+--                           54889 Shadow Shock          2960-3440   10000     320
+--                           61568 Flamestrike      6938-8062 direct 12000     625
+--                                 + 3500/tick x4 ONLY while standing in it
+--   30278  3125-4362/2.0s   69211 Shadow Bolt FILLER    1313-1687  2200 cast  682
+--                           56632 Tangled Webs (CC, no damage)  -   60000       -
+--                           17228 Shadow Bolt Volley    2328-3128   12000     228
+--   30179  3125-4362/2.0s   60015 Shadow Bolt FILLER    1273-1427  3000 cast  450
+--                           61570 Lightning Shield 1600/proc 50 % 10 chg  n/a
+--                                 n/a is not an omission: the re-cast rate is
+--                                 CHARGE-bound, not cooldown-bound, so no
+--                                 per-second figure is derivable from the row.
+--                                 See the OVERLAP block near the end.
+--                           61562 Shadow Bolt           4250-5750   12000     417
+--   30319  3125-4362/2.0s   69211 Shadow Bolt FILLER    1313-1687  2200 cast  682
+--                           61563 Corruption 1665-1935 x6  9990-11610 10000
+--                           13338 Curse of Tongues (debuff, no damage)  -
+--   29309  3750-5235/2.4s   42746 Cleave (110 % wpn)    1719-2399    7000     294
+--                           56130 Brood Plague 1275/tick x10 over 30 s      425
+--                           32714 Enrage  (+50 % melee haste, +20 % scale, 8 s)
+--                           59126 Shadow Breath        8788-10212   12000     792
+--
+-- The band those rows have to sit in is the SHIPPED band, re-measured the same
+-- way: fillers 245 (47809) / 278 (42842) / 360 (22088) / 443 (47857) /
+-- 450 (60015) / 682 (69211) dps, and gated rows from 0 (a pure debuff) up to
+-- 2596 (42397 Rend Flesh on 84275) and 2625 (59116 Poison Cloud on 84286).
+-- Every row above is inside it, and the three heaviest this pack fields
+-- (61568, 59126, 61563) are all BELOW the two shipped maxima.
+--
+-- A DoT is deliberately reported as its FULL per-cast total, not as a
+-- sustained figure: re-applying it before it expires refreshes the duration,
+-- it does not stack, so 56130 Brood Plague's real contribution is its 1275 per
+-- 3 s tick (425 dps) and not 12750 every 9 s.
+--
+-- ONE MORE ACCOUNTING CONVENTION, named here so the next reader does not
+-- re-find it and file it as a defect. 48640 Strike, 42746 Cleave and 16169
+-- Arcing Smash all carry SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE (0x4), which is
+-- the bit Spell::IsNextMeleeSwingSpell() keys on (Spell.cpp:8128-8130), so
+-- each one CONSUMES the auto-attack it lands on instead of adding a hit. Their
+-- marginal value is therefore the excess over a normal swing, not the full
+-- number, and the ~dps column above credits all three additively. That is
+-- DELIBERATE: the shipped mod_pdungeon_member_spells.sql counts 48640, 59992
+-- and 70191 exactly the same way, so it is a module-wide convention and
+-- changing it in this file alone would make this file the odd one out. The
+-- fix, if it is ever wanted, is a pass over every kit file at once. Either
+-- way the error is conservative - it makes the pack read HARDER than it is,
+-- never softer - and it is functionally harmless: a queued melee spell
+-- occupies CURRENT_MELEE_SPELL, does not block the other kit rows and cannot
+-- deadlock.
+--
+-- ----------------------------------------------------------------------------
+-- SPELL IDENTITY - every id, read out of Spell.dbc rather than named from
+-- memory. "own" = the creature's own stock rotation, taken from smart_scripts
+-- (or, for the boss, from src/server/scripts/Northrend/AzjolNerub/ahnkahet/
+-- boss_elder_nadox.cpp). "pack-native" = another pack-8 creature's own spell.
+-- "zone" = native to an Ahn'kahet creature that is NOT a pack member - which
+-- is a weaker claim than pack-native and is kept separate for that reason.
+-- Where a tag sits on a line covering two entries, it is now stated which
+-- entry it holds for: two tags that did not hold for both were corrected on
+-- 2026-09-09 and are marked below.
+-- Every single one is ManaCost 0 flat AND 0 percent.
+--
+--  spell  name                what Spell.dbc says it IS                     on
+--  48640  Strike              WEAPON_PERCENT_DAMAGE 150, 5 yd, instant      30176
+--  50729  Carnivorous Bite    SCHOOL_DAMAGE 1710-2090 + BLEED 803/tick,
+--                             5 yd, 15 s                            30176, 31104
+--  69900  Spirit Burst        SCHOOL_DAMAGE, caster-centred radius 15       30176
+--  42746  Cleave              WEAPON_PERCENT_DAMAGE 110, 5 yd. `own` holds
+--                             for 30277 ONLY (smart_scripts 30277 id 0, and
+--                             31104's id 0) - boss_elder_nadox.cpp has no
+--                             Cleave, so it is NOT the boss's own. Corrected
+--                             2026-09-09, previously tagged `own` for both.
+--                                                                   30277, 29309
+--  16509  Rend                PERIODIC_DAMAGE 460/tick, MECHANIC_BLEED,
+--                             5 yd, 15 s. EquippedItemClass 2 is harmless -
+--                             Spell::CheckItems:7205-7217 returns
+--                             SPELL_CAST_OK for any non-player caster.       30277
+--  56646  Enrage              MOD_MELEE_HASTE 30, self, 6 s         own    30277
+--  16169  Arcing Smash        WEAPON_DAMAGE +400, TARGET_UNIT_CONE_ENEMY_24
+--                             radius 8, instant                             31104
+--  60845  Shadow Nova         SCHOOL_DAMAGE, caster-centred radius 10       31104
+--  61567  Fireball            SCHOOL_DAMAGE, 40 yd, INSTANT         own    30111
+--  54889  Shadow Shock        SCHOOL_DAMAGE, caster-centred radius 25       30111
+--  61568  Flamestrike         DEST_AREA damage + PERSISTENT_AREA_AURA,
+--                             30 yd, radius 5, 2.0 s cast, 8 s     own    30111
+--  69211  Shadow Bolt         SCHOOL_DAMAGE, 30 yd, 2.2 s cast        30278, 30319
+--  56632  Tangled Webs        MOD_ROOT, Mechanic 7 ROOT, caster-centred
+--                             radius 25, 1.5 s cast, 8 s. Corrected
+--                             2026-09-09: previously tagged `pack-native`,
+--                             but smart_scripts gives 56632 to 30276
+--                             Ahn'kahar Web Winder, which is NOT a pack
+--                             member. It is Ahn'kahet-native.       zone    30278
+--  17228  Shadow Bolt Volley  SCHOOL_DAMAGE, caster-centred radius 30,
+--                             ATTR0 0x00080000 -> x18.19 at level 80        30278
+--  60015  Shadow Bolt         SCHOOL_DAMAGE, 40 yd, 3.0 s cast              30179
+--  61570  Lightning Shield    PROC_TRIGGER_DAMAGE 1600, self, 600 s own    30179
+--  61562  Shadow Bolt         SCHOOL_DAMAGE, 40 yd, 1.5 s cast              30179
+--  61563  Corruption          PERIODIC_DAMAGE 1665-1935/tick, 30 yd,
+--                             12 s                                 own    30319
+--  13338  Curse of Tongues    MOD_CASTING_SPEED_NOT_STACK -50, 30 yd,
+--                             15 s                                 own    30319
+--  56130  Brood Plague        PERIODIC_DAMAGE 1275/tick, 5 yd, 30 s own    29309
+--  32714  Enrage              MOD_MELEE_HASTE 50 + MOD_SCALE 20, self,
+--                             8 s, NO damage multiplier        pack-native 29309
+--  59126  Shadow Breath       SCHOOL_DAMAGE, TARGET_UNIT_CONE_ENEMY_24
+--                             radius 15, instant                            29309
+--
+-- 22 distinct ids. Three sit on two members each: 42746 Cleave (30277 + the
+-- boss), 50729 Carnivorous Bite (30176 + 31104) and 69211 Shadow Bolt (the two
+-- 30 yd fillers). The primary key is (entry, spellId), so that is legal, and
+-- it is what the shipped file already does - 47809 on three pack-1 members,
+-- 71264 on three, 47857 on two, 8599 on six. The one reuse deliberately NOT
+-- made is between 30277 and 31104: they draw the SAME display 27324 at the
+-- same scale (see the packs file's model block), so their kits share nothing
+-- at all.
+--
+-- 31104 Ahn'kahar Watcher casts 42746/56643/56646 in its own smart_scripts
+-- rows - the SAME three as 30277 Ahn'kahar Slasher. It is given a generic
+-- smash/bite/nova kit instead ON PURPOSE: two members of one pack sharing one
+-- rotation makes the pack read as two copies of a creature, and they already
+-- share a body. 30277 keeps the native rotation, 31104 gets the deep-tunnel
+-- sentinel's.
+--
+-- ----------------------------------------------------------------------------
+-- GLOBAL SPELLSCRIPT / DB-OVERRIDE SWEEP (the check that cost 67879 its slot)
+--
+-- PDv2's binder is an AllCreatureScript, so it beats a template ScriptName and
+-- AIName = 'SmartAI'. It does NOT beat a SpellScript: CreatureAI and
+-- SpellScript are different registries, and a spell bound in
+-- acore_world.spell_script_names runs its C++ handlers for every caster in the
+-- world. Every id in the INSERT below was therefore grepped against four
+-- tables on 2026-09-09, and all four came back EMPTY:
+--
+--   spell_script_names   (2787 rows live)   0 hits
+--   spell_linked_spell                      0 hits
+--   spell_custom_attr                       0 hits
+--   spell_proc                              0 hits
+--
+-- The one hit before the fix was 67879 Claw -> spell_black_knight_ghoul_claw
+-- (see the FIX PASS block). NOTE for whoever audits the rest of the module:
+-- 67879 is still a t0 row on 84271 and 84273 in the shipped
+-- mod_pdungeon_member_spells.sql, and those two rows carry the same threat
+-- wipe. That is outside this file's scope and is reported, not silently fixed.
+--
+-- ----------------------------------------------------------------------------
+-- RANGE - what "reaches" means here
+--
+-- UpdateCasterCombat plants a role-1 mob wherever it happens to be INSIDE
+-- ProceduralDungeon.V2.CastRangeYd - me->IsWithinCombatRange(victim,
+-- castRange), not "at exactly 25 yd" (PDv2CreatureAI.cpp:1475-1500). So a
+-- role-1 row that cannot reach 25 yd silently fails from the far edge of the
+-- hold, and the cooldown is spent on the ATTEMPT (PDv2CreatureAI.cpp:
+-- 1450-1453), which means a spell that refuses costs the mob a whole rotation
+-- slot rather than being retried. Every row on 30278, 30179 and 30319
+-- therefore reaches >= 25 yd:
+--
+--   69211 30 yd   60015 40 yd   61562 40 yd   61563 30 yd   13338 30 yd
+--   61570 30 yd   56632 radius 25   17228 radius 30
+--
+-- "range 0" means caster-centred, not "no range": 17228 Shadow Bolt Volley,
+-- 54889 Shadow Shock, 60845 Shadow Nova and 69900 Spirit Burst are all
+-- TARGET_SRC_CASTER + TARGET_UNIT_SRC_AREA_ENEMY, and it is the RADIUS that
+-- decides whether they reach - 30, 25, 10 and 15 respectively. That is why
+-- 60845 and 69900 sit only on the melee nerubians and 17228 sits on the
+-- caster. 59126 Shadow Breath and 16169 Arcing Smash are
+-- TARGET_UNIT_CONE_ENEMY_24 at radius 15 and 8: both sit on members that
+-- fight in melee and face their victim.
+--
+-- ----------------------------------------------------------------------------
+-- POWER COST
+--
+-- All 22 distinct spell ids used below are ManaCost 0 flat AND 0
+-- ManaCostPercentage - free forever, not merely affordable. That matters
+-- twice. First, the three unit_class 1 members (30176, 30277, 31104) have
+-- basemana 0 at level 80, and SpellInfo::CalcPowerCost adds a FLAT cost
+-- unconditionally, so Spell::CheckPower would fail with NO_POWER on any flat
+-- cost at all. Second, Creature::Regenerate gives an in-combat creature only
+-- Spirit/5 + 17 mana per interval, so even on the unit_class 2 casters a
+-- percentage-cost filler empties the pool in six to nine casts and then
+-- silently fails for the rest of the fight - the trap the shipped file's
+-- header argues at length about 47809/47857/42842. Six otherwise good
+-- candidates were dropped on this rule alone; they are listed in EXCLUDED.
+--
+-- 16509 Rend and 16169 Arcing Smash carry PowerType 1 (rage). That is not a
+-- problem while the cost is 0/0: Spell::CheckPower compares GetPower(type)
+-- against the cost, and 0 < 0 is false.
+--
+-- The three fillers are 69211 Shadow Bolt (30 yd) on 30278, 60015 Shadow Bolt
+-- (40 yd) on 30179 and 69211 again on 30319 - one per role-1 member, each
+-- identical to that member's casterSpellId in mod_pdungeon_packs_faceless.sql,
+-- and each comfortably past the 25 yd hold.
+--
+-- ----------------------------------------------------------------------------
+-- CC CLASSIFICATION (aura/mechanic read out of Spell.dbc, not guessed)
+--
+--  spell  name           why it is CC                              placed
+--  56632  Tangled Webs   Mechanic 7 ROOT, aura MOD_ROOT, 8 s       30278 @50
+--
+-- ONE CC in the whole pack, at cooldownMs 60000 and minDiff 50, never in
+-- slot 0 - the rule the shipped file's own CC table enforces. No other row
+-- here carries a CC mechanic or aura; MECHANIC_BLEED on 50729 and 16509 is
+-- not CC, and neither is 13338's casting-speed debuff nor 32714's melee
+-- haste.
+--
+-- 13338 Curse of Tongues stays OUT of that table on the merits - Mechanic 0,
+-- and MOD_CASTING_SPEED_NOT_STACK is in none of the module's CC aura sets -
+-- but its two numbers were being stated in two different tables and never put
+-- together, which this file does do for 32714, 61568 and 56632. Together they
+-- read: SpellDuration 15000 ms on a 12000 ms row is PERMANENT UPTIME. From
+-- difficulty 75 a single Twilight Darkcaster keeps -50 % casting speed on its
+-- target without a gap for the whole fight, and Unit::ApplyCastTimePercentMod
+-- (Unit.cpp:13500-13510) turns that into a x1.5 cast time on the victim - so
+-- every caster and healer it is on casts half again as slow, permanently.
+-- It does NOT stack (NOT_STACK is in the aura name), so a second Darkcaster
+-- adds nothing, and it is 30319's own spell. The row class is precedented:
+-- the shipped file carries the pure-debuff t75 rows 50511 Curse of Weakness
+-- and 1010 Curse of Idiocy and the self-buff 70654 Blood Armor. It is
+-- recorded here because it is the pack's second most player-visible control
+-- effect after the root, not because it is a defect.
+--
+-- The CC is a ROOT and that is a deliberate choice over the fears this
+-- creature family also offers (34322 Psychic Scream was on the shortlist).
+-- Map 760 has no terrain outside the generated platform, so a fear can walk a
+-- player off the edge; a root cannot. It is the same reasoning that keeps
+-- 56640/59106 Web Grab (SPELL_EFFECT_PULL_TOWARDS) out of this file, and the
+-- same reasoning the shipped file records for 62129's knock-back.
+--
+-- ----------------------------------------------------------------------------
+-- EXCLUDED, AND WHY - every one of these fails SILENTLY in game
+--
+--  56643          Triple Slash (30277's own)
+--                 PERIODIC_TRIGGER_SPELL on TARGET_UNIT_CASTER -> 56645 lands
+--                 on the CASTER: ~2370-3300 self damage per cast at level 80
+--                 and nothing on the player. See the FIX PASS block.
+--  26662 / 64112  Berserk (Nadox's own) and its SPELL_AURA_LINKED partner
+--                 x6 damage, x2.5 swing speed, 300 s; the linked 64112 adds
+--                 +150 % run speed, MECHANIC_IMMUNITY_MASK 1630 (root, charm,
+--                 confuse, disarm, distract, grip, sleep) and +25 % scale. The
+--                 speed buff alone is what this file's own 56354 Sprint
+--                 exclusion forbids. See the FIX PASS block.
+--  67879          Claw
+--                 acore_world.spell_script_names -> spell_black_knight_ghoul_
+--                 claw: ResetAllThreat() + random re-target on every hit.
+--  8599           Enrage
+--                 the module's usual enrage, and the id both reviews asked
+--                 for. MEASURED at level 80 it is NOT the "+10 % damage" the
+--                 reviews assert: MOD_DAMAGE_PERCENT_DONE basePoints 10 with
+--                 EffectRealPointsPerLevel 1.0 and BaseLevel 1 resolves to
+--                 10 + 79 = +89 % for 120 s, i.e. permanent on a 10 000 ms
+--                 row. On a DamageModifier 7.5 boss that is the same
+--                 structural fault as 26662 at a fifth of the size, and with
+--                 miscValue 127 it would multiply Brood Plague and Shadow
+--                 Breath too. 32714 Enrage - 30277's own alternative, +50 %
+--                 MELEE HASTE and +20 % scale for 8 s, no damage term, no
+--                 linked aura - takes the slot instead. It is finite, it is
+--                 visible, and it cannot touch the boss's spell damage.
+--  48687          Shadow Bolt Volley
+--                 549-741 at level 80 against 17228's 2328-3128. Four times
+--                 weaker, not four times stronger; see the FIX PASS block.
+--  47867          Curse of Doom
+--                 PERIODIC_DAMAGE 7300 with an EffectAuraPeriod equal to its
+--                 whole 60 000 ms duration - it fires ONCE, sixty seconds
+--                 after the cast. A PDv2 room rarely lives that long, so the
+--                 damage usually never lands. (Shipped on 84265 and 84280;
+--                 recorded here, not fixed here.)
+--  31340 / 31341  Rain of Fire / Unquenchable Flames
+--                 31340 is 0/0 and on-theme for 30111, but its effect 2 is a
+--                 PERSISTENT_AREA_AURA carrying PERIODIC_TRIGGER_SPELL ->
+--                 31341, and 31341's own effect targets TARGET_UNIT_CASTER
+--                 with PERIODIC_DAMAGE 1251. That is the trigger-on-the-aura-
+--                 holder shape that condemned 56643, one indirection further
+--                 out, and it could not be settled without a live test.
+--  42395          Lacerating Slash
+--                 1735 per tick x 9 = 15615 per cast, above the band this
+--                 pack keeps; 16509 Rend does the same job at 2300.
+--  42397 / 48130  Rend Flesh / Gore
+--                 17525-18825 and 12598-13402 per cast. Same reason.
+--  22644          Blood Leech
+--                 SPELL_EFFECT_HEALTH_LEECH - a heal effect by another name,
+--                 and only 240 at level 80.
+--   9034 / 47960  Immolate / Shadowflame
+--                 326 and 544 per cast at level 80, one thirteenth and one
+--                 third of the rows beside them.
+--  48125          Shadow Word: Pain R12                ManaCostPct 22
+--  47811 / 27215  Immolate R11 / R9                    ManaCostPct 17
+--  47864          Curse of Agony R7                    ManaCostPct 10
+--  20823          Fireball                             ManaCost 90 flat
+--  12739          Shadow Bolt (30319's own, normal)    ManaCost 90 flat
+--  56858          Flamestrike (30111's own, normal)    ManaCost 260 flat
+--  28902          Bloodlust (30179's own low-hp buff)  ManaCost 10 flat, and
+--                 SPELL_AURA_MELEE_SLOW on itself
+--                 The seven above all work, and all break this file's one hard
+--                 power rule: 0 flat AND 0 percent on every row.
+--  56119 / 56120  Summon Swarmers / Summon Swarm Guardian (Nadox's own)
+--                 SPELL_EFFECT_SUMMON. A summoned add is not a pack member,
+--                 never enters _roomAlive, and the room counter is the whole
+--                 clear condition (PDv2InstanceScript.cpp:707-709).
+--  59465          Brood Rage (Nadox's own, heroic)
+--                 TARGET_UNIT_NEARBY_ENTRY - it buffs a nearby swarmer. With
+--                 the summons excluded there is no ally to buff.
+--  56354          Sprint (npc_ahnkahar_nerubian's own)
+--                 SPELL_AURA_MOD_INCREASE_SPEED. A movement-speed buff fights
+--                 the module's own grid waypoint motion.
+--  56151          Guardian Aura (30176's own)
+--                 the ally buff Nadox's script takes from the add; nothing in
+--                 a PDv2 room consumes it.
+--  56281          Swarm (Nadox's own)
+--                 a fine self buff, but SpellDuration -1: it never falls off.
+--  56698 / 59102  Shadow Blast (30278's own, and its ONLY real nuke)
+--                 6000 ms cast time and 900 flat ManaCost. ScriptedAI::
+--                 DoMeleeAttackIfReady returns early on UNIT_STATE_CASTING,
+--                 so a 6 s cast is most of a rotation spent not swinging.
+--  56702 / 59103  Shadow Sickle (30278's own)
+--                 range 0 with no area target and 250 flat ManaCost - it
+--                 cannot reach from a 25 yd hold. 30278's whole native
+--                 rotation is these four ids, which is why its kit is built
+--                 from the generic pool plus the Ahn'kahet-native 56632.
+--  56711 / 56713  Image Channel (30111's, 30179's and 30319's own)
+--                 SPELL_AURA_DUMMY with no consumer once Jedoga's script is
+--                 unbound - the cast would visibly do nothing. The guard's
+--                 dummy rule does not catch this one (the EFFECT is
+--                 APPLY_AURA, not DUMMY); it is a manual exclusion.
+--  11986          Healing Wave (30179's own)
+--                 SPELL_EFFECT_HEAL. No self-heal loops in a pack kit -
+--                 ModifyHealReceived is deliberately not hooked
+--                 (PDv2Scaling.cpp:317-321).
+--  17290 / 56898  Fireball / Corruption (30111's and 30319's own)
+--                 usable, but 90 and 80 FLAT ManaCost against the free
+--                 61567 / 61563 that do the same job.
+--  59363          Acid Splash
+--                 TARGET_DEST_CASTER + TARGET_UNIT_DEST_AREA_ENTRY, i.e. an
+--                 ENTRY-filtered area target: it selects by creature entry,
+--                 not by hostility, so it is not a player-facing spell.
+--                 (Shipped as a t0 row on 84266 and 84278; recorded, not
+--                 fixed here.)
+--  60833 / 60848  Shadow Crash (Herald Volazj's signature)
+--                 rangeMin 10 - it refuses whenever the player is closer than
+--                 10 yd. Excluded with its caster (see the packs file).
+--  34322          Psychic Scream   a fear on a map with no terrain (see CC)
+--  56640 / 59106  Web Grab         SPELL_EFFECT_PULL_TOWARDS
+--
+-- ----------------------------------------------------------------------------
+-- ONE OBSERVED OVERLAP, AND THE ONLY REFLECT IN THE MODULE
+--
+-- 30179 Twilight Apostle spawns with creature_template_addon.auras 12550
+-- "Lightning Shield" (PROC_TRIGGER_DAMAGE, 2 damage) and its t50 row casts
+-- 61570 "Lightning Shield" (PROC_TRIGGER_DAMAGE, 1600 damage, 50 % chance,
+-- TEN charges). Two different spell ids with the same name; the cast one is by
+-- far the stronger and the 12550 half is noise.
+--
+-- What the 61570 half does was RE-MEASURED 2026-09-09, because the first cut
+-- of this block called it "bounded by its charge count, and the pair is
+-- harmless either way" and a later review read the bound the other way - that
+-- the charges reset every 10 s with the row cooldown, for ~1600 dps of
+-- unavoidable retaliation. Neither is right:
+--
+--   * The bound IS real, and it is the CHARGES and not the row. 61570's
+--     attr0 0x02050000 carries SPELL_ATTR0_COOLDOWN_ON_EVENT (0x02000000),
+--     which SpellInfo::IsCooldownStartedOnEvent() keys on directly
+--     (SpellInfo.cpp:1244-1247): the spell is unusable while its own effect is
+--     still up, and its cooldown does not even START until the effect wears
+--     off. SpellDuration is 600000 ms, so the Apostle re-casts only once the
+--     ten charges are SPENT - not once per 10000 ms row cooldown.
+--   * The reflect is 1601 per proc at ProcChance 50 with ProcCharges 10, i.e.
+--     a hard ceiling of ~16000 per cast, and it takes roughly twenty
+--     qualifying hits on the Apostle to spend that.
+--   * ProcTypeMask 0x222A8 retaliates against EVERY damage type and not only
+--     melee: TAKEN_MELEE_AUTO_ATTACK, TAKEN_SPELL_MELEE_DMG_CLASS,
+--     TAKEN_RANGED_AUTO_ATTACK, TAKEN_SPELL_RANGED_DMG_CLASS,
+--     TAKEN_SPELL_NONE_DMG_CLASS_NEG, TAKEN_SPELL_MAGIC_DMG_CLASS_NEG and
+--     DONE_TRAP_ACTIVATION. A ranged group does not dodge it.
+--
+-- So its sustained rate is bounded by charge CONSUMPTION rather than by the
+-- row cooldown, and that is exactly why it is the one row in the level-80
+-- table carrying `n/a` instead of a ~dps figure: a per-second number is not
+-- derivable from the row, only from how fast a group feeds it hits. It is
+-- also the only PROC_TRIGGER_DAMAGE / DAMAGE_SHIELD / REFLECT_SPELLS aura in
+-- the module's whole pack corpus, and the only member of this pack with a
+-- shield visual, which is the point of giving it that row. A difficulty-50
+-- pull on 30179 is the one number in this pack that cannot be settled from
+-- the data.
+--
+-- ----------------------------------------------------------------------------
+-- ONE CAST-TIME COST, ACCEPTED ON PURPOSE
+--
+-- 30111 Twilight Worshipper is role 0 (melee) and its t75 row 61568
+-- Flamestrike has a 2.0 s cast, so that mob stops swinging for two seconds
+-- once every 12 s at difficulty 75+. It is kept because it is the zealot's
+-- own signature and because a robed cultist that occasionally plants a fire
+-- patch is what makes it read as a cultist rather than another melee body.
+-- Its two lower rows (61567 Fireball, 54889 Shadow Shock) are both instant.
+--
+-- Note what 61568 actually costs a PLAYER, because it is this pack's biggest
+-- single number: 6938-8062 on the direct hit, plus 3500 per tick for four
+-- ticks ONLY for as long as somebody stands in the patch. A player who steps
+-- out takes the direct hit alone. It is a move-out-of-it mechanic, not a
+-- 22 000 burst, and it is the only one this pack has.
+--
+-- ----------------------------------------------------------------------------
+-- The CREATE TABLE IF NOT EXISTS block below is REDUNDANCY, and this header's
+-- earlier claim that it is what keeps the file applying on a fresh database
+-- was WRONG. Measured: the AC updater sorts by filename with a plain
+-- std::string compare (UpdateFetcher.cpp:521-524, PathCompare), '.' is 0x2E
+-- and '_' is 0x5F, so `mod_pdungeon_member_spells.sql` sorts BEFORE
+-- `mod_pdungeon_member_spells_faceless.sql` - and that file carries its own
+-- `CREATE TABLE IF NOT EXISTS pdungeon_member_spells` (line 238). On a fresh
+-- world database the table therefore already exists by the time this file
+-- runs. The block is kept anyway, byte-identical to the canonical definition,
+-- so this file stays self-contained if the shipped one is ever renamed or
+-- split; IF NOT EXISTS makes it free either way.
+--
+-- THIS FILE SHIPS ZERO creature_template AND ZERO spell_dbc ROWS.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS `pdungeon_member_spells` (
+  `entry` INT UNSIGNED NOT NULL,
+  `spellId` INT UNSIGNED NOT NULL,
+  `slot` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `cooldownMs` INT UNSIGNED NOT NULL DEFAULT 8000,
+  `minDiff` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (`entry`, `spellId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Idempotent re-apply: delete this file's own entries, then insert. Never
+-- DROP - an operator who gave a creature of their own a kit keeps it. The
+-- delete is an EXPLICIT entry list, not a BETWEEN: the entries run from 29309
+-- to 31104, and a range delete over that span would wipe an operator's rows
+-- for nearly two thousand unrelated templates.
+DELETE FROM `pdungeon_member_spells` WHERE `entry` IN
+ (29309,30111,30176,30179,30277,30278,30319,31104);
+
+INSERT INTO `pdungeon_member_spells`
+  (`entry`, `spellId`, `slot`, `cooldownMs`, `minDiff`, `enabled`) VALUES
+  -- ==========================================================================
+  -- PACK 8 "Ahn'kahet Deep" - MELEE (role 0)
+  -- ==========================================================================
+  -- 30176 Ahn'kahar Guardian  npc_ahnkahar_nerubian  (uc1, type 6, lootid 0)
+  (30176, 48640, 1,  6000,  1, 1),  -- Strike            150% weapon 2371-3299   t0
+  (30176, 50729, 1, 10000, 50, 1),  -- Carnivorous Bite  5725-6105, bleed 15 s   t50
+  (30176, 69900, 1, 12000, 75, 1),  -- Spirit Burst      3238-3762, radius 15    t75
+  -- 30277 Ahn'kahar Slasher  (uc1, type 6) - its own Cleave and Enrage, plus a bleed
+  (30277, 42746, 1,  7000,  1, 1),  -- Cleave            110% weapon 1739-2419 own t0
+  (30277, 16509, 1, 10000, 50, 1),  -- Rend              bleed 460 x5 = 2300     t50
+  (30277, 56646, 1, 12000, 75, 1),  -- Enrage            self melee haste 6 s own t75
+  -- 31104 Ahn'kahar Watcher  (uc1, type 6, addon aura 18950 = detection only)
+  (31104, 16169, 1,  6000,  1, 1),  -- Arcing Smash      weapon +400, cone 8 yd  t0
+  (31104, 50729, 1, 10000, 50, 1),  -- Carnivorous Bite  5725-6105, bleed 15 s   t50
+  (31104, 60845, 1, 12000, 75, 1),  -- Shadow Nova       2775-3225, radius 10    t75
+  -- 30111 Twilight Worshipper  (uc2, type 7, role 0 by demotion - see the packs file)
+  (30111, 61567, 1,  7000,  1, 1),  -- Fireball          40 yd 4163-4837 instant own t0
+  (30111, 54889, 1, 10000, 50, 1),  -- Shadow Shock      2960-3440, radius 25    t50
+  (30111, 61568, 1, 12000, 75, 1),  -- Flamestrike       6938-8062 + patch  own  t75
+  -- ==========================================================================
+  -- PACK 8 "Ahn'kahet Deep" - RANGE (role 1) - filler + two cooldown spells
+  -- ==========================================================================
+  -- 30278 Ahn'kahar Spell Flinger  (uc2, type 6, mana 19970)
+  (30278, 69211, 0,     0,  1, 1),  -- Shadow Bolt       30 yd 1313-1687, 0 mana t0 FILLER
+  (30278, 56632, 1, 60000, 50, 1),  -- Tangled Webs      25 yd  CC (MOD_ROOT)    t50
+  (30278, 17228, 1, 12000, 75, 1),  -- Shadow Bolt Volley 2328-3128, radius 30   t75
+  -- 30179 Twilight Apostle  (uc2, type 7, mana 31952, addon aura 12550)
+  (30179, 60015, 0,     0,  1, 1),  -- Shadow Bolt       40 yd 1273-1427, 0 mana t0 FILLER
+  (30179, 61570, 1, 10000, 50, 1),  -- Lightning Shield  1600/proc, 10 charges own t50
+  (30179, 61562, 1, 12000, 75, 1),  -- Shadow Bolt       40 yd 4250-5750, 1.5 s  t75
+  -- 30319 Twilight Darkcaster  (uc2, type 7, mana 15976) - two of its three are its own
+  (30319, 69211, 0,     0,  1, 1),  -- Shadow Bolt       30 yd 1313-1687, 0 mana t0 FILLER
+  (30319, 61563, 1, 10000, 50, 1),  -- Corruption        30 yd DoT 12 s      own t50
+  (30319, 13338, 1, 12000, 75, 1),  -- Curse of Tongues  30 yd cast speed -50% own t75
+  -- ==========================================================================
+  -- PACK 8 "Ahn'kahet Deep" - BOSS (role 2)
+  -- ==========================================================================
+  -- 29309 Elder Nadox  boss_elder_nadox  (uc2, rank 1, 214200 hp)
+  (29309, 42746, 1,  7000,  1, 1),  -- Cleave            110% weapon 1719-2399   t0
+  -- Round C / C6: a second base ability per boss (operator, 2026-09-08: "2 Basis, dann je eine auf 50 und 75")
+  (29309, 56130, 1,  9000,  1, 1),  -- Brood Plague      1275/tick x10, 30 s own t0 #2
+  (29309, 32714, 1, 10000, 50, 1),  -- Enrage            +50% haste +20% scale 8 s t50
+  (29309, 59126, 1, 12000, 75, 1);  -- Shadow Breath     8788-10212, cone 15 yd  t75

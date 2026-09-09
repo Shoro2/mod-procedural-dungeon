@@ -25,6 +25,7 @@
 #include "Log.h"
 #include "Opcodes.h"
 #include "PDDefines.h"
+#include "PDv2InstanceScript.h"
 #include "PDv2Mgr.h"
 #include "PDv2UILink.h"
 #include "Player.h"
@@ -306,7 +307,8 @@ class PDClientLinkPlayerScript : public PlayerScript
 public:
     PDClientLinkPlayerScript() : PlayerScript("PDClientLinkPlayerScript",
         { PLAYERHOOK_ON_BEFORE_SEND_CHAT_MESSAGE, PLAYERHOOK_CAN_ENTER_MAP,
-          PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_BEFORE_LOGOUT }) { }
+          PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_BEFORE_LOGOUT,
+          PLAYERHOOK_CAN_REPOP_AT_GRAVEYARD }) { }
 
     // Sends the player home BEFORE the logout save, which is the only way to
     // keep the dungeon position out of the DB row. Two earlier attempts
@@ -421,6 +423,27 @@ public:
         LOG_INFO(PDungeon::PD_LOG, "PDv2 link: denied map entry for {} ({})",
                  player->GetName(), whyNot);
         return false;
+    }
+
+    // Round B / B1: a player who presses 'release' within the second before
+    // the instance's tick resurrects them must not be sent to a graveyard -
+    // zone 5100 has no graveyard_zone row, and the core's fallback for a
+    // missing one is Westfall (GameGraveyard.cpp:161-165). While a respawn is
+    // pending the release is simply refused; the tick then removes the ghost
+    // aura and the corpse on its own, so nothing is left for the player to do
+    // but wait out that one second.
+    bool OnPlayerCanRepopAtGraveyard(Player* player) override
+    {
+        if (!sPDv2Mgr->IsEnabled() || !player ||
+            player->GetMapId() != sPDv2Mgr->GetConfig().mapId)
+        {
+            return true;
+        }
+        if (auto* script = dynamic_cast<PDungeon::PDv2InstanceScript*>(player->GetInstanceScript()))
+        {
+            return !script->HasPendingRespawn(player->GetGUID());
+        }
+        return true;
     }
 };
 
