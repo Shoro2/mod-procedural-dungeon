@@ -121,6 +121,26 @@ Treasure rooms hold bonus chests, the shrine buffs the party once per run.
   displays (M2 pieces do not block creature vision).
 - **Layout knobs** (`mod_procedural_dungeon.conf`): grid size, room count and
   sizes, loop chance, pack sizes, torch density, spawn batching.
+- **Creature packs** (`pdungeon_packs` / `pdungeon_pack_members` /
+  `pdungeon_member_spells`): **eight** packs ship today — 1 Crypt Horrors,
+  2 Abyssal Broodpit, 3 Lords of the Deep, 4 Barrow Dead, 5 Legion Rift,
+  6 Shadowfang Pack, 7 Cult of the Damned, 8 Ahn'kahet Deep — one theme per
+  room, with the boss drawn from the role-2 pool across all packs and no boss
+  appearing twice in a run while the pool allows it. Every pack **references**
+  stock creature entries and adds no `creature_template` or `spell_dbc` row of
+  its own, so adding a pack is pure data: a `.sql` pair that deletes and
+  re-inserts its own `packId` only. Add one by copying a sibling file rather
+  than by hand — the header of each records what has to be measured (health,
+  swing, silhouette, loot, immunities, and the `SpellDifficulty` substitution
+  that decides whether the spell id you wrote is the spell the core casts).
+- **No dungeon kill grants reputation.** The module calls
+  `Creature::SetReputationRewardDisabled(true)` on every creature it spawns —
+  room mobs, patrols, ambushes, split children and critters alike — so stock
+  entries that carry a `creature_onkill_reputation` row cannot turn a generated
+  dungeon into a reputation faucet (pack 7's Scholomance trash would otherwise
+  pay +10 Argent Dawn per kill, to Exalted, with no turn-in). It is a code
+  switch, not a data patch, so no stock table is retuned and every future pack
+  inherits it; there is deliberately no per-pack opt-out.
 - **Base map**: `ProceduralDungeon.BaseMapId` + the matching SQL block in
   `mod_pdungeon_base.sql` (prepared variants: 451 Development Land,
   169 Emerald Dream, 44 Monastery).

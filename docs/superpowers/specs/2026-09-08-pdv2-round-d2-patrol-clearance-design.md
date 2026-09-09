@@ -1,7 +1,24 @@
 # PDv2 Round D2 — patrol clearance: the kit tells the planner where a body actually fits
 
-**Date** 2026-09-08 (evening) · **Branch** `claude/pdv2-round-c-0cf92ad4` (tip `e5dd64a`) · **Status** design,
-decided by the session lead from the operator's T2 finding and the measurement below; not implemented.
+**Date** 2026-09-08 (evening) · **Branch** `claude/pdv2-round-c-0cf92ad4` (tip at writing `e5dd64a`) ·
+**Status IMPLEMENTED, evidence tier T1** — `e23f0a9` (kit: chunk meta v26, the clearance layer),
+`c2ca4d3` (module: clear-point waypoints, `tightPerQuarter` / `minClearQ`, the two-pass plan) and
+`a565b5e` (the follow-up below), **deployed locally 2026-09-09**. T2 is still owed: the operator has
+not re-run runde30 §3 against the deployed build.
+
+**One decision below was refuted by implementing it — read decision 5 with this.** `MergeCollinear`
+merges on CELLS, so it threw every intermediate clear point away again and 16 of the kit's 66
+theme-2 corridor lane runs still walked into a facade box: only the two ends of a straight run kept
+their clear point. `a565b5e` adds `MergeClearPoints` beside `MergeCollinear` (never inside it) —
+the cell rule first and unconditionally, then "drop this cell only while the resulting leg still
+passes every clear point it swallows within `PD_PATROL_MERGE_TOLERANCE_Q` = 2 quarter-yards = 0.5
+yd", re-tested over the whole run on each drop, in integer 1/12-yard arithmetic so MSVC and gcc
+agree on the waypoint count. Both patrol plan sites take it; the spawn-side beat deliberately keeps
+the RAW cell chain (`SpawnPatrols` needs cell *k* to seat follower *k*, and a merged list has no
+cell *k*); the chase is untouched. It is not idempotent, and that is documented rather than fixed.
+`PD_OPERATOR_PATROL_PIN` moved once more and is the only pin that did — 30 waypoints to 85 over the
+twelve corridor beats, with `cells` / `cost` / `offsetSum` unchanged because they are read off the
+raw chain. Decision 6's `k:waypoints:cells:cost:offsetSum` shape survived intact.
 
 Operator (T2 of Round D): *"die pat geht noch immer durch das haus. das problem ist, dass der durchgang durch
 die häuser nicht immer mittig ist, sondern dass diese teilweise rechts oder links weiter in den gang ragen,

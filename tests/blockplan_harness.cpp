@@ -5057,6 +5057,18 @@ namespace
     // to fill a trash slot with), and a room themed to pack 2 must still get
     // caster picks - from the merged pool, since pack 2 has none of its own -
     // while its melee slots stay pack 2.
+    //
+    // Packs 4-8 are absent BY DESIGN and adding them would be a regression.
+    // Live there are eight (4 "Barrow Dead" and 5 "Legion Rift" from
+    // `_undead_demon.sql`, then Round C's 6 "Shadowfang Pack", 7 "Cult of the
+    // Damned" and 8 "Ahn'kahet Deep"), and every one of the five carries melee
+    // AND caster AND boss - which is to say every one of them is the EASY
+    // case. The two rules this fixture exists to hold are only expressible by
+    // the awkward shapes of packs 1-3: a pack with no caster of its own, and a
+    // pack with no trash at all. Mixing the easy packs in would move every pin
+    // in this section and buy no coverage. The pool that DOES track the live
+    // tables' growth is the boss one, and BossDrawPackPools below says why it
+    // stays frozen too.
     PackPools ThemeCoherencePackPools()
     {
         PackPools pools;
@@ -5198,15 +5210,35 @@ namespace
     // pick per boss room over the whole role-2 pool, so a repeat was the
     // design (`.superpowers/sdd/c-research-bosses-triangles.md` §1.5).
     //
-    // The five entries below ARE the live role-2 pool, taken from
-    // `pdungeon_pack_members WHERE role = 2` on 2026-09-08 (research §1.4):
-    // 84288 Dralak, 84289 Lord Maltrion, 84290 Mor'Kar (pack 3), 25352
-    // Scourge Overlord (pack 4), 29620 Dreadlord Mal'Ganis (pack 5). Five is
-    // what makes this fixture able to say anything at all: the rule binds
-    // only while the pool holds MORE distinct bosses than the run has boss
-    // rooms, and the game math asks for up to four (`GameBossRooms(30)`), so
-    // a three-boss fixture would go vacuous exactly where the rule matters
-    // most.
+    // The five entries below WERE the whole live role-2 pool when this pin was
+    // captured, taken from `pdungeon_pack_members WHERE role = 2` on
+    // 2026-09-08 (research §1.4): 84288 Dralak, 84289 Lord Maltrion, 84290
+    // Mor'Kar (pack 3), 25352 Scourge Overlord (pack 4), 29620 Dreadlord
+    // Mal'Ganis (pack 5). Five is what makes this fixture able to say anything
+    // at all: the rule binds only while the pool holds MORE distinct bosses
+    // than the run has boss rooms, and the game math asks for up to four
+    // (`GameBossRooms(30)`), so a three-boss fixture would go vacuous exactly
+    // where the rule matters most.
+    //
+    // THE LIVE POOL IS NO LONGER FIVE, AND THIS FIXTURE STAYS AT FIVE ON
+    // PURPOSE. Round C added three packs - 6 "Shadowfang Pack" (boss 27580
+    // Selas), 7 "Cult of the Damned" (29934 Acolyte of Agony) and 8 "Ahn'kahet
+    // Deep" (29309 Elder Nadox) - so `WHERE role = 2` returns EIGHT rows on a
+    // database with all four pack files applied (measured 2026-09-09: 8 packs,
+    // 76 members, 226 kit rows).
+    //
+    // This is a FROZEN SAMPLE, not a mirror of the tables, and nothing in this
+    // file reads the database - the harness is engine-free and cannot. Do NOT
+    // "re-sync" it when a pack is added. Growing it to eight would DESTROY the
+    // property the pin beside it is built on: four boss rooms out of five
+    // bosses is the TIGHTEST the rule ever runs, with exactly one entry left
+    // un-drawn, and four out of eight leaves four spare and would pass under a
+    // rule that filtered one draw too late. The fixture is sized for the
+    // branch, and the branch has not changed. What a new pack DOES owe this
+    // file is a check that the shape assumptions still hold: more distinct
+    // bosses than `GameBossRooms(V2.DlvlCap)` boss rooms (8 > 4 today, so the
+    // no-repeat clause binds on every real run and BossFallbackPackPools below
+    // stays the only place the other clause is reachable at all).
     //
     // Packs 4 and 5 carry no trash member here. That costs the boss draw
     // nothing - the boss slot is exempt from theming and always draws from
