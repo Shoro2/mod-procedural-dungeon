@@ -40,9 +40,9 @@
 -- melee mob's swings; its power cost is affordable for that creature's real
 -- level-80 pool.
 --
--- SIX STEPS were added after earlier cuts of this file shipped spells whose
+-- SEVEN STEPS were added after earlier cuts of this file shipped spells whose
 -- behaviour none of the above could see. All 23 distinct ids below were run
--- through all six:
+-- through all seven:
 --
 --   1. acore_world.spell_script_names. A SpellScript is bound to the SPELL,
 --      and lives in a different registry from AllCreatureScript - so PDv2's
@@ -111,6 +111,31 @@
 --      That is harmless under this file's 12000 ms row, but a future row at
 --      8000 under a 10000 ms RecoveryTime would silently skip, so the number
 --      is written down.
+--   7. ON-NEXT-SWING, the second Attributes bit. Step 4 already reads
+--      Attributes for the 0x80000 scaler; this bit was not read until now.
+--      FIVE of the 23 ids carry 0x00000004, measured out of Spell.dbc field 4
+--      (2026-09-09): 14516 Strike 0x00050014, 48640 Strike 0x00050014, 16169
+--      Arcing Smash 0x00040014, 42746 Cleave 0x00040014 and 59992 Cleave
+--      0x00040014. In this core 0x4 is SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE
+--      ("on next melee, type 1", SharedDefines.h:372) and 0x400 is
+--      SPELL_ATTR0_ON_NEXT_SWING ("type 2", SharedDefines.h:380); the two are
+--      handled identically and none of the 23 carries 0x400. Such a spell
+--      REPLACES the next auto-attack instead of adding a hit:
+--      Spell::IsNextMeleeSwingSpell tests exactly that bit
+--      (Spell.cpp:8128-8131), and Unit::AttackerStateUpdate sets
+--      `meleeAttack = false` on it with the comment "The melee attack is
+--      replaced by the melee spell" (Unit.cpp:2796-2801).
+--      WHAT THAT MEANS FOR THE TABLE BELOW: the dps column adds the caster's
+--      whole swing midpoint to those five abilities, so their five figures are
+--      the damage of the ABILITY EVENT and not its margin over the swing it
+--      consumes - up to 3-4.5x the marginal number in the worst case. The
+--      direction is OVERSTATEMENT, which is the safe direction for a "is this
+--      too hot" question, so no row is retuned on it: 59992 and 48640 already
+--      run in the LIVE data at this cadence (59992 on 84264, 84284, 84288 and
+--      the shipped boss 25352; 48640 on 84284 and on four pack-5 members),
+--      16169 and 42746 are used the same way by the sibling pack-8 file added
+--      in this round, and only 14516 is new here. It is written down because
+--      the column would otherwise read as marginal dps.
 --
 -- Every "(its own)" note was measured too - smart_scripts action_type 11 for
 -- that entry - not inherited from a design document.
@@ -140,6 +165,7 @@
 --   42746  110% weapon damage, 5 yd, up to 3 targets            ~115 (7 s)
 --   50729  1710-2090 + bleed 803 x 5 = 5725-6105 over 15 s      ~592 (10 s)
 --   60845  2775-3225, self 10 yd area                           ~250 (12 s)
+--          ...and ~300 on the BOSS, whose own row is cd 10000, not 12000
 --   69211  1313-1687, 30 yd, 2.2 s cast              FILLER      ~682
 --   48125  230 x 6 ticks = 1380 over 18 s, 30 yd                ~138 (10 s)
 --   48687  549-741, 30 yd area, 1.5 s cast                       ~54 (12 s)
@@ -147,7 +173,7 @@
 --   47960  136 x 4 ticks = 544 over 8 s, 100 yd                  ~54 (10 s)
 --   54889  2960-3440, self 25 yd area                           ~267 (12 s)
 --   47864  145 x 12 ticks = 1740 over 24 s, 30 yd               ~174 (10 s)
---   17228  623-838, self 30 yd area, instant  (x4.8747)          ~61 (12 s)
+--   17228  624-838, self 30 yd area, instant  (x4.8747)          ~61 (12 s)
 --   59992  weapon swing +240, 5 yd, up to 3 targets             ~569 (7 s, boss swing)
 --   34240  980-1470, 20 yd, 40 yd cone, instant                 ~136 (9 s, boss)
 --   69581  3750-6250 + 2000 x 2 ticks = 7750-10250, 30 yd       ~750 (12 s, boss)
@@ -373,8 +399,11 @@
 --              from the cult that spread the plague.
 --
 -- The economy this pack brings with it - the seven trash members keep their
--- native Scholomance tables, the boss has lootid 0 and drops nothing at all -
--- is argued in full in mod_pdungeon_packs_cult.sql and belongs in the operator
+-- native Scholomance tables, the boss has lootid 0 and drops nothing at all,
+-- and the +10 Argent Dawn per kill that all seven templates carry is switched
+-- off for the whole dungeon in PDv2InstanceScript::SpawnTaggedMob
+-- (PDv2InstanceScript.cpp:1273) rather than by swapping the creatures - is
+-- argued in full in mod_pdungeon_packs_cult.sql and belongs in the operator
 -- document before the first run, not after.
 --
 -- THIS FILE SHIPS ZERO creature_template AND ZERO spell_dbc ROWS. Every spell
@@ -447,7 +476,7 @@ INSERT INTO `pdungeon_member_spells`
   -- 10471 Scholomance Acolyte  (unit_class 2, 11982 mana) - the novice
   (10471, 60015, 0,     0,  1, 1),  -- Shadow Bolt   1273-1427, 40 yd, 3.0 s   ~450  t0 FILLER
   (10471, 47864, 1, 10000, 50, 1),  -- Curse of Agony R9  1740 over 24 s, 10 %       t50
-  (10471, 17228, 1, 12000, 75, 1),  -- Shadow Bolt Volley  623-838, self 30 yd AoE   t75
+  (10471, 17228, 1, 12000, 75, 1),  -- Shadow Bolt Volley  624-838, self 30 yd AoE   t75
   -- ==========================================================================
   -- PACK 7 "Cult of the Damned" - BOSS (role 2)
   -- ==========================================================================
@@ -456,5 +485,5 @@ INSERT INTO `pdungeon_member_spells`
   (29934, 59992, 1,  7000,  1, 1),  -- Cleave        swing +240, 5 yd, 3 targets     t0
   -- Round C / C6: a second base ability per boss (operator, 2026-09-08: "2 Basis, dann je eine auf 50 und 75")
   (29934, 34240, 1,  9000,  1, 1),  -- Carrion Swarm  980-1470, 20 yd, 40 yd cone    t0 #2
-  (29934, 60845, 1, 10000, 50, 1),  -- Shadow Nova   2775-3225, self 10 yd  (as 11551)   t50
+  (29934, 60845, 1, 10000, 50, 1),  -- Shadow Nova   2775-3225, self 10 yd ~300 (as 11551 @12 s: 250)  t50
   (29934, 69581, 1, 12000, 75, 1);  -- Pustulant Flesh  7750-10250, 30 yd, 10 s      t75

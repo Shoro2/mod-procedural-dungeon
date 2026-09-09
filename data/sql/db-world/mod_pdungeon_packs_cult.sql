@@ -94,8 +94,26 @@
 --   drop its `weight` below 100. Editing creature_template.flags_extra here
 --   would retune Scholomance itself and is out of scope for a pack file.
 --
--- Health lands in 12822..26710 for the trash - the same band as the shipped
--- 84263-84290 trash (12600..32000) - and the difficulty dial does the rest.
+--   Two further facts about that row, so neither is discovered in game. First,
+--   10488 would be the pool's FIRST dual wielder: SELECT COUNT(*) FROM
+--   pdungeon_pack_members pm JOIN creature_template ct ON ct.entry = pm.entry
+--   WHERE ct.flags_extra & 2048 returns 0 over all 52 live members. Second, the
+--   ~587 dps figure is a CEILING and not a midpoint - UnitAI::
+--   DoMeleeAttackIfReady staggers the offhand to ATTACK_DISPLAY_DELAY whenever
+--   both hands come up in the same tick (UnitAI.cpp:56-59), which the estimate
+--   does not model, and 10488's own opener 16169 Arcing Smash is an
+--   on-next-swing row that REPLACES the mainhand swing rather than adding to it
+--   (see the kit file, step 7). Both push the number down.
+--
+-- Health lands in 12822..26710 for the trash. An earlier cut called that "the
+-- same band as the shipped 84263-84290 trash (12600..32000)"; re-measured
+-- 2026-09-09, that band does not exist. The shipped custom trash is exactly TWO
+-- values at level 80 - 22434 (84263-84285, uc8, basehp0 3739 x 6) and 32052
+-- (84264-84287, uc1, basehp0 5342 x 6) - so this pack's 12822 floor sits BELOW
+-- the shipped custom floor, not inside it. The comparison that does support the
+-- sentence is the whole live pool: the 47 live trash members of packs 1-5
+-- (roles 0 and 1) span 7373..36860, and 12822..26710 sits inside that. The
+-- difficulty dial does the rest.
 -- The shipped packs' trash is `rank` 0, so the elite frames on this pack's
 -- eight ARE a visible difference: intentional (vanilla dungeon trash is
 -- elite), not a defect.
@@ -183,10 +201,23 @@
 --                   unit_flags2 2048, dynamicflags 0, flags_extra 0 (in
 --                   particular no 0x80000000 HARD_RESET, the flag that cost
 --                   Herald Volazj his slot, and no 2048 offhand attack),
---                   VehicleId 0, type 6 UNDEAD, rank 1, no ` (1)` name suffix,
---                   and NO creature_template_addon row at all, so nothing
---                   spawns with a permanent school immunity or an
---                   invisibility aura.
+--                   VehicleId 0, type 6 UNDEAD, rank 1, no ` (1)` name suffix.
+--   addon           29934 DOES have a creature_template_addon row. An earlier
+--                   cut of this block asserted it had none "so nothing spawns
+--                   with a permanent school immunity or an invisibility aura",
+--                   and the premise was false while the conclusion happened to
+--                   hold. Re-measured 2026-09-09: path_id 0, mount 0, bytes1 0,
+--                   bytes2 0, emote 0, auras NULL, visibilityDistanceType 3.
+--                   auras NULL is what actually carries the conclusion - no
+--                   permanent aura of any kind. The row does carry one
+--                   property: visibilityDistanceType 3 =
+--                   VisibilityDistanceType::Large (ObjectDefines.h:61-71) =
+--                   VISIBILITY_DISTANCE_LARGE 200.0f (ObjectDefines.h:35),
+--                   twice the normal 100 yd. Harmless on a 66 yd room, and
+--                   written down because the check that was meant to find it
+--                   reported it absent. For completeness, 10471, 10477, 10486
+--                   and 10488 have addon rows too - all auras empty - and
+--                   10476, 10489 and 11551 have none.
 --   faction         1885, re-measured against FactionTemplate.dbc field 5:
 --                   enemyGroupMask 1 -> HOSTILE to players. (This is the check
 --                   that disqualified 29112 Gothik the Harvester and 29113
@@ -208,17 +239,26 @@
 --                   RequiredNpcOrGo is what disqualified 29821 Prince
 --                   Navarius, who is objective 4 of quest 12919 "The Storm
 --                   King's Vengeance".)
---   speed           speed_run 1.0 against the trash's 1.14286 - it is the
---                   SLOWEST member of its own pack and it cannot outrun a
---                   player. That is a deliberate improvement over 36879's
+--   speed           speed_run 1.0 against the trash's 1.14286 - 1.19048 on
+--                   10488, the one member of the seven that is not 1.14286
+--                   (re-measured 2026-09-09; an earlier cut printed 1.14286 for
+--                   all seven). The conclusion is unchanged: 1.0 is still the
+--                   minimum, so the boss is the SLOWEST member of its own pack
+--                   and it cannot outrun a player. That is a deliberate
+--                   improvement over 36879's
 --                   1.28968 and the reason 30085 Vigilant Shade (126000 hp,
 --                   a free Shade.mdx silhouette, two identity spells) was
 --                   passed over: speed_run 1.71429, the exact figure this
 --                   file already rejects 30071 Stitched Colossus for.
 --   CC immunity     CreatureImmunitiesId -93 = MechanicsMask 0x800010
 --                   FEAR|HORROR, SchoolMask 0 - byte-identical to the shipped
---                   stock bosses 25352 and 29620. It can still be stunned,
---                   rooted, snared, silenced and interrupted. Gandling's -346
+--                   stock boss 25352 Scourge Overlord. (An earlier cut named
+--                   29620 Dreadlord Mal'Ganis beside it. Re-measured
+--                   2026-09-09, 29620 is CreatureImmunitiesId 0, so the
+--                   precedent is one shipped boss, not two - though 11551 in
+--                   this very pack carries the same -93.) It can still be
+--                   stunned, rooted, snared, silenced and interrupted.
+--                   Gandling's -346
 --                   could be none of those and nobody had decided that; this
 --                   one needs no decision because it matches what ships.
 --   rotation        29934 has NO smart_scripts rows of its own (measured:
@@ -376,14 +416,20 @@
 --   GroupId 3   4.00 %  one Quality 2 GREEN, ilvl 45-64
 --   GroupId 6   0.99 %  one Quality 2-3
 --   GroupId 4   0.20 %  one Quality 3 BLUE, ilvl 55-58
---   GroupId 5   0.10 %  one Quality 4 EPIC, ilvl 55-60
+--   GroupId 5   0.10 %  one Quality 4 EPIC, ilvl 55-65
 --   GroupId 0  independent: 10 % greys (ilvl 51-59), 3 % + 1 % whites, and two
 --              100 % references into sub-tables whose own groups total 1.45 %
 --              and 2.0 %
 --
 -- So the honest headline is: roughly one Quality-2 green per 15 trash kills and
--- ONE LEVEL-60-ERA EPIC (ilvl 55-60) PER 1000 TRASH KILLS. That is real and it
--- is now written down - but it is three orders of magnitude away from the
+-- ONE LEVEL-60-ERA EPIC (ilvl 55-65) PER 1000 TRASH KILLS. The ceiling was
+-- re-derived 2026-09-09 by walking all eight level-1 references TRANSITIVELY
+-- through reference_loot_template into item_template: 652 distinct items, max
+-- Quality 4, max RequiredLevel 60, max ItemLevel 65, and nothing above ilvl 100
+-- anywhere. The 29 epics in the closure run ilvl 55-65, topped by 1728 Teebu's
+-- Blazing Longsword and 3475 Cloak of Flames at 65; an earlier cut printed a
+-- 55-60 ceiling, five points low. That is real and it is now written down - but
+-- it is three orders of magnitude away from the
 -- ilvl 200/219 WotLK BoE epics the rejected 36879 paid at 5.9 % per BOSS kill,
 -- and it is not new to this pack: the live pack-4 member 30921 Skeletal
 -- Runesmith carries the identical GroupId-5 Chance-0 reference idiom
@@ -396,6 +442,52 @@
 -- 10486/10488/10489, and 921 Pick Pocket has TargetCreatureType 0, so the
 -- risen undead are fair game too. Only 11551 and the boss have none.
 --
+-- AND THE CHANNEL THE FIRST THREE CUTS OF THIS BLOCK NEVER FOLLOWED: DIRECT
+-- KILL REPUTATION. It is not loot, so no amount of following the loot chain
+-- would have found it, and the one sentence that used to mention Argent Dawn
+-- attributed it to the turn-in tokens above. Measured on
+-- creature_onkill_reputation, 2026-09-09:
+--
+--   creature_id  RewOnKillRepFaction1  RewOnKillRepValue1  MaxStanding1  IsTeamAward1
+--   10471                         529                  10             6             0
+--   10476                         529                  10             6             0
+--   10477                         529                  10             6             0
+--   10486                         529                  10             6             0
+--   10488                         529                  10             6             0
+--   10489                         529                  10             6             0
+--   11551                         529                  10             6             0
+--
+-- Faction 529 is Argent Dawn. MaxStanding1 6 = REP_EXALTED, so the grant does
+-- not stop at Friendly or at Honored; IsTeamAward1 0, so both factions get it.
+-- That is +10 Argent Dawn PER TRASH KILL, passively, with no turn-in and no NPC
+-- visit - Neutral -> Exalted is 3000 + 6000 + 12000 + 21000 = 42000 rep, i.e.
+-- about 4200 trash kills, in a dungeon that can be re-run forever. Nothing in
+-- the rates softens it: Rate.Reputation.Gain = 1 and
+-- Rate.Reputation.LowLevel.Kill = 1 in the deployed
+-- C:\wowstuff\dcore\configs\worldserver.conf (lines 2345 and 2352), and the
+-- low-level reduction could not apply in any case, because
+-- OnBeforeCreatureSelectLevel forces every member to level 80
+-- (PDv2Scaling.cpp:215-230) and a level-80 victim is never grey. The boss 29934
+-- carries no such row, and neither does any live pack member: SELECT COUNT(*)
+-- FROM pdungeon_pack_members pm JOIN creature_onkill_reputation r ON
+-- r.creature_id = pm.entry returns 0 over all 52. Pack 7 would have been the
+-- first, on seven of its eight members.
+--
+-- THE MODULE SWITCHES IT OFF, WHICH IS WHY NOT ONE ROW BELOW CHANGED FOR IT.
+-- The fix is ENGINE and it is a POLICY, not a patch for these seven entries:
+-- PDv2InstanceScript::SpawnTaggedMob calls
+-- Creature::SetReputationRewardDisabled(true) on every mob this dungeon summons
+-- (PDv2InstanceScript.cpp:1273, and the critter loop does the same at :2348).
+-- Player::RewardReputation then returns before it ever looks the
+-- ReputationOnKillEntry up (Player.cpp:5962-5963), and that function is the
+-- only way a creature death grants reputation - KillRewarder::_RewardReputation
+-- (KillRewarder.cpp:192-196) is its sole kill-side caller, reached from
+-- _RewardPlayer (KillRewarder.cpp:237). So inside map 760 these seven pay ZERO
+-- Argent Dawn, while the same templates go on paying +10 in Scholomance itself,
+-- where they were tuned to. Swapping the seven for reputation-free cultists
+-- would have fixed this pack and left the next one exposed; the switch on the
+-- spawn path covers every pack, including packs an operator writes.
+--
 -- PDv2's difficulty multiplier does NOT touch any of this.
 -- PDv2LootScript::OnPlayerBeforeLootMoney (PDv2Scaling.cpp:339-372) multiplies
 -- loot->gold and nothing else, and says so in its own comment: "The creature's
@@ -403,11 +495,18 @@
 -- are flat across the whole x1.00 -> x3.00 difficulty range; only the copper
 -- scales.
 --
--- So this pack is an Argent Dawn reputation and turn-in-token faucet, and a
--- Runecloth faucet, and that is still the largest thing it does to the economy
--- - larger than any single item. If any of it is unwanted the fix is DATA, not
--- code: drop a member's `weight`, or disable the pack. Editing
--- creature_template.lootid here would retune Scholomance itself.
+-- So, in the right order and with the two mechanisms kept apart: what this pack
+-- still does to the economy is an Argent Dawn TURN-IN-TOKEN faucet (12841
+-- Invader's Scourgestone at 35 % on all seven, 22525 Crypt Fiend Parts on
+-- 11551) and a Runecloth faucet, and those remain the largest things it does -
+-- larger than any single item. The PASSIVE Argent Dawn faucet on the templates
+-- is a SEPARATE mechanism and it is switched off in code, above; an earlier cut
+-- of this sentence ran the two together and called the pack "an Argent Dawn
+-- reputation and turn-in-token faucet" on the strength of the tokens alone,
+-- which named the wrong mechanism for the bigger of the two. If any of what is
+-- left is unwanted the fix is DATA, not code: drop a member's `weight`, or
+-- disable the pack. Editing creature_template.lootid here would retune
+-- Scholomance itself.
 --
 -- ----------------------------------------------------------------------------
 -- THIS FILE SHIPS ZERO creature_template ROWS AND ZERO UPDATES TO THEM.
@@ -427,10 +526,17 @@
 -- before mod_pdungeon_packs_cult.sql, and mod_pdungeon_member_spells.sql
 -- before mod_pdungeon_member_spells_cult.sql. The fresh-database exposure the
 -- first cut argued does not exist. The repeat is kept anyway because it is
--- free (IF NOT EXISTS), because it makes each pack file applicable on its own
--- to a database that never had the module, and because the blocks are
--- byte-identical to the canonical ones - but it is defensive practice, not a
--- fix for a real ordering bug.
+-- free (IF NOT EXISTS) and because it makes each pack file applicable on its
+-- own to a database that never had the module - but it is defensive practice,
+-- not a fix for a real ordering bug.
+--
+-- One correction to that paragraph: the blocks are NOT "byte-identical to the
+-- canonical ones", as an earlier cut claimed. `pdungeon_pack_members` is;
+-- `pdungeon_packs` is not - this file drops a six-line "-- 0 = ANY theme..."
+-- comment that mod_pdungeon_packs.sql carries inside the block (diffed
+-- 2026-09-09). The DDL itself - columns, types, defaults, primary key, engine,
+-- charset and collation - IS identical in both and matches the live schema, so
+-- the difference is a comment and nothing that CREATE TABLE executes.
 --
 -- role: 0 melee, 1 range, 2 boss.
 -- ----------------------------------------------------------------------------
