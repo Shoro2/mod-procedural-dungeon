@@ -48,7 +48,9 @@
 -- Creature::LoadCreaturesAddon (Creature.cpp:2797-2799) to summons as well - so
 -- a Rethilgore is visible from twice as far as the rest of the room. Harmless
 -- and precedented (pack 4's 29974 and 30482 already carry the same override);
--- stated so it is not discovered.
+-- stated so it is not discovered. The only other non-default column on either
+-- row is 3853's bytes2 = 1, the sheath state - it spawns with its weapon drawn.
+-- bytes1, emote, mount and path_id are 0 on both.
 --
 -- Factions, re-measured from FactionTemplate.dbc field 5:
 --   24 (Shadowfang, the seven trash) ourMask 0x8, friendMask 0x0, enemyMask 0x1
@@ -152,8 +154,12 @@
 --   health      32052 hp = 2.00x his own trash and 21% of the shipped boss floor
 --               (149560 / 252000 / 327600). With V2.BossRoomAdds = 2 in the
 --               deployed conf, and the adds drawn from the ROOM's pack, a Nandos
---               beside pack-8 trash (50400 hp each) had 57% less health than
---               each add standing next to him.
+--               beside a 50400 hp pack-8 add had 36% less health than the add
+--               standing next to him (32052 against 50400). Pack 8's seven trash
+--               measure 25200-50400, so six of the seven out-health him and the
+--               seventh (30176 Ahn'kahar Guardian, 25200) does not - "50400 hp
+--               each" was wrong, and so was the 57%, which is what 21368, this
+--               pack's biggest TRASH member, is below 50400.
 --   silhouette  the same Worgen.mdx as his own trash at 15% more scale than the
 --               biggest trash member - one more rung on a ladder the player had
 --               already seen four times.
@@ -191,11 +197,13 @@
 --   silhouette  Creature\NorthrendWorgen\NorthrendWorgen.mdx, a DIFFERENT model
 --               file from all seven trash members, at scale 3.00 against a trash
 --               ladder that stops at 1.45.
---   abilities   four rows, NONE of which any member of this pack carries, and
---               the difficulty-75 row is the heaviest thing in his kit
---               (67860 Impale, 17672-19828) instead of the lightest. See
---               mod_pdungeon_member_spells_worgen.sql, which also records which
---               of those four ids other packs reuse.
+--   abilities   four rows, NONE of which any member of this pack carries, NONE
+--               of them touched by SpellDifficulty (so the id written in the row
+--               is the id the core casts on map 760 - see the SPELLDIFFICULTY
+--               block in the kit file), and the difficulty-75 row is the heaviest
+--               thing in his kit (28308 Hateful Strike, 19975-27025) instead of
+--               the lightest. See mod_pdungeon_member_spells_worgen.sql, which
+--               also records which of those four ids other packs reuse.
 --   damage      dm 4.6 on the exp-2 base (421.56 .. 586.49 x dm) ->
 --               1939-2698 per 2.0 s swing, ~1159 dps, 6.5x his own trash, where
 --               Nandos at 3.3 was 1.94x and was out-hit 2.3x by two of his own
@@ -211,23 +219,45 @@
 -- ignores the room's pack: it always draws from the role-2 pool across ALL packs
 -- (PDv2PackDraw.cpp:145-152, in that file's own words), while the two
 -- V2.BossRoomAdds come from the ROOM's pack (PDv2PackDraw.cpp:420-431). Measured
--- once the two packs authored beside this one are in, per 2.0 s swing before the
--- difficulty multiplier:
+-- 2026-09-09 against the live acore_world, EACH BOSS AT ITS OWN BaseAttackTime,
+-- before the difficulty multiplier. BaseVariance and BaseAttackTime are
+-- per-template columns and three of these six do not swing at 2.0 s, so a single
+-- normalised swing column would be a fiction; dps is the comparable number:
 --
---   27580 Selas               75600 hp   1939-2698   ~1159 dps   <- the new floor
---   84288/84289/84290        149560 hp    970-1290   ~ 565 dps   (shipped pack 3)
---   36879 Plagueborn Horror  189000 hp   3162-4399   ~1890 dps   (pack 7, cult)
---   29309 Elder Nadox        214200 hp   3125-4362   ~1872 dps   (pack 8, faceless)
---   25352 Scourge Overlord   252000 hp   3162-4399   ~1890 dps   (shipped pack 4)
---   29620 Mal'Ganis          327600 hp   3162-4399   ~1890 dps   (shipped pack 5)
+--   27580 Selas               75600 hp   1939-2698 @2.0 s   ~1159 dps  <- the floor
+--   84288/84289/84290        149560 hp    962-1444 @3.0 s   ~ 401 dps  (shipped pack 3)
+--   29934 Acolyte of Agony   126000 hp   3125-4362 @2.0 s   ~1872 dps  (pack 7, cult)
+--   29309 Elder Nadox        214200 hp   3750-5235 @2.4 s   ~1872 dps  (pack 8, faceless)
+--   25352 Scourge Overlord   252000 hp   3162-4399 @2.0 s   ~1890 dps  (shipped pack 4)
+--   29620 Mal'Ganis          327600 hp   3162-4399 @2.0 s   ~1890 dps  (shipped pack 5)
 --
--- So Selas is the SOFTEST boss in the merged pool by a factor of two on health,
--- and a pack-8-themed boss room hands him two adds of 25200-50400 hp that swing
--- 3162-4399 - each add out-damaging him 1.6x and one holding two thirds of his
--- health. That is a real improvement on what he replaced (Nandos at 32052 was
--- BELOW such an add) and on the alternative the earlier pass weighed (4275
--- Archmage Arugal, 42740 hp), and he clears the 3-10x-his-own-trash bar on
--- health at 3.54x-5.90x.
+-- 84288-84290 carry BaseVariance 0, so the AttackPower/14 term of
+-- Creature::UpdateDamagePhysical (StatSystem.cpp:1163-1172) is zero for them and
+-- the swing is (40.099 .. 60.149) x DamageModifier 8 x BaseAttackTime 3.0 s =
+-- 962-1444, i.e. 401 dps. An earlier revision of this file quoted them at
+-- 970-1290 / ~565 dps: the variance-1 form, rescaled to a 2.0 s basis it does not
+-- have. That overstated their dps by 1.41x, and both sibling pack files already
+-- carried the corrected number when this file was written. No conclusion in this
+-- block moves - correcting it only widens Selas's damage lead over the pack-3
+-- bosses, from 2.1x to 2.9x. The two rows marked (cult) and (faceless) belong to
+-- packs authored ALONGSIDE this one and were read at commit 811aa18; the four
+-- shipped rows are live in the database.
+--
+-- So Selas is the SOFTEST boss in the merged pool on health - 75600 against a
+-- next-softest 126000, i.e. 1.67x, not the "factor of two" an earlier revision
+-- claimed against a pack-7 boss that has since been replaced. A pack-8-themed
+-- boss room hands him two adds of 25200-50400 hp. Those adds all land in
+-- 1872-1890 dps but at three different swings (30277 and 31104 3162-4399 @2.0 s,
+-- 30111 / 30179 / 30278 / 30319 3125-4362 @2.0 s, 30176 3794-5278 @2.4 s), so
+-- each of them out-damages him 1.6x and one holds two thirds of his health. And
+-- "add" does not mean "melee": the two boss-room adds go through the same
+-- pickTrash lambda as ordinary trash (PDv2PackDraw.cpp:225-244, called at :429)
+-- and its first line rolls caster-or-melee per slot at casterPct, 60 by default
+-- (PDv2PackDraw.h:89), so a pack-8 boss room can put two role-1 casters beside
+-- him instead. The health and dps envelope above covers them either way. That is
+-- a real improvement on what he replaced (Nandos at 32052 was BELOW such an add)
+-- and on the alternative the earlier pass weighed (4275 Archmage Arugal, 42740
+-- hp), and he clears the 3-10x-his-own-trash bar on health at 3.54x-5.90x.
 -- It is stated here so the first live run is judged against a known number.
 --
 -- Two more things about him the operator should know rather than discover:
@@ -297,6 +327,13 @@
 -- MechanicsMask 0x800010 = FEAR | HORROR only, with SchoolMask 0 - a worgen that
 -- cannot be feared, which is flavour rather than a wall and nothing like the
 -- 3851 school immunity. Recorded here rather than left to be discovered.
+--
+-- Joined with the with-replacement trash draw noted above, that has one worst
+-- case worth stating: a five-slot room CAN be five Rethilgores, i.e. a room in
+-- which no fear, howl of terror or psychic scream lands on anything. Stun, root,
+-- polymorph, sleep, banish and every other mechanic still work on all five,
+-- which is exactly what separates -93 from the fourteen mechanics of 4279 Odo's
+-- -229 that got Odo rejected. It costs a fear-based plan a pull, not a run.
 --
 -- ----------------------------------------------------------------------------
 -- ECONOMY - measured against creature_loot_template / item_template, not
