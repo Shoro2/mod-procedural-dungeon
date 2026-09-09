@@ -40,9 +40,9 @@
 -- melee mob's swings; its power cost is affordable for that creature's real
 -- level-80 pool.
 --
--- SEVEN STEPS were added after earlier cuts of this file shipped spells whose
+-- EIGHT STEPS were added after earlier cuts of this file shipped spells whose
 -- behaviour none of the above could see. All 23 distinct ids below were run
--- through all seven:
+-- through all eight:
 --
 --   1. acore_world.spell_script_names. A SpellScript is bound to the SPELL,
 --      and lives in a different registry from AllCreatureScript - so PDv2's
@@ -58,7 +58,15 @@
 --      Measured for all 23 ids below: ZERO spell_script_names rows.
 --   2. acore_world.disables (sourceType 0 = SPELL): 0 rows for all 23. Also 0
 --      rows in spell_proc, spell_threat, spell_target_position, spell_area and
---      the custom spell_dbc table.
+--      the custom spell_dbc table. ONE MORE TABLE BELONGS IN THIS SWEEP AND
+--      WAS MISSING FROM IT: acore_world.spell_bonus_data, which holds THREE
+--      rows for these ids - 47864 dot_bonus 0.1, 47960 dot_bonus 0.0667 and
+--      48125 dot_bonus 0.1833, each with direct_bonus, ap_bonus and
+--      ap_dot_bonus 0 (measured 2026-09-09). They are spell-power
+--      coefficients and a creature's spell power here is ~0, so not one
+--      published number moves - but this block reads as a COMPLETE list of
+--      the tables that can change what a spell does, and a complete list has
+--      to name the table even when the table turns out to be inert.
 --   3. acore_world.spell_linked_spell, queried on BOTH SIGNS with ABS() -
 --      an earlier cut queried positive ids only and reported "0 rows", which
 --      was wrong. There is exactly ONE row: spell_trigger -47960,
@@ -130,12 +138,66 @@
 --      the damage of the ABILITY EVENT and not its margin over the swing it
 --      consumes - up to 3-4.5x the marginal number in the worst case. The
 --      direction is OVERSTATEMENT, which is the safe direction for a "is this
---      too hot" question, so no row is retuned on it: 59992 and 48640 already
---      run in the LIVE data at this cadence (59992 on 84264, 84284, 84288 and
---      the shipped boss 25352; 48640 on 84284 and on four pack-5 members),
---      16169 and 42746 are used the same way by the sibling pack-8 file added
---      in this round, and only 14516 is new here. It is written down because
---      the column would otherwise read as marginal dps.
+--      too hot" question, so no row is retuned on it. Re-measured on the LIVE
+--      pdungeon tables after this round was applied (2026-09-09), every one of
+--      the five runs at this cadence elsewhere in the data: 59992 on the
+--      shipped bosses 84288 and 25352 and on six role-0 members (84264, 84284,
+--      28349, 18871, 20403, 3859); 48640 on eight members across packs 1, 4,
+--      5, 6 and 8; 16169 on pack 6's boss 27580 and on pack 8's 31104; 42746
+--      on pack 8's boss 29309 and on 3857 and 30277. Only 14516 was new when
+--      this file was authored, and it is not new any more either - pack 6's
+--      3914 carries it. It is written down because the column would otherwise
+--      read as marginal dps.
+--   8. SPELLDIFFICULTY - THE ID IN THE ROW IS NOT ALWAYS THE ID THE CORE
+--      CASTS, and until now neither file in this pack mentioned the mechanism
+--      at all. map 760 is an INSTANCE map (acore_world.map_dbc: ID 760,
+--      Directory 'FLPD', InstanceType 1 = MAP_INSTANCE, MaxPlayers 5), and on
+--      a dungeon or battleground map every cast is substituted before the
+--      SpellInfo is even chosen: Spell::Spell builds m_spellInfo from
+--      sSpellMgr->GetSpellForDifficultyFromSpell(info, caster)
+--      (Spell.cpp:571-572), and SpellMgr::GetSpellIdForDifficulty
+--      (SpellMgr.cpp:538-578) returns SpellDifficultyEntry::SpellID[
+--      GetSpawnMode()] for any spell that has a difficulty id. The searcher
+--      that decides "has a difficulty id" registers EVERY non-zero SpellID[x]
+--      of a record whose slots 0 and 1 are both set, not only index 0
+--      (DBCStores.cpp:462-487), so a heroic-only rank maps back to its family
+--      exactly as its normal rank does. PDv2 casts through DoCastVictim
+--      (PDv2CreatureAI.cpp:1487), untriggered, so the substitution is
+--      unavoidable for every row in this file.
+--      THE STORE IS NOT THE DBC ALONE, which is the trap the sibling
+--      mod_pdungeon_member_spells_worgen.sql fell into twice and documents at
+--      length. It is loaded as LOAD_DBC(sSpellDifficultyStore,
+--      "SpellDifficulty.dbc", "spelldifficulty_dbc") (DBCStores.cpp:358) and
+--      LoadDBC calls storage.LoadFromDB after the file (DBCStores.cpp:
+--      239-240), whose last loop writes every world row straight into the
+--      index table (DBCDatabaseLoader.cpp:124-129) - so the WORLD TABLE
+--      OVERRIDES AND EXTENDS THE FILE, and only the merged store is an answer.
+--      MEASURED ON THE MERGED STORE FOR ALL 23 IDS, 2026-09-09.
+--      C:\wowstuff\dcore\Data\dbc\SpellDifficulty.dbc (581 records) contains
+--      TWO of the 23, and both at INDEX 0:
+--        entry 1645 -> [69581, 70273, 0, 0]   the boss's t75 row
+--        entry 2263 -> [69900, 73046, 0, 0]   10486's t75 row
+--      acore_world.spelldifficulty_dbc (604 rows) returns ZERO rows for any of
+--      the 23, on the ID column and on all four DifficultySpellID columns, so
+--      the merge adds nothing here and takes nothing away. Both ids are the
+--      NORMAL rank, and for all 23 the id written in the row is the id the
+--      core casts.
+--      AND THE CONDITION THAT MAKES THAT TRUE, because it is a property of the
+--      MAP DATA and not of these spells: map 760 can only ever run at spawn
+--      mode 0. acore_world.mapdifficulty_dbc holds EXACTLY ONE row for it (ID
+--      857, Difficulty 0, MaxPlayers 5), and MapInstanced::CreateInstance
+--      calls GetDownscaledMapDifficultyData(GetId(), difficulty)
+--      (MapInstanced.cpp:200) BEFORE it constructs the InstanceMap at :204,
+--      which walks a heroic request back down to 0 (DBCStores.cpp:767-791).
+--      ADD A HEROIC mapdifficulty_dbc ROW FOR 760 - a plausible future
+--      "heroic mode" - and two rows of this file change damage with NO SQL
+--      EDIT AND NO WARNING: 69581 (base points 3749, die 2501 -> 3750-6250,
+--      periodic 2000 x2) becomes 70273 (5624, 3751 -> 5625-9375, periodic
+--      3000 x2), and 69900 (3237, 525 -> 3238-3762) becomes 73046 (4624,
+--      751 -> 4625-5375). Neither breaks the pack - both climb, and both stay
+--      inside the shipped band - but whoever adds that row owes this file a
+--      re-read, which is why the CONDITION is written down and not just the
+--      result.
 --
 -- Every "(its own)" note was measured too - smart_scripts action_type 11 for
 -- that entry - not inherited from a design document.
@@ -203,7 +265,11 @@
 --   61562 Shadow Bolt  (10476 slot-0 filler) 4250-5750 a cast on a 1.5 s cast
 --     and cd 0 = ~3330 dps, free and uninterruptible from 40 yd. That is 7.4x
 --     the filler it was supposed to sit under and ~5x the highest number
---     anywhere in the live data. Replaced by 60015 (~450).
+--     anywhere in the data live at the time. Replaced by 60015 (~450). (Since
+--     the apply, a grep for 61562 DOES find it live - pack 8 gives it to
+--     30179 at cd 12000, minDiff 75. That is not this rejection reversed: the
+--     defect was 61562 as a FREE cd-0 FILLER, and on a 12 s cooldown the same
+--     cast is ~415 dps, which is an ordinary tier-75 row.)
 --   61563 Corruption   (10476 t50) 1666-1936 PER TICK every 2 s for 12 s =
 --     ~10800 a cast, i.e. ~1080 dps from one cooldown row, undodgeable and
 --     single-target. Replaced by 47960 Shadowflame (~544 a cast), which the
@@ -282,11 +348,14 @@
 -- DoCastVictim untriggered (PDv2CreatureAI.cpp:1487), so CheckPower runs in
 -- full, and UpdateCasterCombat has "no out-of-power fallback" beyond swinging
 -- at a melee player who walked into it (its own comment, PDv2CreatureAI.cpp:
--- 1566-1571). 47809 is not in this pack in any slot; the two free bolts carry
--- all three casters. (The shipped rows that do run 47809 in slot 0 are on
--- unit_class 1 or 8 mobs where the percentage resolves against a 0 pool -
--- 84287 - or are the 84263 / 84281 rows the newest sibling file already names
--- as the anti-pattern.)
+-- 1567-1572 - counted in the working tree, "// Point blank:" at 1567 through
+-- DoMeleeAttackIfReady() at 1572. An earlier cut of THIS file cited 1566-1571
+-- and the correction reached only the packs file, which is why the pair
+-- disagreed on one cite for two review rounds). 47809 is not in this pack in
+-- any slot; the two free bolts carry all three casters.
+-- (The shipped rows that do run 47809 in slot 0 are on unit_class 1 or 8 mobs
+-- where the percentage resolves against a 0 pool - 84287 - or are the 84263 /
+-- 84281 rows the newest sibling file already names as the anti-pattern.)
 --
 -- Every other role-1 row here reaches 25 yd too (48125 30 yd, 48687 30 yd,
 -- 47960 100 yd, 47864 30 yd, 17228 and 54889 self-centred with radius 30 and
@@ -295,6 +364,20 @@
 -- not oblige. That is why 10476's own 17234 Shadow Shock (20 yd) and 10471's
 -- own 17165 Mind Flay (20 yd) are not used despite being those creatures' own
 -- spells.
+--
+-- ONE OF THOSE ROWS REACHES WITH NO MARGIN AT ALL, and "reaches" is too kind
+-- a word for it. 54889 carries EffectRadiusIndex 20, which is EXACTLY 25.0 in
+-- SpellRadius.dbc (read 2026-09-09), and ProceduralDungeon.V2.CastRangeYd is
+-- 25.0 - the very distance UpdateCasterCombat holds 10476 at, and it is 25.0
+-- in both the shipped conf/mod_procedural_dungeon.conf.dist (line 515) and
+-- the deployed configs\modules\mod_procedural_dungeon.conf (line 249). Every
+-- other role-1 row has slack over the hold distance (48125, 48687 and 47864
+-- at 30, 47960 at 100, 17228 radius 30); this one has none. It lands in
+-- practice, because a mob is usually INSIDE its hold distance rather than
+-- exactly on it and because combat reach is added on top - but the honest
+-- statement is "no margin at 25 yd", not "reaches 25 yd", and if the operator
+-- ever raises V2.CastRangeYd above 25 this is the first row that stops
+-- landing. It is the row to move then, not the config.
 --
 -- ----------------------------------------------------------------------------
 -- CAST TIME - WHY EVERY BOSS ROW IS INSTANT
@@ -384,19 +467,38 @@
 --          whose 69581 Pustulant Flesh really was its own; the trade bought a
 --          boss that drops nothing and draws a model nothing else in the
 --          dungeon draws (see the packs file). Its four rows are therefore
---          picked from the audited pool, and the pick was made against the
---          shipped bosses as well as against its own trash:
---            - 59992 Cleave is the house boss opener; 25352 Scourge Overlord
---              AND 84288 Dralak both carry it, so sharing it is the idiom.
---            - 34240 Carrion Swarm, 60845 Shadow Nova and 69581 Pustulant
---              Flesh are NOT in 25352's kit. The previous cut shared THREE of
---              its four rows with 25352 on spell, slot, cooldown and minDiff
---              at once (59992/60015/54889); this one shares exactly ONE.
---            - Only 60845 is borrowed from inside this pack (11551's t75), so
---              three of the four rows belong to the boss alone. 69581 is kept
---              from the previous cut because it is the one row in the file no
---              other member carries and it is already audited: plague damage
---              from the cult that spread the plague.
+--          picked from the audited pool, and the pick was made against EVERY
+--          shipped boss and against its own trash, not against 25352 alone -
+--          an earlier cut claimed that scope and then checked only 25352,
+--          which is the identical scoping error that had already spoiled the
+--          silhouette check. Re-run on the live pdungeon_member_spells table
+--          joined to pdungeon_pack_members, 2026-09-09, row by row:
+--            - 59992 Cleave is the house boss opener, SHARED with two shipped
+--              bosses: 25352 Scourge Overlord (slot 1, cd 7000, minDiff 1 -
+--              identical on all four columns) and 84288 Dralak (cd 9000).
+--              SIX role-0 trash members carry it as well (84264, 84284,
+--              28349, 18871, 20403, 3859), which is what makes it the house
+--              opener rather than anyone's signature.
+--            - 34240 Carrion Swarm is ALSO SHARED WITH A SHIPPED BOSS, and
+--              this is the sentence that was wrong for three review rounds:
+--              84289 Lord Maltrion, pack 3's role-2 boss, carries 34240 at
+--              the same slot 1 and the same minDiff 1, differing only in
+--              cooldown (8000 against this boss's 9000).
+--            - So TWO of the four rows are shared with shipped bosses, not
+--              one. 60845 Shadow Nova is shared as well, though not with a
+--              boss: with this pack's own 11551 at t75 and with pack 8's
+--              trash 31104. Exactly ONE row - 69581 Pustulant Flesh - is
+--              carried by no other member of any pack, and it is the row kept
+--              from the previous cut because it was already audited: plague
+--              damage from the cult that spread the plague.
+--            - For the record, the claim the earlier cut was reaching for is
+--              still true and is worth keeping in its corrected form: the cut
+--              before it shared THREE rows with 25352 on spell, slot,
+--              cooldown and minDiff AT ONCE (59992/60015/54889); this kit
+--              shares exactly one row with 25352 that way, and 60015 and
+--              54889 are gone from the boss entirely. The improvement is
+--              real. "Three of the four rows belong to the boss alone" was
+--              not, and it never survived a join against the boss pool.
 --
 -- The economy this pack brings with it - the seven trash members keep their
 -- native Scholomance tables, the boss has lootid 0 and drops nothing at all,

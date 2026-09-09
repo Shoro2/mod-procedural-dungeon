@@ -7,9 +7,15 @@
 -- Northrend Scourge, this one is the cult that MADE it: the necromancers'
 -- school, its raised soldiery, and the master of the acolytes.
 --
--- Pack id 7 is free: SELECT MAX(id) FROM pdungeon_packs = 5 on this box
--- (re-measured 2026-09-09), and the shipped files' own deletes reach only
--- `id BETWEEN 1 AND 3` (mod_pdungeon_packs.sql) and `id IN (4, 5)`
+-- Pack id 7 WAS free when this file was authored: SELECT MAX(id) FROM
+-- pdungeon_packs returned 5 on this box on 2026-09-09, before any of the
+-- three packs written in this round had been applied. IT HAS SINCE BEEN
+-- APPLIED. Re-measured 2026-09-09 after the apply: pdungeon_packs holds ids
+-- 1-8, pdungeon_pack_members 76 rows and pdungeon_member_spells 226 - packs
+-- 6, 7 and 8 all landed. Every pre-apply count below is therefore labelled
+-- as the baseline it was, and the id argument itself is unchanged either
+-- way, because it never rested on MAX(id): the shipped files' own deletes
+-- reach only `id BETWEEN 1 AND 3` (mod_pdungeon_packs.sql) and `id IN (4, 5)`
 -- (mod_pdungeon_packs_undead_demon.sql), so neither can ever touch pack 7.
 -- This file's delete is scoped to id 7 alone in return - it never uses a
 -- BETWEEN and it never DROPs, so an operator's own packs survive a re-apply.
@@ -28,6 +34,24 @@
 -- (PDv2Scaling.cpp:215-230) - health, mana, base weapon damage and attack
 -- power are regenerated from CreatureBaseStats(80) by Creature::SelectLevel.
 -- Either way the only band that selects this pack is 76..80.
+--
+-- THAT MAKES THIS THE MODULE'S FIRST SUB-80-NATIVE PACK, AND THE MODULE
+-- CARRIES A STANDING WARNING ABOUT EXACTLY THAT. PDv2Scaling's
+-- ModifySpellDamageTaken says in its own comment (PDv2Scaling.cpp:294-298)
+-- that no level-normalisation factor is applied to spell damage, that none
+-- is needed for the native level-80/82 stock 84263-84290, and that "a future
+-- pack with sub-80 members WILL need one - a level-20 template normalised to
+-- 80 still casts a level-20 spell". Creature::SelectLevel regenerates STATS
+-- at 80; it does not touch a spell's own base points. This is that pack, and
+-- it answers the warning BY CONSTRUCTION instead of asking for the factor:
+-- every kit row is drawn from the level-80 band, and each member's own
+-- low-level spells are rejected on exactly those grounds - 12739 Shadow Bolt
+-- (129-173), 14887, 17234 and 17151 are all named and dropped for it in
+-- mod_pdungeon_member_spells_cult.sql. The two rows that DO scale with caster
+-- level use the core's own creature scaler instead (16509 and 17228 carry
+-- SPELL_ATTR0_SCALES_WITH_CREATURE_LEVEL - kit file, step 5). So the source
+-- comment's debt is real and still owed in general; it is not owed by this
+-- pack, and the next pack that takes a sub-80 spell will owe it again.
 --
 -- ----------------------------------------------------------------------------
 -- WHAT THIS PACK WEIGHS AND WHAT IT HITS FOR - BOTH AXES, MEASURED
@@ -86,18 +110,22 @@
 --   their 345-367.
 --
 --   That is DISCLOSED rather than removed, and the reason is the shipped
---   spread. Measured over all 52 live pack members, trash melee dps runs
---   184 (18859 Wrath Priestess) to 609 (20427 Veneratus the Many) INSIDE
---   pack 5 alone - a 3.3x spread. This pack's 345-587 is a 1.7x spread and
---   sits inside that envelope; the DamageModifier column itself is 3.5 on all
---   seven trash, a 1.00x spread. If 10488 still plays hot the lever is data:
---   drop its `weight` below 100. Editing creature_template.flags_extra here
---   would retune Scholomance itself and is out of scope for a pack file.
+--   spread. Measured over the 52 members that were live when this file was
+--   authored - packs 1-5, the pre-apply baseline; the table now holds 76
+--   across packs 1-8 - trash melee dps runs 184 (18859 Wrath Priestess) to
+--   609 (20427 Veneratus the Many) INSIDE pack 5 alone - a 3.3x spread.
+--   This pack's 345-587 is a 1.7x spread and sits inside that envelope; the
+--   DamageModifier column itself is 3.5 on all seven trash, a 1.00x spread.
+--   If 10488 still plays hot the lever is data: drop its `weight` below 100.
+--   Editing creature_template.flags_extra here would retune Scholomance
+--   itself and is out of scope for a pack file.
 --
 --   Two further facts about that row, so neither is discovered in game. First,
---   10488 would be the pool's FIRST dual wielder: SELECT COUNT(*) FROM
+--   10488 is the pool's FIRST dual wielder: SELECT COUNT(*) FROM
 --   pdungeon_pack_members pm JOIN creature_template ct ON ct.entry = pm.entry
---   WHERE ct.flags_extra & 2048 returns 0 over all 52 live members. Second, the
+--   WHERE ct.flags_extra & 2048 returned 0 over the 52 pre-apply members and
+--   still returns 0 over packs 1-6 and 8; re-measured after this file was
+--   applied it returns 1, and the 1 is 10488 itself. Second, the
 --   ~587 dps figure is a CEILING and not a midpoint - UnitAI::
 --   DoMeleeAttackIfReady staggers the offhand to ATTACK_DISPLAY_DELAY whenever
 --   both hands come up in the same tick (UnitAI.cpp:56-59), which the estimate
@@ -111,9 +139,9 @@
 -- values at level 80 - 22434 (84263-84285, uc8, basehp0 3739 x 6) and 32052
 -- (84264-84287, uc1, basehp0 5342 x 6) - so this pack's 12822 floor sits BELOW
 -- the shipped custom floor, not inside it. The comparison that does support the
--- sentence is the whole live pool: the 47 live trash members of packs 1-5
--- (roles 0 and 1) span 7373..36860, and 12822..26710 sits inside that. The
--- difficulty dial does the rest.
+-- sentence is the whole pool that was live when this file was authored: the 47
+-- trash members of packs 1-5 (roles 0 and 1) span 7373..36860, and
+-- 12822..26710 sits inside that. The difficulty dial does the rest.
 -- The shipped packs' trash is `rank` 0, so the elite frames on this pack's
 -- eight ARE a visible difference: intentional (vanilla dungeon trash is
 -- elite), not a defect.
@@ -160,10 +188,19 @@
 --   health          126000 = basehp2 12600 x HealthModifier 10. That is 4.72x
 --                   this pack's heaviest trash, 7.1x its seven-member mean and
 --                   9.8x its lightest - inside the 3-10x band on all three. It
---                   is 0.84x the shipped boss floor (149560 on 84288-84290;
---                   252000 on 25352; 327600 on 29620), i.e. the softest boss
---                   in the pool, which is the price paid for the loot and
---                   silhouette columns below.
+--                   is 0.84x the floor of the five bosses shipped in packs
+--                   1-5 (149560 on 84288-84290; 252000 on 25352; 327600 on
+--                   29620) - the softest boss in THAT pool. Against the
+--                   WIDER pool the silhouette column below uses it is only
+--                   the SECOND softest: pack 6's 27580 Selas is uc1 exp2
+--                   HealthModifier 6 = 75600, and pack 8's 29309 is 214200.
+--                   Both scopes are named because the two are different and
+--                   the file used to quote the narrow one while checking the
+--                   wide one. Since the apply the merged role-2 pool holds
+--                   all EIGHT bosses of packs 1-8 (84288, 84289, 84290,
+--                   25352, 29620, 27580, 29934, 29309), so the wide scope is
+--                   now simply the live one. That softness is the price paid
+--                   for the loot and silhouette columns below.
 --   damage          unit_class 2 with exp 2, DamageModifier 7.5, BaseVariance
 --                   1, BaseAttackTime 2000 -> 3125-4362 a swing, 1872 dps.
 --                   Stated honestly: that is 0.99x the shipped stock bosses
@@ -173,15 +210,30 @@
 --                   BaseVariance 0, DmgMod 8 -> 962-1444 at 3000 ms, 401 dps).
 --                   There is no deliberate multiplier over the shipped bosses
 --                   on damage and none is claimed; the step up this boss room
---                   delivers is the 5x over its own trash plus the kit.
+--                   delivers is the 5x over its own trash plus the kit - and
+--                   that 5x is PER MOB, not per room. A five-mob pack-7 trash
+--                   room is roughly 100000 combined hp and ~1900 combined dps
+--                   plus FIVE kits; the boss is 126000 hp and 1872 dps plus
+--                   ONE, because CastReadyKitSpell returns on the first ready
+--                   row and so fires at most one per tick
+--                   (PDv2CreatureAI.cpp:1457-1470). In aggregate the boss
+--                   room is COMPARABLE to a trash room, not five times it.
+--                   Every shipped boss has that same property, so it is a
+--                   property of the format and not a defect of this pack; it
+--                   is written down so the operator line reads as what the
+--                   operator will meet. Difficulty scales both sides, so
+--                   every figure here is the difficulty-0 floor.
 --   silhouette      display 22196 -> CreatureDisplayInfo -> CreatureModelData
 --                   = Creature\Necromancer\Necromancer.mdx, DBC scale 2.00,
 --                   creature_template_model.DisplayScale 1. The check was
 --                   re-run the right way this time: every creature_template_model
 --                   row of EVERY pdungeon_pack_members entry of EVERY role -
---                   the 52 live members of packs 1-5, this pack's own seven,
---                   and the 16 members of the two packs being added beside it
---                   (6 worgen, 8 faceless) - resolved to a model path. The 64
+--                   the 52 members of packs 1-5 that were live at the time,
+--                   this pack's own seven, and the 16 members of the two
+--                   packs added beside it (6 worgen, 8 faceless) - resolved
+--                   to a model path. That scope is now simply the live table:
+--                   all three packs have been applied and 52 + 7 + 16 + this
+--                   boss = the 76 rows pdungeon_pack_members holds. The 64
 --                   distinct models in use do NOT include Necromancer.mdx.
 --                   (They do include Skeleton.mdx, SkeletonNaked.mdx,
 --                   SkeletonMale.mdx, BoneGolem.mdx, CryptFiend.mdx, Ghoul.mdx,
@@ -198,8 +250,14 @@
 --   flags           npcflag 0, unit_flags 32768 (UNIT_FLAG_SWIMMING, the swim
 --                   animation - UnitDefines.h:272; never 0x2000000
 --                   NOT_SELECTABLE, never the 0x300 immunity pair),
---                   unit_flags2 2048, dynamicflags 0, flags_extra 0 (in
---                   particular no 0x80000000 HARD_RESET, the flag that cost
+--                   unit_flags2 2048 = UNIT_FLAG2_REGENERATE_POWER
+--                   (0x00000800, UnitDefines.h:306) - the one flag in this
+--                   line that is load-bearing rather than cosmetic, because
+--                   Creature::Regenerate returns immediately without it
+--                   (Creature.cpp:977-978) and it is therefore what makes
+--                   the 19970 mana pool of the next block refill at all -
+--                   dynamicflags 0, flags_extra 0 (in particular no
+--                   0x80000000 HARD_RESET, the flag that cost
 --                   Herald Volazj his slot, and no 2048 offhand attack),
 --                   VehicleId 0, type 6 UNDEAD, rank 1, no ` (1)` name suffix.
 --   addon           29934 DOES have a creature_template_addon row. An earlier
@@ -212,12 +270,22 @@
 --                   permanent aura of any kind. The row does carry one
 --                   property: visibilityDistanceType 3 =
 --                   VisibilityDistanceType::Large (ObjectDefines.h:61-71) =
---                   VISIBILITY_DISTANCE_LARGE 200.0f (ObjectDefines.h:35),
---                   twice the normal 100 yd. Harmless on a 66 yd room, and
---                   written down because the check that was meant to find it
---                   reported it absent. For completeness, 10471, 10477, 10486
---                   and 10488 have addon rows too - all auras empty - and
---                   10476, 10489 and 11551 have none.
+--                   VISIBILITY_DISTANCE_LARGE 200.0f (ObjectDefines.h:35).
+--                   An earlier cut called that "twice the normal 100 yd",
+--                   which compares it to the wrong number: 100.0f is
+--                   VISIBILITY_DISTANCE_NORMAL (ObjectDefines.h:36) and it is
+--                   the CONTINENT default. The number this boss is 200 yd
+--                   against is the MAP's, and map 760 is an instance, so the
+--                   key that decides it is Visibility.Distance.Instances -
+--                   170 in the deployed C:\wowstuff\dcore\configs\
+--                   worldserver.conf (line 1326), the same value as the core
+--                   default DEFAULT_VISIBILITY_INSTANCE 170.0f
+--                   (ObjectDefines.h:40). So the real gap is 200 against 170,
+--                   i.e. 1.18x and not 2x. Harmless on a 66 yd room either
+--                   way, and written down because the check that was meant to
+--                   find it reported it absent. For completeness, 10471,
+--                   10477, 10486 and 10488 have addon rows too - all auras
+--                   empty - and 10476, 10489 and 11551 have none.
 --   faction         1885, re-measured against FactionTemplate.dbc field 5:
 --                   enemyGroupMask 1 -> HOSTILE to players. (This is the check
 --                   that disqualified 29112 Gothik the Harvester and 29113
@@ -267,7 +335,9 @@
 --                   therefore built from the audited pool, and what carries
 --                   its identity is the model and the scale. That trade is
 --                   named here rather than hidden: see the kit file for the
---                   four rows and for the ONE row it shares with 25352.
+--                   four rows and for which of them are shared, and with
+--                   which shipped bosses - the answer is TWO of the four,
+--                   not one, and the kit file states it row by row.
 --
 -- Alternatives measured and rejected, so the choice reads as a decision:
 -- 26530 Salramm the Fleshcrafter and 26529 Meathook (315000 hp, DamageModifier
@@ -282,8 +352,15 @@
 -- 25352 Scourge Overlord is already pack 4's boss; 31222 Khit'rix the Dark
 -- Master draws NerubianPriest.mdx, which pack 8's boss 29309 Elder Nadox is
 -- taking in the same round; 30071 Stitched Colossus runs at speed_run 1.71429
--- and its own kit is two knock-backs; 29935 Acolyte of Pain is 29934's twin on
--- every column and only one of the two can have the slot.
+-- and its own kit is two knock-backs; 29935 Acolyte of Pain is 29934's
+-- NEAR-twin and only one of the two can have the slot. An earlier cut wrote
+-- "twin on every column", which is false on two: maxlevel 76 against 29934's
+-- 75, and creature_template_model 23181 against 22196 (re-measured
+-- 2026-09-09). Both display ids resolve to the same
+-- Creature\Necromancer\Necromancer.mdx at the same 2.00 scale, so the
+-- conclusion survives the correction - the two are interchangeable for every
+-- purpose this pack has - but "every column" is measurable and was measurably
+-- the wrong word.
 --
 -- The name overlap with this pack's own 10471 Scholomance Acolyte is
 -- deliberate and is the fiction: the trash are acolytes of the school, and the
@@ -311,9 +388,13 @@
 -- is the one member that shares no model with anything else in the dungeon.
 --
 -- Three members - Scholomance Necromancer / Necrolyte / Acolyte - carry a
--- real instance's name into a procedural ruined city. That is new for this
--- data (the live packs are custom 84263-84290 or generic names, and the only
--- place-name in them is "Forgotten Depths High Priest"). It is kept on
+-- real instance's name into a procedural ruined city. That was new when this
+-- file was authored: the five packs live at the time were custom 84263-84290
+-- or generic names, and the only place-name among them was "Forgotten Depths
+-- High Priest". It is no longer new, and the correction is worth the line: the
+-- two sibling packs applied alongside this one do the same thing, five
+-- "Shadowfang ..." members in pack 6 and four "Ahn'kahar ..." in pack 8, so
+-- the idiom is now the round's and not this pack's alone. It is kept on
 -- purpose: the pack IS the school, the names are the only thing in the pack
 -- that says so, and a name is cheaper to change later than a template.
 --
@@ -433,7 +514,9 @@
 -- ilvl 200/219 WotLK BoE epics the rejected 36879 paid at 5.9 % per BOSS kill,
 -- and it is not new to this pack: the live pack-4 member 30921 Skeletal
 -- Runesmith carries the identical GroupId-5 Chance-0 reference idiom
--- (Reference 1200180), and 9 of the 52 live pack members have a lootid at all.
+-- (Reference 1200180), and 9 of the 52 pack members that were live when this
+-- file was authored - packs 1-5, still 9 of 52 when scoped that way - have a
+-- lootid at all.
 --
 -- Two 100 % items on 10488 (18746 Divination Scryer, 18792 Blessed Arcanite
 -- Barding) are QuestRequired = 1 and therefore drop for nobody who has not got
@@ -468,10 +551,14 @@
 -- low-level reduction could not apply in any case, because
 -- OnBeforeCreatureSelectLevel forces every member to level 80
 -- (PDv2Scaling.cpp:215-230) and a level-80 victim is never grey. The boss 29934
--- carries no such row, and neither does any live pack member: SELECT COUNT(*)
--- FROM pdungeon_pack_members pm JOIN creature_onkill_reputation r ON
--- r.creature_id = pm.entry returns 0 over all 52. Pack 7 would have been the
--- first, on seven of its eight members.
+-- carries no such row, and no pack member carried one before this file was
+-- applied: SELECT COUNT(*) FROM pdungeon_pack_members pm JOIN
+-- creature_onkill_reputation r ON r.creature_id = pm.entry returned 0 over the
+-- 52 pre-apply members, and still returns 0 when scoped to packs 1-5.
+-- RE-MEASURED AFTER THE APPLY IT RETURNS SEVEN, and all seven are this pack's.
+-- Pack 7 is the first pack with the row, on seven of its eight members, exactly
+-- as this block predicted - which is the state the engine switch below exists
+-- for, and the reason the switch is on the spawn path and not on the data.
 --
 -- THE MODULE SWITCHES IT OFF, WHICH IS WHY NOT ONE ROW BELOW CHANGED FOR IT.
 -- The fix is ENGINE and it is a POLICY, not a patch for these seven entries:
@@ -487,6 +574,25 @@
 -- where they were tuned to. Swapping the seven for reputation-free cultists
 -- would have fixed this pack and left the next one exposed; the switch on the
 -- spawn path covers every pack, including packs an operator writes.
+--
+-- TWO PROPERTIES OF THAT SWITCH THE OPERATOR SHOULD HAVE IN THE DATA FILE AND
+-- NOT ONLY IN A FIX REPORT:
+--
+--   EVIDENCE TIER. The switch is source-and-compiler evidence: the call sites,
+--     the gate in Player::RewardReputation and the single kill-side caller were
+--     all read, and worldserver was rebuilt, but NOTHING ABOUT IT HAS BEEN SEEN
+--     IN GAME. The confirmation is one line and costs one pull: kill a pack-7
+--     TRASH mob (not the boss - 29934 has no row to suppress) inside map 760,
+--     on a character that is below Exalted with Argent Dawn, and watch for the
+--     ABSENCE of the reputation message. A character already at Exalted proves
+--     nothing, because MaxStanding1 6 would suppress the gain anyway.
+--   NO OPT-OUT. The policy is GLOBAL and unconditional - every creature this
+--     dungeon summons is switched, on every pack, with no column and no flag to
+--     turn it back on. That is deliberate today, because nothing in the current
+--     data wants a payout. A future pack that DID want a small one could not
+--     have it from the spawn path: it would need a deliberate lever - a
+--     pdungeon_pack_members column, or a per-pack flag - added on purpose. That
+--     cost is recorded here so it survives outside the fix report.
 --
 -- PDv2's difficulty multiplier does NOT touch any of this.
 -- PDv2LootScript::OnPlayerBeforeLootMoney (PDv2Scaling.cpp:339-372) multiplies
@@ -511,12 +617,16 @@
 -- ----------------------------------------------------------------------------
 -- THIS FILE SHIPS ZERO creature_template ROWS AND ZERO UPDATES TO THEM.
 -- Not one of the eight entries falls in 84263-84290, and none of them is
--- referenced by any other pack: SELECT packId, entry FROM
--- pdungeon_pack_members WHERE entry IN (...) returns 0 rows and
--- SELECT COUNT(*) FROM pdungeon_member_spells WHERE entry IN (...) returns 0
--- (re-measured 2026-09-09, including the new boss 29934). A grep over
--- modules/**/*.sql finds 29934 nowhere at all. No spell_dbc row and no custom
--- id is created here.
+-- referenced by any other pack. Measured before this file was applied,
+-- 2026-09-09: SELECT packId, entry FROM pdungeon_pack_members WHERE entry IN
+-- (...) returned 0 rows and SELECT COUNT(*) FROM pdungeon_member_spells WHERE
+-- entry IN (...) returned 0, including for the new boss 29934. Re-measured
+-- after the apply those two return 8 and 25 - this file's own rows, all of
+-- them packId 7 - so the property that mattered still holds: no OTHER pack
+-- claims any of the eight. A grep over modules/**/*.sql finds 29934 in this
+-- pack's two files and, as a COMMENT only, in the two sibling worgen files
+-- written in the same round, which cite it for comparison. No other file
+-- inserts a row for it. No spell_dbc row and no custom id is created here.
 --
 -- The two CREATE TABLE IF NOT EXISTS blocks below are REPEATED from
 -- mod_pdungeon_packs.sql on purpose, and the reason given in the first cut of

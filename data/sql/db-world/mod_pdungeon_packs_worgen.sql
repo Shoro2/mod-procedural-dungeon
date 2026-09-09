@@ -240,8 +240,25 @@
 -- carried the corrected number when this file was written. No conclusion in this
 -- block moves - correcting it only widens Selas's damage lead over the pack-3
 -- bosses, from 2.1x to 2.9x. The two rows marked (cult) and (faceless) belong to
--- packs authored ALONGSIDE this one and were read at commit 811aa18; the four
--- shipped rows are live in the database.
+-- packs authored ALONGSIDE this one and were first read at commit 811aa18, when
+-- all three were still file-only. They are file-only no longer: re-measured
+-- 2026-09-09 against the live acore_world, pdungeon_packs holds ids 1-8,
+-- pdungeon_pack_members 76 rows and pdungeon_member_spells 226, so ALL SIX rows
+-- above are loaded and the merged role-2 pool is now EIGHT bosses, not five.
+--
+-- Every figure in this table, and in the merged-trash table below, is the
+-- dungeon-NORMAL one. Creature::UpdateEntry swaps the template for
+-- DifficultyEntry[GetSpawnMode() - 1] on heroic, and the pack-8 members do carry
+-- such clones - 29309 -> 31456 'Elder Nadox (1)' at DamageModifier 13 against
+-- 7.5, and 30111/30176/30179/30277/30278/30319/31104 -> 31475/31441/31471/31442/
+-- 31443/31472/31449, all at 13. None of them is reachable today: map 760 has
+-- exactly ONE mapdifficulty_dbc row (id 857, Difficulty 0, MaxPlayers 5), so the
+-- spawn mode is always 0 and the normal template is always the one that spawns.
+-- The figures are labelled anyway so they stay honest if a heroic row for 760 is
+-- ever added - the same latent condition the kit file's SPELLDIFFICULTY block
+-- names on the spell side. Every boss listed above carries difficulty_entry_1 =
+-- 0, and so does each of PACK 6'S OWN EIGHT: difficulty_entry_1..3 are 0 on all
+-- of them, measured column by column. This pack is mode-stable by construction.
 --
 -- So Selas is the SOFTEST boss in the merged pool on health - 75600 against a
 -- next-softest 126000, i.e. 1.67x, not the "factor of two" an earlier revision
@@ -336,17 +353,37 @@
 -- -229 that got Odo rejected. It costs a fear-based plan a pull, not a run.
 --
 -- ----------------------------------------------------------------------------
--- ECONOMY - measured against creature_loot_template / item_template, not
--- inferred from the lootid column
+-- ECONOMY - measured against creature_loot_template / item_template AND every
+-- Reference row they point at, not inferred from the lootid column
+--
+-- FOLLOW THE Reference COLUMN. A creature_loot_template row whose Reference is
+-- non-zero rolls a whole reference_loot_template tree instead of the item named
+-- in `Item`, and a row with GroupId != 0 at Chance 0 is an EQUAL-CHANCED group
+-- member (LootMgr.cpp:112-116) whose one-element group therefore fires on EVERY
+-- kill: LootTemplate::LootGroup::Roll (LootMgr.cpp:1262-1296) tries the
+-- explicitly-chanced list first, falls through to SelectRandomContainerElement
+-- over the equal-chanced one, and Process (:1409-1425) then recurses into the
+-- reference. An earlier revision of this block stopped at the direct rows and
+-- got two of its own statements backwards, including the operator-facing one
+-- about the boss. Reference is the loot-side analogue of SpellDifficulty (see
+-- the SPELLDIFFICULTY block in the kit file): in both cases the row names one
+-- id and the core resolves another, and in both cases reading the row alone is
+-- not a measurement.
 --
 -- ALL EIGHT members carry a native loot table (2529, 3853, 3854, 3855, 3857,
 -- 3859, 3914, 27580 - lootid non-zero on every one), seven are skinnable
 -- (skinloot 100005 / 100006 / 100007; the boss is skinloot 0), and gold spans
 -- 32-328 copper across the Shadowfang seven (3853 32-192, 3855 40-209,
 -- 3857 41-202, 3914 51-206, 2529 63-328, 3859 74-303, 3854 95-129) and
--- 1231-2051 copper for the boss, before PDv2's own loot multiplier.
+-- 1231-2051 copper for the boss, before PDv2's own loot multiplier. Every
+-- Rate.Drop.Item.* key - Referenced, ReferencedAmount and GroupAmount included
+-- - is 1 in the deployed dcore\configs\worldserver.conf, so the table chances
+-- below apply unmodified, and PDv2's FL mats drop ON TOP of the creature's own
+-- loot rather than replacing it (PDv2InstanceScript.cpp:731; the only
+-- loot.clear() is for noLoot-flagged split children, :739-744).
 --
--- ONE item deserves a decision rather than a discovery:
+-- ONE item is the only GUARANTEED blue in the pack, and it deserves a decision
+-- rather than a discovery:
 --
 --   3914 Rethilgore drops 5254 Rugged Spaulders (Quality 3 blue, item level 20)
 --   at Chance 100 / GroupId 0 - on EVERY kill, and he is trash, not a boss, and
@@ -362,14 +399,54 @@
 --   damage and health outlier, since 920 is DamageModifier 1.0 and 4701 hp at
 --   level 80.
 --
--- The BOSS is loot-clean: 27580 Selas drops only greys and whites (43851 Fur
--- Clothing Scraps 41.6%, 33470 Frostweave Cloth 25%, 33454 Salted Venison 9.9%,
--- 33444 Pungent Seal Whey 3.7%), where the previous boss 3927 dropped 3748
--- Feline Mantle (blue) at 60% and 6314 Wolfmaster Cape (blue) at 40% on nearly
--- every boss kill. Swapping the boss removed a blue flood as well as fixing the
--- three step-up axes.
+--   3914 is also the ONLY member of the pack whose loot table holds no Reference
+--   row at all - four direct rows and nothing else - which is precisely why the
+--   picture above fits him and fits nobody else in the roster.
 --
--- No member of this pack drops anything above Quality 3, and nothing epic.
+-- The BOSS IS NOT LOOT-CLEAN, and an earlier revision of this block said he was.
+-- 27580 Selas carries FIVE creature_loot_template rows, not four: the greys and
+-- whites (43851 Fur Clothing Scraps 41.6%, 33470 Frostweave Cloth 25%, 33454
+-- Salted Venison 9.9%, 33444 Pungent Seal Whey 3.7%) PLUS (Item 1, Reference
+-- 1200375, Chance 0, GroupId 5) "World Loot Level 75", which by the group rule
+-- above fires on EVERY kill. Resolved recursively it reaches 266 leaf items, 35
+-- of them Quality 3:
+--
+--   group 1  1227375 / 1227476 / 1227577  @3.33 % each -> ~10 % chance of an
+--            ilvl-150/154/158 Quality-2 GREEN per boss kill
+--   group 2  1237375 / 1237476 / 1237577  @0.033 % each -> ~0.1 % chance of an
+--            ilvl-150/154/158 Quality-3 BLUE per boss kill
+--   group 0  1207583 @10 % (55 greys/whites), 1267579 @100 % (4 items, Q2-Q3 at
+--            ilvl 70-80), 1256875 @3 %, 1256883 @1 %; among the Q3 leaves are
+--            43876 Guide to Northern Cloth Scavenging @1 % and 43624 Titanium
+--            Lockbox @0.1 %
+--
+-- (33470's own row also carries Reference 1270002, so even the "Frostweave
+-- Cloth" line resolves rather than dropping the named item.)
+--
+-- SIX of the seven trash members - 2529, 3853, 3854, 3855, 3857 and 3859, i.e.
+-- everyone except 3914 - additionally carry (Item 33, Reference 1033000, Chance
+-- 0.5) "Shadowfang Keep BoEs": an eleven-item equal-chanced group of Quality-3
+-- blues (1318 Night Reaver, 1482 Shadowfang, 1483 Face Smasher, 1484 Witching
+-- Stave, 1489 Gloomshroud Armor, 1935 Assassin's Blade, 1974 Mindthrust
+-- Bracers, 2205 Duskbringer, 2292 Necrology Robes, 2807 Guillotine Axe, 3194
+-- Black Malice), plus a "World Loot Level 19/20" GroupId 5 reference that fires
+-- on every kill exactly the way the boss's does. So 5254 is NOT the only blue
+-- this pack can drop - it is the only CERTAIN one.
+--
+-- The boss-swap conclusion is untouched and still holds with room to spare: the
+-- previous boss 3927 dropped 3748 Feline Mantle (blue) at 60% and 6314
+-- Wolfmaster Cape (blue) at 40% on nearly every kill, against Selas's ~0.1%.
+-- Swapping the boss removed a blue flood as well as fixing the three step-up
+-- axes; only the stated facts underneath that conclusion were wrong.
+--
+-- No member of this pack drops anything above Quality 3, and nothing epic. That
+-- claim SURVIVES the deeper reading - fully resolved, the maximum quality
+-- across all eight trees is exactly 3 - it had simply never been tested by the
+-- reading that first produced it.
+--
+-- One gated row, stated so it is not discovered: 3855 Shadowfang Darksoul
+-- carries 6915 Large Soran'ruk Fragment at Chance 100 / QuestRequired 1. The
+-- quest gate means a level-80 PDv2 party never sees it.
 --
 -- ----------------------------------------------------------------------------
 -- theme 0 = any look, same as all five shipped packs: a pack whose theme is
@@ -403,15 +480,23 @@
 -- 'mod_pdungeon_packs.sql' - the file that owns these two CREATE statements -
 -- sorts BEFORE 'mod_pdungeon_packs_worgen.sql' on a fresh database as well as on
 -- this one. The same is true in the companion kit file, and this file's earlier
--- claim that it was load-bearing THERE was also wrong: the only other creator of
+-- claim that it was load-bearing THERE was also wrong: the CANONICAL creator of
 -- `pdungeon_member_spells` is 'mod_pdungeon_member_spells.sql' (line 238), and
--- by the same rule it sorts before 'mod_pdungeon_member_spells_worgen.sql'. Both
--- repetitions are harmless duplication kept so each file applies on its own.
+-- by the same rule it sorts before 'mod_pdungeon_member_spells_worgen.sql'.
+-- It is not the ONLY other creator, and an earlier revision of this sentence
+-- said it was: the concurrently authored '_cult' and '_faceless' kit files
+-- repeat the same CREATE, exactly as this file does, and the '_cult' and
+-- '_faceless' PACK files repeat the two above. Nothing follows from that - the
+-- rule is about the '.' before the '_', so the canonical file sorts first
+-- against EVERY sibling, and IF NOT EXISTS makes each repeat free. All of them
+-- are harmless duplication kept so each file applies on its own.
 --
 -- THIS FILE SHIPS ZERO creature_template ROWS AND ZERO UPDATES TO THEM, and zero
 -- spell_dbc rows. Every entry is stock 3.3.5a, none falls in 84263-84290, none is
--- used by packs 1-5 (SELECT packId, entry FROM pdungeon_pack_members WHERE entry
--- IN (...) returns 0 rows) and no other module's SQL references any of them as a
+-- used by any OTHER pack (SELECT packId, entry FROM pdungeon_pack_members WHERE
+-- entry IN (...) returns exactly this pack's own eight rows, all at packId 6,
+-- and nothing else - it returned 0 rows before this file was applied) and no
+-- other module's SQL references any of them as a
 -- creature (a grep across modules/ hits only the coordinate fragment
 -- '...,2529.99,...' and the ITEM id 3914 in mod-turtle-content loot tables).
 --

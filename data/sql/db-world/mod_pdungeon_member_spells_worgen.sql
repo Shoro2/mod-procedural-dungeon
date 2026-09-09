@@ -72,7 +72,11 @@
 --
 -- The damage column below is the id AS WRITTEN. Four ids are difficulty-swapped
 -- on map 760 and are marked (SD); for those the column carries the dungeon-NORMAL
--- value the core actually casts, with the heroic value beside it.
+-- value the core actually casts, with the heroic value beside it. The SAME
+-- convention and the same (SD) marker now run through the per-row comments on the
+-- INSERT itself: an earlier revision marked them nowhere and quoted the HEROIC
+-- figure on two of the four (59021 as 6475-7525, 59126 as 8788-10212), which is
+-- the un-cast value on the only spawn mode map 760 can run.
 --
 --   id     name                dmg @80 (measured)      shape
 --   14516  Strike              weapon swing + 247      WEAPON_DAMAGE, single, 5 yd
@@ -163,7 +167,7 @@
 -- chosen:
 --
 --   Spell::Spell           m_spellInfo(sSpellMgr->GetSpellForDifficultyFromSpell(
---                          info, caster))                       Spell.cpp:570-571
+--                          info, caster))                       Spell.cpp:571-572
 --   SpellMgr::GetSpellIdForDifficulty                       SpellMgr.cpp:538-578
 --       returns SpellDifficultyEntry::SpellID[GetSpawnMode()] for any spell that
 --       has a difficulty id, on any dungeon or battleground map
@@ -331,10 +335,21 @@
 --   2529 1273-1427 ->  4788-5912   ->  11563-13437      climbing
 --   27580 2339-3098 / 12350-13650  ->  17525-18825  ->  19975-27025   climbing
 --
--- and on dungeon-HEROIC only three cells move, all upward, so every curve still
--- climbs there too: 3914's tier-50 becomes 6475-7525, 3854's tier-75 becomes
--- 8788-10212 and 3857's tier-50 becomes 4625-5375. The boss's four rows and
--- 2529's three are identical in both modes.
+-- and on dungeon-HEROIC only three NUMERIC cells move, all three upward, so every
+-- curve still climbs there too: 3914's tier-50 becomes 6475-7525, 3854's tier-75
+-- becomes 8788-10212 and 3857's tier-50 becomes 4625-5375. The boss's four rows
+-- and 2529's three are identical in both modes.
+--
+-- The FOURTH substituted cell moves DOWNWARD, and "all upward" is true only of
+-- the three numeric ones: 3859's tier-75 is the CC, 11428 -> 46183, which trades
+-- a flat 150-166 for WEAPON_PERCENT_DAMAGE 23-27 % = 73-107 against that member's
+-- own 317-397 swing. Nothing is concealed by it - the SPELLDIFFICULTY table above
+-- prints "heroic weapon x0.23" and the climb row reads "the CC" rather than a
+-- number, because the 2 s MOD_STUN is the payload and is identical in both modes
+-- - but the sentence is stated precisely here so the next reader does not have to
+-- re-derive which of the four it excludes. On map 760 none of this is reachable
+-- today: mapdifficulty_dbc holds exactly one row for 760 (id 857, Difficulty 0,
+-- MaxPlayers 5), so GetSpawnMode() is always 0.
 --
 -- (The boss's tier-0 row 16169 carries SPELL_ATTR0_ON_NEXT_SWING_NO_DAMAGE, so
 -- it REPLACES the swing rather than adding to it: 1939-2698 + 400.)
@@ -437,7 +452,7 @@
 -- role-1 row. No row anywhere in this file has a non-zero rangeMin.
 --
 -- ----------------------------------------------------------------------------
--- FOUR NON-PROBLEMS, recorded so the next reader does not re-litigate them
+-- FIVE NON-PROBLEMS, recorded so the next reader does not re-litigate them
 --
 --  * EquippedItemClass 2 on 14516 Strike, 48640 Strike and 59992 Cleave is not a
 --    creature problem: Spell::CheckItems returns SPELL_CAST_OK immediately for a
@@ -458,6 +473,14 @@
 --    cast while the CASTER holds that aura; no PDv2 mob can ever hold it - the
 --    module applies no auras at spawn and neither creature_template_addon row in
 --    this pack carries one - so it can never fire. Stated, not discovered.
+--  * FacingCasterFlags 1 (SPELL_FACING_FLAG_INFRONT) on EIGHT of the 24 - 40736,
+--    42395, 42397, 42746, 59021, 59992, 60015 and 69211 - is inert on a creature.
+--    Its only reader is Spell::CheckRange (Spell.cpp:7126), and that test is
+--    gated on m_caster->IsPlayer(), so no PDv2 mob is ever refused a cast for
+--    standing behind its target. Measured field by field out of Spell.dbc
+--    (column 20 of the 234, per the spell_dbc column list), with 133 Fireball,
+--    845 Cleave, 2098 Eviscerate and 25286 Heroic Strike read back as controls.
+--    An earlier review summarised this as seven ids; the count is eight.
 --
 -- ----------------------------------------------------------------------------
 -- EXCLUDED, and why - the spells these creatures own that are NOT used
@@ -574,7 +597,8 @@
 --        41596. Spell::EffectScriptEffect (SpellEffects.cpp:3837-4038) switches on
 --        SpellFamilyName and then on the spell id; 40736 appears NOWHERE in the
 --        AzerothCore tree (grep over src/ -> 0 hits), so the switch falls through
---        to the DB path at :4035-4036, ScriptsStart(sSpellScripts, id | effIndex
+--        to the DB path at :4036-4037 (the LOG_DEBUG and then the operative call
+--        at 4037), ScriptsStart(sSpellScripts, id | effIndex
 --        << 24). acore_world.spell_scripts has 130 rows and NONE of them is any
 --        of this file's 24 ids, so that call finds nothing and returns. The
 --        basePoints 41596 is not a triggered spell - EffectTriggerSpell_2 is 0 -
@@ -587,14 +611,19 @@
 -- The CREATE TABLE IF NOT EXISTS block below is REDUNDANCY, not an ordering fix,
 -- and an earlier revision of this file claimed the opposite. Measured:
 -- UpdateFetcher::PathCompare compares filename().string()
--- (UpdateFetcher.cpp:521-524) and '.' (0x2E) sorts before '_' (0x5F). The only
--- other file that creates `pdungeon_member_spells` is
+-- (UpdateFetcher.cpp:521-524) and '.' (0x2E) sorts before '_' (0x5F). The
+-- CANONICAL creator of `pdungeon_member_spells` is
 -- 'mod_pdungeon_member_spells.sql' (line 238) - NOT 'mod_pdungeon_packs.sql',
 -- which creates `pdungeon_packs` and `pdungeon_pack_members` only - and by that
 -- rule it sorts BEFORE 'mod_pdungeon_member_spells_worgen.sql'. So the table
--- already exists on a fresh database by the time this file runs. The block is
--- kept because IF NOT EXISTS makes it free and it keeps this file applicable on
--- its own, which is the same disposition both sibling packs took.
+-- already exists on a fresh database by the time this file runs. It is not the
+-- ONLY other creator, and an earlier revision of this sentence said it was: the
+-- '_cult' and '_faceless' kit files repeat the same CREATE, exactly as this one
+-- does. Nothing follows from that either - the rule turns on the '.' before the
+-- '_', so the canonical file sorts first against EVERY sibling, in any order the
+-- three of them land in. The block is kept because IF NOT EXISTS makes it free
+-- and it keeps this file applicable on its own, which is the same disposition
+-- both sibling packs took.
 -- ----------------------------------------------------------------------------
 
 CREATE TABLE IF NOT EXISTS `pdungeon_member_spells` (
@@ -626,20 +655,20 @@ INSERT INTO `pdungeon_member_spells`
   -- ==========================================================================
   -- 3914 Rethilgore  (unit_class 1, dm 1.7, 21368 hp, display 524 scale 1.15)
   (3914, 14516, 1,  6000,  1, 1),  -- Strike            weapon + 247, 5 yd single         t0
-  (3914, 59021, 1, 10000, 50, 1),  -- Vicious Bite      6475-7525, 5 yd single            t50
+  (3914, 59021, 1, 10000, 50, 1),  -- Vicious Bite      3238-3762, 5 yd single            t50 (SD)
   (3914, 42395, 1, 12000, 75, 1),  -- Lacerating Slash  15615 bleed over 18 s, 5 yd       t75
   -- 3854 Shadowfang Wolfguard  (unit_class 1, dm 1.7, 16026 hp, display 203 scale 1.00)
   (3854, 48640, 1,  6000,  1, 1),  -- Strike            weapon 150%, 5 yd single          t0
   (3854, 50729, 1, 10000, 50, 1),  -- Carnivorous Bite  5725-6105 (hit + bleed), 5 yd     t50
-  (3854, 59126, 1, 12000, 75, 1),  -- Shadow Breath     8788-10212, 15 yd cone            t75
+  (3854, 59126, 1, 12000, 75, 1),  -- Shadow Breath     6938-8062, 15 yd cone             t75 (SD)
   -- 3857 Shadowfang Glutton  (unit_class 1, dm 1.7, 16026 hp, display 202 scale 1.00)
   (3857, 42746, 1,  7000,  1, 1),  -- Cleave            weapon 110%, 5 yd, chain 3        t0
-  (3857, 69900, 1, 10000, 50, 1),  -- Spirit Burst      3238-3762, self-centred 15 yd     t50
+  (3857, 69900, 1, 10000, 50, 1),  -- Spirit Burst      3238-3762, self-centred 15 yd     t50 (SD)
   (3857, 36965, 1, 12000, 75, 1),  -- Rend              11250 bleed over 15 s, 5 yd       t75
   -- 3859 Shadowfang Ragetooth  (unit_class 1, dm 1.7, 16026 hp, display 736 scale 1.15)
   (3859, 59992, 1,  7000,  1, 1),  -- Cleave            weapon + 240, 5 yd, chain 3       t0
   (3859, 55249, 1, 10000, 50, 1),  -- Whirling Slash    5828-6172, self-centred 5 yd      t50
-  (3859, 11428, 1, 60000, 75, 1),  -- Knockdown         2 s stun + 150-166  CC (STUN)     t75
+  (3859, 11428, 1, 60000, 75, 1),  -- Knockdown         2 s stun + 150-166  CC (STUN)     t75 (SD)
   -- ==========================================================================
   -- PACK 6 "Shadowfang Pack" - RANGE (role 1) - filler + two cooldown spells
   -- ==========================================================================

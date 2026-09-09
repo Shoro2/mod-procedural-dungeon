@@ -53,9 +53,15 @@
 --   30319  Twilight Darkcaster        2   2      4        50400   15976
 --   29309  Elder Nadox  (BOSS)        2   2     17       214200   79880
 --
--- 50400 hp of trash against the 12600-32052 the other packs field: 1.6x pack
--- 2's heaviest and 4x pack 5's lightest, so "twice as long" is the middle of
--- a 1.6x-4x range and not a single number.
+-- 50400 hp of trash against the 7373-36860 the other seven packs field,
+-- re-measured 2026-09-09 over every role-0 / role-1 member of packs 1, 2, 4,
+-- 5, 6 and 7: 1.57x pack 2's heaviest (32052) and 6.8x the lightest, which is
+-- pack 5's uc2 casters 18859 / 18870 / 24919 at basehp1 7373 x 1. An earlier
+-- cut of this line said "12600-32052 ... 4x pack 5's lightest"; 12600 is pack
+-- 4's floor, not pack 5's, and the 4x was that wrong floor. So "twice as long"
+-- is the middle of a 1.6x-6.8x range and not a single number - and this pack's
+-- OWN 30176 at 25200 sits BELOW pack 5's heaviest trash (20427 Veneratus the
+-- Many, 36860).
 --
 -- The boss lands at 214200, between the shipped 149560 (84288-84290) and
 -- 327600 (29620 Dreadlord Mal'Ganis), so it needs no special handling: there
@@ -69,29 +75,68 @@
 --
 -- The health table above is only one side of the divergence. The other side is
 -- creature_template.DamageModifier, which Unit::CalculateMinMaxDamage takes
--- LINEARLY (src/server/game/Entities/Unit/StatSystem.cpp:1163-1172:
--- min = (weaponBase + AP/14 * BaseVariance) * DamageModifier), on top of the
--- expansion's own base-damage column (damage_base 47.24 / 44.20 for the exp 0
--- packs against damage_exp2 164.92 for this one). Measured at level 80 on
--- 2026-09-09, auto-attack only, difficulty 0:
+-- LINEARLY (src/server/game/Entities/Unit/StatSystem.cpp:1163-1172), on top of
+-- the expansion's own base-damage column (damage_base 47.24 / 44.20 for the
+-- exp 0 packs against damage_exp2 164.92 for this one).
 --
---   pack                       DamageModifier   swing         swing dps
---   1  Crypt Horrors            2.5 .. 4.0      233 .. 438     87 .. 141
---   2  Abyssal Broodpit         2.5 .. 4.0      233 .. 438    131 .. 141
---   4  Barrow Dead              1.0             208 .. 293    110 .. 126
---   5  Legion Rift              1.0 .. 2.9      156 .. 704     92 .. 304
---   8  Ahn'kahet Deep (THIS)    7.5 ON ALL 8   1563 .. 2199   780 .. 945
---   shipped BOSSES  25352 / 29620   7.5        1581 .. 2199          945
---   shipped BOSSES  84288-84290     8.0         321 ..  481          134
+-- CORRECTED 2026-09-09, and the correction is why this block is worth
+-- re-reading: the first cut of this table published the swing WITHOUT its
+-- attack-speed factor and then divided by the attack time anyway, so every
+-- figure in its `swing dps` column was low by exactly BaseAttackTime/1000 -
+-- 2.4x on this pack's boss. mod_pdungeon_packs_cult.sql carries the same
+-- correction with the full derivation, in its "WHAT THIS PACK WEIGHS AND WHAT
+-- IT HITS FOR" block, and both sibling files already publish the corrected
+-- form. The missing `x BaseAttackTime/1000` term is `basePct =
+-- GetPctModifierValue(unitMod, BASE_PCT) * attackSpeedMulti` at
+-- StatSystem.cpp:1166, and Unit::GetAPMultiplier (Unit.cpp:13652-13655)
+-- returns GetAttackTime()/1000 for every non-player:
+--
+--   swing_min = (damage_base[exp]       + AttackPower/14 x BaseVariance)
+--               x DamageModifier x (BaseAttackTime / 1000)
+--   swing_max = (damage_base[exp] x 1.5 + AttackPower/14 x BaseVariance)
+--               x DamageModifier x (BaseAttackTime / 1000)
+--
+-- The swing is multiplied by the attack time and dps divides by it again, so
+-- creature melee DPS is INDEPENDENT of attack speed:
+--
+--   dps = (damage_base[exp] x 1.25 + AttackPower/14 x BaseVariance)
+--         x DamageModifier
+--
+-- Measured at level 80 on 2026-09-09 against the live acore_world, over every
+-- role-0 / role-1 member of each pack, auto-attack only, difficulty 0:
+--
+--   pack                       DamageModifier   swing           dps
+--   1  Crypt Horrors            2.5 .. 4.0      465 ..  875    262 ..  282
+--   2  Abyssal Broodpit         2.5 .. 4.0      465 ..  645    262 ..  282
+--   4  Barrow Dead              1.0             417 ..  674    250 ..  252
+--   5  Legion Rift              1.0 .. 2.9      234 .. 1407    184 ..  609
+--   6  Shadowfang Pack          1.7             298 ..  397    168 ..  178
+--   7  Cult of the Damned       3.5             613 ..  980    345 ..  367
+--   8  Ahn'kahet Deep (THIS)    7.5 ON ALL 8   3125 .. 5278   1872 .. 1890
+--   shipped BOSSES  25352 / 29620   7.5        3162 .. 4399          1890
+--   shipped BOSSES  84288-84290     8.0         962 .. 1444           401
 --                                   (BaseVariance 0 and BaseAttackTime 3000,
 --                                    which is why 8.0 lands under this pack's 7.5)
 --
--- Read that last block twice: EVERY trash member of this pack swings for
--- exactly what the pack-4 and pack-5 BOSSES swing for, and 5.5x-10.9x what
--- any other pack's trash swings for. With ProceduralDungeon.V2.SpawnsPerRoom
--- = 5 and a with-replacement weighted draw (PDv2PackDraw.cpp), a room can be
--- five of them: ~4700 raw melee dps at difficulty 0 and ~9400 at difficulty
--- 50, before a single kit spell. PDv2 applies NO per-pack normalisation
+-- Packs 6 and 7 were missing from the first cut of this table although both
+-- are sibling files in this same directory; their rows here are the figures
+-- those files publish themselves (the worgen file's own trash/boss dps tables
+-- and the cult file's member table) and this pass reproduced every one of
+-- them to the unit. The packs 1/2 swing cell read "233 .. 438" in the first
+-- cut, twice over: 438 paired the class-1 base damage with the class-8
+-- DamageModifier, which no member of either pack carries.
+--
+-- Read that last block twice: EVERY trash member of this pack does the melee
+-- dps of the pack-4 and pack-5 BOSSES, and 3.1x-11.3x what any other pack's
+-- trash does - 3.1x is against pack 5's hardest hitter (20427 Veneratus the
+-- Many, 609 dps) and 11.3x against pack 6's uc2 worgen at 168, so a universal
+-- "5.5x-10.9x against any other pack" was wrong at both ends. With
+-- ProceduralDungeon.V2.SpawnsPerRoom = 5 and a with-replacement weighted draw
+-- (PDv2PackDraw.cpp), a room can be five of them: ~9400 raw melee dps at
+-- difficulty 0 and ~18800 at difficulty 50, before a single kit spell. That
+-- ~9400 is the same number mod_pdungeon_packs_worgen.sql already quotes for a
+-- pack-8 room in its cross-pack table; the first cut of this file said ~4700,
+-- and so contradicted its own sibling. PDv2 applies NO per-pack normalisation
 -- anywhere - OnCreatureSelectLevel moves health only and says so in its own
 -- comment (PDv2Scaling.cpp:232-263).
 --
@@ -104,11 +149,17 @@
 --   * creature_template.DamageModifier is NOT edited, for the same reason
 --     HealthModifier is not: it is a shared column that Ahn'kahet itself and
 --     every other consumer reads. Nor is there a lower-hitting swap on this
---     theme: every rank 1 / exp 2 Ahn'kahet, nerubian or Twilight's Hammer
---     template in creature_template is 7.5 (19 of them), 13 (17 heroic
---     clones) or higher (4 Nerubian Burrowers at 16.2-33.6). The only
---     on-theme stock below 7.5 is rank 0 with a HealthModifier of 0.012
---     (Ahn'kahar Swarmer, ~153 hp at 80) - not a pack member.
+--     theme. Swept 2026-09-09 with the filter `rank` = 1 AND exp = 2 AND name
+--     LIKE any of "%Ahn'kahar%" / "%Ahn'kahet%" / "%Twilight%" / "%Nerubian%":
+--     25 rows at DamageModifier 7.5, 19 at 13 (the ' (1)'-suffixed heroic
+--     clones) and 4 above - Nerubian Burrowers 35655 / 34607 / 34648 / 35656
+--     at 16.2 / 17.2 / 29.3 / 33.6. THE COUNTS AT 7.5 AND 13 MOVE WITH THE
+--     NAME FILTER, which is why the filter is quoted and not just the number:
+--     an earlier cut of this line said 19 and 17, and the two 2026-09-09
+--     adversarial reviews' own sweeps returned 23/17 and 29/21. What does not
+--     move is the load-bearing half - the sweep returns ZERO rows below 7.5.
+--     The only on-theme stock below it is rank 0 with a HealthModifier of
+--     0.012 (Ahn'kahar Swarmer, ~153 hp at 80) - not a pack member.
 --   * `weight` stays 100 on all eight, per the pack contract.
 --   * So the levers that remain are the DIFFICULTY DIAL and the KIT. The kit
 --     is where this pass spent them: mod_pdungeon_member_spells_faceless.sql
@@ -117,8 +168,8 @@
 --     filler worth ~3330 sustained dps) outright.
 --   * An operator tuning the difficulty dial should therefore expect a pack-8
 --     room to be the hardest room of a run at a given difficulty - roughly
---     2-4x the time and 5-10x the incoming melee of any other pack's room -
---     and should judge the dial against a pack-8 draw, not against pack 4.
+--     1.6-6.8x the time and 3-11x the incoming melee of any other pack's room
+--     - and should judge the dial against a pack-8 draw, not against pack 4.
 --
 -- ----------------------------------------------------------------------------
 -- WHY ELDER NADOX AND NOT HERALD VOLAZJ
@@ -133,12 +184,26 @@
 -- (PDv2InstanceScript.cpp:707-709). One evade - a wipe, a run-away, a
 -- knockback - therefore leaves the boss room permanently uncleared.
 --
--- 29309 Elder Nadox has flags_extra 0 and takes the slot. He is a real step
--- up on all three axes a boss is judged on: 214200 hp = 4.25x his own trash;
--- a 4.00-scale NerubianPriest silhouette against their 1.10-1.25 warriors;
--- and, since the fix pass, a kit whose t75 (59126 Shadow Breath, 8788-10212)
--- is the pack's heaviest single row. His boss_elder_nadox ScriptName never
--- binds, and neither does 30176's npc_ahnkahar_nerubian:
+-- 29309 Elder Nadox has flags_extra 0 and takes the slot. He is a real step up
+-- on HEALTH (214200 hp = 4.25x his own trash), on SILHOUETTE (a 4.00-scale
+-- NerubianPriest against their 1.10-1.25 warriors, and a model file no
+-- packmate draws) and, since the fix pass, on ABILITIES from difficulty 75 -
+-- his t75 row 59126 Shadow Breath at 8788-10212 is the pack's heaviest single
+-- row.
+--
+-- He is NOT a step up on the fourth axis, AUTO-ATTACK, and an earlier cut of
+-- this paragraph claimed "a real step up on all three axes", which overstated
+-- it. His DamageModifier is 7.5 - exactly his trash's - so his melee dps is
+-- 1872 against their 1872-1890: level with the pack's four other unit_class 2
+-- members and 0.99x the three unit_class 1 ones. His BaseAttackTime 2400
+-- against their 2000 does NOT lower it either; it buys a BIGGER swing
+-- (3750-5235 against 3125-4399) at the same dps, because the swing carries
+-- the attack time and dps divides it out again (see the damage block above).
+-- The ability axis is what carries this boss, and it only opens at difficulty
+-- 75.
+--
+-- His boss_elder_nadox ScriptName never binds, and neither does 30176's
+-- npc_ahnkahar_nerubian:
 -- CreatureAISelector::SelectAI asks sScriptMgr->GetCreatureAI BEFORE it looks
 -- at AIName (CreatureAISelector.cpp:78-88) and ScriptMgr::GetCreatureAI asks
 -- every AllCreatureScript before the ScriptName registry
@@ -165,11 +230,23 @@
 --   30179  27369/27370/27371/27372  Orc M/M/F/F                 scale 1.10
 --   30319  27373/27374/27376/27377  Scourge M/M/F/F             scale 1.10
 --
--- The three cultists each carry FOUR display variants, so a room of them is
--- four different bodies rather than one repeated model. Not one display here
--- is 11686 Creature\InvisibleStalker\InvisibleStalker.mdx - the trap that
--- cost 30621-30625 Twisted Visage their slots, since they are Volazj's
--- Insanity phantoms and would have spawned as invisible mobs.
+-- The three cultists each carry FOUR display variants, but four DISPLAYS is
+-- not four BODIES and only one of the three delivers that. Resolved through
+-- CreatureDisplayInfo -> CreatureModelData on 2026-09-09:
+--
+--   30111  27386/27387/27388/27389  ->  FOUR distinct models (Tauren M/F,
+--                                       Troll M/F)
+--   30179  27369/27370/27371/27372  ->  TWO  (OrcMale x2, OrcFemale x2)
+--   30319  27373/27374/27376/27377  ->  TWO  (ScourgeMale x2, ScourgeFemale x2)
+--
+-- The paired displays differ by texture variation, so a room of cultists does
+-- show real variety - but the first cut's "four different bodies rather than
+-- one repeated model" was overstated for two of the three, not empty.
+--
+-- Not one display here is 11686
+-- Creature\InvisibleStalker\InvisibleStalker.mdx - the trap that cost
+-- 30621-30625 Twisted Visage their slots, since they are Volazj's Insanity
+-- phantoms and would have spawned as invisible mobs.
 --
 -- TWO MODEL NEAR-DUPLICATES, both measured, neither disqualifying:
 --
@@ -188,8 +265,36 @@
 --      (PDv2PackDraw.cpp), so a pack-4 boss room CAN show Nadox as "that same
 --      caster, twice as tall". The alternatives are worse (Volazj is
 --      disqualified above, 30414 costs 113400 hp), and no boss-vs-boss
---      duplicate exists: the role-2 pool is Lich, Human, Dreadlord, CryptLord,
---      Mal'Ganis, Worgen - a nerubian priest is new to it.
+--      duplicate exists. RE-DERIVED 2026-09-09 rather than amended, because
+--      the first cut listed six and the pool has since grown: with packs 1-8
+--      all live in pdungeon_pack_members the role-2 pool is EIGHT bosses and
+--      EIGHT distinct model files -
+--
+--        25352 Scourge Overlord  Creature\Lich\Lich.mdx                  3.50
+--        84288 Dralak            Character\Human\Male\HumanMale.mdx      1.00
+--        84289 Lord Maltrion     Creature\Dreadlord\DreadLord.mdx        1.50
+--        84290 Mor'Kar           Creature\CryptLord\CryptLord.mdx        1.00
+--        29620 Mal'Ganis         Creature\MalGanis\MalGanis.mdx          3.00
+--        27580 Selas             Creature\NorthrendWorgen\
+--                                  NorthrendWorgen.mdx                   3.00
+--        29934 Acolyte of Agony  Creature\Necromancer\Necromancer.mdx    2.00
+--        29309 Elder Nadox       Creature\NerubianPriest\
+--                                  NerubianPriest.mdx                    4.00
+--
+--      - so the conclusion is unchanged: no duplicate, and a nerubian priest
+--      is new to the pool. Note for anyone checking this against a review
+--      note that names 36879 Plagueborn Horror as the eighth: 36879 was
+--      replaced by 29934 as the cult pack's boss and is in NO pack at all.
+--
+-- That global boss draw has a POWER consequence as well as the model one, and
+-- it runs the other way. A pack-8 boss room is boss + V2.BossRoomAdds - the
+-- deployed value is 2 (mod_procedural_dungeon.conf:253) - so it is a boss plus
+-- TWO pack-8 trash, and half the boss pool does less melee than ONE of those
+-- adds: 84288/84289/84290 measure 401 dps (BaseVariance 0, BaseAttackTime
+-- 3000, 962-1444 a swing) and 27580 Selas 1159, against an add's 1872-1890.
+-- The three pack-3 bosses are 0.21x a single pack-8 add. Only 25352 and 29620
+-- (1890) edge past one, and 29934 and 29309 tie it. So in a pack-8 boss room
+-- the adds, not the boss, are usually the damage.
 --
 -- ----------------------------------------------------------------------------
 -- FLAG AND AURA TRAPS, ALL CHECKED, ALL CLEAR
@@ -203,6 +308,19 @@
 --   flags_extra      0 on all eight (see the Volazj note above).
 --   npcflag          0 on all eight - no questgiver marker, no vendor menu.
 --   VehicleId        0 on all eight.
+--   rank             1 (elite) on all eight, where the shipped packs' trash is
+--                    rank 0. Every Rate.Creature.Elite.* key is 1 in the
+--                    deployed C:\wowstuff\dcore\configs\worldserver.conf
+--                    (lines 2990-3032), so Creature::_GetHealthMod and
+--                    _GetDamageMod both return 1.0 and `rank` costs and buys
+--                    nothing beyond the gold dragon on the nameplate. It is a
+--                    LOOK change, it is intentional (vanilla dungeon trash is
+--                    elite), and the operator should EXPECT it rather than
+--                    report it as a bug. Both sibling packs authored in this
+--                    same wave carry the note in as many words; the first cut
+--                    of this file was the only one of the three without it,
+--                    and mentioned `rank` only inside an INSERT comment with
+--                    no consequence attached.
 --   name suffix      no ' (1)'/' (2)'/' (3)' sniff-duplicate suffix.
 --   faction          16 on all eight. FactionTemplate.dbc field 5:
 --                    enemyGroupMask = 1 -> hostile to players. YES.
@@ -243,8 +361,9 @@
 --                    polymorphed or knocked back at all, and three more are
 --                    fear-immune. Expect crowd control to fail on them.
 --   difficulty_entry_1     EVERY member of this pack has a heroic clone, and
---                    this is the first pack for which that is true (packs 1-5
---                    are all 0): 30176->31441, 30277->31442, 30278->31443,
+--                    this is the only pack for which that is true - re-checked
+--                    2026-09-09 now that 6 and 7 are live too, every member of
+--                    packs 1-7 is 0: 30176->31441, 30277->31442, 30278->31443,
 --                    31104->31449, 29309->31456, 30179->31471, 30319->31472,
 --                    30111->31475. Each of those is a ' (1)'-suffixed
 --                    sniff-duplicate with DamageModifier 13 instead of 7.5.
@@ -275,9 +394,20 @@
 -- its ranged flavour is not lost, it comes back as melee-cast cooldown spells
 -- in mod_pdungeon_member_spells_faceless.sql.
 --
--- 4 melee / 3 range / 1 boss against Mob.CasterChance = 30 and
--- SpawnsPerRoom = 5 gives roughly 1.5 casters per room, drawn from three
+-- 4 melee / 3 range / 1 boss against the DEPLOYED Mob.CasterChance and
+-- SpawnsPerRoom = 5 gives roughly 1.25 casters per room, drawn from three
 -- distinct caster bodies (nerubian caster, orc cultist, Scourge cultist).
+--
+-- CORRECTED 2026-09-09, and it is this project's own standing deployed-config
+-- trap: the first cut of this line said "Mob.CasterChance = 30 ... roughly 1.5
+-- casters per room". 30 is only the TEMPLATE default - it is what
+-- conf/mod_procedural_dungeon.conf.dist:180 ships and what PDMgr.cpp:57 falls
+-- back to. The deployed file
+-- C:\wowstuff\dcore\configs\modules\mod_procedural_dungeon.conf:180 reads
+-- `ProceduralDungeon.Mob.CasterChance = 25`, so 5 x 0.25 = 1.25 is the live
+-- figure. Every OTHER config value these two files quote was checked against
+-- the same deployed file and is correct: V2.SpawnsPerRoom = 5 (:247),
+-- V2.CastRangeYd = 25.0 (:249), V2.BossRoomAdds = 2 (:253).
 --
 -- casterSpellId is the role-1 member's filler and a FALLBACK only:
 -- pdungeon_member_spells is the truth for every spell a mob casts. The column
@@ -324,11 +454,20 @@
 --
 -- ----------------------------------------------------------------------------
 -- Not one creature_template row is edited or added by this file, and none of
--- the eight entries falls in 84263-84290 or is used by another pack -
--- `SELECT packId, entry FROM pdungeon_pack_members WHERE entry IN (...)`
--- returned 0 rows and `SELECT COUNT(*) FROM pdungeon_member_spells WHERE
--- entry IN (...)` returned 0 on 2026-09-09. The whole three-table design
--- exists so this file never has to touch a shared template.
+-- the eight entries falls in 84263-84290 or is used by another pack. That was
+-- established BEFORE this file was applied: on 2026-09-09, against a database
+-- that then held packs 1-5 only, `SELECT packId, entry FROM
+-- pdungeon_pack_members WHERE entry IN (...)` returned 0 rows and `SELECT
+-- COUNT(*) FROM pdungeon_member_spells WHERE entry IN (...)` returned 0.
+--
+-- THIS PACK HAS SINCE BEEN APPLIED, so those two queries are a PRE-APPLY
+-- BASELINE and not a present-tense claim. Re-measured later the same day:
+-- pdungeon_packs holds ids 1-8, pdungeon_pack_members holds 76 rows (pack 8's
+-- own eight - 29309, 30111, 30176, 30179, 30277, 30278, 30319, 31104 - among
+-- them) and pdungeon_member_spells holds 226. Anyone re-running the
+-- "used by another pack" test today has to exclude packId 8 to reproduce the
+-- 0. The whole three-table design exists so this file never has to touch a
+-- shared template.
 --
 -- The CREATE TABLE IF NOT EXISTS blocks below are REDUNDANCY, and this
 -- header's earlier claim that they are what keeps this pack applying on a
