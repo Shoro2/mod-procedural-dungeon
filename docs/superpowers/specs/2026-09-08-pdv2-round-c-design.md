@@ -1,8 +1,11 @@
 # PDv2 Round C — the operator's T2 verdict on Round B, turned into fixes and features
 
 **Date** 2026-09-08 · **Branch** `claude/pdv2-round-c-<sessionId>` off `claude/pdv2-round-b-0cf92ad4`
-(`c0e3afb`; Round B stays unmerged until Round C passes the same operator test) · **Status** design,
-approved by the operator in chat on 2026-09-08 (decisions listed per section), not implemented.
+(`c0e3afb`) · **Status** **CLOSED T2 2026-09-09** — implemented T1 2026-09-08 (round close `7bf0192`),
+passed the operator run of 2026-09-08 20:01 (`tools/pd_testlauf_runde29.md`; the two remaining
+findings became `3e55e95` / `30839f4` / `55a09ce` and Round D), and the final operator verdict on
+the whole branch came on 2026-09-09 (*"ja top passt alles"*, runde30). Decisions were approved in
+chat on 2026-09-08 (listed per section). Rounds B, C, D and D2 merged into `main` together.
 
 Source: the operator's Round B test (`tools/pd_testlauf_runde28.md`, run of 2026-09-08 09:49,
 `Server_2026-09-08_09_49_57.log`: seed 2052467817, difficulty 1, 16 rooms / 2 bosses, 49 blocks,

@@ -3,8 +3,9 @@
 **Date** 2026-09-08 (evening) · **Branch** `claude/pdv2-round-c-0cf92ad4` (tip at writing `e5dd64a`) ·
 **Status IMPLEMENTED, evidence tier T1** — `e23f0a9` (kit: chunk meta v26, the clearance layer),
 `c2ca4d3` (module: clear-point waypoints, `tightPerQuarter` / `minClearQ`, the two-pass plan) and
-`a565b5e` (the follow-up below), **deployed locally 2026-09-09**. T2 is still owed: the operator has
-not re-run runde30 §3 against the deployed build.
+`a565b5e` (the follow-up below), **deployed locally 2026-09-09 and CLOSED T2 the same day**: the operator
+re-ran runde30 (§3 the beat down the visible passage, §4-§6) against the deployed build and accepted
+all of it (*"ja top passt alles"*).
 
 **One decision below was refuted by implementing it — read decision 5 with this.** `MergeCollinear`
 merges on CELLS, so it threw every intermediate clear point away again and 16 of the kit's 66

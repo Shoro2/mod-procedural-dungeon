@@ -3,7 +3,9 @@
 **Date** 2026-09-08 · **Branch** `claude/pdv2-round-c-0cf92ad4` (continues on the Round C branch; tip `55a09ce`) ·
 **Status** **implemented T1 2026-09-08, commits `e75fc3e` (D3) / `616d59d` (D1) / `1dc9179` (D2)** on that
 branch (tip now `1dc9179`); decided with the operator in chat on 2026-09-08 (three choices below).
-T2 owed — the operator run in `C:\wowstuff\ForgottenLand2.0\tools\pd_testlauf_runde30.md`.
+**T2 CLOSED 2026-09-09**: the operator run of 2026-09-08 22:34 passed D2 and D3 and failed §3 on the
+off-centre passages (Round D2 fixed that), and the run of 2026-09-09 passed everything
+(`C:\wowstuff\ForgottenLand2.0\tools\pd_testlauf_runde30.md`, verdict *"ja top passt alles"*).
 
 Source: the operator's retest after the patrol fix `55a09ce`: *"pats laufen von raum zu raum, aber in einer
 geraden linie durch ecken von häusern und objekte hindurch. können wir da irgendwie pathfinding
