@@ -3,7 +3,7 @@
 -- (world database)
 --
 -- 25 rows for the 8 members of pack 7 "Cult of the Damned" (Scholomance) -
--- three per creature, and FOUR for the BOSS (36879 Plagueborn Horror), which
+-- three per creature, and FOUR for the BOSS (29934 Acolyte of Agony), which
 -- carries a second minDiff 1 row per Round C / C6, exactly like the two Task
 -- 11 bosses in mod_pdungeon_member_spells_undead_demon.sql. Column order and
 -- cadence rule match the shipped mod_pdungeon_member_spells.sql exactly:
@@ -24,7 +24,7 @@
 -- opener sit at 7000.
 --
 -- ----------------------------------------------------------------------------
--- HOW EVERY ID BELOW WAS VERIFIED - INCLUDING THE STEP THE FIRST CUT MISSED
+-- HOW EVERY ID BELOW WAS VERIFIED - INCLUDING THE TWO STEPS EARLIER CUTS MISSED
 --
 -- Against C:\wowstuff\dcore\Data\dbc\Spell.dbc (55100 records - the file the
 -- worldserver actually loads, NOT acore_world.spell_dbc, which is an
@@ -32,14 +32,17 @@
 -- SpellRange / SpellRadius / SpellCastTimes / SpellDuration, measured
 -- 2026-09-09. Per row: the spell IS what the comment claims (Name_Lang_enUS);
 -- its effects do what the comment claims, read out of Effect_1..3 /
--- EffectAura_1..3 / EffectBasePoints_1..3 / EffectDieSides_1..3; its implicit
--- targets can reach a player from where this mob will stand; its CC status is
--- read out of Mechanic / EffectMechanic / EffectAura and never guessed from
--- the name; its cast time does not eat a melee mob's swings; its power cost
--- is affordable for that creature's real level-80 pool.
+-- EffectAura_1..3 / EffectBasePoints_1..3 / EffectDieSides_1..3 /
+-- EffectRealPointsPerLevel_1..3 / EffectMultipleValue_1..3 /
+-- EffectChainTargets_1..3; its implicit targets can reach a player from where
+-- this mob will stand; its CC status is read out of Mechanic / EffectMechanic /
+-- EffectAura and never guessed from the name; its cast time does not eat a
+-- melee mob's swings; its power cost is affordable for that creature's real
+-- level-80 pool.
 --
--- FOUR STEPS WERE ADDED after the first cut of this file shipped a spell
--- whose behaviour none of the above could see:
+-- SIX STEPS were added after earlier cuts of this file shipped spells whose
+-- behaviour none of the above could see. All 23 distinct ids below were run
+-- through all six:
 --
 --   1. acore_world.spell_script_names. A SpellScript is bound to the SPELL,
 --      and lives in a different registry from AllCreatureScript - so PDv2's
@@ -47,24 +50,67 @@
 --      Claw on 11551; 67879 -> spell_black_knight_ghoul_claw, whose
 --      OnEffectHitTarget hook calls GetThreatMgr().ResetAllThreat() and then
 --      SelectTarget(Random, 0, 30.0f) + AttackStart on every cast
---      (boss_black_knight.cpp:449-469, hooked to
+--      (boss_black_knight.cpp:450-462, hooked to
 --      SPELL_EFFECT_WEAPON_PERCENT_DAMAGE, which is 67879's effect 1). A mob
 --      with that row drops its whole threat table every 6 seconds and cannot
 --      be tanked. 67879 is NOT in this pack any more. (It is still live on
---      31528, 31847, 84271 and 84273 - pre-existing, out of scope here, and
---      recorded in .superpowers/sdd/packs-fix-1.md.)
+--      31528, 31847, 84271 and 84273 - pre-existing and out of scope here.)
 --      Measured for all 23 ids below: ZERO spell_script_names rows.
---   2. acore_world.disables (sourceType 0 = SPELL): 0 rows for all 23.
---   3. acore_world.spell_linked_spell (spell_trigger / spell_effect): 0 rows
---      for all 23, so nothing below silently drags a second spell with it.
+--   2. acore_world.disables (sourceType 0 = SPELL): 0 rows for all 23. Also 0
+--      rows in spell_proc, spell_threat, spell_target_position, spell_area and
+--      the custom spell_dbc table.
+--   3. acore_world.spell_linked_spell, queried on BOTH SIGNS with ABS() -
+--      an earlier cut queried positive ids only and reported "0 rows", which
+--      was wrong. There is exactly ONE row: spell_trigger -47960,
+--      spell_effect -63311, type 0, "Glyph of Shadowflame Rank 1". A negative
+--      trigger is the aura-REMOVAL hook (SpellAuras.cpp:1256-1262): when
+--      47960's aura falls off a target the core calls
+--      RemoveAurasDueToSpell(63311). 63311 is the warlock glyph's snare, which
+--      no creature ever applies, so the row is a no-op here - but it exists,
+--      and the sweep now says so. acore_world.spell_custom_attr likewise has
+--      exactly one row: 15572 Sunder Armor, attributes 0x00400000
+--      SPELL_ATTR0_CU_SINGLE_AURA_STACK (SpellInfo.h:199) - one armour-debuff
+--      stack per caster, harmless and in fact desirable.
 --   4. The DAMAGE NUMBER of every row, at level 80, written into the row
---      comment. SpellEffectInfo::CalcValue clamps the caster level into
---      [BaseLevel, MaxLevel] and then scales by (level - SpellLevel) x
---      EffectRealPointsPerLevel, so a raw EffectBasePoints reading is not the
---      number the player takes: 14516 Strike is +247 on the swing and not
---      +10, 15588 Thunderclap's snare is -70% and not -40%. Every value below
---      is the level-80 value, and periodic auras are multiplied out by
---      duration / EffectAuraPeriod.
+--      comment - computed from SpellEffectInfo::CalcValue as it is actually
+--      written in src/server/game/Spells/SpellInfo.cpp, which has THREE terms,
+--      not one:
+--        a) BasePoints is the RAW EffectBasePoints (SpellInfo.cpp:335 stores
+--           it unmodified).
+--        b) if EffectRealPointsPerLevel != 0, the caster level is clamped into
+--           [BaseLevel, MaxLevel], reduced by max(BaseLevel, SpellLevel), and
+--           multiplied in. This is what makes 14516 Strike +247 and not +10.
+--        c) the die is rolled AFTER that: +1 exactly when DieSides == 1, and
+--           irand(1, DieSides) otherwise. So a value with a die runs
+--           raw + levelterm + 1 .. raw + levelterm + DieSides - one point
+--           lower at BOTH ends than an earlier cut of this table printed.
+--   5. THE NPC LEVEL SCALER, which no earlier cut had. CalcValue has a SECOND,
+--      independent level term: for a caster that is not player-controlled,
+--      with SpellLevel != 0 and != the caster's level, with
+--      EffectRealPointsPerLevel == 0, and with
+--      SPELL_ATTR0_SCALES_WITH_CREATURE_LEVEL (0x00080000) set, the value is
+--      multiplied by
+--          CreatureBaseStats(casterLevel, class).BaseDamage[expansion]
+--        / CreatureBaseStats(SpellLevel,  class).BaseDamage[expansion]
+--      (SpellInfo.cpp, CalcValue, the "amount multiplication based on caster's
+--      level" block - AzerothCore uses creature_classlevelstats, NOT
+--      gtNPCManaCostScaler.dbc). SPELL_EFFECT_SCHOOL_DAMAGE and
+--      SPELL_AURA_PERIODIC_DAMAGE both qualify. TWO of the 23 ids carry the
+--      attribute - 16509 Rend (Attributes 0x000D0010) and 17228 Shadow Bolt
+--      Volley (0x00090000) - both with SpellLevel 20 and
+--      RealPointsPerLevel 0, so both gates are open. Measured ratios on this
+--      box, exp 0 for both casters:
+--        16509 on 10486 (unit_class 1): 47.2377 / 9.6823 = x4.8788
+--        17228 on 10471 (unit_class 2): 44.2013 / 9.0674 = x4.8747
+--      The other 21 ids have Attributes & 0x80000 == 0 and are unscaled. Both
+--      scaled rows stay inside the shipped band; the point of the step is that
+--      the published numbers are now the ones the player takes.
+--   6. Periodic auras are multiplied out by SpellDuration / EffectAuraPeriod,
+--      and a spell's OWN RecoveryTime is read: 48687 Shadow Bolt Volley R1
+--      carries RecoveryTime 10000 / CategoryRecoveryTime 1500 of its own.
+--      That is harmless under this file's 12000 ms row, but a future row at
+--      8000 under a 10000 ms RecoveryTime would silently skip, so the number
+--      is written down.
 --
 -- Every "(its own)" note was measured too - smart_scripts action_type 11 for
 -- that entry - not inherited from a design document.
@@ -74,45 +120,67 @@
 --
 -- Shipped fillers, for scale: 47809 ~245 dps, 42842 Frostbolt ~278 (pack 1),
 -- 60015 ~450, 69211 ~682 (packs 4/5). Cooldown rows in the shipped data run
--- from 20 dps (22644 Blood Leech) to ~750 (59018 Bile Vomit). This pack's
--- three fillers are 245 / 450 / 682 and its heaviest single row is the boss's
--- own 69581 at ~750 dps. Nothing here is outside what already ships.
+-- from 20 dps (22644 Blood Leech) to ~750 (59018 Bile Vomit). This pack's two
+-- fillers are 450 and 682 and its heaviest single row is the boss's 69581 at
+-- ~750 dps. Nothing here is outside what already ships.
+--
+-- "swing" below means the caster's own measured melee midpoint: 881 for 10486,
+-- 734 for the other three melee, 3744 for the boss (see the packs file).
 --
 --   spell  what it costs the player at level 80             sustained dps
---   14516  weapon swing +247, 5 yd                            ~100 (6 s)
---   16509  bleed 28 x 5 ticks = ~140 over 15 s                  ~14 (10 s)
---   69900  3239-3763, self 15 yd area                          ~292 (12 s)
---   16169  weapon swing +400 in an 8 yd CONE                   ~120 (6 s)
---   70654  self -11% damage taken, 10 s (defensive, no damage)    0 (10 s)
---   22644  241 health leech, 10 yd area                          ~20 (12 s)
---   48640  150% weapon damage, 5 yd                              ~92 (6 s)
+--   14516  weapon swing +247, 5 yd                            ~188 (6 s)
+--   16509  bleed 131 x 5 ticks = 655 over 15 s  (x4.8788)       ~66 (10 s)
+--   69900  3238-3762, self 15 yd area                          ~292 (12 s)
+--   16169  weapon swing +400 in an 8 yd CONE                   ~189 (6 s)
+--   70654  self -12% damage taken, 10 s (defensive, no damage)    0 (10 s)
+--   22644  240 health leech per target, 10 yd area              ~20 (12 s)
+--   48640  150% weapon damage, 5 yd                             ~184 (6 s)
 --   15572  -948 armour on the target, 30 s (no damage)             0 (10 s)
---   15655  181 damage + 2 s STUN, 5 yd            THE PACK CC      ~3 (60 s)
---   42746  110% weapon damage, 5 yd                              ~58 (7 s)
---   50729  1711-2091 + bleed 803 x 5 = ~5900 over 15 s          ~590 (10 s)
---   60845  2776-3226, self 10 yd area                           ~250 (12 s)
+--   15655  180 damage + 2 s STUN, 5 yd           THE PACK CC      ~3 (60 s)
+--   42746  110% weapon damage, 5 yd, up to 3 targets            ~115 (7 s)
+--   50729  1710-2090 + bleed 803 x 5 = 5725-6105 over 15 s      ~592 (10 s)
+--   60845  2775-3225, self 10 yd area                           ~250 (12 s)
 --   69211  1313-1687, 30 yd, 2.2 s cast              FILLER      ~682
---   48125  231 x 6 ticks = ~1386 over 18 s, 30 yd               ~139 (10 s)
---   48687  550-742, 30 yd area, 1.5 s cast                       ~54 (12 s)
---   60015  1274-1428, 40 yd, 3.0 s cast              FILLER      ~450
---   47960  137 x 4 ticks = ~548 over 8 s, 100 yd                 ~55 (10 s)
---   54889  2961-3441, self 25 yd area                           ~267 (12 s)
---   47809  694-774, 30 yd, 3.0 s cast                FILLER      ~245
---   47864  146 x 12 ticks = ~1752 over 24 s, 30 yd              ~175 (10 s)
---   17228  129-173, self 30 yd area, instant                     ~13 (12 s)
---   59992  weapon swing +240, 5 yd                              ~300 (7 s, boss swing)
---   69581  3751-6251 + 2001 x 2 ticks = ~7750-10250, 30 yd      ~750 (12 s)
+--   48125  230 x 6 ticks = 1380 over 18 s, 30 yd                ~138 (10 s)
+--   48687  549-741, 30 yd area, 1.5 s cast                       ~54 (12 s)
+--   60015  1273-1427, 40 yd, 3.0 s cast              FILLER      ~450
+--   47960  136 x 4 ticks = 544 over 8 s, 100 yd                  ~54 (10 s)
+--   54889  2960-3440, self 25 yd area                           ~267 (12 s)
+--   47864  145 x 12 ticks = 1740 over 24 s, 30 yd               ~174 (10 s)
+--   17228  623-838, self 30 yd area, instant  (x4.8747)          ~61 (12 s)
+--   59992  weapon swing +240, 5 yd, up to 3 targets             ~569 (7 s, boss swing)
+--   34240  980-1470, 20 yd, 40 yd cone, instant                 ~136 (9 s, boss)
+--   69581  3750-6250 + 2000 x 2 ticks = 7750-10250, 30 yd       ~750 (12 s, boss)
 --
--- Four rows from the first cut were dropped on these numbers, and why:
+-- Three magnitudes that a row comment alone would hide, and that a player will
+-- notice, are stated here instead of being left to the fight:
+--
+--   70654 Blood Armor is DurationIndex 1 -> 10000 ms on a 10000 ms cooldown,
+--     i.e. 100 % UPTIME: a permanent -12 % damage taken on 10488, not a
+--     10-second window. It is kept because it is defensive and because the
+--     shipped file already runs it at cd 10000 on 84279, 30921 and 18871 -
+--     but "permanent" is the honest word and 8269 Frenzy was dropped from this
+--     same slot for exactly that property on the offensive side.
+--   22644 Blood Leech has EffectMultipleValue 3.00 on a SPELL_EFFECT_HEALTH_LEECH
+--     with TARGET_SRC_CASTER + TARGET_UNIT_SRC_AREA_ENEMY radius 10, so it
+--     HEALS THE CASTER 3x the damage it deals, per target: 240 damage and 720
+--     healing per player hit, ~13 % of 10488's health against a five-player
+--     group every 12 s. Guard rule R3 ("no self-heal loops") does not see it,
+--     because HEALTH_LEECH is classified as a damage effect. Seven shipped rows
+--     already use it, so this is disclosure and not a departure.
+--   42746 Cleave and 59992 Cleave both carry EffectChainTargets 3: they hit up
+--     to THREE targets, not one. 70191 Cleave (chain 10) was rejected from the
+--     boss opener for that reason.
+--
+-- Five rows from earlier cuts were dropped on these numbers, and why:
 --
 --   61562 Shadow Bolt  (10476 slot-0 filler) 4250-5750 a cast on a 1.5 s cast
 --     and cd 0 = ~3330 dps, free and uninterruptible from 40 yd. That is 7.4x
 --     the filler it was supposed to sit under and ~5x the highest number
---     anywhere in the live data; two Necrolytes in one room is ~6700 dps at
---     difficulty 0 and ~20000 at difficulty 100. Replaced by 60015 (~450).
+--     anywhere in the live data. Replaced by 60015 (~450).
 --   61563 Corruption   (10476 t50) 1666-1936 PER TICK every 2 s for 12 s =
 --     ~10800 a cast, i.e. ~1080 dps from one cooldown row, undodgeable and
---     single-target. Replaced by 47960 Shadowflame (~548 a cast), which the
+--     single-target. Replaced by 47960 Shadowflame (~544 a cast), which the
 --     shipped file already runs four times.
 --   8269 Frenzy        (10488 t50) +159 flat damage done, +61% MELEE HASTE
 --     and +16% scale for 120 s on a 10 s cooldown - permanent uptime, ~2.3x
@@ -125,34 +193,40 @@
 --     AND -33% melee haste in a 10 yd self-AoE for 10 s on a 12 s cooldown,
 --     i.e. ~83% uptime and permanent with two Risen Warriors in the room. A
 --     snare is not CC by this project's definition and this was legal - but
---     on a map with no terrain, movement is the whole defensive game, and the
---     precedent it leaned on (42842 Frostbolt) is -40% SINGLE TARGET.
+--     on a map with no terrain, movement is the whole defensive game.
 --     Replaced by 69900 Spirit Burst, plain area damage.
 --   17615 Mana Burn    (10471 t50) SPELL_EFFECT_POWER_BURN with
 --     EffectMultipleValue 0.5: at most 272 mana burned and at most 136
 --     damage, and against a warrior, rogue or death knight literally zero -
 --     while still returning SPELL_CAST_OK, so CastReadyKitSpell counts it a
 --     success and the filler does not get that tick. Replaced by 47864 Curse
---     of Agony R9 (~1752 over 24 s), which is still a "different threat" - a
---     curse - and works on every class.
+--     of Agony R9 (1740 over 24 s), which works on every class.
 --
 -- ----------------------------------------------------------------------------
 -- POWER COST
 --
--- The four unit_class 1 melee members (10486, 10488, 10489, 11551) AND the
--- unit_class 1 boss (36879) have basemana 0 at level 80, so a FLAT ManaCost
--- on any of their rows would fail Spell::CheckPower with NO_POWER and burn
--- the cooldown anyway (PDv2CreatureAI.cpp:1450-1453 spends the cooldown on
--- the attempt). All sixteen of their rows are 0 flat AND 0 percentage - free
--- forever, not merely affordable. The PowerType 1 (rage) rows among them -
--- 16509 Rend, 16169 Arcing Smash, 42746 Cleave, 15572 Sunder Armor, 15655
--- Shield Slam - are NOT a problem while the cost is 0/0: CheckPower compares
--- GetPower(type) against the cost, and 0 < 0 is false. (48640 Strike and
--- 59992 Cleave are PowerType 0, not rage - the first cut said otherwise.)
--- Neither is EquippedItemClass 2 on 14516 / 48640 / 59992 / 15572 / 16509 or
--- 4 on 15655: Spell::CheckItems (Spell.cpp:7205-7217) fails only a DISARMED
--- creature on a melee/ranged spell and otherwise returns SPELL_CAST_OK for a
--- non-player caster; nothing here is disarmed.
+-- The four unit_class 1 melee members (10486, 10488, 10489, 11551) have
+-- basemana 0 at level 80, so a FLAT ManaCost on any of their rows would fail
+-- Spell::CheckPower with NO_POWER and burn the cooldown anyway
+-- (PDv2CreatureAI.cpp:1464-1470 spends the cooldown on the attempt). All
+-- twelve of their rows are 0 flat AND 0 percentage. The PowerType 1 (rage)
+-- rows among them - 16509 Rend, 16169 Arcing Smash, 42746 Cleave, 15572
+-- Sunder Armor, 15655 Shield Slam - are NOT a problem while the cost is 0/0:
+-- CheckPower compares GetPower(type) against the cost, and 0 < 0 is false.
+-- (48640 Strike and 59992 Cleave are PowerType 0, not rage.) Neither is
+-- EquippedItemClass 2 on 14516 / 48640 / 59992 / 15572 / 16509 or 4 on 15655:
+-- Spell::CheckItems (Spell.cpp:7205-7217) fails only a DISARMED creature on a
+-- melee/ranged spell and otherwise returns SPELL_CAST_OK for a non-player
+-- caster; nothing here is disarmed.
+--
+-- THE BOSS IS unit_class 2 THIS TIME, not unit_class 1: 29934 Acolyte of Agony
+-- has ManaModifier 5 on basemana 3994, i.e. 19970 mana at level 80. A
+-- percentage cost would therefore RESOLVE rather than vanish on it. All four
+-- of its rows are nevertheless 0 flat AND 0 percentage, deliberately: a role-2
+-- mob runs the MELEE branch of PDv2MobAI::UpdateCombat and has no filler to
+-- fall through to, so a dry cooldown row is a dead rotation slot with no
+-- backstop at all. 47867 Curse of Doom (15 %) and 64160 Drain Life (17 %) were
+-- both shortlisted for the boss and both dropped on that.
 --
 -- The three casters are unit_class 2 with ManaModifier 3, i.e. 3994 x 3 =
 -- 11982 mana at level 80 (measured, not assumed). Two rows there are not
@@ -164,23 +238,61 @@
 --
 -- Both are COOLDOWN rows and never fillers, which is the whole distinction
 -- the shipped file's power block draws: Creature::Regenerate gives an
--- in-combat creature only Spirit/5 + 17 mana per interval, so a
--- percentage-cost FILLER empties its caster in six to nine casts and then
--- fails silently for the rest of the fight. A dry cooldown row costs one
--- rotation slot while the free filler keeps working - and a failed kit cast
--- falls straight through to the filler in the same tick (UpdateCasterCombat:
--- `if (... && !CastReadyKitSpell()) CastFiller();`). The shipped file already
--- runs 48125 this way on 30203 and 31529.
+-- in-combat creature only Spirit/5 + 17 mana per interval (Creature.cpp:
+-- 1011-1018), so a percentage-cost FILLER empties its caster in six to nine
+-- casts and then fails silently for the rest of the fight. A dry cooldown row
+-- costs one rotation slot while the free filler keeps working - and a failed
+-- kit cast falls straight through to the filler in the same tick
+-- (UpdateCasterCombat: `if (... && !CastReadyKitSpell()) CastFiller();`). The
+-- shipped file already runs 48125 this way on 30203 and 31529.
 --
--- All three fillers (69211 / 60015 / 47809, all "Shadow Bolt") are 0 flat AND
--- 0 percentage and each reaches at least ProceduralDungeon.V2.CastRangeYd
--- (25): 69211 30 yd 2.2 s, 60015 40 yd 3.0 s, 47809 30 yd 3.0 s. Every other
--- role-1 row here reaches 25 yd too (48125 30 yd, 48687 30 yd, 47960 100 yd,
--- 47864 30 yd, 17228 and 54889 self-centred with radius 30 and 25) - the
--- cooldown is spent on the attempt, so a 20 yd spell on a mob holding at 25
--- would throw away a whole rotation slot whenever the player did not oblige.
--- That is why 10476's own 17234 Shadow Shock (20 yd) and 10471's own 17165
--- Mind Flay (20 yd) are not used despite being those creatures' own spells.
+-- BOTH FILLERS (69211 on 10477; 60015 on 10476 AND 10471) are 0 flat AND 0
+-- percentage - free forever, not merely affordable - and each reaches at least
+-- ProceduralDungeon.V2.CastRangeYd (25): 69211 30 yd 2.2 s, 60015 40 yd 3.0 s.
+-- An earlier cut put 47809 Shadow Bolt R13 in 10471's slot 0 on the strength
+-- of its damage band and did not re-run the cost check: 47809 is ManaCost 0
+-- flat but ManaCostPercentage 17, i.e. 2037 mana out of 11982 -> SIX casts and
+-- then SPELL_FAILED_NO_POWER for the rest of the fight. CastFiller() calls
+-- DoCastVictim untriggered (PDv2CreatureAI.cpp:1487), so CheckPower runs in
+-- full, and UpdateCasterCombat has "no out-of-power fallback" beyond swinging
+-- at a melee player who walked into it (its own comment, PDv2CreatureAI.cpp:
+-- 1566-1571). 47809 is not in this pack in any slot; the two free bolts carry
+-- all three casters. (The shipped rows that do run 47809 in slot 0 are on
+-- unit_class 1 or 8 mobs where the percentage resolves against a 0 pool -
+-- 84287 - or are the 84263 / 84281 rows the newest sibling file already names
+-- as the anti-pattern.)
+--
+-- Every other role-1 row here reaches 25 yd too (48125 30 yd, 48687 30 yd,
+-- 47960 100 yd, 47864 30 yd, 17228 and 54889 self-centred with radius 30 and
+-- 25) - the cooldown is spent on the attempt, so a 20 yd spell on a mob
+-- holding at 25 would throw away a whole rotation slot whenever the player did
+-- not oblige. That is why 10476's own 17234 Shadow Shock (20 yd) and 10471's
+-- own 17165 Mind Flay (20 yd) are not used despite being those creatures' own
+-- spells.
+--
+-- ----------------------------------------------------------------------------
+-- CAST TIME - WHY EVERY BOSS ROW IS INSTANT
+--
+-- 29934 is role 2, so it runs the MELEE branch of PDv2MobAI::UpdateCombat
+-- (PDv2CreatureAI.cpp:1877-1892): CastReadyKitSpell() and then
+-- DoMeleeAttackIfReady(). UnitAI::DoMeleeAttackIfReady (UnitAI.cpp:41-44)
+-- returns immediately while UNIT_STATE_CASTING is set:
+--
+--     void UnitAI::DoMeleeAttackIfReady()
+--     { if (me->HasUnitState(UNIT_STATE_CASTING)) return;
+--
+-- so every millisecond of cast time is melee the boss does not swing. On a
+-- 2000 ms BaseAttackTime and a 3744 midpoint swing that is 1.87 damage per
+-- millisecond of cast. An earlier cut put 60015 Shadow Bolt - a 3.0 s HARD
+-- CAST - in the boss's 9000 ms base slot: 1350 delivered against 5616 of
+-- forgone melee, a net -474 dps, roughly -25 % of the boss's melee output.
+-- packs-research.md had rejected 15790 Arcane Missiles from that exact slot
+-- for that exact reason and the point was then lost.
+--
+-- All four of the boss's rows are therefore CastingTimeIndex 1 -> 0 ms:
+-- 59992, 34240, 60845 and 69581 all cost zero swings. The same test is why
+-- 28615 Spike Volley (500 ms) was passed over for the t50 slot even though its
+-- damage fits.
 --
 -- ----------------------------------------------------------------------------
 -- CC CLASSIFICATION (aura/mechanic read out of Spell.dbc, not guessed)
@@ -189,14 +301,19 @@
 --  15655  Shield Slam  Mechanic 12 STUN, eff1 aura MOD_STUN      10489 @75
 --
 -- That is the pack's ENTIRE CC budget: one row, cd 60000, minDiff 75, never
--- in slot 0, 2000 ms of stun. Two further CC spells that these creatures own
--- are therefore deliberately NOT used - 11428 Knockdown (Mechanic STUN,
--- 10486's own) and 15474 Web Explosion (aura MOD_ROOT, 11551's own). Both are
--- listed here so the omission reads as a decision rather than an oversight.
--- With 15588 Thunderclap gone (see above) this pack now carries no snare
--- either, so there is nothing in it that touches player movement at all -
--- which is the property that matters most on a map whose floor ends at the
--- platform edge.
+-- in slot 0, SpellDuration 2000 ms of stun. Two further CC spells that these
+-- creatures own are therefore deliberately NOT used - 11428 Knockdown
+-- (Mechanic STUN, 10486's own) and 15474 Web Explosion (aura MOD_ROOT,
+-- 11551's own). Both are listed here so the omission reads as a decision
+-- rather than an oversight. With 15588 Thunderclap gone (see above) this pack
+-- now carries no snare either, so there is nothing in it that touches player
+-- movement at all - which is the property that matters most on a map whose
+-- floor ends at the platform edge. The complete set of effects used across the
+-- 23 ids is {SCHOOL_DAMAGE, APPLY_AURA, HEALTH_LEECH, WEAPON_PERCENT_DAMAGE,
+-- WEAPON_DAMAGE} and the complete set of auras is {PERIODIC_DAMAGE, MOD_STUN,
+-- MOD_RESISTANCE, MOD_DAMAGE_PERCENT_TAKEN} - no KNOCK_BACK, PULL_TOWARDS,
+-- JUMP, CHARGE, TELEPORT_UNITS, SUMMON, INSTAKILL, RESURRECT, FORCE_CAST or
+-- HEAL anywhere.
 --
 -- ----------------------------------------------------------------------------
 -- WHAT EACH CREATURE'S OWN ROTATION GAVE, AND WHAT HAD TO BE LEFT OUT
@@ -235,18 +352,30 @@
 --          (SPELL_EFFECT_HEAL, no self-heal loops); 17165 Mind Flay rejected
 --          (20 yd); 16592 Shadowform is a 40 % self-buff aura that would also
 --          change its silhouette, and was left out.
---   36879  69582 Blight Bomb is EXCLUDED: its effect 2 is
---          SPELL_EFFECT_INSTAKILL, which is banned outright. 70274 Toxic
---          Waste is EXCLUDED: SPELL_AURA_PERIODIC_DAMAGE_PERCENT at 10 per
---          tick is percent-of-max-health damage, i.e. a ground pool that can
---          take a full health bar in one duration regardless of gear. 69581
---          Pustulant Flesh is the survivor and is the one row in this file no
---          other member carries.
+--   29934  NOTHING - this template has ZERO smart_scripts rows (measured), no
+--          ScriptName and no AIName, so it brings no signature spell of its
+--          own. That is the one thing it gives up against the rejected 36879,
+--          whose 69581 Pustulant Flesh really was its own; the trade bought a
+--          boss that drops nothing and draws a model nothing else in the
+--          dungeon draws (see the packs file). Its four rows are therefore
+--          picked from the audited pool, and the pick was made against the
+--          shipped bosses as well as against its own trash:
+--            - 59992 Cleave is the house boss opener; 25352 Scourge Overlord
+--              AND 84288 Dralak both carry it, so sharing it is the idiom.
+--            - 34240 Carrion Swarm, 60845 Shadow Nova and 69581 Pustulant
+--              Flesh are NOT in 25352's kit. The previous cut shared THREE of
+--              its four rows with 25352 on spell, slot, cooldown and minDiff
+--              at once (59992/60015/54889); this one shares exactly ONE.
+--            - Only 60845 is borrowed from inside this pack (11551's t75), so
+--              three of the four rows belong to the boss alone. 69581 is kept
+--              from the previous cut because it is the one row in the file no
+--              other member carries and it is already audited: plague damage
+--              from the cult that spread the plague.
 --
 -- The economy this pack brings with it - the seven trash members keep their
--- native Scholomance tables and the boss drops nothing at all - is argued in
--- full in mod_pdungeon_packs_cult.sql and belongs in the operator document
--- before the first run, not after.
+-- native Scholomance tables, the boss has lootid 0 and drops nothing at all -
+-- is argued in full in mod_pdungeon_packs_cult.sql and belongs in the operator
+-- document before the first run, not after.
 --
 -- THIS FILE SHIPS ZERO creature_template AND ZERO spell_dbc ROWS. Every spell
 -- id below is a stock 3.3.5a Spell.dbc entry and no custom id is created.
@@ -276,54 +405,56 @@ CREATE TABLE IF NOT EXISTS `pdungeon_member_spells` (
 -- DROP - an operator who gave a creature of their own a kit keeps it. The
 -- delete is an EXPLICIT ENTRY LIST, not a BETWEEN: the entries run from 1853
 -- to 36879, and a range delete over that span would wipe an operator's rows
--- for tens of thousands of unrelated templates. 1853 Darkmaster Gandling is
--- in the list although he is no longer a member of this pack: the first cut
--- of this file gave him four rows, and a re-apply has to take them back out.
+-- for tens of thousands of unrelated templates. 1853 Darkmaster Gandling and
+-- 36879 Plagueborn Horror are in the list although neither is a member of this
+-- pack any more: the first cut gave 1853 four rows and the second gave 36879
+-- four rows, and a re-apply has to take both sets back out.
 DELETE FROM `pdungeon_member_spells` WHERE `entry` IN
- (1853,10471,10476,10477,10486,10488,10489,11551,36879);
+ (1853,10471,10476,10477,10486,10488,10489,11551,29934,36879);
 
 INSERT INTO `pdungeon_member_spells`
   (`entry`, `spellId`, `slot`, `cooldownMs`, `minDiff`, `enabled`) VALUES
   -- ==========================================================================
   -- PACK 7 "Cult of the Damned" - MELEE (role 0)
   -- ==========================================================================
-  -- 10486 Risen Warrior  (unit_class 1, 26710 hp, swing 326-409 @2400 ms)
+  -- 10486 Risen Warrior  (unit_class 1, 26710 hp, swing 782-980 @2400 ms)
   (10486, 14516, 1,  6000,  1, 1),  -- Strike      (its own) swing +247, 5 yd        t0
-  (10486, 16509, 1, 10000, 50, 1),  -- Rend        (its own) bleed 28 x5, 15 s       t50
-  (10486, 69900, 1, 12000, 75, 1),  -- Spirit Burst  3239-3763, self 15 yd area      t75
-  -- 10488 Risen Construct  (unit_class 1, 26710 hp, swing 326-409 @2000 ms)
+  (10486, 16509, 1, 10000, 50, 1),  -- Rend        (its own) bleed 131 x5, 15 s      t50
+  (10486, 69900, 1, 12000, 75, 1),  -- Spirit Burst  3238-3762, self 15 yd area      t75
+  -- 10488 Risen Construct  (unit_class 1, 26710 hp, swing 652-817 @2000 ms, DUAL WIELD)
   (10488, 16169, 1,  6000,  1, 1),  -- Arcing Smash (its own) swing +400, 8 yd cone  t0
-  (10488, 70654, 1, 10000, 50, 1),  -- Blood Armor   self -11% damage taken, 10 s    t50
-  (10488, 22644, 1, 12000, 75, 1),  -- Blood Leech   241 leech, 10 yd area           t75
+  (10488, 70654, 1, 10000, 50, 1),  -- Blood Armor   self -12% dmg taken, 100% uptime t50
+  (10488, 22644, 1, 12000, 75, 1),  -- Blood Leech   240/target, heals 3x, 10 yd     t75
   -- 10489 Risen Guard  (unit_class 1, 16026 hp) - carries the pack's only CC
   (10489, 48640, 1,  6000,  1, 1),  -- Strike        150% weapon damage, 5 yd        t0
   (10489, 15572, 1, 10000, 50, 1),  -- Sunder Armor (its own) -948 armour, 30 s      t50
-  (10489, 15655, 1, 60000, 75, 1),  -- Shield Slam (its own) 181 + CC STUN 2 s       t75
+  (10489, 15655, 1, 60000, 75, 1),  -- Shield Slam (its own) 180 + CC STUN 2 s       t75
   -- 11551 Necrofiend  (unit_class 1, 16026 hp)
-  (11551, 42746, 1,  7000,  1, 1),  -- Cleave        110% weapon damage, 5 yd        t0
-  (11551, 50729, 1, 10000, 50, 1),  -- Carnivorous Bite  ~5900 with bleed, 15 s      t50
-  (11551, 60845, 1, 12000, 75, 1),  -- Shadow Nova   2776-3226, self 10 yd area      t75
+  (11551, 42746, 1,  7000,  1, 1),  -- Cleave        110% weapon, 5 yd, 3 targets    t0
+  (11551, 50729, 1, 10000, 50, 1),  -- Carnivorous Bite  5725-6105 with bleed, 15 s  t50
+  (11551, 60845, 1, 12000, 75, 1),  -- Shadow Nova   2775-3225, self 10 yd area      t75
   -- ==========================================================================
   -- PACK 7 "Cult of the Damned" - RANGE (role 1) - filler + two cooldown spells
   -- ==========================================================================
   -- 10477 Scholomance Necromancer  (unit_class 2, 11982 mana) - the senior caster
   (10477, 69211, 0,     0,  1, 1),  -- Shadow Bolt   1313-1687, 30 yd, 2.2 s   ~682  t0 FILLER
-  (10477, 48125, 1, 10000, 50, 1),  -- Shadow Word: Pain R12  ~1386/18 s, 22 %       t50
-  (10477, 48687, 1, 12000, 75, 1),  -- Shadow Bolt Volley  550-742, 30 yd area       t75
+  (10477, 48125, 1, 10000, 50, 1),  -- Shadow Word: Pain R12  1380/18 s, 22 %        t50
+  (10477, 48687, 1, 12000, 75, 1),  -- Shadow Bolt Volley  549-741, 30 yd area       t75
   -- 10476 Scholomance Necrolyte  (unit_class 2, 11982 mana) - the middle rank
-  (10476, 60015, 0,     0,  1, 1),  -- Shadow Bolt   1274-1428, 40 yd, 3.0 s   ~450  t0 FILLER
-  (10476, 47960, 1, 10000, 50, 1),  -- Shadowflame   ~548 over 8 s, 100 yd, free     t50
-  (10476, 54889, 1, 12000, 75, 1),  -- Shadow Shock  2961-3441, self 25 yd area      t75
+  (10476, 60015, 0,     0,  1, 1),  -- Shadow Bolt   1273-1427, 40 yd, 3.0 s   ~450  t0 FILLER
+  (10476, 47960, 1, 10000, 50, 1),  -- Shadowflame   544 over 8 s, 100 yd, free      t50
+  (10476, 54889, 1, 12000, 75, 1),  -- Shadow Shock  2960-3440, self 25 yd area      t75
   -- 10471 Scholomance Acolyte  (unit_class 2, 11982 mana) - the novice
-  (10471, 47809, 0,     0,  1, 1),  -- Shadow Bolt R13  694-774, 30 yd, 3.0 s ~245   t0 FILLER
-  (10471, 47864, 1, 10000, 50, 1),  -- Curse of Agony R9  ~1752 over 24 s, 10 %      t50
-  (10471, 17228, 1, 12000, 75, 1),  -- Shadow Bolt Volley  129-173, self 30 yd AoE   t75
+  (10471, 60015, 0,     0,  1, 1),  -- Shadow Bolt   1273-1427, 40 yd, 3.0 s   ~450  t0 FILLER
+  (10471, 47864, 1, 10000, 50, 1),  -- Curse of Agony R9  1740 over 24 s, 10 %       t50
+  (10471, 17228, 1, 12000, 75, 1),  -- Shadow Bolt Volley  623-838, self 30 yd AoE   t75
   -- ==========================================================================
   -- PACK 7 "Cult of the Damned" - BOSS (role 2)
   -- ==========================================================================
-  -- 36879 Plagueborn Horror  (unit_class 1, rank 1, 189000 hp, swing 1581-2199 @1500 ms)
-  (36879, 59992, 1,  7000,  1, 1),  -- Cleave        swing +240, 5 yd                t0
+  -- 29934 Acolyte of Agony  (unit_class 2, rank 1, 126000 hp, swing 3125-4362 @2000 ms)
+  -- All four rows are cast 0 ms - a role-2 mob melees, and a cast costs swings.
+  (29934, 59992, 1,  7000,  1, 1),  -- Cleave        swing +240, 5 yd, 3 targets     t0
   -- Round C / C6: a second base ability per boss (operator, 2026-09-08: "2 Basis, dann je eine auf 50 und 75")
-  (36879, 60015, 1,  9000,  1, 1),  -- Shadow Bolt   1274-1428, 40 yd  (as 10476 filler)  t0 #2
-  (36879, 54889, 1, 10000, 50, 1),  -- Shadow Shock  2961-3441, self 25 yd  (as 10476)    t50
-  (36879, 69581, 1, 12000, 75, 1);  -- Pustulant Flesh (its own) ~7750-10250, 30 yd  t75
+  (29934, 34240, 1,  9000,  1, 1),  -- Carrion Swarm  980-1470, 20 yd, 40 yd cone    t0 #2
+  (29934, 60845, 1, 10000, 50, 1),  -- Shadow Nova   2775-3225, self 10 yd  (as 11551)   t50
+  (29934, 69581, 1, 12000, 75, 1);  -- Pustulant Flesh  7750-10250, 30 yd, 10 s      t75
