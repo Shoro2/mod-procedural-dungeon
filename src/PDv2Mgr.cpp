@@ -295,6 +295,15 @@ namespace PDungeon
         _config.respawnMaxCopies = std::min<uint32>(5, sConfigMgr->GetOption<uint32>(
             "ProceduralDungeon.V2.Respawn.MaxCopies", 2));
 
+        // Round E / WP10: the finale portal's destination, by game_tele NAME.
+        // Not validated here on purpose - the tele store is loaded from the
+        // world DB after the first config read, so a lookup at this point
+        // would report every name as missing on startup and only ever succeed
+        // on `.reload config`. PDExitObjects.cpp resolves it per click and
+        // says so loudly when the row is not there.
+        _config.finaleTeleName = sConfigMgr->GetOption<std::string>(
+            "ProceduralDungeon.V2.Finale.TeleName", "flcapital");
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} detour {}%",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,

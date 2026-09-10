@@ -48,7 +48,13 @@ namespace PDungeon
         // the last boss dies and torn down with the run. Rows live in
         // mod_pdungeon_templates_fix.sql; the cache's loot (910068) is in
         // mod_pdungeon_chromie.sql.
-        GO_AZEALIA_PORTAL = 910067, // C8: type 10, click teleports to Azealia
+        //
+        // The Azealia in the NAME is C8's and stays: it is the registered
+        // ScriptName in gameobject_template, so renaming it would be an SQL
+        // change and a client cache bump for nothing. Since Round E / WP10 the
+        // destination is whatever game_tele row V2.Finale.TeleName picks
+        // (default `flcapital`), and Azealia is only the fallback.
+        GO_AZEALIA_PORTAL = 910067, // C8: type 10, click teleports the clicker
         GO_REWARD_CHEST   = 910068, // C8: "Chromie's Cache", lock 57
         // Round E / WP8 (2026-09-10): the small chest a WON event room leaves
         // on the pilgrim's own square when he walks away. A THIRD chest entry

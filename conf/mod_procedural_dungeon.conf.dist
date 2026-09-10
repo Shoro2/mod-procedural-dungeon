@@ -1322,3 +1322,38 @@ ProceduralDungeon.V2.Respawn.Enable = 1
 
 ProceduralDungeon.V2.Respawn.MaxCopies = 2
 
+#
+#    ProceduralDungeon.V2.Finale.TeleName
+#        Description: Round E / WP10: where the finale portal puts the player,
+#                     as the NAME of a row in acore_world.game_tele - the same
+#                     names a GM types after `.tele`.
+#
+#                     The portal used to carry its destination as four
+#                     literals in C++, which meant that moving the arrival
+#                     spot meant a rebuild. It now looks the row up on every
+#                     click, so the portal follows the world data: move
+#                     `flcapital` in game_tele and the next run's portal lands
+#                     where you moved it.
+#
+#                     The shipped default is the capital (operator, 2026-09-11
+#                     - a finished run belongs back in town, not at the raid
+#                     door): row 20042 `flcapital`, map 727, 13356.2 /
+#                     12009.1 / -23.39, facing 4.50. C8's original
+#                     `flraidazealia` is row 20040 on the same map.
+#
+#                     The match is EXACT and case-insensitive, so a name that
+#                     is not a row - a typo, a blank value, a row somebody
+#                     deleted - resolves to nothing rather than to whichever
+#                     row happens to contain the text. That case is not
+#                     silent: the player is sent to `flraidazealia`, the C8
+#                     destination compiled in as the fallback, and the
+#                     worldserver logs a WARN naming the key on every click.
+#
+#                     Read LIVE like every other V2 key: `.reload config`
+#                     retargets the next click, including one in a run that is
+#                     already being walked.
+#        Default:     "flcapital"
+#
+
+ProceduralDungeon.V2.Finale.TeleName = "flcapital"
+

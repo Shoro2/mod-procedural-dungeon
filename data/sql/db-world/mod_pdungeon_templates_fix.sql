@@ -287,12 +287,19 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 -- already use (777000 'To Azealia', 222000/223000 'Return To Azealia').
 -- Those three carry their teleport in Data2 = an `event_scripts` id; this row
 -- deliberately does NOT copy that mechanism. go_pdungeon_azealia_portal
--- (src/PDExitObjects.cpp) teleports in C++ to `game_tele` 20040
--- `flraidazealia` - (727, 13611.1, 13655.7, 9.87548, o 4.7776), the canonical
--- "back to Azealia" spot the nine dungeon exits share - which needs no
--- world-DB script row at all. Nobody is teleported automatically: the click
--- is the player's, so the cache can be looted first (operator decision
--- 2026-09-08).
+-- (src/PDExitObjects.cpp) teleports in C++, which needs no world-DB script row
+-- at all. Nobody is teleported automatically: the click is the player's, so
+-- the cache can be looted first (operator decision 2026-09-08).
+--
+-- Round E / WP10: WHERE it teleports is no longer written in the code either.
+-- The hook resolves a `game_tele` row by NAME at click time, from the conf key
+-- ProceduralDungeon.V2.Finale.TeleName - `flcapital` (id 20042, map 727,
+-- 13356.2 / 12009.1 / -23.39, o 4.50) since the operator asked for the capital
+-- on 2026-09-11. C8's `flraidazealia` (id 20040) survives as the compiled-in
+-- fallback for a name that resolves to nothing. The row's NAME still says
+-- Azealia: it is what the client has cached, so renaming it would cost a
+-- ClientCacheVersion bump, and it is a separate decision from where the portal
+-- goes.
 --
 -- 910068 'Chromie''s Cache': type 3 CHEST, display 259 (TreasureChest01) like
 -- the pocket cache above but at size 2, so the run's reward reads as the

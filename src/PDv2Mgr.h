@@ -322,6 +322,20 @@ namespace PDungeon
         // waves and the echoes together.
         bool        respawnEnable = true;
         uint32_t    respawnMaxCopies = 2;
+
+        // Round E / WP10 (2026-09-11). Where the C8 finale portal puts the
+        // player: the NAME of an acore_world.game_tele row, resolved at click
+        // time (PDExitObjects.cpp), never a set of coordinates typed into a
+        // conf. A destination is world data - it moves when the world moves -
+        // and the row is the one thing an operator already edits when a hub
+        // moves, so the portal follows `.tele <name>` for free.
+        //
+        // A std::string and not a resolved GameTele const*, because the store
+        // is loaded after this config is first read and `.reload config` must
+        // not be able to cache a stale pointer into it. The lookup costs one
+        // pass over the tele store per CLICK, which is a human pressing a
+        // portal at the end of a run.
+        std::string finaleTeleName = "flcapital";
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the
