@@ -199,6 +199,21 @@ local function ParseRun(body)
         eventSec, eventPct = h[1], h[2]
     end
 
+    -- The gate's open state (segOpen) is the THIRD optional group and carries
+    -- a single field, appended behind the event pair by the rule the server
+    -- writes by: a worldserver from before WP8 sends fifteen fields, and 0 is
+    -- what its silence means as exactly as what it would have sent - "the
+    -- barrier of the segment this line describes is still sealed". That is the
+    -- only state the gate line could show before this field existed, so an old
+    -- server keeps precisely the line it always drew. Read off `h.tail` and
+    -- only when the event pair was there, since this field can never arrive
+    -- without it.
+    local segOpen = 0
+    local k = h and SplitHead(h.tail, 1)
+    if k and ToNumbers(k, 1) then
+        segOpen = k[1]
+    end
+
     return {
         elapsed = f[1], killed = f[2], total = f[3],
         bossKilled = f[4], bossTotal = f[5],
@@ -206,6 +221,7 @@ local function ParseRun(body)
         px = f[8], py = f[9], state = f[10],
         segPlanned = segPlanned, segKilled = segKilled, segPct = segPct,
         eventSec = eventSec, eventPct = eventPct,
+        segOpen = segOpen,
     }
 end
 
@@ -546,13 +562,20 @@ end
 
 local HUD_W = 240
 local CANVAS = 160
+local HUD_BAR_W = HUD_W - 20    -- the event bar spans the separator's width
 
 local Hud = CreateFrame("Frame", "FLPDHud", UIParent)
 Hud:SetWidth(HUD_W)
--- +16 for the gate line (2026-09-08, C7), +14 for the event line
--- (2026-09-10, Round E): the event line keeps its row whether or not an
--- event is running, so the map below never jumps as one starts or ends.
-Hud:SetHeight(270)
+-- 270 was this frame with a one-line event row: +16 for the gate line
+-- (2026-09-08, C7) and +14 for that line (2026-09-10, Round E). The event BAR
+-- that replaced the line (WP8) is four pixels taller than it - 3 of gap, 12 of
+-- bar, then 1 and 4 for the health strip under it, where the line took 2 and
+-- 14 - so the frame grows by those four rather than eat the map's gap.
+--
+-- Both rows are RESERVED, not reclaimed: the gate string keeps a fixed height
+-- when it is empty and the event textures only drop to alpha 0, so the map
+-- below never jumps as a gate opens or a defence starts and ends.
+Hud:SetHeight(274)
 Hud:SetPoint("TOP", UIParent, "TOP", 0, -35)
 Hud:SetMovable(true)
 Hud:EnableMouse(true)
@@ -581,30 +604,84 @@ local hudCounts = Hud:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 hudCounts:SetPoint("TOP", hudTimer, "BOTTOM", 0, -4)
 hudCounts:SetText("...")
 
--- The next sealed gate's kill progress, straight off the run tick. Like every
--- other number on this HUD it is the server's: the addon knows neither the
--- barrier threshold nor which segment the party stands in.
+-- The kill progress of the gate the player is standing behind, straight off
+-- the run tick. Like every other number on this HUD it is the server's: the
+-- addon knows neither the barrier threshold nor which segment it is counting.
+--
+-- The height is pinned because the line is now EMPTY where the server has no
+-- gate to describe (a boss room, a player off the plan): a FontString with no
+-- text is zero pixels tall, and letting the row collapse would drag the event
+-- bar, the separator and the map up with it every time.
 local hudGate = Hud:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 hudGate:SetPoint("TOP", hudCounts, "BOTTOM", 0, -2)
+hudGate:SetHeight(14)
 hudGate:SetText("...")
 
--- The running event's countdown and the host's remaining health, straight off
--- the run tick. The SECONDS and the PERCENT are the server's - this line only
--- formats them, so it can no more disagree with the defence than the timer can
--- with the run.
+-- The running event as a bar: how much of the defence is left to survive, the
+-- host's remaining health under it, and the clock written across it. The
+-- SECONDS and the PERCENT are the server's - this row only draws them, so it
+-- can no more disagree with the defence than the timer can with the run.
 --
--- Its row is RESERVED rather than reclaimed: the string is emptied when no
--- event is running and the height is fixed, so hudSep and the map below hold
--- still. That is the simpler of the two shapes - hiding the line would mean
--- re-anchoring hudSep to hudGate and back on every transition, and a map that
--- jumps 14 pixels the moment a timed defence starts is worse than a blank row.
+-- Plain textures with SetWidth, the same idiom the panel's XP bar uses: there
+-- is no StatusBar frame anywhere in this addon and this row does not introduce
+-- one. Background and fills share the ARTWORK layer (a region created later
+-- draws over one created earlier, which is what puts each fill on its
+-- background); the text sits a whole layer above, so a full bar can never
+-- swallow it.
+--
+-- The row is RESERVED rather than reclaimed: nothing is hidden or re-anchored
+-- when no event runs, the textures simply go to alpha 0 and keep their space,
+-- so hudSep and the map below hold still. A map that jumps the moment a timed
+-- defence starts is worse than a blank row.
+local hudEventBg = Hud:CreateTexture(nil, "ARTWORK")
+hudEventBg:SetPoint("TOP", hudGate, "BOTTOM", 0, -3)
+hudEventBg:SetWidth(HUD_BAR_W)
+hudEventBg:SetHeight(12)
+hudEventBg:SetTexture(0.15, 0.15, 0.25, 0.9)
+hudEventBg:SetAlpha(0)
+
+local hudEventFill = Hud:CreateTexture(nil, "ARTWORK")
+hudEventFill:SetPoint("TOPLEFT", hudEventBg, "TOPLEFT", 0, 0)
+hudEventFill:SetWidth(1)
+hudEventFill:SetHeight(12)
+hudEventFill:SetTexture(0.95, 0.62, 0.15, 0.95)
+hudEventFill:SetAlpha(0)
+
+-- The host's health, a thin strip under the bar rather than a second full one:
+-- the two numbers race each other during a defence and stacking them keeps the
+-- comparison in one glance without spending another line of the HUD.
+local hudEventHp = Hud:CreateTexture(nil, "ARTWORK")
+hudEventHp:SetPoint("TOPLEFT", hudEventBg, "BOTTOMLEFT", 0, -1)
+hudEventHp:SetWidth(1)
+hudEventHp:SetHeight(4)
+hudEventHp:SetTexture(0.20, 0.70, 0.30, 0.95)
+hudEventHp:SetAlpha(0)
+
 local hudEvent = Hud:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-hudEvent:SetPoint("TOP", hudGate, "BOTTOM", 0, -2)
-hudEvent:SetHeight(14)
+hudEvent:SetPoint("CENTER", hudEventBg, "CENTER", 0, 0)
 hudEvent:SetText("")
 
+-- How long the running defence started with. It is NOT on the wire - the tick
+-- carries the seconds LEFT - so the longest count seen for the defence being
+-- drawn is its length as far as this HUD can honestly know. The server's own
+-- V2.Event.DurationSec is deliberately not copied here: a Lua-side copy of a
+-- server-owned number is the one bug this addon is built to be unable to have
+-- (see the header), and a defence joined halfway through is better drawn
+-- against the part this client has actually watched than against a length it
+-- guessed and the server may not have used.
+--
+-- The count only ever falls inside one defence (the server pins a deadline
+-- when it starts), so a HIGHER one can only be a new defence: re-pin instead
+-- of holding a bar clamped at full. Zero seconds ends the row and clears this,
+-- which is also what the server sends between two defences.
+local eventSpan = 0
+
 local hudSep = Hud:CreateTexture(nil, "ARTWORK")
-hudSep:SetPoint("TOP", hudEvent, "BOTTOM", 0, -5)
+-- Anchored to the bar's BACKGROUND, never to the health strip: the strip's
+-- width follows the host's health, and a point on a shrinking texture would
+-- walk the separator - and the map hanging off it - sideways across the HUD.
+-- The offset is the strip's own 1 + 4 plus the 5 this separator always had.
+hudSep:SetPoint("TOP", hudEventBg, "BOTTOM", 0, -10)
 hudSep:SetWidth(HUD_W - 20)
 hudSep:SetHeight(1)
 hudSep:SetTexture(0.4, 0.4, 0.6, 0.5)
@@ -768,27 +845,62 @@ local function RenderCounts(r, flashOn)
         r.killed, r.total, bossColour, r.bossKilled, r.bossTotal,
         r.roomsCleared, r.roomsTotal))
 
-    -- segPlanned 0 is the server's "no barrier is sealed": either none is
-    -- left, or this build of the worldserver does not send the fields yet.
-    -- Both are honestly "open" from where the player stands.
-    if r.segPlanned > 0 then
+    -- The three gate numbers describe the segment the PLAYER IS STANDING IN
+    -- since WP8 (GateFieldsFor on the server side). They used to describe the
+    -- next still-sealed barrier anywhere in the run, which is why the line
+    -- looked stuck: the moment a gate opened it jumped to the next segment's
+    -- 0/n and sat there while the party finished the room it was standing in.
+    -- Which segment is measured is entirely the server's call - this only
+    -- prints what arrived.
+    --
+    -- segPlanned 0 is the server's "there is no gate to describe here": a boss
+    -- room, a player off the plan, or a worldserver from before the fields
+    -- existed. The row goes blank rather than name a barrier nobody mentioned.
+    -- segOpen is the server's word too - a segment whose barrier is already
+    -- open still shows its kills, because they are the room's own progress.
+    if r.segPlanned == 0 then
+        hudGate:SetText("")
+    elseif r.segOpen == 1 then
+        hudGate:SetText(string.format(
+            "Gate |cff00ff00open|r  |cffffffff%d/%d|r", r.segKilled, r.segPlanned))
+    else
         hudGate:SetText(string.format(
             "Gate |cffffffff%d/%d|r  (%d%%)", r.segKilled, r.segPlanned, r.segPct))
-    else
-        hudGate:SetText("Gate |cff00ff00open|r")
     end
 
     -- eventSec 0 is the server's "no event is running" - nothing started, one
     -- just ended, or this worldserver does not send the pair yet. All three
     -- read the same from where the player stands: there is no defence to time,
-    -- so the row goes blank rather than print a clock for a fight that is not
-    -- happening. The minutes and seconds are split out of the server's own
-    -- second count; nothing here decides how long is left.
+    -- so the bar goes invisible rather than draw a clock for a fight that is
+    -- not happening. Its SPACE stays (see the widgets above).
+    --
+    -- The minutes and seconds are split out of the server's own second count
+    -- and the percent is printed as it arrived; nothing here decides how long
+    -- is left or how hurt the host is. Only the two WIDTHS are clamped, and
+    -- only so a bar cannot draw past its own background.
     if r.eventSec > 0 then
+        if r.eventSec > eventSpan then eventSpan = r.eventSec end
+
+        local frac = r.eventSec / eventSpan
+        if frac < 0 then frac = 0 elseif frac > 1 then frac = 1 end
+        local hp = r.eventPct / 100
+        if hp < 0 then hp = 0 elseif hp > 1 then hp = 1 end
+
+        hudEventFill:SetWidth(math.max(1, frac * HUD_BAR_W))
+        hudEventHp:SetWidth(math.max(1, hp * HUD_BAR_W))
+        hudEventBg:SetAlpha(1)
+        hudEventFill:SetAlpha(1)
+        hudEventHp:SetAlpha(1)
         hudEvent:SetText(string.format(
             "Hold the line |cffffffff%d:%02d|r  |cffff8800%d%%|r",
             math.floor(r.eventSec / 60), r.eventSec % 60, r.eventPct))
     else
+        eventSpan = 0
+        hudEventFill:SetWidth(1)
+        hudEventHp:SetWidth(1)
+        hudEventBg:SetAlpha(0)
+        hudEventFill:SetAlpha(0)
+        hudEventHp:SetAlpha(0)
         hudEvent:SetText("")
     end
 end
