@@ -723,11 +723,21 @@ namespace PDungeon
                 // `!_patrolActive`, and the plan it produces sets that flag.
                 // A patroller that logs this twice has lost its beat twice,
                 // which is itself the finding.
-                LOG_WARN(PD_LOG, "PDv2: patrol planner fell back to the walk grid for {} "
-                                 "guid {}: no beat from cell ({},{}) to ({},{}) keeps a "
-                                 "yard of clearance",
-                         me->GetName(), me->GetGUID().GetCounter(),
-                         here.x, here.y, goal.x, goal.y);
+                //
+                // Round E / R3: behind V2.Debug, and no longer a WARN. The
+                // squeeze is a DESIGNED fallback - a pinched lane row is a
+                // property of the kit, not a fault of the run - and a per-beat
+                // warning about a working mechanic is what teaches a host to
+                // stop reading its own warnings. Same text, same evidence,
+                // asked for on purpose.
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2: patrol planner fell back to the walk grid for {} "
+                                     "guid {}: no beat from cell ({},{}) to ({},{}) keeps a "
+                                     "yard of clearance",
+                             me->GetName(), me->GetGUID().GetCounter(),
+                             here.x, here.y, goal.x, goal.y);
+                }
             }
             // MERGED ON THE CLEAR POINTS, not on the cells (Round D2
             // follow-up). MergeCollinear kept only the two ends of a straight
@@ -840,9 +850,13 @@ namespace PDungeon
                     loose.minClearQ = 0;
                     haveBack = FindPatrolPath(*grid, here, _patrolRoute[nearest],
                                               _instance->PropCells(), back, loose);
-                    if (haveBack)
+                    // Round E / R3: behind V2.Debug and no longer a WARN, for
+                    // the reason the planner's twin above gives - and this one
+                    // fires once per FIGHT that ended in a pinched stretch,
+                    // which a busy corridor produces all evening.
+                    if (haveBack && PDv2Debug())
                     {
-                        LOG_WARN(PD_LOG, "PDv2: patrol rejoin fell back to the walk grid for "
+                        LOG_INFO(PD_LOG, "PDv2: patrol rejoin fell back to the walk grid for "
                                          "{} guid {}: no way from cell ({},{}) back onto the "
                                          "beat keeps a yard of clearance",
                                  me->GetName(), me->GetGUID().GetCounter(), here.x, here.y);
@@ -1748,10 +1762,12 @@ namespace PDungeon
             }
         }
 
-        if (called)
+        // One line per PULL that reached anybody - so one per fight, and a
+        // five-room dungeon is nothing but fights (Round E / R3).
+        if (called && PDv2Debug())
         {
-            LOG_DEBUG(PD_LOG, "PDv2: {} called {} reachable ally(s) into the fight",
-                      me->GetName(), called);
+            LOG_INFO(PD_LOG, "PDv2: {} called {} reachable ally(s) into the fight",
+                     me->GetName(), called);
         }
     }
 

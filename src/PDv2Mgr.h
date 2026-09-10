@@ -159,6 +159,21 @@ namespace PDungeon
         // arms it on a dungeon that is already being walked.
         bool        patrolDebug = false;
 
+        // Round E / R3 (2026-09-10). The module-wide diagnostics switch, and
+        // the only reason anything in PDv2 speaks per creature, per tick or
+        // per client verb. OFF by default and expected to stay off everywhere
+        // but a run somebody is actively watching: every line behind it is one
+        // a five-room dungeon prints dozens of times, and none of them is a
+        // fault - a fault names itself at WARN or ERROR and is never gated.
+        //
+        // Deliberately NOT the same key as patrolDebug above. That one arms
+        // the patrol AI's per-leg trace, which is a different hunt at a
+        // different volume: an operator chasing a spawn, a death or a client
+        // verb should not have to read a corridor's movement informs to get
+        // there. Read live like every other V2 knob, on the line that would
+        // log, so `.reload config` both arms and disarms it mid-run.
+        bool        debug = false;
+
         // B5. Chance per boss segment that one of its corridors is armed, how
         // many mobs the trap spawns, and the stun it opens with (0 = no stun).
         // The chance is read live and is not a layout input - BuildAmbushPlan
@@ -523,5 +538,25 @@ namespace PDungeon
 }
 
 #define sPDv2Mgr PDungeon::PDv2Mgr::instance()
+
+namespace PDungeon
+{
+    // Round E / R3. The module-wide diagnostics gate, asked ON the line that
+    // would log rather than cached anywhere: ProceduralDungeon.V2.Debug is
+    // read live in LoadConfig, so an operator who types `.reload config`
+    // mid-run starts and stops the evidence without a restart - which is the
+    // whole point, because what is wanted is one pull, one spawn or one client
+    // handshake and not the rest of the night.
+    //
+    // Mirrors PatrolDebug() in PDv2CreatureAI.cpp, which keeps its own key and
+    // its own thirteen sites for the patrol AI's per-leg trace.
+    //
+    // Below the class and below the macro because it dereferences the
+    // singleton; inline so a gated site costs a config read and a branch.
+    inline bool PDv2Debug()
+    {
+        return sPDv2Mgr->GetConfig().debug;
+    }
+}
 
 #endif

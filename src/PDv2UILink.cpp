@@ -806,8 +806,17 @@ namespace PDungeon
             size_t const split = rest.find(' ');
             if (split == std::string::npos)
             {
-                LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent a SET with no value ('{}')",
-                          accountId, body);
+                // Round E / R3, and the same for the five sibling lines below:
+                // what arrives here is CLIENT traffic, so its volume is not
+                // this module's to bound - a stuck addon, an old panel or a
+                // hostile one can send a malformed verb every frame. Behind
+                // V2.Debug, where somebody debugging a panel turns one key on
+                // and reads them at INFO.
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 UI: account {} sent a SET with no value ('{}')",
+                             accountId, body);
+                }
                 return;
             }
 
@@ -815,8 +824,11 @@ namespace PDungeon
             int value = 0;
             if (!ParseInt(rest.substr(split + 1), value))
             {
-                LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent a SET with a bad value ('{}')",
-                          accountId, body);
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 UI: account {} sent a SET with a bad value ('{}')",
+                             accountId, body);
+                }
                 return;
             }
 
@@ -843,16 +855,22 @@ namespace PDungeon
                 // panel may move, and a hostile one is still just a panel.
                 if (BandRowLocked())
                 {
-                    LOG_DEBUG(PD_LOG, "PDv2 UI: account {} tried to set the locked mob "
-                                      "level band", accountId);
+                    if (PDv2Debug())
+                    {
+                        LOG_INFO(PD_LOG, "PDv2 UI: account {} tried to set the locked mob "
+                                         "level band", accountId);
+                    }
                     return;
                 }
                 wanted.cfgBandMin = value;
             }
             else
             {
-                LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent an unknown SET key ('{}')",
-                          accountId, key);
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 UI: account {} sent an unknown SET key ('{}')",
+                             accountId, key);
+                }
                 return;
             }
 
@@ -932,8 +950,11 @@ namespace PDungeon
             int on = 0;
             if (!ParseInt(body.substr(4), on))
             {
-                LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent a bad HUD toggle ('{}')",
-                          accountId, body);
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 UI: account {} sent a bad HUD toggle ('{}')",
+                             accountId, body);
+                }
                 return;
             }
 
@@ -942,7 +963,10 @@ namespace PDungeon
             return;
         }
 
-        LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent an unknown verb ('{}')", accountId, body);
+        if (PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2 UI: account {} sent an unknown verb ('{}')", accountId, body);
+        }
     }
 
     std::string PDv2UILink::DebugLine(uint32_t accountId)

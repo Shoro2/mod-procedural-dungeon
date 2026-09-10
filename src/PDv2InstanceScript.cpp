@@ -514,14 +514,22 @@ namespace PDungeon
         // Spawn telemetry. Written at INFO during the 2026-08-10 invisible-
         // attacker hunt, where it settled the case in one session: the only
         // unselectable spawn was Swarming Shadows (38163), forty of them.
-        // Kept at DEBUG because the next hunt will want it again - flip
-        // Logger.module to 6 and every spawn names itself.
-        LOG_DEBUG(PD_LOG, "PDv2: instance {} spawn: entry {} '{}' faction {} "
-                          "selectable {} visible-model {}",
-                  instance->GetInstanceId(), creature->GetEntry(),
-                  creature->GetName(), creature->GetFaction(),
-                  creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) ? "no" : "yes",
-                  creature->GetDisplayId());
+        // The next hunt will want it again - and since Round E / R3 it takes
+        // V2.Debug rather than a logger level, so the operator turns on one
+        // key instead of learning what Logger.module 6 means.
+        //
+        // ONE LINE PER CREATURE, which is a hundred-odd of them per run: the
+        // gate is what keeps this out of a host's log, and INFO under the gate
+        // is what makes it visible the moment the key is on.
+        if (PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} spawn: entry {} '{}' faction {} "
+                             "selectable {} visible-model {}",
+                     instance->GetInstanceId(), creature->GetEntry(),
+                     creature->GetName(), creature->GetFaction(),
+                     creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) ? "no" : "yes",
+                     creature->GetDisplayId());
+        }
 
         if (!creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
         {
@@ -1866,9 +1874,15 @@ namespace PDungeon
         }
         MarkRunDirty();
 
-        LOG_DEBUG(PD_LOG, "PDv2: instance {} Lil' Bro depth {} split into {} - run total {}",
-                  instance->GetInstanceId(), uint32(proto.splitDepth), uint32(born),
-                  uint32(_run.total));
+        // One line per SPLIT, so one per kill of a splitting mob and one more
+        // per kill of every child - the fastest way there is to fill a log
+        // with a mechanic working exactly as designed (Round E / R3).
+        if (PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} Lil' Bro depth {} split into {} - run total {}",
+                     instance->GetInstanceId(), uint32(proto.splitDepth), uint32(born),
+                     uint32(_run.total));
+        }
     }
 
     void PDv2InstanceScript::SpawnFromPlan(BlockPlan const& plan)
@@ -3718,9 +3732,15 @@ namespace PDungeon
         }
         MarkRunDirty();
 
-        LOG_DEBUG(PD_LOG, "PDv2: {} died in instance {} ({} death(s) this run) - "
-                          "respawn on the next tick",
-                  unit->GetName(), instance->GetInstanceId(), uint32(_run.deaths));
+        // One line per player DEATH, and a wipe-heavy run has plenty (Round E
+        // / R3). The tally itself is not diagnostics - it is graded by R1 and
+        // reported by FinishRun's INFO, which stays ungated.
+        if (PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2: {} died in instance {} ({} death(s) this run) - "
+                             "respawn on the next tick",
+                     unit->GetName(), instance->GetInstanceId(), uint32(_run.deaths));
+        }
     }
 
     void PDv2InstanceScript::RespawnPending()
@@ -3831,8 +3851,15 @@ namespace PDungeon
             player->TeleportTo(instance->GetId(), _entranceX, _entranceY, _entranceZ + 2.0f, 0.0f);
             ChatHandler(player->GetSession()).SendSysMessage(
                 "You fell off the dungeon and were returned to the entrance.");
-            LOG_DEBUG(PD_LOG, "PDv2: returned {} to the entrance from Z {}",
-                      player->GetName(), player->GetPositionZ());
+            // Per TICK per faller, in the worst case: a player who keeps
+            // sliding off the same ledge is caught again every pass of
+            // CatchFallers, so this one is gated by V2.Debug (Round E / R3)
+            // and the player's own chat line is the ungated evidence.
+            if (PDv2Debug())
+            {
+                LOG_INFO(PD_LOG, "PDv2: returned {} to the entrance from Z {}",
+                         player->GetName(), player->GetPositionZ());
+            }
         }
     }
 

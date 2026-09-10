@@ -973,6 +973,70 @@ ProceduralDungeon.V2.Patrol.FollowDistYd = 3.0
 ProceduralDungeon.V2.Patrol.Debug = 0
 
 #
+#    ProceduralDungeon.V2.Debug
+#        Description: Round E (2026-09-10): the module's per-creature,
+#                     per-tick and per-client-verb diagnostics, in the
+#                     worldserver log under `module.pdungeon`. 0 = silent,
+#                     1 = talkative. OFF everywhere but a run somebody is
+#                     actively watching - every line behind this key is one a
+#                     single five-room dungeon prints dozens of times.
+#
+#                     The lines print at INFO once the key is on, so turning
+#                     it on is the WHOLE operation: no Logger.module level to
+#                     find, nothing to put back afterwards. Read LIVE on the
+#                     line that would log, so `.reload config` both arms and
+#                     disarms it without a restart and without re-rolling
+#                     anybody's dungeon.
+#
+#                     What it prints, all prefixed `PDv2`:
+#
+#                       * one line per CREATURE the instance spawns, naming
+#                         its entry, name, faction, whether it is selectable
+#                         and its display id. That is the line that settled
+#                         the 2026-08-10 invisible-attacker hunt, and there
+#                         are a hundred-odd of them per run.
+#                       * one line per Lil' Bro SPLIT - so one per kill of a
+#                         splitting mob, and one more per kill of every child.
+#                       * one line per player DEATH, with the run's tally.
+#                       * one line per player caught FALLING off the dungeon,
+#                         which is per tick for a player who keeps sliding off
+#                         the same ledge (the player's own chat line is not
+#                         gated).
+#                       * one line per PULL in which a mob called reachable
+#                         allies into the fight - so one per fight.
+#                       * one line per patrol re-plan that had to fall back to
+#                         the walk grid, planning a beat or rejoining one.
+#                         These two were WARNs until Round E: the squeeze past
+#                         a pinched lane row is a designed fallback and a
+#                         property of the kit, not a fault of the run.
+#                       * one line per client ACK relayed up, and one per
+#                         malformed or unknown verb from the panel (a bad SET,
+#                         an unknown SET key, a locked-band SET, a bad HUD
+#                         toggle, an unknown verb). What the panel sends is
+#                         client traffic, so its volume is not the server's to
+#                         bound.
+#                       * one line per GEAR ROLL while V2.Loot.ClassFilter is
+#                         on, naming the pool, how much of it the looter's
+#                         class can wear and what the filter cost in ms.
+#
+#                     What it does NOT gate, and what therefore still prints
+#                     on a silent host: the startup and load summaries, the
+#                     per-run build summaries (spawns, props, barriers,
+#                     patrols, ambushes), the finale and FinishRun lines, the
+#                     per-cache loot payout, and every WARN or ERROR that
+#                     names a data fault - a missing chest anchor, an unknown
+#                     pack member, an unknown loot item, a dropped loot row.
+#                     A fault is never diagnostics.
+#
+#                     Independent of V2.Patrol.Debug above, which arms the
+#                     patrol AI's own per-leg trace. That is a different hunt
+#                     at a different volume: neither key implies the other.
+#        Default:     0
+#
+
+ProceduralDungeon.V2.Debug = 0
+
+#
 #    ProceduralDungeon.V2.Ambush.Chance
 #        Description: Round B (2026-09-03): percent chance, per boss segment,
 #                     that one of the corridors on the way to its boss room is

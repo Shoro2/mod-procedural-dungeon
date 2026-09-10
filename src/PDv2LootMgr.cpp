@@ -377,16 +377,25 @@ namespace PDungeon
             // Built per call and thrown away: the pools top out around 2 200
             // entries, gear is rolled a handful of times per run, and a cache
             // keyed by (pool, class, race) would have to be invalidated by
-            // hand the day the pools are regenerated. The debug line below is
+            // hand the day the pools are regenerated. The gated line below is
             // the measurement that says the choice still holds.
+            //
+            // ONE LINE PER GEAR ROLL since Round E / R3, so it takes V2.Debug
+            // like every other per-roll line: a chest, a boss and the final
+            // cache each roll several, per looter, per run. The per-cache INFO
+            // in PDv2ChestLoot.cpp is the ungated record of what was PAID -
+            // this one is only the filter's own cost.
             uint32 const startMs = getMSTime();
             Collect(*found, looter, PD_LOOT_EXPANSION_ALL, candidates);
-            LOG_DEBUG(PD_LOG, "PDv2 loot: pool {} filtered to {} of {} "
-                              "entries for class {} in {} ms", found->name,
-                      uint32(candidates.size()),
-                      uint32(found->entries.size()),
-                      uint32(looter->getClass()),
-                      GetMSTimeDiffToNow(startMs));
+            if (PDv2Debug())
+            {
+                LOG_INFO(PD_LOG, "PDv2 loot: pool {} filtered to {} of {} "
+                                 "entries for class {} in {} ms", found->name,
+                         uint32(candidates.size()),
+                         uint32(found->entries.size()),
+                         uint32(looter->getClass()),
+                         GetMSTimeDiffToNow(startMs));
+            }
         }
 
         // Also the path a disabled filter takes. An empty filtered set is

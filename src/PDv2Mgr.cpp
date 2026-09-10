@@ -133,6 +133,15 @@ namespace PDungeon
         _config.patrolDebug = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Patrol.Debug", false);
 
+        // Round E / R3: off, and read exactly like the patrol switch above and
+        // for the same reason - every gated line asks PDv2Debug() on the tick
+        // that would print it, so `.reload config` arms and disarms the whole
+        // per-creature / per-tick / per-verb stream on a run that is already
+        // being walked. Two keys rather than one because the two hunts have
+        // nothing to do with each other (PDv2Mgr.h says which is which).
+        _config.debug = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Debug", false);
+
         // B5: a percent roll like the ones above, and a mob count the spawn
         // ring can actually seat (0 disarms the ambush without disarming
         // anything else). V2.Ambush.RadiusYd is gone since Round C / C2 - the

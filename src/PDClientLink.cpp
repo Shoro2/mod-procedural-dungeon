@@ -169,7 +169,14 @@ namespace PDungeon
                 std::lock_guard<std::mutex> guard(_lock);
                 _state.ReportAck(accountId, ack);
             }
-            LOG_DEBUG(PD_LOG, "PDv2 link: account {} relayed ack '{}'", accountId, ack);
+            // One line per ACK, and the DLL acks every push the panel and the
+            // dungeon trigger - so this is a per-client-verb line and takes
+            // V2.Debug since Round E / R3. `.pdungeon v2 info` answers the
+            // same question for RIGHT NOW without the log.
+            if (PDv2Debug())
+            {
+                LOG_INFO(PD_LOG, "PDv2 link: account {} relayed ack '{}'", accountId, ack);
+            }
 
             // The ack is what turns AwaitingAck into Ready (or Nak), and the
             // panel only knows what its last C payload said - tell it now, or
