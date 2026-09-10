@@ -114,8 +114,21 @@ namespace
     // and the loot table is only being used to carry the answer into the
     // window the player is about to open - the row
     // PDv2InstanceScript::InjectBossGear builds for a corpse, with a stack.
-    void AddCertain(GameObject* go, uint32 item, uint32 count)
+    //
+    // Returns false when the row did NOT go in, which is the one thing
+    // Loot::AddItem will not tell anyone: it loops on
+    // `lootItems.size() < limit` with limit = MAX_NR_LOOT_ITEMS
+    // (LootMgr.cpp:491-497) and returns void, so an add past the window is a
+    // silent no-op. 18 is the client's hard ceiling on a 3.3.5a loot window
+    // (LootMgr.h:51-52), not a server tunable, so the answer is to test the
+    // window first and let the caller report what it lost.
+    bool AddCertain(GameObject* go, uint32 item, uint32 count)
     {
+        if (go->loot.items.size() >= static_cast<size_t>(MAX_NR_LOOT_ITEMS))
+        {
+            return false;
+        }
+
         // LootItem::count is a uint8 bitfield and LootStoreItem's maxcount is
         // a uint8, so a stack the bonus table could ask for past 255 has to be
         // clamped rather than wrapped down to near-nothing; a 0 would build a
@@ -126,13 +139,41 @@ namespace
         go->loot.AddItem(LootStoreItem(item, 0, 100.0f, false,
                                        LOOT_MODE_DEFAULT, 0,
                                        static_cast<int32>(stack), stack));
+        return true;
+    }
+
+    // The tail an over-full cache had to throw away, once per injection and at
+    // WARN: a dropped row is a reward the run rolled and the player never sees
+    // - not a bug the code can fix at runtime, but a statement that the dials
+    // have outgrown the window and something (template filler rows, the gear
+    // count, the bonus table) has to come down. Silence here is what let the
+    // finding stand in the first place.
+    void WarnDropped(GameObject* go, uint32 accountId, int dropped)
+    {
+        if (dropped <= 0)
+        {
+            return;
+        }
+
+        LOG_WARN(PD_LOG,
+                 "PDv2 loot: cache {} for account {} dropped {} item(s) at "
+                 "the {}-slot loot window",
+                 go->GetEntry(), accountId, dropped, MAX_NR_LOOT_ITEMS);
     }
 
     // Round E / L4, the Shifting Cache (910030): gear from the run's band.
-    void InjectShiftingCache(GameObject* go, PDv2RunState const& run,
+    //
+    // This chest needs no priority argument the way the finale below does. Its
+    // template carries three filler rows (mod_pdungeon_phase2.sql:24-26) and
+    // the gear tops out at four at lootMult 3.6, so seven of the eighteen
+    // slots is the worst case and everything rolled fits. The window is still
+    // tested on every add: a retuned template is one UPDATE away, and a
+    // silently eaten row would read in-game as a broken pool.
+    void InjectShiftingCache(GameObject* go, PDv2InstanceScript* run,
                              Player* looter)
     {
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        PDv2RunState const& state = run->GetRunState();
 
         // D9: floor(Items x lootMult) items are certain and the fraction left
         // over is the percent chance of one more. The dice the engine-free
@@ -140,7 +181,7 @@ namespace
         // never PDRandom's - a seeded loot roll would turn the same chest on
         // the same seed into a lookup table (PDv2InstanceScript.cpp:609-618).
         int const count = GameScaledCount(cfg.lootChestItems,
-                                          static_cast<int>(run.lootMultX100),
+                                          static_cast<int>(state.lootMultX100),
                                           static_cast<int>(urand(1, 100)));
 
         // V2.Loot.IccDlvl, the one rung the chests climb: below it the run
@@ -148,8 +189,9 @@ namespace
         // one. The run's FROZEN dlvl, like every other gameplay read in this
         // module - a dlvl gained by finishing THIS run must not retune the
         // chests still standing in it.
-        bool const icc = static_cast<int>(run.dlvl) >= cfg.lootIccDlvl;
+        bool const icc = static_cast<int>(state.dlvl) >= cfg.lootIccDlvl;
 
+        int dropped = 0;
         for (int i = 0; i < count; ++i)
         {
             uint32 const item =
@@ -164,38 +206,65 @@ namespace
                 // a pool sitting at 0 rows.
                 continue;
             }
-            AddCertain(go, item, 1);
+            if (!AddCertain(go, item, 1))
+            {
+                ++dropped;
+            }
         }
+
+        WarnDropped(go, run->GetAccountId(), dropped);
     }
 
     // Round E / L4 + L5, Chromie's Cache (910068): the run's closing payout -
     // gear one band above the chests, the two finale currencies, and the
     // legacy-rare bonus rolls.
+    //
+    // THE ORDER BELOW IS A PRIORITY ORDER AND IS LOAD-BEARING. A 3.3.5a loot
+    // window holds 18 rows, and Loot::AddItem drops everything past that
+    // without a word (LootMgr.cpp:491-497, LootMgr.h:51). This cache can ask
+    // for more at the top of the dials: the five template filler rows are
+    // already in go->loot when the hook runs (mod_pdungeon_chromie.sql), plus
+    // up to 4 gear at lootMult 3.6, plus T4 and T5, plus up to 9 bonus rows -
+    // about twenty. The cap eats the TAIL, so the tail has to be the cheapest
+    // thing:
+    //
+    //   1. the legacy rares FIRST. They are the rarest rows in the module, the
+    //      headline of a finished run and the reason anyone pushes the dial;
+    //      appended last (as they were) they are the first to be thrown away,
+    //      and a player who never sees the row cannot tell that from bad luck.
+    //   2. T4 and T5 currency. Two rows at most, and the cache is their only
+    //      source on the realm - a trash mob cannot pay these tiers.
+    //   3. gear last. Same pool the next run rolls again, and the one part of
+    //      the payout that exists elsewhere.
+    //
+    // Whatever still did not fit is reported once, at WARN, by WarnDropped.
     void InjectFinalCache(GameObject* go, PDv2InstanceScript* run,
                           Player* looter)
     {
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
         PDv2RunState const& state = run->GetRunState();
 
-        // The same rung the chests use, one band higher on both sides.
-        bool const icc = static_cast<int>(state.dlvl) >= cfg.lootIccDlvl;
-        std::string_view const pool = icc ? LOOT_POOL_ICC_HC : LOOT_POOL_ICC_N;
+        int dropped = 0;
 
-        int const wanted =
-            GameScaledCount(cfg.lootFinalItems,
-                            static_cast<int>(state.lootMultX100),
-                            static_cast<int>(urand(1, 100)));
+        // L5, the legacy rares: independent rolls over `pdungeon_loot_bonus`,
+        // each already gated on the run's difficulty and scaled by the same
+        // room factor inside PDv2LootMgr, and each already resolved to the
+        // looter's armour class where the row asks for one. The answer may
+        // hold none, one or all of the rows.
+        std::vector<LootBonusHit> const bonus =
+            sPDv2LootMgr->RollBonus(state.difficulty,
+                                    static_cast<int>(state.roomFactorX100),
+                                    looter);
 
-        int gear = 0;
-        for (int i = 0; i < wanted; ++i)
+        int bonusAdded = 0;
+        for (LootBonusHit const& hit : bonus)
         {
-            uint32 const item = sPDv2LootMgr->RollGear(pool, looter);
-            if (!item)
+            if (!AddCertain(go, hit.item, hit.count))
             {
+                ++dropped;
                 continue;
             }
-            AddCertain(go, item, 1);
-            ++gear;
+            ++bonusAdded;
         }
 
         // T4 and T5. The formula the kill tiers use
@@ -237,35 +306,58 @@ namespace
                 continue;
             }
 
-            AddCertain(go, item, 1);
+            if (!AddCertain(go, item, 1))
+            {
+                ++dropped;
+                continue;
+            }
             hits[tier - LOOT_CURRENCY_FINAL_FIRST] = 1;
         }
 
-        // L5, the legacy rares: independent rolls over `pdungeon_loot_bonus`,
-        // each already gated on the run's difficulty and scaled by the same
-        // room factor inside PDv2LootMgr, and each already resolved to the
-        // looter's armour class where the row asks for one. The answer may
-        // hold none, one or all of the rows.
-        std::vector<LootBonusHit> const bonus =
-            sPDv2LootMgr->RollBonus(state.difficulty,
-                                    static_cast<int>(state.roomFactorX100),
-                                    looter);
-        for (LootBonusHit const& hit : bonus)
+        // L4, the gear, LAST for the reason the block comment gives: it is the
+        // most replaceable half of the payout, so it is the half that should
+        // meet the window first if anything has to.
+        //
+        // The same rung the chests use, one band higher on both sides.
+        bool const icc = static_cast<int>(state.dlvl) >= cfg.lootIccDlvl;
+        std::string_view const pool = icc ? LOOT_POOL_ICC_HC : LOOT_POOL_ICC_N;
+
+        int const wanted =
+            GameScaledCount(cfg.lootFinalItems,
+                            static_cast<int>(state.lootMultX100),
+                            static_cast<int>(urand(1, 100)));
+
+        int gear = 0;
+        for (int i = 0; i < wanted; ++i)
         {
-            AddCertain(go, hit.item, hit.count);
+            uint32 const item = sPDv2LootMgr->RollGear(pool, looter);
+            if (!item)
+            {
+                continue;
+            }
+            if (!AddCertain(go, item, 1))
+            {
+                ++dropped;
+                continue;
+            }
+            ++gear;
         }
 
         // One line per cache, at INFO and not DEBUG: this is the whole closing
         // payout of a run, so an operator reading a night of logs can see what
         // each finished run actually paid without turning anything on. The
         // chests stay silent - there are up to a dozen of them per run and
-        // they would drown this.
+        // they would drown this. Every count is what actually went INTO the
+        // loot, never what was rolled, so this line and the WARN below add up
+        // to the roll.
         LOG_INFO(PD_LOG,
                  "PDv2 loot: final cache for account {} (diff {}, dlvl {}, "
                  "rooms x{}): {} gear, T4 {}, T5 {}, bonus {}",
                  run->GetAccountId(), uint32(state.difficulty),
                  uint32(state.dlvl), uint32(state.roomFactorX100), gear,
-                 hits[0], hits[1], uint32(bonus.size()));
+                 hits[0], hits[1], bonusAdded);
+
+        WarnDropped(go, run->GetAccountId(), dropped);
     }
 
     // One script for both chests. The hook is GLOBAL - it fires for every
@@ -325,7 +417,7 @@ namespace
 
             if (entry == GO_CHEST)
             {
-                InjectShiftingCache(go, run->GetRunState(), looter);
+                InjectShiftingCache(go, run, looter);
             }
             else
             {
