@@ -6377,8 +6377,14 @@ namespace
     // is the actual spread of the city theme's passages. Both captured by
     // RUNNING, the layered one over the kit v26 SQL script 48 generated for
     // this round.
+    // kit t1b-v39 / kitVersion 27 (Round E K1: the alt-1 room's facade reserve)
+    // re-captured the LAYERED string: K1's pad-slot reserve put a fifth house on
+    // each wall of the alt-1 room, and a facade is what a patrol lane is measured
+    // against, so 8 cells of chunks 13001-13014 changed clearance. The walk masks
+    // did NOT move (8410 walkable cells both sides), which is why the no-layer
+    // string - a property of the masks alone - is untouched.
     char const* const PD_PATROL_CLEAR_PIN_NOLAYER = "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:8410:;";
-    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:350:75:632:61:6955:;";
+    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:353:73:635:59:6953:;";
 
     // The histogram itself, over g_masks and g_patrol rather than over a built
     // grid: this is a statement about the KIT, and a grid only ever holds the
