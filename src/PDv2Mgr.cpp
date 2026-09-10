@@ -503,6 +503,38 @@ namespace PDungeon
         return cap;
     }
 
+    int PDv2Mgr::SetDiffCap(uint32_t accountId, int wanted)
+    {
+        int const cap = GameClampDiff(wanted);
+        {
+            std::lock_guard<std::mutex> guard(_lock);
+            PDv2AccountState& state = _accounts[accountId];
+            // Assignment, not std::max: this is the one door that may close.
+            // Everything the ratchet's comment says about not trusting a
+            // caller's number still applies to the VALUE - it is clamped into
+            // the dial above - but not to its DIRECTION, which is the whole
+            // point of the entry point existing.
+            state.diffCap = cap;
+            // `loaded` for the same reason RaiseDiffCap sets it: a cap set
+            // before this account ever had a row is still a real answer, and
+            // GeneratePlan must follow it rather than the server config.
+            state.loaded = true;
+        }
+
+        // No GREATEST on the UPDATE half, and that is the ONLY difference
+        // from RaiseDiffCap's statement: the ratchet is enforced in the
+        // database precisely so that no gameplay path can write a cap
+        // backwards, and this path is not a gameplay path. Still diff_cap
+        // alone - a test tool is not a licence to clobber the neighbouring
+        // columns.
+        CharacterDatabase.Execute(
+            "INSERT INTO pdungeon_account (accountId, diff_cap) VALUES ({}, {}) "
+            "ON DUPLICATE KEY UPDATE diff_cap = VALUES(diff_cap)",
+            accountId, cap);
+
+        return cap;
+    }
+
     PDv2RunReward PDv2Mgr::GrantRunReward(uint32_t accountId, int roomsUsed)
     {
         PDv2RunReward reward;

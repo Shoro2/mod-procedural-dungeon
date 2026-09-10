@@ -441,7 +441,18 @@ namespace PDungeon
             << ' ' << GameRoomsCap(dlvl)
             << ' ' << account.cfgDifficulty
             << ' ' << PD_GAME_DIFF_MIN
-            << ' ' << PD_GAME_DIFF_MAX
+            // Round E / R1 (spec D15). The `diffMax` field is the ACCOUNT's
+            // earned cap, not the dial's absolute ceiling: the slider bounds
+            // itself at c.diffMax (flpdui.lua), so this is where a cap the
+            // player has not earned yet stops being offered. PD_GAME_DIFF_MAX
+            // is still the ceiling the cap itself is clamped to (GameClampDiff
+            // in RaiseDiffCap), so a maxed account sends exactly what this
+            // line used to send unconditionally.
+            //
+            // The server does NOT rely on this bound: SetAccountCfg re-clamps
+            // whatever the panel asks for against the same cap, because a wire
+            // field is a hint to a client and never a permission.
+            << ' ' << account.diffCap
             << ' ' << PD_GAME_DIFF_STEP
             << ' ' << account.cfgCasterPct
             << ' ' << PD_GAME_CASTER_PCT_MIN

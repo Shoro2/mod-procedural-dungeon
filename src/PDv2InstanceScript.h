@@ -187,6 +187,22 @@ namespace PDungeon
         // dial: a dlvl gained by finishing THIS run must not retune the mobs
         // that are still standing in it.
         uint8  dlvl = 0;
+        // Round E / R1 (spec D15). How many PLAYER deaths this run has cost so
+        // far - NOT frozen like the four fields above, because it is the only
+        // one of them the run itself produces rather than consumes.
+        //
+        // One number for the whole party rather than one per player: what
+        // FinishRun asks of it is a yes/no ("did anybody die?"), which decides
+        // between V2.Cap.CleanUnlock and V2.Cap.DeathUnlock. A per-player
+        // tally would make the unlock depend on WHOSE run it is, and a run has
+        // exactly one account behind it.
+        //
+        // uint8 and SATURATING at 255 (OnUnitDeath), never wrapping: the wrap
+        // is the whole risk here, because 256 deaths rolling back to 0 would
+        // turn the worst run in the module's history into a clean clear and
+        // pay it the larger unlock. The history column is TINYINT UNSIGNED to
+        // match, and 255 vs 300 is a distinction nothing downstream draws.
+        uint8  deaths = 0;
         bool   complete = false;
         bool   started = false;
     };

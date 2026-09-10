@@ -386,6 +386,24 @@ namespace PDungeon
         // for the player's settings, the stored layout or the progression.
         int RaiseDiffCap(uint32_t accountId, int wanted);
 
+        // Round E / R1. The TEST door beside the ratchet: sets the cap to
+        // `wanted` (clamped into [1, 100]) in EITHER direction and returns it.
+        //
+        // Its own entry point rather than a `force` flag on RaiseDiffCap, so
+        // that the ratchet has no bypass parameter a future caller could pass
+        // by accident: every gameplay path calls RaiseDiffCap and cannot lower
+        // a cap even by mistake, and the only caller of this one is the
+        // GM-only `.pdungeon v2 cap`, which exists to test the bound the
+        // gameplay path can only ever open.
+        //
+        // Writes `diff_cap` and nothing else, exactly like RaiseDiffCap -
+        // including leaving cfgDifficulty alone. Lowering the cap under a dial
+        // already set above it does NOT retune the setting here; SetAccountCfg
+        // and LoadAccountState both re-clamp, so the dial is corrected the
+        // next time it is written or read from the row, and a run already
+        // spawned keeps the difficulty it froze.
+        int SetDiffCap(uint32_t accountId, int wanted);
+
         // Pays out a finished run: 01 §8 dxp (difficulty-independent by
         // design), recomputes dlvl, and persists dlvl/dxp only.
         PDv2RunReward GrantRunReward(uint32_t accountId, int roomsUsed);

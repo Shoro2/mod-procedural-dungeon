@@ -1056,6 +1056,31 @@ namespace PDungeon
         // announce, and fires exactly once because FinishRun does.
         sPDv2UILink->SendEnd(instance, reward);
 
+        // Round E / R1 (spec D15). The difficulty cap moves HERE and nowhere
+        // else on the gameplay path: finishing a run at dial D unlocks
+        // D + unlock, and the unlock is the smaller death value when the run
+        // cost anybody a death and the larger clean value when it did not.
+        //
+        // Measured against `_run.difficulty` - the dial FROZEN at spawn - and
+        // never against the account's live cfg_difficulty or its current cap.
+        // Against the live setting, a player who lowered the dial mid-run
+        // would be paid for a run they did not play; against the cap, farming
+        // easy runs at a high cap would inch the cap upwards for ever, which
+        // is the loop PDv2Mgr.h refuses from the other end.
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        int const unlock = _run.deaths ? cfg.capDeathUnlock : cfg.capCleanUnlock;
+        int const capBefore = sPDv2Mgr->GetAccountState(_accountId).diffCap;
+        int const capNow = sPDv2Mgr->RaiseDiffCap(_accountId,
+                                                  int(_run.difficulty) + unlock);
+
+        // STRICTLY greater, which is the whole reason `capBefore` is read at
+        // all: RaiseDiffCap is a ratchet and answers the cap in force whether
+        // or not it moved, so the return value alone cannot tell an unlock
+        // from a no-op. Announcing "difficulty 40 unlocked" to a party that
+        // has been capped at 40 for a week is exactly the kind of noise a
+        // raid warning must never carry.
+        bool const capRose = capNow > capBefore;
+
         Map::PlayerList const& players = instance->GetPlayers();
         for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
         {
@@ -1076,6 +1101,22 @@ namespace PDungeon
                 handler.PSendSysMessage("Your dungeon level is now {} - a deeper layout and "
                                         "more of the depths are open.", reward.newDlvl);
             }
+
+            if (capRose)
+            {
+                // The finale's raid-warning voice rather than another sys
+                // message: the N kind reaches chat AND the warning frame, and
+                // of everything this completion says, the ceiling on the NEXT
+                // run is the one line worth the frame.
+                sPDv2UILink->SendNotice(player, Acore::StringFormat(
+                    "Difficulty {} unlocked ({} death(s)).", capNow,
+                    uint32(_run.deaths)));
+                // ...and the panel behind it, because `c.diffMax` is what
+                // bounds the slider (flpdui.lua). Without this push the player
+                // is told about a ceiling their own dial still refuses to
+                // reach, until whatever happens to send the next C payload.
+                sPDv2UILink->SendCfg(player);
+            }
         }
 
         // History is written on COMPLETION only, so an abandoned run leaves no
@@ -1088,19 +1129,23 @@ namespace PDungeon
         // different scale (mod_pdungeon_runs_difficulty.sql says why the column
         // survives). loot_mult_x100 stays, because the loot multiplier really
         // is a x100 quantity.
+        // Round E / R1 adds `deaths`: the row already records the difficulty
+        // the run was PLAYED at, and the death count is what turns that pair
+        // into the cap decision this run made - without it the history cannot
+        // say why one clear at 40 unlocked 45 and the next unlocked 43.
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_runs (seed, map_id, instance_id, leader_guid, account_id, "
-            "dlvl, difficulty, loot_mult_x100, rooms_cleared, result, completed_at) "
-            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, 1, NOW())",
+            "dlvl, difficulty, loot_mult_x100, rooms_cleared, deaths, result, completed_at) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, 1, NOW())",
             _spawnedSeed, instance->GetId(), instance->GetInstanceId(), _leaderGuid,
             _accountId, reward.newDlvl, uint32(_run.difficulty), _run.lootMultX100,
-            _run.roomsCleared);
+            _run.roomsCleared, uint32(_run.deaths));
 
         LOG_INFO(PD_LOG, "PDv2: account {} completed instance {} (seed {}): {}/{} rooms, "
-                         "{} kill(s), +{} dxp -> dlvl {}", _accountId,
-                 instance->GetInstanceId(), _spawnedSeed, uint32(_run.roomsCleared),
-                 uint32(_run.roomsTotal), uint32(_run.killed), reward.dxpGained,
-                 reward.newDlvl);
+                         "{} kill(s), {} death(s), +{} dxp -> dlvl {}, cap {} -> {}",
+                 _accountId, instance->GetInstanceId(), _spawnedSeed,
+                 uint32(_run.roomsCleared), uint32(_run.roomsTotal), uint32(_run.killed),
+                 uint32(_run.deaths), reward.dxpGained, reward.newDlvl, capBefore, capNow);
 
         // Nobody is teleported out. The dungeon stays walkable after its last
         // boss because farming it is the point (01 §8) - the way out is the way
@@ -3624,8 +3669,29 @@ namespace PDungeon
         // one second is the whole window the release veto in PDClientLink
         // exists to cover.
         _pendingRespawn[unit->GetGUID()] = getMSTime();
-        LOG_DEBUG(PD_LOG, "PDv2: {} died in instance {} - respawn on the next tick",
-                  unit->GetName(), instance->GetInstanceId());
+
+        // Round E / R1. The cap's only input from the run floor, counted HERE
+        // rather than in RespawnPending, because this hook is the one place a
+        // death is certain. The next tick's respawn can be pre-empted by a
+        // logout, a GM resurrection or the player leaving the map, and none of
+        // those un-kills anybody. Every death of every player counts - the
+        // party shares one run, and it is the run that is being graded.
+        //
+        // Scoped to the run by SpawnFromPlan's `_run = PDv2RunState()`, which
+        // is what keeps a fall into the void on a not-yet-built map out of the
+        // next run's tally.
+        //
+        // Saturating, never wrapping (PDv2RunState::deaths says why 256 deaths
+        // reading as a clean clear would be the expensive kind of bug).
+        if (_run.deaths < 255)
+        {
+            ++_run.deaths;
+        }
+        MarkRunDirty();
+
+        LOG_DEBUG(PD_LOG, "PDv2: {} died in instance {} ({} death(s) this run) - "
+                          "respawn on the next tick",
+                  unit->GetName(), instance->GetInstanceId(), uint32(_run.deaths));
     }
 
     void PDv2InstanceScript::RespawnPending()
