@@ -1750,6 +1750,9 @@ namespace PDungeon
         tag->patrolGoalCellY = proto.patrolGoalCellY;
         tag->patrolLeader = proto.patrolLeader;
         tag->patrolRank = proto.patrolRank;
+        // Round E / D7: set by TickEvents on an event-wave attacker (and by
+        // any later respawn copy), read by the currency gate in OnMobDied.
+        tag->isExtra = proto.isExtra;
 
         // Before the affixes, never after: a Lil' Bro child is a TENTH of its
         // parent that a Big Boy bit then grows by half again, and reversing
@@ -4070,8 +4073,11 @@ namespace PDungeon
         // seconds later, which is what makes the final stretch a fight rather
         // than a wait. Guarded against a zero gap because both numbers are
         // live conf values and a division is not a place to trust a clamp.
+        // ...and never below one: SpawnEverySec >= DurationSec is legal on
+        // both keys on its own, and the truncation would leave a defence
+        // with no attackers at all - an unloseable free chest.
         int const waveSize = cfg.eventSpawnEverySec > 0
-                             ? cfg.eventDurationSec / cfg.eventSpawnEverySec
+                             ? std::max(1, cfg.eventDurationSec / cfg.eventSpawnEverySec)
                              : 0;
 
         double const mid = PD_BLOCK_SIZE_YD / 2.0;
