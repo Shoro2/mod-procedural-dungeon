@@ -885,7 +885,11 @@ namespace PDungeon
 
     int PocketCountFor(int rooms, int bossRooms, int branches)
     {
-        int const total = std::max(2, rooms + bossRooms);
+        // Round E / R2: `rooms` counts ORDINARY rooms, so the entrance is the
+        // "+ 1" here and in the builder below - the two must stay identical or
+        // the pocket budget would be taken against a different chain than the
+        // one that gets built (PDBlockPlan.h states the arithmetic once).
+        int const total = std::max(2, rooms + bossRooms + 1);
         int const bosses = bossRooms > 0 ? bossRooms : 1;
         int pockets = std::max(0, branches);
         pockets = std::min(pockets, total / 3);
@@ -1547,7 +1551,9 @@ namespace PDungeon
         // 4. Chain length: the spine holds the whole room budget minus the
         //    pockets. Without this a 3-room chain with the bosses at the
         //    formula positions for L = 3 validates against a 4-room config.
-        if (chainLen != std::max(2, plan.config.rooms + plan.config.bossRooms) - pocketCount)
+        //    The budget is rooms + bossRooms + 1 since Round E / R2 - the
+        //    trailing 1 is the entrance, which is a chain cell like any other.
+        if (chainLen != std::max(2, plan.config.rooms + plan.config.bossRooms + 1) - pocketCount)
         {
             return fail("chain length does not match the room budget");
         }
@@ -1563,7 +1569,7 @@ namespace PDungeon
                 ++roomCount;
             }
         }
-        if (roomCount != std::max(2, plan.config.rooms + plan.config.bossRooms) + loopCount)
+        if (roomCount != std::max(2, plan.config.rooms + plan.config.bossRooms + 1) + loopCount)
         {
             return fail("room count does not match the budget plus the loop rooms");
         }
@@ -1639,7 +1645,10 @@ namespace PDungeon
         }
 
         // Round B (spec 2026-09-02): the budget is arithmetic, not a draw.
-        int const total = std::max(2, cfg.rooms + cfg.bossRooms);
+        // Round E / R2 (spec D13): + 1 for the entrance, which is chain 0 and
+        // is no longer taken out of the ordinary rooms the dial asked for.
+        // PocketCountFor computes the SAME total - keep the two in step.
+        int const total = std::max(2, cfg.rooms + cfg.bossRooms + 1);
         int const bosses = cfg.bossRooms > 0 ? cfg.bossRooms : 1;
         int const pocketsWanted = PocketCountFor(cfg.rooms, cfg.bossRooms, cfg.branches);
         int const chainLen = total - pocketsWanted;

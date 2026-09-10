@@ -262,7 +262,10 @@ ProceduralDungeon.V2.FloorZ = 50.0
 
 #
 #    ProceduralDungeon.V2.Rooms / .BossRooms
-#        Description: Rooms in a generated layout, before and as boss rooms.
+#        Description: ORDINARY rooms in a generated layout, and boss rooms.
+#                     The entrance and the boss halls come ON TOP of .Rooms:
+#                     5 / 1 builds five ordinary rooms, one boss hall and one
+#                     entrance, and the HUD's room pair counts the five.
 #                     These are now the FALLBACK only: an account that has a
 #                     pdungeon_account row gets 01 §8's rooms (its own cfg_rooms
 #                     clamped into 3 + dlvl, hard cap 15) and boss rooms

@@ -110,17 +110,23 @@ namespace PDungeon
     // (ONE ADT tile - multi-tile plans are untested client-side, so the field
     // is never widened to buy rooms). bossRooms per row is GameBossRooms at the
     // dlvl where that room count unlocks, i.e. what a player there would run.
-    // Measured 2026-09-02 (Round B chain generator), 3000 seeds per row:
+    // Re-measured 2026-09-10 (Round E / R2: `rooms` counts ORDINARY rooms, so
+    // every row seats one cell more than it used to - the entrance), 3000
+    // seeds per row, theme 1:
     //
     //   rooms  bossRooms  room cells  gen failures  max manifest B
-    //      12          1          13         0             913
-    //      13          2          15         0             971
-    //      14          2          16         0            1033
-    //      15          2          17         0            1071
+    //      12          1          14         0             931
+    //      13          2          16         0            1093
+    //      14          2          17         0            1133
+    //      15          2          18         0            1173
+    //
+    // Theme 2's wider chunk ids are the real ceiling and were measured in the
+    // same run: 1229 B at 15 rooms + 2 boss, 0 gen failures - 65 % of the
+    // 1900 B budget, so the cap stays 15 rather than dropping to 14.
     //
     // Both constraints are far from binding at 15, and the chain leaves MORE
     // manifest headroom than the MST it replaced (15 rooms measured 1406 B on
-    // 2026-08-07 and 1071 B now: one spine plus its pockets needs fewer
+    // 2026-08-07 and 1173 B now: one spine plus its pockets needs fewer
     // corridor blocks than a tree with loops and stubs did). A separate sweep
     // past the design cap (1000 seeds per row) puts the real edges at:
     //   * manifest size saturates around 1330 B - 70% of the 1900 B ceiling
@@ -134,8 +140,10 @@ namespace PDungeon
     //     2 -> 3 at the dlvl that would have wanted it), then collapses fast -
     //     432 of 1000 at 27 cells, and nothing generates at all at 32.
     //
-    // So 15 rooms + 2 boss rooms = 17 cells sits 9 cells below the first
-    // observed failure. If either the gap rule or the manifest format changes,
+    // So 15 rooms + 2 boss rooms + the entrance = 18 cells sits 8 cells below
+    // the first observed failure - the R2 entrance spent one of that margin,
+    // and the packing sweep is unaffected by WHERE the cell count comes from.
+    // If either the gap rule or the manifest format changes,
     // re-run `pdblock --roomcap 3000`; the batch re-measures this constant on
     // every run so it cannot rot silently.
     constexpr int PD_GAME_ROOMS_CAP_MEASURED = 15;
@@ -463,7 +471,8 @@ namespace PDungeon
     // How large the planning field should be for a given room count.
     //
     // `rooms` is the TOTAL room count the planner will seat - cfg.rooms PLUS
-    // cfg.bossRooms - and not the player's room slider on its own. Every cell
+    // cfg.bossRooms PLUS the entrance (Round E / R2) - and not the player's
+    // room slider on its own. Every cell
     // the layout claims counts here: a boss room needs the same cell and the
     // same MIN_ROOM_GAP as any other room, so a field sized from the slider
     // alone is a field the plan provably does not fit in. That is not

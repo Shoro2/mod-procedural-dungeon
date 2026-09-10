@@ -107,17 +107,25 @@ namespace PDungeon
 
     // Round B chain arithmetic (spec 2026-09-02 §2), pure and draw-free so the
     // engine, the planner and the harness agree by construction.
-    //   total    = max(2, rooms + bossRooms)
+    //   total    = max(2, rooms + bossRooms + 1)
     //   pockets  = min(branches, total / 3, (total - 1 - N) / 2)   N = max(1, bossRooms)
     //   chainLen = total - pockets
     //   boss k   = round(k * (chainLen - 1) / N), k = 1..N
+    //
+    // Round E / R2 (spec D13): the "+ 1" is the ENTRANCE. `rooms` is the count
+    // of ORDINARY rooms the player was promised - the slider's own number - so
+    // the entrance and the boss halls are added on top of it rather than
+    // eating one of them. Before R2 the entrance was chain 0 of a `rooms +
+    // bossRooms` budget, which is why a 14-room dial built 13 ordinary rooms
+    // and the HUD (which skips the entrance) and the panel (which shows the
+    // dial) disagreed by exactly one.
     int PocketCountFor(int rooms, int bossRooms, int branches);
     int BossChainIndex(int chainLen, int bossRooms, int k);
 
     struct BlockCfg
     {
         uint32_t seed = 0;
-        int rooms = 3;              // ROOM blocks, before boss rooms are added
+        int rooms = 3;              // ordinary rooms; the entrance and the boss rooms come on top
         int bossRooms = 1;
         int fieldBlocks = 8;        // planning field is fieldBlocks square
         int detourChancePct = 33;   // Round B (B0b): chance per boss segment that a loop room hangs off the run

@@ -287,9 +287,13 @@ namespace PDungeon
         // rooms do not exist on the 3x3 field the old expression handed it -
         // MIN_ROOM_GAP 2 admits at most 5 cells on 3x3, so every attempt failed
         // and the player got "no valid layout" (final review of B0, 2026-09-03).
-        // The live default is unmoved: 5 + 1 = 24 cells still asks for 5x5.
+        // Round E / R2 adds the ENTRANCE to that total: since the slider
+        // counts ordinary rooms, the plan seats rooms + bossRooms + 1 cells,
+        // and a field sized one cell short is the same provable misfit this
+        // paragraph was written about. The live default is unmoved:
+        // 5 + 1 + 1 = 7 rooms still asks for 6x6, capped at V2.FieldBlocks.
         cfg.fieldBlocks = std::min(_config.fieldBlocks,
-                                   GameFieldBlocksForRooms(cfg.rooms + cfg.bossRooms));
+                                   GameFieldBlocksForRooms(cfg.rooms + cfg.bossRooms + 1));
         cfg.detourChancePct = _config.detourChancePct;
         cfg.branches = _config.branches;
         cfg.originBX = _config.originBX;

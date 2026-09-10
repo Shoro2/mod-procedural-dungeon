@@ -2197,19 +2197,24 @@ namespace
     {
         char msg[200];
         struct Row { int rooms; int boss; int branches; int pockets; int chainLen; int b1; int b2; };
+        // Round E / R2 (spec D13): every row re-derived by hand for
+        // total = max(2, rooms + bossRooms + 1). The entrance is a chain cell,
+        // so a longer chain moves the boss indices too - 15 rooms + 2 bosses
+        // used to seat them at 7 and 14 on a 15-cell chain and now seats them
+        // at 8 and 15 on a 16-cell one.
         Row const rows[] = {
-            {  1, 1, 2, 0,  2, 1, -1 },
-            {  2, 1, 2, 0,  3, 2, -1 },
-            {  3, 1, 2, 1,  3, 2, -1 },
-            {  5, 1, 2, 2,  4, 3, -1 },
-            {  8, 1, 2, 2,  7, 6, -1 },
-            { 12, 2, 2, 2, 12, 6, 11 },
-            { 15, 2, 2, 2, 15, 7, 14 },
-            {  5, 1, 0, 0,  6, 5, -1 },
-            {  1, 2, 2, 0,  3, 1,  2 },
-            {  5, 1, 9, 2,  4, 3, -1 },
-            { 15, 2, 9, 5, 12, 6, 11 },
-            {  5, 0, 2, 1,  4, 3, -1 },     // bossRooms 0 still means one boss
+            {  1, 1, 2, 0,  3, 2, -1 },
+            {  2, 1, 2, 1,  3, 2, -1 },
+            {  3, 1, 2, 1,  4, 3, -1 },
+            {  5, 1, 2, 2,  5, 4, -1 },
+            {  8, 1, 2, 2,  8, 7, -1 },
+            { 12, 2, 2, 2, 13, 6, 12 },
+            { 15, 2, 2, 2, 16, 8, 15 },
+            {  5, 1, 0, 0,  7, 6, -1 },
+            {  1, 2, 2, 0,  4, 2,  3 },
+            {  5, 1, 9, 2,  5, 4, -1 },
+            { 15, 2, 9, 6, 12, 6, 11 },
+            {  5, 0, 2, 2,  4, 3, -1 },     // bossRooms 0 still means one boss
         };
         for (Row const& r : rows)
         {
@@ -2218,7 +2223,7 @@ namespace
                           r.rooms, r.boss, r.branches, pockets, r.pockets);
             Check(pockets == r.pockets, msg, 0);
 
-            int const total = std::max(2, r.rooms + r.boss);
+            int const total = std::max(2, r.rooms + r.boss + 1);
             int const chainLen = total - pockets;
             std::snprintf(msg, sizeof(msg), "chainLen for (%d,%d,%d) = %d, want %d",
                           r.rooms, r.boss, r.branches, chainLen, r.chainLen);
@@ -2245,7 +2250,7 @@ namespace
         {
             for (int boss = 1; boss <= 4; ++boss)
             {
-                int const total = std::max(2, rooms + boss);
+                int const total = std::max(2, rooms + boss + 1);
                 int const chainLen = total - PocketCountFor(rooms, boss, 2);
                 std::snprintf(msg, sizeof(msg),
                               "the pocket clamp left no room for the bosses at (%d rooms, %d boss)",
@@ -2276,6 +2281,103 @@ namespace
         BlockCfg const cfg;
         Check(cfg.branches == 2, "BlockCfg::branches must default to 2", 0);
         Check(cfg.detourChancePct == 33, "BlockCfg::detourChancePct must default to 33", 0);
+    }
+
+    // Round E / R2 (spec D13): the room slider counts ORDINARY rooms.
+    //
+    // The whole point of the change, stated as three counts that hold for
+    // every legal (rooms, bossRooms) the engine can ask for:
+    //
+    //   * plain Room blocks == cfg.rooms + the loop rooms. POCKETS ARE NOT
+    //     ADDED HERE and that is not an oversight: PocketCountFor carves the
+    //     pockets OUT of the same `total` the spine is built from
+    //     (chainLen = total - pockets), so a pocket is a spine room moved off
+    //     the chain, not an extra one. Loop rooms are the only kind that comes
+    //     on top of the budget (design 2026-09-03 0.4), which is why they and
+    //     nothing else appear on the right-hand side. Measured, not reasoned:
+    //     the failure message prints every count so a move can be read.
+    //   * exactly one RoomEntrance, and it is no longer taken out of the
+    //     player's room budget - that is the bug this task closes.
+    //   * exactly cfg.bossRooms RoomBoss blocks, likewise on top.
+    //
+    // The engine's HUD denominator (`_run.roomsTotal`) and the panel's
+    // "Current depths" count are both the first line of this table, which is
+    // what makes the two agree with the dial the player moved.
+    void RunOrdinaryRoomCountChecks(int seeds)
+    {
+        char msg[240];
+        // 1 is the slider floor, 14 the largest count that unlocks below the
+        // cap, 5 the shipped default. Both boss counts the band can hand out
+        // at those room counts (GameBossRooms is 1 below dlvl 10, 2 from 10).
+        int const roomChoices[3] = { 1, 5, 14 };
+        for (int rooms : roomChoices)
+        {
+            for (int boss = 1; boss <= 2; ++boss)
+            {
+                for (int i = 0; i < seeds; ++i)
+                {
+                    uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 11u;
+                    BlockCfg cfg = MakeCfg(seed, rooms);
+                    cfg.bossRooms = boss;
+
+                    BlockPlan plan;
+                    if (!GenerateBlockPlan(cfg, &plan))
+                    {
+                        std::snprintf(msg, sizeof(msg),
+                                      "no layout for %d ordinary room(s) + %d boss",
+                                      rooms, boss);
+                        Check(false, msg, seed);
+                        continue;
+                    }
+
+                    int plain = 0, entrance = 0, bossFound = 0;
+                    int pockets = 0, loops = 0;
+                    for (PlacedBlock const& b : plan.blocks)
+                    {
+                        // Pocket and loop rooms are told apart by the fields
+                        // the planner sets, not by their role: both are plain
+                        // Rooms (PDBlockPlan.h, PlacedBlock).
+                        if (b.branchOf >= 0)
+                        {
+                            ++pockets;
+                        }
+                        if (b.detourOf >= 0)
+                        {
+                            ++loops;
+                        }
+                        if (b.role == BlockRole::Room)
+                        {
+                            ++plain;
+                        }
+                        else if (b.role == BlockRole::RoomEntrance)
+                        {
+                            ++entrance;
+                        }
+                        else if (b.role == BlockRole::RoomBoss)
+                        {
+                            ++bossFound;
+                        }
+                    }
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "the dial no longer counts ordinary rooms: asked for %d + %d "
+                                  "boss, got %d plain room(s) (%d pocket(s), %d loop room(s)), "
+                                  "want %d",
+                                  rooms, boss, plain, pockets, loops, rooms + loops);
+                    Check(plain == rooms + loops, msg, seed);
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "a layout for %d + %d boss has %d entrance block(s), want 1",
+                                  rooms, boss, entrance);
+                    Check(entrance == 1, msg, seed);
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "a layout for %d + %d boss has %d boss room(s)",
+                                  rooms, boss, bossFound);
+                    Check(bossFound == boss, msg, seed);
+                }
+            }
+        }
     }
 
     void RunGameMathChecks()
@@ -2814,28 +2916,36 @@ namespace
     // regenerates a different dungeon.
     void RunLayoutFreezeCheck()
     {
-        // Re-pinned for B2's third Room look: AltCountFor(Room) is 3, so the
-        // room's alt draw maps one unchanged raw value onto 0..2 instead of
-        // 0..1 and this layout's two spine rooms became alt 2 (chunk 4011).
-        // The manifest keeps its LENGTH - a four-digit id either way - and
-        // only the CRC moves, which is exactly why the trailer is pinned
-        // beside the byte count. PD_LAYOUT_VERSION stays 3 (spec decision 10;
-        // nothing is deployed). The pin before this one was 403 / E;c1478940
-        // (B0b's loop rooms: one Chance per boss segment before any chain
-        // step), before that 383 / E;0eeda3ad (B0b task 1, the shortcut draw
-        // withdrawn), the B0 pin 363 / E;a5019024, the v2 pin
-        // 571 / E;85fc0e4c, the v1 pin 551 / E;13df5510.
+        // Round E / R2 (spec D13, 2026-09-10). The room budget gained the
+        // ENTRANCE - `rooms` counts ordinary rooms now - so this cfg builds
+        // the layout the OLD generator built at 6 rooms, and every pin over a
+        // generated plan in this file moved with it. Proven rather than
+        // asserted: a HEAD-of-branch build at rooms = 6 emits this exact
+        // manifest, byte for byte, for this seed. PD_LAYOUT_VERSION 3 -> 4.
+        //
+        // The byte count is the coincidence worth naming: 403 either way. One
+        // more room block costs ~10 B and the re-routed spine happens to give
+        // the same back in corridor blocks, which is precisely why the trailer
+        // is pinned beside the length - the CRC caught what the count could
+        // not.
+        //
+        // Before this pin: 403 / E;6576f540 (B2's third Room look, where the
+        // spine rooms became alt 2 / chunk 4011), 403 / E;c1478940 (B0b's loop
+        // rooms: one Chance per boss segment before any chain step), 383 /
+        // E;0eeda3ad (B0b task 1, the shortcut draw withdrawn), the B0 pin
+        // 363 / E;a5019024, the v2 pin 571 / E;85fc0e4c, the v1 pin
+        // 551 / E;13df5510.
         uint32_t const PINNED_SEED = 12345u;
         int const PINNED_ROOMS = 5;
         size_t const PINNED_BYTES = 403;
-        char const* const PINNED_TRAILER = "E;6576f540\n";
+        char const* const PINNED_TRAILER = "E;dab039b3\n";
         // The failure message names the pin this one REPLACED, so whoever
         // reads it can tell a fresh move from the B0b re-roll. Kept as
         // constants beside the live pin: the message used to pair the current
         // byte count with the previous trailer, which read as a third value
         // that never existed.
         size_t const PREVIOUS_BYTES = 403;
-        char const* const PREVIOUS_TRAILER = "E;c1478940";
+        char const* const PREVIOUS_TRAILER = "E;6576f540";
 
         BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
         cfg.bossRooms = 1;
@@ -3207,9 +3317,11 @@ namespace
                 // Own arithmetic, deliberately not PocketCountFor. N is the
                 // boss count the PLANNER seats - one even when the config says
                 // zero - and the pocket ceiling is cfg.branches, not the 2 this
-                // used to hardcode.
+                // used to hardcode. The trailing + 1 is the ENTRANCE
+                // (Round E / R2): combo.rooms counts ordinary rooms, so the
+                // entrance is a cell the budget adds rather than one it spends.
                 int const N = std::max(1, combo.bossRooms);
-                int const total = std::max(2, combo.rooms + combo.bossRooms);
+                int const total = std::max(2, combo.rooms + combo.bossRooms + 1);
                 int wantPockets = std::min(std::max(0, cfg.branches), total / 3);
                 wantPockets = std::min(wantPockets, std::max(0, (total - 1 - N) / 2));
                 int const wantChain = total - wantPockets;
@@ -3413,7 +3525,8 @@ namespace
                     }
                 }
                 Check(loops <= N, "more loop rooms than segments", seed);
-                Check(rooms == total + loops, "room count is not rooms + bossRooms + loop rooms", seed);
+                Check(rooms == total + loops,
+                      "room count is not rooms + bossRooms + entrance + loop rooms", seed);
                 // Non-vacuity over the WHOLE sample, exactly like sawPocket -
                 // not a property of any single layout. Set here rather than
                 // from the DetourChance-100 combo alone: that combo already
@@ -3763,7 +3876,7 @@ namespace
             if (verbose)
             {
                 std::printf("  %5d  %4d  %5d   %7d  %11d  %s\n", row.rooms, row.bossRooms,
-                            row.rooms + row.bossRooms, row.failures,
+                            row.rooms + row.bossRooms + 1, row.failures,
                             static_cast<int>(row.maxManifest), ok ? "ok" : "FAILS");
             }
         }
@@ -4514,10 +4627,13 @@ namespace
     // 5 rooms, the shipped fixtures) and paste the value out of the "plan
     // moved" failure message - never by reasoning about what it should be -
     // and only once every change that can move these streams has landed.
+    // (2026-09-10, Round E / R2: the room budget gained the entrance, so this
+    // cfg builds the layout HEAD built at 6 rooms and BOTH streams moved with
+    // it. Re-captured by running, as this paragraph demands.)
     char const* const PD_DECOR_PLAN_PIN =
-        "258,257,1,910020,18.333333,12.500000,3.141593;258,257,4,910050,56.666666,20.833333,0.000000;258,257,5,910051,10.000000,20.833333,3.141593;258,257,5,910051,56.666666,29.166666,0.000000;258,257,6,910054,29.166666,10.000000,4.712389;258,257,7,910055,10.000000,45.833333,3.141593;258,257,10,910060,18.333333,10.000000,3.926991;258,257,10,910060,48.333333,56.666666,0.785398;258,257,11,910062,10.000000,56.666666,2.356194;258,257,11,910062,56.666666,10.000000,5.497787;259,258,3,910020,45.833333,18.333333,4.712389;258,259,9,910052,26.666666,45.833333,3.141593;258,259,12,910063,26.666666,26.666666,3.926991;259,259,1,910020,26.666666,62.500000,3.141593;259,259,4,910050,4.166667,26.666666,4.712389;259,259,7,910055,12.500000,26.666666,4.712389;259,259,11,910062,48.333333,18.333333,5.497787;259,259,11,910062,18.333333,18.333333,3.926991;259,259,13,910070,29.166666,20.833333,0.000000;259,259,13,910070,29.166666,45.833333,0.000000;260,259,9,910052,26.666666,45.833333,3.141593;258,260,3,910020,20.833333,26.666666,4.712389;260,260,3,910020,26.666666,54.166666,3.141593;260,260,9,910052,62.500000,26.666666,4.712389;260,260,12,910063,26.666666,26.666666,3.926991;261,260,1,910020,18.333333,45.833333,3.141593;261,260,1,910020,12.500000,26.666666,4.712389;261,260,1,910020,26.666666,12.500000,3.141593;261,260,4,910050,48.333333,29.166666,0.000000;261,260,6,910054,26.666666,54.166666,3.141593;261,260,7,910055,18.333333,20.833333,3.141593;261,260,10,910060,18.333333,48.333333,2.356194;261,260,11,910062,48.333333,18.333333,5.497787;261,260,11,910062,18.333333,18.333333,3.926991;261,260,13,910070,29.166666,45.833333,0.000000;262,260,3,910020,62.500000,26.666666,4.712389;258,261,1,910020,29.166666,10.000000,4.712389;258,261,1,910020,18.333333,12.500000,3.141593;258,261,1,910020,29.166666,56.666666,1.570796;258,261,5,910051,56.666666,29.166666,0.000000;258,261,5,910051,10.000000,54.166666,3.141593;258,261,6,910054,45.833333,56.666666,1.570796;258,261,7,910055,20.833333,56.666666,1.570796;258,261,10,910060,10.000000,56.666666,2.356194;258,261,11,910062,48.333333,56.666666,0.785398;258,261,11,910062,56.666666,10.000000,5.497787;258,261,13,910070,20.833333,20.833333,0.000000;258,261,13,910070,45.833333,29.166666,0.000000;258,261,13,910070,20.833333,45.833333,0.000000;262,261,3,910020,45.833333,31.666666,1.570796;260,262,1,910020,29.166666,10.000000,4.712389;260,262,1,910020,10.000000,54.166666,3.141593;260,262,1,910020,10.000000,45.833333,3.141593;260,262,6,910054,20.833333,56.666666,1.570796;260,262,7,910055,56.666666,20.833333,0.000000;260,262,8,910056,56.666666,12.500000,0.000000;260,262,10,910060,56.666666,10.000000,5.497787;261,262,3,910020,26.666666,45.833333,3.141593;261,262,9,910052,26.666666,54.166666,3.141593;262,262,1,910020,26.666666,4.166667,3.141593;262,262,2,910021,20.833333,56.666666,1.570796;262,262,2,910021,10.000000,20.833333,3.141593;262,262,7,910055,56.666666,29.166666,0.000000;262,262,10,910060,18.333333,10.000000,3.926991;262,262,11,910062,10.000000,56.666666,2.356194;262,262,13,910070,29.166666,12.500000,0.000000;262,262,14,910073,29.166666,20.833333,0.000000;262,262,14,910073,45.833333,29.166666,0.000000;262,262,14,910073,29.166666,45.833333,0.000000;260,263,3,910020,4.166667,26.666666,4.712389;260,263,9,910052,12.500000,26.666666,4.712389";
+        "261,258,3,910020,62.500000,26.666666,4.712389;258,259,9,910052,26.666666,62.500000,3.141593;259,259,1,910020,10.000000,20.833333,3.141593;259,259,1,910020,10.000000,54.166666,3.141593;259,259,4,910050,26.666666,62.500000,3.141593;259,259,4,910050,45.833333,56.666666,1.570796;259,259,7,910055,56.666666,20.833333,0.000000;259,259,10,910060,10.000000,56.666666,2.356194;259,259,11,910062,56.666666,10.000000,5.497787;259,259,13,910070,20.833333,29.166666,0.000000;259,259,13,910070,29.166666,54.166666,0.000000;260,259,3,910020,26.666666,62.500000,3.141593;261,259,3,910020,54.166666,26.666666,4.712389;261,259,9,910052,26.666666,12.500000,3.141593;258,260,9,910052,4.166667,26.666666,4.712389;261,260,1,910020,10.000000,20.833333,3.141593;261,260,4,910050,45.833333,10.000000,4.712389;261,260,4,910050,4.166667,26.666666,4.712389;261,260,7,910055,26.666666,62.500000,3.141593;261,260,10,910060,10.000000,56.666666,2.356194;261,260,11,910062,18.333333,10.000000,3.926991;262,260,9,910052,26.666666,20.833333,3.141593;258,261,1,910020,56.666666,45.833333,0.000000;258,261,1,910020,20.833333,10.000000,4.712389;258,261,1,910020,10.000000,20.833333,3.141593;258,261,4,910050,29.166666,56.666666,1.570796;258,261,5,910051,56.666666,12.500000,0.000000;258,261,7,910055,10.000000,45.833333,3.141593;258,261,8,910056,4.166667,26.666666,4.712389;258,261,11,910062,10.000000,56.666666,2.356194;258,261,13,910070,20.833333,20.833333,0.000000;261,261,3,910020,62.500000,26.666666,4.712389;261,261,9,910052,56.666666,20.833333,0.000000;262,261,9,910052,45.833333,31.666666,1.570796;260,262,1,910020,10.000000,29.166666,3.141593;260,262,1,910020,10.000000,54.166666,3.141593;260,262,1,910020,45.833333,10.000000,4.712389;260,262,4,910050,56.666666,29.166666,0.000000;260,262,4,910050,20.833333,56.666666,1.570796;260,262,5,910051,45.833333,56.666666,1.570796;260,262,5,910051,10.000000,20.833333,3.141593;260,262,6,910054,56.666666,12.500000,0.000000;260,262,8,910056,29.166666,10.000000,4.712389;260,262,13,910070,20.833333,29.166666,0.000000;260,262,13,910070,45.833333,29.166666,0.000000;260,262,13,910070,29.166666,45.833333,0.000000;261,262,3,910020,4.166667,26.666666,4.712389;262,262,1,910020,29.166666,10.000000,4.712389;262,262,1,910020,56.666666,20.833333,0.000000;262,262,4,910050,56.666666,12.500000,0.000000;262,262,4,910050,45.833333,56.666666,1.570796;262,262,6,910054,62.500000,26.666666,4.712389;262,262,8,910056,26.666666,62.500000,3.141593;262,262,10,910060,48.333333,56.666666,0.785398;262,262,11,910062,56.666666,10.000000,5.497787;262,262,13,910070,45.833333,20.833333,0.000000;263,262,3,910020,54.166666,26.666666,4.712389;261,263,1,910020,10.000000,54.166666,3.141593;261,263,1,910020,45.833333,56.666666,1.570796;261,263,1,910020,56.666666,29.166666,0.000000;261,263,4,910050,10.000000,45.833333,3.141593;261,263,4,910050,10.000000,20.833333,3.141593;261,263,5,910051,20.833333,56.666666,1.570796;261,263,5,910051,10.000000,29.166666,3.141593;261,263,6,910054,56.666666,20.833333,0.000000;261,263,7,910055,29.166666,10.000000,4.712389;261,263,10,910060,10.000000,56.666666,2.356194;261,263,11,910062,56.666666,10.000000,5.497787;261,263,13,910070,20.833333,45.833333,0.000000;261,263,13,910070,45.833333,29.166666,0.000000;262,263,9,910052,12.500000,26.666666,4.712389;263,263,1,910020,10.000000,12.500000,3.141593;263,263,1,910020,56.666666,20.833333,0.000000;263,263,2,910021,56.666666,29.166666,0.000000;263,263,2,910021,29.166666,10.000000,4.712389;263,263,7,910055,20.833333,10.000000,4.712389;263,263,10,910060,10.000000,56.666666,2.356194;263,263,10,910060,56.666666,10.000000,5.497787;263,263,13,910070,20.833333,20.833333,0.000000;263,263,13,910070,20.833333,45.833333,0.000000;263,263,14,910073,20.833333,29.166666,0.000000;263,263,14,910073,45.833333,45.833333,0.000000;263,263,14,910073,45.833333,20.833333,0.000000";
     char const* const PD_CRITTER_PLAN_PIN =
-        "259,259,1,32428,29.166666,45.833333;259,259,1,32428,29.166666,29.166666;259,259,2,23086,29.166666,20.833333;261,260,1,32428,29.166666,29.166666;261,260,2,23086,29.166666,20.833333;258,261,1,32428,29.166666,45.833333;258,261,2,23086,45.833333,45.833333;258,261,2,23086,45.833333,29.166666;258,261,3,2110,29.166666,20.833333;260,261,4,26525,29.166666,29.166666;262,261,4,26525,29.166666,29.166666;262,261,4,26525,54.166666,29.166666;260,262,2,23086,20.833333,29.166666;260,262,2,23086,29.166666,29.166666;262,262,1,32428,45.833333,20.833333;262,262,2,23086,20.833333,20.833333;262,262,2,23086,45.833333,45.833333";
+        "259,259,1,32428,29.166666,29.166666;259,259,1,32428,20.833333,45.833333;259,259,2,23086,45.833333,45.833333;259,259,2,23086,45.833333,29.166666;259,259,3,2110,29.166666,20.833333;260,259,4,26525,29.166666,29.166666;260,259,4,26525,29.166666,54.166666;258,261,1,32428,12.500000,29.166666;261,261,4,26525,29.166666,29.166666;262,261,4,26525,29.166666,29.166666;262,261,4,26525,54.166666,29.166666;260,262,1,32428,29.166666,20.833333;260,262,2,23086,29.166666,45.833333;260,262,2,23086,20.833333,45.833333;260,262,3,2110,45.833333,45.833333;262,262,1,32428,29.166666,20.833333;262,262,1,32428,12.500000,29.166666;261,263,2,23086,20.833333,29.166666;261,263,2,23086,45.833333,45.833333;262,263,4,26525,29.166666,29.166666;263,263,1,32428,45.833333,20.833333;263,263,2,23086,20.833333,45.833333;263,263,2,23086,12.500000,29.166666;263,263,6,26525,29.166666,29.166666";
 
     bool CheckDecorPlanPinned(std::string& why)
     {
@@ -4588,7 +4704,11 @@ namespace
     // Format: chain cells `|` pockets `host>x,y;` `|` loops `into>x,y;`.
     // Captured by RUNNING `pdblock --batch` and reading the "the chain moved"
     // message, never by reasoning about the value.
-    char const* const PD_CHAIN_PIN = "258,261;259,259;261,260;262,262;|1>258,257;2>260,262;|";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE: the chain is one cell
+    // longer and the pockets moved with the stream. The four cells this pin
+    // used to hold are its first four, unchanged, with 263,263 appended.
+    // Before R2: "258,261;259,259;261,260;262,262;|1>258,257;2>260,262;|".
+    char const* const PD_CHAIN_PIN = "258,261;259,259;261,260;262,262;263,263;|2>260,262;3>261,263;|";
 
     // A SECOND chain, because the pin above ends in an empty loop field: seed
     // 12345 draws no loop room at the default DetourChance, so it pins the
@@ -4598,7 +4718,13 @@ namespace
     // Captured the same way: by RUNNING `pdblock --batch` and reading the
     // "the loop chain moved" message, never by reasoning about the value.
     char const* const PD_CHAIN_PIN_LOOP =
-        "263,259;259,259;258,257;260,256;|2>257,258;1>260,260;|1>261,258;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE. Same shape as the pin above:
+    // the first four chain cells are unchanged, 263,256 is appended, and the
+    // LOOP ROOM did not move at all (1>261,258) - the per-segment detour
+    // Chance draws land before the first chain step, so a longer chain cannot
+    // reach them. Before R2:
+    // "263,259;259,259;258,257;260,256;|2>257,258;1>260,260;|1>261,258;".
+        "263,259;259,259;258,257;260,256;263,256;|2>256,257;3>262,257;|1>261,258;";
 
     std::string ChainPinString(BlockPlan const& plan)
     {
@@ -4678,7 +4804,8 @@ namespace
     // coin fell. Format: `bx,by,segment;` per spot, in segment order.
     // Captured by RUNNING `pdblock --batch` and reading the "the ambush plan
     // moved" message, never by reasoning about the value.
-    char const* const PD_AMBUSH_PLAN_PIN = "262,261,1;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE (before R2: "262,261,1;").
+    char const* const PD_AMBUSH_PLAN_PIN = "258,260,1;";
 
     // The shipped default of V2.Ambush.Chance. Mirrored here rather than
     // exported from the generator on purpose: the chance is an operator key
@@ -5561,7 +5688,10 @@ namespace
     // draw answered "29620,84289,25352,84289;" on this very config - 84289
     // Lord Maltrion in boss slots 1 AND 3 - which is the failure this rule
     // was written against, measured rather than argued.
-    char const* const PD_BOSS_NOREPEAT_PIN = "29620,84289,84290,25352;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE: the layout under the draw
+    // has one room more, so the stream this reads moved with it (before R2:
+    // "29620,84289,84290,25352;").
+    char const* const PD_BOSS_NOREPEAT_PIN = "29620,84289,25352,84288;";
 
     bool CheckBossNoRepeatPinned(std::string& why)
     {
@@ -5652,7 +5782,8 @@ namespace
     // "0,0,0;" was in the literal until the batch printed the real string.
     // All THREE boss rooms drew 84289 - a repeat is not a failure here, it is
     // the branch, and a pin that forbade one would forbid the contract.
-    char const* const PD_BOSS_FALLBACK_PIN = "84289,84289,84289;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE (before R2: "84289,84289,84289;").
+    char const* const PD_BOSS_FALLBACK_PIN = "84289,84289,84288;";
 
     bool CheckBossFallbackPinned(std::string& why)
     {
@@ -5754,8 +5885,12 @@ namespace
                 {
                     continue;               // the clamp folded two choices onto one row
                 }
+                // + 1 for the entrance, exactly as PDv2Mgr::EnsurePlan sizes
+                // it (Round E / R2): the field has to seat every cell the plan
+                // claims, and since the slider counts ordinary rooms the
+                // entrance is one more cell than the dial names.
                 int const field = std::min(confFieldBlocks,
-                                           GameFieldBlocksForRooms(rooms + boss));
+                                           GameFieldBlocksForRooms(rooms + boss + 1));
                 int failures = 0;
                 int retries = 0;
                 size_t maxManifest = 0;
@@ -6117,9 +6252,15 @@ namespace
     // `blocks,rooms,boss;bytes;E;crc;`. The first three are the numbers the
     // worldserver printed for this run (Server_2026-09-08_09_49_57.log:952 -
     // "spawned 76 creature(s) in 16 room(s) (2 boss) from a 49-block plan");
-    // `rooms` is counted the way SpawnFromPlan counts it into _run.roomsTotal
-    // (PDv2InstanceScript.cpp:1034-1045, :1099): every block with a roomId
-    // EXCEPT the entrance, loop rooms included.
+    // `rooms` is a BLOCK CENSUS: every block with a roomId except the
+    // entrance, loop rooms and boss halls included. It used to be the same
+    // number SpawnFromPlan writes into _run.roomsTotal, and since Round E / R2
+    // it is not - roomsTotal counts ORDINARY rooms, which for this layout is
+    // 15 (13 on the dial plus its two loop rooms) against the 17 pinned here.
+    // The census is what this pin wants: it is a fingerprint of the placed
+    // layout beside the manifest bytes, not a restatement of a gameplay
+    // counter, and dropping the halls out of it would make it blind to a boss
+    // hall that turned into an ordinary room.
     //
     // The manifest byte count and CRC trailer are the same instrument
     // RunLayoutFreezeCheck uses, added here for the reason that check exists
@@ -6132,7 +6273,15 @@ namespace
     // + trailer is a byte identity for the placed layout. seq 1, matching
     // RunLayoutFreezeCheck; the seq goes into the head line, so it is part of
     // the CRC. Captured by RUNNING.
-    char const* const PD_OPERATOR_PLAN_PIN = "49,16,2;1081;E;2ae1a357;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE. The account's 13-room dial now
+    // builds 13 ORDINARY rooms rather than 12, so `rooms` here goes 16 -> 17
+    // while the re-routed spine needs six blocks fewer (49 -> 43) and the
+    // manifest shrinks with them (1081 -> 955 B). Measured against a
+    // HEAD-of-branch build with this cfg at rooms = 14: it emits
+    // 43,17,2;955;E;8d03ef7c; too, which is the whole claim of R2 in one
+    // line. The stored layout rerolls once on entry (PD_LAYOUT_VERSION 4),
+    // exactly as v2 and v3 did. Before R2: "49,16,2;1081;E;2ae1a357;".
+    char const* const PD_OPERATOR_PLAN_PIN = "43,17,2;955;E;8d03ef7c;";
 
     // `i:waypoints:cells:cost:offsetSum;` per CORRIDOR of the chain - the
     // merged waypoint count, the raw cell count, the PatrolCost total and the
@@ -6184,14 +6333,33 @@ namespace
     // i.e. fourteen legs where one straight line used to cut across every jog
     // the kit measured. Corridor 3 did not move at all - a passage whose clear
     // points really are collinear still merges to its two ends.
+    // BOTH strings re-captured for Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE.
+    // The chain grew by one room, so the beat list grew by one CORRIDOR:
+    // twelve entries became thirteen. The layered one was measured by running
+    // the harness against the staged kit; the no-layer one by running a
+    // throwaway build of this same file with the kit's patrol layers dropped
+    // after load, which is the only way to reach that branch on a box whose
+    // staging carries them (the clearance histogram it shares that branch with
+    // - PD_PATROL_CLEAR_PIN_NOLAYER - is a property of the KIT and did not
+    // move, which is what says the measurement was sound).
+    //
+    // Before R2, the twelve-corridor pins:
+    //   no layer: 1:2:24:610:0;2:2:8:210:0;3:2:8:210:0;4:2:8:170:0;
+    //             5:3:16:460:0;6:3:15:390:0;7:2:24:570:0;8:2:8:170:0;
+    //             9:2:16:410:0;10:2:16:410:0;11:2:16:370:0;12:3:14:400:0;
+    //   layered:  1:10:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:6:8:250:62;
+    //             5:6:16:1458:278;6:8:15:950:142;7:15:24:1282:296;8:6:8:250:62;
+    //             9:7:16:1082:204;10:5:16:1154:204;11:10:16:482:124;
+    //             12:6:14:1368:214;
     char const* const PD_OPERATOR_PATROL_PIN_NOLAYER =
-        "1:2:24:610:0;2:2:8:210:0;3:2:8:210:0;4:2:8:170:0;5:3:16:460:0;"
-        "6:3:15:390:0;7:2:24:570:0;8:2:8:170:0;9:2:16:410:0;10:2:16:410:0;"
-        "11:2:16:370:0;12:3:14:400:0;";
+        "1:2:24:610:0;2:2:8:210:0;3:2:8:170:0;4:2:8:210:0;5:3:16:460:0;"
+        "6:3:16:420:0;7:3:7:190:0;8:3:9:270:0;9:3:8:220:0;10:3:9:270:0;"
+        "11:2:8:210:0;12:2:24:650:0;13:3:8:220:0;";
     char const* const PD_OPERATOR_PATROL_PIN =
-        "1:10:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:6:8:250:62;"
-        "5:6:16:1458:278;6:8:15:950:142;7:15:24:1282:296;8:6:8:250:62;"
-        "9:7:16:1082:204;10:5:16:1154:204;11:10:16:482:124;12:6:14:1368:214;";
+        "1:10:24:1778:396;2:4:10:1002:190;3:5:8:242:52;4:4:10:962:190;"
+        "5:6:16:1458:278;6:9:16:1004:168;7:5:7:550:90;8:7:9:622:116;"
+        "9:6:8:604:116;10:7:9:622:116;11:2:8:754:152;12:19:28:1598:396;"
+        "13:5:8:324:70;";
 
     // PD_PATROL_CLEAR_PIN: the distribution of `patrolClear` over every
     // WALKABLE cell of every chunk of the staged kit, 16 buckets, printed as
@@ -6334,8 +6502,10 @@ namespace
     // no ambush and why the trigger geometry was never actually exercised. At
     // chance 100 the same layout offers two corridors, so the candidate lists
     // are populated and only the coin was in the way. Captured by RUNNING.
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE (before R2:
+    // "chance50:0;chance100:259,259,1;257,258,2;").
     char const* const PD_OPERATOR_AMBUSH_PIN =
-        "chance50:0;chance100:259,259,1;257,258,2;";
+        "chance50:0;chance100:259,259,1;261,256,2;";
 
     // Why Task 4 replaces the 9 yd disc, in one table (research
     // c-research-ambush-trigger.md, "Per-kind lane geometry"; measured over the
@@ -6819,6 +6989,11 @@ namespace
         // what Round C / C2's ambush trigger stands on.
         RunBlockDerivationChecks();
         RunChainMathChecks();
+        // Round E / R2. 200 seeds per (rooms, bossRooms) pair regardless of
+        // --batch n: the counts are STRUCTURAL and hold per seed, so this is a
+        // fixed sweep of the draw space rather than a sample whose size means
+        // anything.
+        RunOrdinaryRoomCountChecks(200);
         RunLayoutFreezeCheck();
         RunTypedAnchorChecks();
         // Outside the mask guard on purpose: the corner cases are hand-built
@@ -7050,6 +7225,11 @@ namespace
             // drops rooms would make dlvl meaningless. Loop rooms are the one
             // legitimate extra: B0b adds them ON TOP of the budget, so a layout
             // whose segment drew one has exactly one room more.
+            //
+            // Round E / R2: `rooms` is the ORDINARY count, so the budget is
+            // that plus the boss rooms plus the entrance. Written out of
+            // cfg.bossRooms rather than as a literal, so the expression says
+            // which room each summand is.
             int rooms_found = 0;
             int loopsHere = 0;
             for (PlacedBlock const& b : plan.blocks)
@@ -7057,7 +7237,7 @@ namespace
                 if (b.roomId >= 0) ++rooms_found;
                 if (b.detourOf >= 0) ++loopsHere;
             }
-            Check(rooms_found == rooms + 1 + loopsHere,
+            Check(rooms_found == rooms + cfg.bossRooms + 1 + loopsHere,
                   "room count does not match the config plus the loop rooms", seed);
 
             // Entrance and boss must be distinct blocks.

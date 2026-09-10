@@ -388,6 +388,12 @@ namespace PDungeon
         // be larger than today's band allows (its gen inputs are frozen by
         // design), and the first in-game test proved a panel that shows only
         // the next roll's bounds reads as a bug when the live dungeon differs.
+        //
+        // Round E / R2: curRooms counts ORDINARY rooms - the entrance and the
+        // boss halls are both out of it, because curBoss reports the halls on
+        // the same line and the pair has to read like the two dials above it.
+        // Counting the halls in both places is what made "rooms 14" on the
+        // slider and "0/15 rooms" on the HUD describe one dungeon.
         int curRooms = 0, curBoss = 0;
         if (auto const plan = sPDv2Mgr->GetPlan(accountId))
         {
@@ -397,11 +403,12 @@ namespace PDungeon
                 {
                     continue;
                 }
-                ++curRooms;
                 if (b.role == BlockRole::RoomBoss)
                 {
                     ++curBoss;
+                    continue;
                 }
+                ++curRooms;
             }
         }
 
@@ -566,14 +573,16 @@ namespace PDungeon
         // second for the rest of the run. One error line per room clear is the
         // honest cost of a layout that outgrew the wire.
         //
-        // The pair is {run generation, cleared-room count}. Only the second
+        // The pair is {run generation, emptied-room count}. Only the second
         // half moves during a run; the first is what makes a REBUILD - same
         // instance, new run, count back to 0 - a change the tick can see
-        // (_clearedSent says why the count alone cannot).
+        // (_clearedSent says why the count alone cannot). The EMPTIED count,
+        // not the HUD's cleared one: `cleared` above carries the boss halls
+        // and the HUD counter no longer does (Round E / R2).
         {
             std::lock_guard<std::mutex> guard(_lock);
             _clearedSent[player->GetGUID()] =
-                script ? std::make_pair(script->RunGeneration(), script->RoomsClearedCount())
+                script ? std::make_pair(script->RunGeneration(), script->RoomsEmptiedCount())
                        : std::make_pair(uint32_t(0), uint32_t(0));
         }
 
@@ -726,7 +735,7 @@ namespace PDungeon
         // only when a room falls, so neither can move between two players of
         // the same tick.
         std::pair<uint32_t, uint32_t> const clearedKey(script->RunGeneration(),
-                                                       script->RoomsClearedCount());
+                                                       script->RoomsEmptiedCount());
 
         Map::PlayerList const& players = script->instance->GetPlayers();
         for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)

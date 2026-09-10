@@ -165,6 +165,13 @@ namespace PDungeon
         uint8  bossTotal = 0;
         uint8  roomsCleared = 0;
         uint8  roomsTotal = 0;
+        // Round E / R2. Rooms emptied by kills INCLUDING the boss halls, which
+        // the pair above deliberately leaves out (roomsTotal is the ordinary
+        // count the dial names, so its numerator has to be one too). Nothing
+        // on the wire reads this - it exists because the panel's cleared-room
+        // map does paint boss halls, so "the K set moved" is a different
+        // question from "the HUD's room pair moved" and needs its own answer.
+        uint8  roomsEmptied = 0;
         // The 1..100 dial, frozen at spawn. 0 rather than the dial's floor is
         // the deliberate "no run bound yet" value: the scaling hooks read it as
         // "multiply by nothing", and SpawnFromPlan overwrites it before the
@@ -358,11 +365,18 @@ namespace PDungeon
         // tick, which is also what it looks like to a player standing in it.
         void ClearedRoomBlocks(std::vector<std::pair<int, int>>& out) const;
 
-        // The run's cleared-room counter, as the wire's change detector: the
+        // The run's emptied-room counter, as the wire's change detector: the
         // K message is a complete set, so "resend it when this moved" is all
         // the link needs to keep every client's map honest without a delta
         // protocol it could silently fall out of step with.
-        uint32 RoomsClearedCount() const { return _run.roomsCleared; }
+        //
+        // roomsEmptied and NOT roomsCleared (Round E / R2): the HUD counter
+        // stopped counting boss halls when the dial started meaning ordinary
+        // rooms, but ClearedRoomBlocks still hands the panel every emptied
+        // room, boss halls included. Keyed on the HUD counter, the hall a
+        // party just finished would stay grey until some ordinary room fell
+        // after it.
+        uint32 RoomsEmptiedCount() const { return _run.roomsEmptied; }
 
         // ...and the OTHER half of that change detector. The counter above
         // only counts rooms emptied by kills, so it cannot tell a rebuild

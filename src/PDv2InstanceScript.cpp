@@ -964,7 +964,24 @@ namespace PDungeon
             {
                 if (--_roomAlive[tag->roomIndex] == 0)
                 {
-                    ++_run.roomsCleared;
+                    // Every emptied room, boss halls included: this is what
+                    // the panel's cleared-room map is resent on, and that map
+                    // paints the halls (PDv2InstanceScript.h, RoomsEmptied-
+                    // Count).
+                    ++_run.roomsEmptied;
+
+                    // Round E / R2: the numerator has to count the same rooms
+                    // the denominator does, and roomsTotal is the ORDINARY
+                    // count since the dial started meaning ordinary rooms. A
+                    // boss hall is reported by bossKilled/bossTotal on the same
+                    // HUD line; counting it here as well would push the room
+                    // pair past its own total on the last pull of the run.
+                    // _roomAlive is only stepped for a room that HAD a pack, so
+                    // the bounds check above already proved the index is live.
+                    if (!_roomIsBoss[tag->roomIndex])
+                    {
+                        ++_run.roomsCleared;
+                    }
                 }
             }
 
@@ -1050,6 +1067,12 @@ namespace PDungeon
         // that was walked: the room count is what dlvl bought, and the boss is
         // what proves the run. Difficulty pays nothing on purpose (the formula
         // has no difficulty argument, and PDv2GameMath.h says why).
+        //
+        // Round E / R2 makes "what dlvl bought" literal: roomsTotal is now the
+        // ORDINARY room count, i.e. the dial's own number, where it used to
+        // carry the boss halls too. A run therefore pays bossRooms fewer rooms
+        // of dxp than before at the same dial - the free room the entrance used
+        // to take is not paid for either, and the curve is one number wide.
         PDv2RunReward const reward = sPDv2Mgr->GrantRunReward(_accountId, _run.roomsTotal);
 
         // The HUD's completion toast rides the same grant the chat lines below
@@ -2005,30 +2028,36 @@ namespace PDungeon
         }
 
         _roomAlive.assign(roomBlocks.size(), 0);
-        _run.roomsTotal = static_cast<uint8>(roomBlocks.size());
+        // Round E / R2 (spec D13). ORDINARY rooms, not every room the dungeon
+        // built: the boss halls have their own counter on the HUD line
+        // (bossKilled/bossTotal), and counting them twice is exactly what made
+        // the panel say "14 rooms" while the HUD said "0/15 rooms". `rooms` on
+        // the dial is now the ordinary count, the entrance and the boss halls
+        // come on top of it, and this is the number that has to agree with it.
+        // roomBlocks still holds every room - _roomAlive, the spawn slices and
+        // every roomIndex are keyed by that list and must stay complete.
+        _run.roomsTotal = static_cast<uint8>(
+            std::count(_roomIsBoss.begin(), _roomIsBoss.end(), false));
 
         // Round E / D8. The room factor, frozen beside the loot multiplier and
         // for the same reason - every currency roll of every kill is scaled by
         // it, and the dial must not move under a run that is being walked.
         //
-        // ORDINARY rooms, counted here from _roomIsBoss rather than read off
-        // _run.roomsTotal. The two are not the same number today: roomsTotal
-        // is every room the dungeon built, boss halls included, while the
-        // factor asks how much TRASH the run is worth walking - and D8's whole
-        // point is that a one-room run must not pay what a ten-room run pays.
-        // WP3 makes roomsTotal mean exactly the ordinary count; counting it
-        // explicitly is what keeps this task independent of that one, and it
-        // stays correct either way.
+        // ORDINARY rooms, read straight off _run.roomsTotal: since Round E /
+        // R2 that field IS the ordinary count (assigned above from
+        // _roomIsBoss), which is exactly what the factor asks for - how much
+        // TRASH the run is worth walking, D8's point being that a one-room run
+        // must not pay what a ten-room run pays. One source of truth: when the
+        // two were counted separately they could drift apart silently.
         // The factor is stored UNSIGNED, so the one thing that has to happen
         // on the way in is the floor GameRoomFactorX100 deliberately does not
         // apply (its header says why): a negative RoomsBonusPctPerRoom is not
         // a legal conf value, but a negative product cast into a uint16 would
         // come out enormous and GameChanceBp would then clamp every tier to a
         // certainty - a typo that pays MORE is the wrong way to fail.
-        int const ordinaryRooms = static_cast<int>(
-            std::count(_roomIsBoss.begin(), _roomIsBoss.end(), false));
         _run.roomFactorX100 = static_cast<uint16>(
-            std::max(0, GameRoomFactorX100(ordinaryRooms, cfg.lootRoomsBaseline,
+            std::max(0, GameRoomFactorX100(static_cast<int>(_run.roomsTotal),
+                                           cfg.lootRoomsBaseline,
                                            cfg.lootRoomsBonusPctPerRoom)));
 
         // The affix set for THIS run's difficulty, resolved once: it is the

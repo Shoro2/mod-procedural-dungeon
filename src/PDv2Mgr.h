@@ -316,7 +316,13 @@ namespace PDungeon
     // V2.DetourChance (B0b: loop rooms; the forward-cut mechanism the key was
     // named for is withdrawn). Every stored layout rerolls once; dlvl/dxp
     // untouched, as before.
-    constexpr uint32_t PD_LAYOUT_VERSION = 3;
+    //
+    // v4 (2026-09-10, Round E / R2): the room slider counts ORDINARY rooms and
+    // the entrance is added on top (`total = max(2, rooms + bossRooms + 1)`),
+    // so a stored v3 seed at the same cfg_rooms now builds one room more and
+    // the whole chain draw shifts with it. Every stored layout rerolls once;
+    // dlvl/dxp untouched, as before.
+    constexpr uint32_t PD_LAYOUT_VERSION = 4;
 
     class PDv2Mgr
     {
