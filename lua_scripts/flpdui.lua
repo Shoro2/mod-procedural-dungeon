@@ -118,7 +118,15 @@ local function ToNumbers(fields, count)
     return true
 end
 
-local CFG_FIELDS = 24
+-- How many numeric fields the C payload carries before its free-text tail. The
+-- server only ever APPENDS to that list and this number moves in lockstep: 26
+-- since the stat profile (25) and its unlock flag (26) went on the wire ahead of
+-- the tail. A worldserver from before them sends 24, its verdict text lands in
+-- fields 25/26, ToNumbers refuses it and the payload is dropped WHOLE - the
+-- panel keeps asking and reads "..." rather than showing a profile nobody sent.
+-- That is the intended failure and not a compatibility bug: this addon and the
+-- worldserver that speaks to it are deployed together.
+local CFG_FIELDS = 26
 
 local function ParseCfg(body)
     local f = SplitHead(body, CFG_FIELDS)
@@ -136,6 +144,12 @@ local function ParseCfg(body)
         bandLocked = f[19], lootMultX100 = f[20],
         curRooms = f[21], curBoss = f[22], affixCount = f[23],
         verdictCode = f[24],
+        -- The account's chosen loot profile and whether THIS character owns the
+        -- Discerning Eye talent that unlocks it. The flag decides whether the
+        -- row is drawn at all; it is a hint about the panel, never a permission
+        -- - the server refuses `SET statprofile` on its own side while the
+        -- talent is missing, exactly as it does for the band row.
+        statProfile = f[25], statUnlocked = f[26],
         verdictText = f.tail,
     }
 
@@ -253,6 +267,12 @@ end
 local PANEL_W = 420
 local PANEL_H = 364            -- +20 current-depths (2026-08-07), +14 affixes
 local BAND_ROW_H = 52           -- what the hidden band row would add back
+-- What the hidden stat-profile row would add back, summed rather than guessed:
+-- 26 of gap to the slider + 17 of slider (OptionsSliderTemplate's own height)
+-- + 11 of gap to the hint + 10 of hint line. Everything under the row keeps its
+-- usual gaps (26 to a slider, 16 to a text line) whether it hangs off the hint
+-- or off the casters slider, which is what makes this ONE number.
+local PROFILE_ROW_H = 64
 local PREVIEW = 160             -- the layout preview: the HUD map's square, verbatim
 local PREVIEW_ROW_H = 170       -- what the hidden preview row would add back: 160 + its gap
 local BAR_W = PANEL_W - 48
@@ -328,6 +348,18 @@ local function RenderBand(v)
     return string.format("%d-%d", v, v + cfg.bandStep - 1)
 end
 
+-- The stat profile is the one slider whose value is a WORD. 0..3 travels on the
+-- wire and lives in the account column because that is what the SET verb and the
+-- engine's PD_STAT_PROFILE_* take; the player never sees the number. A value the
+-- server clamps to that range can only arrive outside it if the two sides have
+-- stopped agreeing, and then this reads "..." like every other widget that has
+-- not been told - naming a profile there would be the guess this addon does not
+-- make, and indexing the table blind would blank the panel mid-payload.
+local PROFILE_NAMES = { [0] = "Off", "Strength", "Agility", "Caster" }
+local function RenderProfile(v)
+    return PROFILE_NAMES[v] or "..."
+end
+
 local function MakeSlider(name, label, render, setKey, anchor, dy)
     local s = CreateFrame("Slider", name, Panel, "OptionsSliderTemplate")
     s:SetWidth(BAR_W - 24)
@@ -365,8 +397,25 @@ end
 local roomsSlider = MakeSlider("FLPDRoomsSlider", "Rooms", RenderRooms, "rooms", sep1, -20)
 local diffSlider = MakeSlider("FLPDDiffSlider", "Difficulty", RenderDiff, "diff", roomsSlider, -26)
 local casterSlider = MakeSlider("FLPDCasterSlider", "Casters", RenderCaster, "caster", diffSlider, -26)
+-- The stat-profile row sits between the casters slider and the band row, in the
+-- order the two optional rows were added. Both anchors passed here are the
+-- "neither optional row is up" case: from here on LayoutPanel owns where the
+-- band slider hangs, because what sits above it depends on the profile row.
+local profileSlider = MakeSlider("FLPDProfileSlider", "Stat profile", RenderProfile,
+                                 "statprofile", casterSlider, -26)
+profileSlider:Hide()
 local bandSlider = MakeSlider("FLPDBandSlider", "Mob level", RenderBand, "band", casterSlider, -26)
 bandSlider:Hide()
+
+-- What the row is FOR, said once under it. A slider labelled "Stat profile"
+-- does not say which loot it shapes, and this panel is the only place a player
+-- who just bought Discerning Eye finds that out. Hidden and shown with the
+-- slider by LayoutPanel, and no SetWidth on purpose: an unwrapped FontString is
+-- one line tall, which is the line PROFILE_ROW_H pays for.
+local profileHint = Panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+profileHint:SetPoint("TOP", profileSlider, "BOTTOM", 0, -11)
+profileHint:SetText("|cffaaaaaaDiscerning Eye: caches and bosses roll only gear that fits|r")
+profileHint:Hide()
 
 local lootLine = Panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 lootLine:SetPoint("TOP", casterSlider, "BOTTOM", 0, -16)
@@ -436,27 +485,48 @@ verdictLine:SetWidth(BAR_W)
 verdictLine:SetJustifyH("CENTER")
 verdictLine:SetText("Client link: ...")
 
--- The two optional rows, and the panel height that follows from them.
+-- The three optional rows, and the panel height that follows from them.
 --
 -- The band row is built exactly like the others and hidden on the SERVER's
 -- flag, so the day a multi-band pack set exists the server clears bandLocked
 -- and the row appears - no new client code, and its limits are already on the
 -- wire waiting for it.
 --
+-- The stat-profile row is that same mechanism read the other way round: it is
+-- up only while the server says this character owns Discerning Eye. Hiding it
+-- is cosmetic and nothing more - the server refuses the SET behind it, so a
+-- client that drew the row anyway would only collect a polite refusal.
+--
 -- The preview row is the same idea from the other side: it is up only while a
--- layout has actually arrived to draw in it. Both flags are the server's word,
--- never a guess, and PANEL_H is the panel with neither row.
+-- layout has actually arrived to draw in it. All three flags are the server's
+-- word, never a guess, and PANEL_H is the panel with none of the rows.
 local bandRow = false      -- bandSlider up: the server's bandLocked is clear
+local profileRow = false   -- profileSlider up: the server's statUnlocked is set
 local previewRow = false   -- previewCanvas up: an M payload has been drawn
 
 local function LayoutPanel()
+    -- What the rows underneath hang from: the profile row's hint line while
+    -- that row is up, the casters slider while it is not. They re-anchor rather
+    -- than move, so neither optional row has to know about the other.
+    local above = casterSlider
+    if profileRow then
+        profileSlider:Show()
+        profileHint:Show()
+        above = profileHint
+    else
+        profileSlider:Hide()
+        profileHint:Hide()
+    end
+
+    bandSlider:ClearAllPoints()
     lootLine:ClearAllPoints()
     if bandRow then
+        bandSlider:SetPoint("TOP", above, "BOTTOM", 0, -26)
         bandSlider:Show()
         lootLine:SetPoint("TOP", bandSlider, "BOTTOM", 0, -16)
     else
         bandSlider:Hide()
-        lootLine:SetPoint("TOP", casterSlider, "BOTTOM", 0, -16)
+        lootLine:SetPoint("TOP", above, "BOTTOM", 0, -16)
     end
 
     -- The preview sits between the affix line and the separator, so the band
@@ -472,6 +542,7 @@ local function LayoutPanel()
     end
 
     local height = PANEL_H
+    if profileRow then height = height + PROFILE_ROW_H end
     if bandRow then height = height + BAND_ROW_H end
     if previewRow then height = height + PREVIEW_ROW_H end
     Panel:SetHeight(height)
@@ -506,12 +577,24 @@ local function ApplyCfg(c)
     ApplySlider(roomsSlider, c.rooms, c.roomsMin, c.roomsMax, 1)
     ApplySlider(diffSlider, c.diff, c.diffMin, c.diffMax, c.diffStep)
     ApplySlider(casterSlider, c.caster, c.casterMin, c.casterMax, 1)
+    -- The only slider whose bounds do NOT arrive on the wire, and the exception
+    -- proves the rule: 0..3 is the wire contract itself - the four values the
+    -- SET verb accepts and the four names the addon can render - not a tuning
+    -- number the server may move under us. A fifth profile is a new payload and
+    -- a new addon either way, which is what CFG_FIELDS is there to enforce.
+    -- Written whether the row is drawn or not, so the panel already shows the
+    -- account's stored choice the moment Discerning Eye raises the row.
+    ApplySlider(profileSlider, c.statProfile, 0, 3, 1)
     ApplySlider(bandSlider, c.bandMin, c.bandLo, c.bandHi, c.bandStep)
 
+    bandRow = c.bandLocked == 0
+    -- Per CHARACTER, unlike the profile it shows: the talent is bought on one
+    -- character, the chosen profile belongs to the account. A character without
+    -- the node simply does not see the row the others steer.
+    profileRow = c.statUnlocked == 1
     -- curRooms 0 is the server saying the account holds no layout at all, so
     -- whatever the preview last drew describes a dungeon that is gone. The row
     -- folds away and the next M brings it back.
-    bandRow = c.bandLocked == 0
     if c.curRooms == 0 then previewRow = false end
     LayoutPanel()
 
