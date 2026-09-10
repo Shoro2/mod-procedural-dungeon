@@ -79,9 +79,11 @@ namespace PDungeon
 
     // Room floor. 01 §8's "3 + dlvl" is the CAP, not a floor - the floor was 3
     // until the first in-game test, when the operator asked for 1 (2026-08-07):
-    // a 1-room run is entrance + boss room, a legal boss-rush micro-dungeon
-    // (the planner scatters max(2, rooms + bossRooms) cells, so the layout
-    // never degenerates below two rooms).
+    // a 1-room run is entrance + one ordinary room + one boss room, a legal
+    // boss-rush micro-dungeon. Since Round E / R2 the planner scatters
+    // max(2, rooms + bossRooms + 1) cells - the + 1 is the entrance, which the
+    // slider stopped counting - and GameBossRooms never returns 0, so the
+    // smallest legal layout is three blocks and cannot degenerate below two.
     constexpr int PD_GAME_ROOMS_MIN = 1;
 
     // The "3" in 01 §8's cap formula "3 + dlvl" - deliberately its own

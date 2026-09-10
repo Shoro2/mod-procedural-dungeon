@@ -5861,7 +5861,11 @@ namespace
     //
     //     cfg.rooms       = GameClampRooms(<the player's choice>, dlvl)
     //     cfg.bossRooms   = GameBossRooms(dlvl)
-    //     cfg.fieldBlocks = min(V2.FieldBlocks, GameFieldBlocksForRooms(rooms + bossRooms))
+    //     cfg.fieldBlocks = min(V2.FieldBlocks,
+    //                           GameFieldBlocksForRooms(rooms + bossRooms + 1))
+    //
+    // The trailing + 1 is the entrance, which the slider stopped counting in
+    // Round E / R2; the row loop below repeats the term for the same reason.
     //
     // Every row must generate on every seed, validate, and fit the manifest
     // budget. `retries` is printed per row because it, not the failure count,
@@ -5885,7 +5889,7 @@ namespace
                 {
                     continue;               // the clamp folded two choices onto one row
                 }
-                // + 1 for the entrance, exactly as PDv2Mgr::EnsurePlan sizes
+                // + 1 for the entrance, exactly as PDv2Mgr::GeneratePlan sizes
                 // it (Round E / R2): the field has to seat every cell the plan
                 // claims, and since the slider counts ordinary rooms the
                 // entrance is one more cell than the dial names.

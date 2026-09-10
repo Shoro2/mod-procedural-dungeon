@@ -1076,12 +1076,17 @@ namespace PDungeon
         // what proves the run. Difficulty pays nothing on purpose (the formula
         // has no difficulty argument, and PDv2GameMath.h says why).
         //
-        // Round E / R2 makes "what dlvl bought" literal: roomsTotal is now the
-        // ORDINARY room count, i.e. the dial's own number, where it used to
-        // carry the boss halls too. A run therefore pays bossRooms fewer rooms
-        // of dxp than before at the same dial - the free room the entrance used
-        // to take is not paid for either, and the curve is one number wide.
-        PDv2RunReward const reward = sPDv2Mgr->GrantRunReward(_accountId, _run.roomsTotal);
+        // What was BUILT is the ordinary rooms PLUS the boss halls, and that
+        // sum is exactly the number the pre-R2 roomsTotal carried by itself.
+        // Round E / R2 narrowed roomsTotal to the ORDINARY rooms - the dial's
+        // own number - so the boss halls are added back HERE; without them the
+        // payout would silently drop by bossRooms at every dial, and a rename
+        // of one counter would have retuned the reward curve. bossTotal counts
+        // one boss per boss room (PDv2PackMgr.h's contract, pinned at the spawn
+        // site), so the sum is the old total and a run pays the dxp it always
+        // did.
+        PDv2RunReward const reward = sPDv2Mgr->GrantRunReward(
+            _accountId, static_cast<int>(_run.roomsTotal) + _run.bossTotal);
 
         // The HUD's completion toast rides the same grant the chat lines below
         // announce, and fires exactly once because FinishRun does.
