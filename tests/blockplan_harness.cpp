@@ -380,11 +380,15 @@ namespace
         std::vector<PlacedBlock const*> chain(static_cast<size_t>(len), nullptr);
         std::vector<PlacedBlock const*> pockets;
         std::vector<PlacedBlock const*> loops;
+        std::vector<PlacedBlock const*> events;
         int bosses = 0;
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.chainIndex >= 0) chain[static_cast<size_t>(b.chainIndex)] = &b;
-            if (b.branchOf >= 0) pockets.push_back(&b);
+            // Round E / WP5: event pockets out of the pocket list, so the
+            // "pockets" line keeps meaning the pocket BUDGET.
+            if (b.isEvent) events.push_back(&b);
+            else if (b.branchOf >= 0) pockets.push_back(&b);
             if (b.detourOf >= 0) loops.push_back(&b);
             if (b.role == BlockRole::RoomBoss) ++bosses;
         }
@@ -432,6 +436,21 @@ namespace
             out += '\n';
         }
 
+        // Round E / WP5, and printed only when there are any: at the 0 %
+        // default this line never appears, so every output the operator
+        // document quotes reads exactly as it did.
+        if (!events.empty())
+        {
+            out += "events:";
+            for (PlacedBlock const* e : events)
+            {
+                std::snprintf(buf, sizeof(buf), "  R#%d + event room (%d,%d) [segment %d]",
+                              e->branchOf, e->bx, e->by, SegmentOf(plan, *e));
+                out += buf;
+            }
+            out += '\n';
+        }
+
         int segStart = 1;
         int k = 0;
         for (int i = 1; i < len; ++i)
@@ -462,9 +481,13 @@ namespace
         return out;
     }
 
-    void PrintOne(uint32_t seed, int rooms)
+    void PrintOne(uint32_t seed, int rooms, int eventChancePct)
     {
-        BlockCfg const cfg = MakeCfg(seed, rooms);
+        BlockCfg cfg = MakeCfg(seed, rooms);
+        // Round E / WP5: settable so one layout carrying an event pocket can
+        // be looked at - ChainSummary prints an "events:" line when there is
+        // one. 0 keeps the default dump byte-identical.
+        cfg.eventChancePct = eventChancePct;
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))
         {
@@ -497,7 +520,7 @@ namespace
     // stream that rewrites every \n into \r\n -- so piping this through a shell
     // would corrupt it in a way that only shows up as a parse error much later.
     void WriteManifest(uint32_t seed, int rooms, char const* path, int obx, int oby,
-                       int theme, int bossRooms)
+                       int theme, int bossRooms, int eventChancePct)
     {
         BlockCfg cfg = MakeCfg(seed, rooms, obx, oby);
         cfg.theme = theme;
@@ -507,6 +530,14 @@ namespace
         // 2026-09-02 to audit an operator's live layout from its
         // pdungeon_account row; 1 keeps every earlier call byte-identical.
         cfg.bossRooms = bossRooms;
+        // Round E / WP5, and a generation input for the same reason. The
+        // default 0 keeps every earlier call byte-identical; it is settable
+        // so the Python composer - the byte-exact oracle for the client - can
+        // be handed a manifest that actually CONTAINS an event pocket. The
+        // manifest format does not change for one (an event room is a Room
+        // chunk on a block line like any other), and the oracle run is what
+        // proves that rather than asserts it.
+        cfg.eventChancePct = eventChancePct;
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))
         {
@@ -2300,6 +2331,15 @@ namespace
     //     player's room budget - that is the bug this task closes.
     //   * exactly cfg.bossRooms RoomBoss blocks, likewise on top.
     //
+    // Round E / WP5 adds a fourth bucket, EVENTS, and it is a guard rather
+    // than a measurement here: this sweep runs at the BlockCfg default, where
+    // eventChancePct is 0, so the honest expectation is zero of them. Split
+    // out of `pockets` all the same - an event pocket carries branchOf like
+    // any pocket - so that a planner which started seating them at 0 % would
+    // show up as `events <= boss` going red or as `plain` moving, instead of
+    // silently inflating the pocket tally. RunEventPocketChecks below is
+    // where they are actually exercised.
+    //
     // The engine's HUD denominator (`_run.roomsTotal`) and the panel's
     // "Current depths" count are both the first line of this table, which is
     // what makes the two agree with the dial the player moved.
@@ -2331,13 +2371,17 @@ namespace
                     }
 
                     int plain = 0, entrance = 0, bossFound = 0;
-                    int pockets = 0, loops = 0;
+                    int pockets = 0, loops = 0, events = 0;
                     for (PlacedBlock const& b : plan.blocks)
                     {
-                        // Pocket and loop rooms are told apart by the fields
-                        // the planner sets, not by their role: both are plain
-                        // Rooms (PDBlockPlan.h, PlacedBlock).
-                        if (b.branchOf >= 0)
+                        // Pocket, loop and event rooms are told apart by the
+                        // fields the planner sets, not by their role: all
+                        // three are plain Rooms (PDBlockPlan.h, PlacedBlock).
+                        if (b.isEvent)
+                        {
+                            ++events;
+                        }
+                        else if (b.branchOf >= 0)
                         {
                             ++pockets;
                         }
@@ -2375,9 +2419,335 @@ namespace
                                   "a layout for %d + %d boss has %d boss room(s)",
                                   rooms, boss, bossFound);
                     Check(bossFound == boss, msg, seed);
+
+                    // Round E / WP5. One event pocket per boss segment is the
+                    // ceiling everywhere; at this sweep's eventChancePct of 0
+                    // the honest count is 0, and an event that appeared here
+                    // would ALSO push `plain` one over the first assertion
+                    // above - an event pocket is a plain Room - so the two
+                    // together say "none at the default" without this one
+                    // having to encode the default.
+                    std::snprintf(msg, sizeof(msg),
+                                  "a layout for %d + %d boss has %d event pocket(s) "
+                                  "at eventChancePct 0, ceiling %d",
+                                  rooms, boss, events, boss);
+                    Check(events <= boss, msg, seed);
                 }
             }
         }
+    }
+
+    // Round E / WP5: the event pocket, exercised where the coin cannot hide
+    // it - eventChancePct 100, so every boss segment of every layout in the
+    // sweep asks for one. Three things are being measured, and only the first
+    // is a property of a single layout:
+    //
+    //   1. Per segment, exactly one event pocket OR one counted drop. The
+    //      planner never retries and never backtracks for an event room, so
+    //      "asked and got nothing" has to leave a trace or a silently
+    //      event-less dungeon would read as a correct one.
+    //   2. Every event block satisfies the rules ValidateBlockPlan states.
+    //      The validator runs here too, but it is re-checked field by field
+    //      from the outside: a validator that stopped looking at event
+    //      pockets would otherwise pass this sweep by doing nothing.
+    //   3. The DROP RATE over the whole sweep, split into the two kinds of
+    //      drop, because they mean opposite things:
+    //        * STRUCTURAL - the segment has no ordinary spine room free to
+    //          hang anything off. At rooms 1 / boss 2, segment 2 is the boss
+    //          room and nothing else, so its event is arithmetically
+    //          impossible; at rooms 5 / boss 2 the last segment has a single
+    //          candidate that the pocket pass may already have taken. Those
+    //          are the room budget's shape, not a planner fault, and the
+    //          layouts that show them are exactly the ones WP5 Task 2's
+    //          engine will have to cope with anyway.
+    //        * GEOMETRIC - hosts existed and none of them had a free cell to
+    //          step into. That IS a planner fault if it happens often, and it
+    //          is the number this check holds to a threshold.
+    //      Both are printed; the sweep's totals are the measurement the
+    //      report quotes.
+    void RunEventPocketChecks(int seeds)
+    {
+        char msg[300];
+        int const roomChoices[3] = { 1, 5, 14 };
+
+        int segmentsAsked = 0;
+        int eventsPlaced = 0;
+        int dropsTotal = 0;
+        int dropsStructural = 0;
+        int dropsGeometric = 0;
+        int layouts = 0;
+
+        std::printf("event pockets at eventChancePct 100, %d seeds per row:\n", seeds);
+        std::printf("  rooms  boss  segments  placed  drop:struct  drop:geom\n");
+
+        for (int rooms : roomChoices)
+        {
+            for (int boss = 1; boss <= 2; ++boss)
+            {
+                // Per row, so the two drop kinds can be read where they
+                // happen rather than as one blended number: the structural
+                // ones are a property of (rooms, boss) alone, the geometric
+                // ones of how full an 8x8 field gets at that room count.
+                int rowSegments = 0, rowPlaced = 0, rowStruct = 0, rowGeom = 0;
+                for (int i = 0; i < seeds; ++i)
+                {
+                    // The same seed ladder RunOrdinaryRoomCountChecks walks,
+                    // so a layout that misbehaves here can be looked at there
+                    // with the events switched off.
+                    uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 11u;
+                    BlockCfg cfg = MakeCfg(seed, rooms);
+                    cfg.bossRooms = boss;
+                    cfg.eventChancePct = 100;
+
+                    BlockPlan plan;
+                    if (!GenerateBlockPlan(cfg, &plan))
+                    {
+                        std::snprintf(msg, sizeof(msg),
+                                      "no layout for %d ordinary room(s) + %d boss at "
+                                      "eventChancePct 100", rooms, boss);
+                        Check(false, msg, seed);
+                        continue;
+                    }
+                    ++layouts;
+
+                    std::string err;
+                    Check(ValidateBlockPlan(plan, &err),
+                          err.empty() ? "validation failed with event pockets" : err.c_str(), seed);
+
+                    // The spine by chain index, and which of its rooms an
+                    // ORDINARY pocket already hangs off - the "one hanger per
+                    // host" rule needs both, and the drop split below reads
+                    // the pocket flags too.
+                    int const chainLen = ChainLength(plan);
+                    std::vector<int> chainAt(static_cast<size_t>(chainLen), -1);
+                    std::vector<bool> hostedPocket(static_cast<size_t>(chainLen), false);
+                    for (size_t bi = 0; bi < plan.blocks.size(); ++bi)
+                    {
+                        PlacedBlock const& b = plan.blocks[bi];
+                        if (b.chainIndex >= 0 && b.chainIndex < chainLen)
+                        {
+                            chainAt[static_cast<size_t>(b.chainIndex)] = static_cast<int>(bi);
+                        }
+                        if (b.branchOf >= 0 && !b.isEvent && b.branchOf < chainLen)
+                        {
+                            hostedPocket[static_cast<size_t>(b.branchOf)] = true;
+                        }
+                    }
+
+                    std::vector<int> perSegment(static_cast<size_t>(boss) + 1, 0);
+                    int events = 0;
+                    for (PlacedBlock const& b : plan.blocks)
+                    {
+                        if (!b.isEvent)
+                        {
+                            continue;
+                        }
+                        ++events;
+
+                        int sockets = 0;
+                        for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                        {
+                            if (b.socketMask & bit) ++sockets;
+                        }
+
+                        std::snprintf(msg, sizeof(msg),
+                                      "event pocket (%d,%d) is role %d with %d socket(s), "
+                                      "roomId %d, chainIndex %d, detourOf %d - want a plain "
+                                      "Room dead end with one socket and a room id",
+                                      b.bx, b.by, static_cast<int>(b.role), sockets,
+                                      b.roomId, b.chainIndex, b.detourOf);
+                        Check(b.role == BlockRole::Room && sockets == 1 && b.roomId >= 0 &&
+                              b.chainIndex < 0 && b.detourOf < 0, msg, seed);
+
+                        std::snprintf(msg, sizeof(msg),
+                                      "event pocket (%d,%d) hangs off chain %d, chain length %d "
+                                      "- want 1..%d", b.bx, b.by, b.branchOf, chainLen,
+                                      chainLen - 2);
+                        bool const hostOk = b.branchOf >= 1 && b.branchOf < chainLen - 1;
+                        Check(hostOk, msg, seed);
+
+                        if (hostOk && chainAt[static_cast<size_t>(b.branchOf)] >= 0)
+                        {
+                            PlacedBlock const& host =
+                                plan.blocks[static_cast<size_t>(chainAt[static_cast<size_t>(b.branchOf)])];
+                            std::snprintf(msg, sizeof(msg),
+                                          "event pocket (%d,%d) hangs off chain %d, which is "
+                                          "role %d - the entrance and the boss rooms may host "
+                                          "nothing", b.bx, b.by, b.branchOf,
+                                          static_cast<int>(host.role));
+                            Check(host.role == BlockRole::Room, msg, seed);
+
+                            std::snprintf(msg, sizeof(msg),
+                                          "event pocket (%d,%d) shares chain %d with an ordinary "
+                                          "pocket - one hanger per host", b.bx, b.by, b.branchOf);
+                            Check(!hostedPocket[static_cast<size_t>(b.branchOf)], msg, seed);
+                        }
+
+                        // The chunk id must be an ordinary ROOM chunk of the
+                        // block's own mask: theme base + alt stride + role 0.
+                        // Written out rather than taken from the planner, so a
+                        // planner that emitted, say, a boss chunk for the
+                        // event room could not agree with itself.
+                        int const wantChunk = 2000 + b.alt * 1000 + static_cast<int>(b.socketMask);
+                        std::snprintf(msg, sizeof(msg),
+                                      "event pocket (%d,%d) carries chunk %d, want the room "
+                                      "chunk %d (mask %u, alt %d)", b.bx, b.by, b.chunkId,
+                                      wantChunk, b.socketMask, b.alt);
+                        Check(b.chunkId == wantChunk &&
+                              b.alt >= 0 && b.alt < AltCountFor(BlockRole::Room), msg, seed);
+
+                        if (!g_masks.empty())
+                        {
+                            std::snprintf(msg, sizeof(msg),
+                                          "event pocket (%d,%d) uses chunk %d, which has no walk "
+                                          "mask in the kit SQL", b.bx, b.by, b.chunkId);
+                            Check(MaskFor(b.chunkId) != nullptr, msg, seed);
+                        }
+
+                        int const seg = SegmentOf(plan, b);
+                        std::snprintf(msg, sizeof(msg),
+                                      "event pocket (%d,%d) reports segment %d of %d",
+                                      b.bx, b.by, seg, boss);
+                        Check(seg >= 1 && seg <= boss, msg, seed);
+                        if (seg >= 1 && seg <= boss)
+                        {
+                            ++perSegment[static_cast<size_t>(seg)];
+                        }
+                    }
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "%d block(s) carry isEvent but EventPocketCount says %d",
+                                  events, EventPocketCount(plan));
+                    Check(events == EventPocketCount(plan), msg, seed);
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "%d ordinary room(s) + %d boss placed %d event pocket(s) and "
+                                  "counted %d drop(s) - every segment must do exactly one of the "
+                                  "two", rooms, boss, events, plan.eventsDropped);
+                    Check(events + plan.eventsDropped == boss, msg, seed);
+
+                    for (int k = 1; k <= boss; ++k)
+                    {
+                        std::snprintf(msg, sizeof(msg),
+                                      "boss segment %d of %d carries %d event pockets, ceiling 1",
+                                      k, boss, perSegment[static_cast<size_t>(k)]);
+                        Check(perSegment[static_cast<size_t>(k)] <= 1, msg, seed);
+                    }
+
+                    // Which kind of drop this layout took, per segment: a
+                    // segment with no event was dropped, and it is STRUCTURAL
+                    // when the segment had no eligible host to begin with.
+                    // The eligible set is re-derived here from the finished
+                    // plan (ordinary spine rooms of the segment, 1..L-2, not
+                    // already hosting a pocket) rather than read out of the
+                    // planner, which is the whole point of measuring it.
+                    for (int k = 1; k <= boss; ++k)
+                    {
+                        if (perSegment[static_cast<size_t>(k)] > 0)
+                        {
+                            continue;
+                        }
+                        int eligible = 0;
+                        for (int idx = 1; idx < chainLen - 1; ++idx)
+                        {
+                            int const at = chainAt[static_cast<size_t>(idx)];
+                            if (at < 0 || plan.blocks[static_cast<size_t>(at)].role != BlockRole::Room)
+                            {
+                                continue;
+                            }
+                            if (SegmentOf(plan, plan.blocks[static_cast<size_t>(at)]) != k)
+                            {
+                                continue;
+                            }
+                            if (hostedPocket[static_cast<size_t>(idx)])
+                            {
+                                continue;
+                            }
+                            ++eligible;
+                        }
+                        if (eligible > 0)
+                        {
+                            ++rowGeom;
+                        }
+                        else
+                        {
+                            ++rowStruct;
+                        }
+                    }
+
+                    rowSegments += boss;
+                    rowPlaced += events;
+                    dropsTotal += plan.eventsDropped;
+                }
+
+                std::printf("  %5d  %4d  %8d  %6d  %11d  %9d\n",
+                            rooms, boss, rowSegments, rowPlaced, rowStruct, rowGeom);
+                segmentsAsked += rowSegments;
+                eventsPlaced += rowPlaced;
+                dropsStructural += rowStruct;
+                dropsGeometric += rowGeom;
+            }
+        }
+
+        // Non-vacuity first: a sweep at 100 % that placed nothing would pass
+        // every rule above by having no event pocket to break one.
+        Check(eventsPlaced > 0,
+              "no seed in the sweep placed an event pocket at eventChancePct 100 - the "
+              "event pass is dead code", 0);
+
+        int const possible = segmentsAsked - dropsStructural;
+        int const pctX10 = segmentsAsked ? (dropsTotal * 1000 + segmentsAsked / 2) / segmentsAsked : 0;
+        int const geoX10 = possible ? (dropsGeometric * 1000 + possible / 2) / possible : 0;
+        std::printf("event pockets: %d placed over %d boss segment(s) in %d layout(s); "
+                    "%d drop(s) = %d.%d%% (structural %d, geometric %d = %d.%d%% of the "
+                    "%d segment(s) that could have carried one)\n",
+                    eventsPlaced, segmentsAsked, layouts, dropsTotal,
+                    pctX10 / 10, pctX10 % 10, dropsStructural, dropsGeometric,
+                    geoX10 / 10, geoX10 % 10, possible);
+
+        std::snprintf(msg, sizeof(msg),
+                      "the two drop kinds add up to %d, but %d drops were counted",
+                      dropsStructural + dropsGeometric, dropsTotal);
+        Check(dropsStructural + dropsGeometric == dropsTotal, msg, 0);
+
+        // The threshold is on the GEOMETRIC drops alone, over the segments
+        // that could have carried an event at all. A structural drop is the
+        // room budget's own shape - at rooms 1 / boss 2 the second segment is
+        // nothing but its boss room, and at rooms 5 / boss 2 the last segment
+        // has a single candidate the pocket pass may already have taken - and
+        // holding the planner to a number it cannot move would only teach the
+        // next reader to raise the number.
+        //
+        // THE NUMBER BELOW IS A REGRESSION FLOOR, NOT A DESIGN TARGET, and
+        // the difference is the one thing to carry away from this check. The
+        // WP5 brief asked for a drop rate under 5 %; MEASURED at 300 seeds
+        // per row on 2026-09-10 the geometric rate is 19.6 % of the 2100
+        // possible segments (411 of them), and the per-row table above says
+        // where it comes from:
+        //
+        //     rooms 5 / boss 1   112 of 300   the worst row by far
+        //     rooms 14 / boss 2  131 of 600
+        //     rooms 1  / boss 1   23 of 300
+        //
+        // The cause is not the event step but the HOST SET the design fixes
+        // for it: an ordinary spine room carries either a pocket or an event,
+        // never both, so at 5 rooms / 1 boss the two pockets take two of the
+        // three ordinary spine rooms and the event has exactly ONE candidate
+        // left - which then has to have a free cell beside it. Widening that
+        // (letting an event share a host with a pocket, or giving it a
+        // two-step route) is a DESIGN decision for the round, not something
+        // this task may quietly take; until it is taken, 25 % in the conf
+        // buys roughly 20 % of runs an event room rather than 25 %.
+        //
+        // So the check guards the direction: 30 % leaves the measurement room
+        // to breathe and still goes red long before "the event pass stopped
+        // fitting anywhere".
+        std::snprintf(msg, sizeof(msg),
+                      "%d of the %d boss segments that could have carried an event lost it to "
+                      "a full field (%d.%d%%), regression floor 30%% - re-measure the host "
+                      "rule before moving this",
+                      dropsGeometric, possible, geoX10 / 10, geoX10 % 10);
+        Check(geoX10 < 300, msg, 0);
     }
 
     void RunGameMathChecks()
@@ -3815,7 +4185,8 @@ namespace
         size_t maxManifest = 0;
     };
 
-    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds, int theme = 1)
+    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds, int theme = 1,
+                                 int eventChancePct = 0)
     {
         RoomCapRow row;
         row.rooms = rooms;
@@ -3827,6 +4198,11 @@ namespace
             BlockCfg cfg = MakeCfg(seed, rooms);
             cfg.bossRooms = bossRooms;
             cfg.theme = theme;
+            // Round E / WP5. The default 0 is the historical measurement; the
+            // 100 % pass is the one that matters for the budget, because an
+            // event pocket costs a manifest line for the room and one per
+            // corridor block of its route, up to bossRooms times over.
+            cfg.eventChancePct = eventChancePct;
 
             BlockPlan plan;
             if (!GenerateBlockPlan(cfg, &plan))
@@ -3846,13 +4222,13 @@ namespace
     // Largest room count that generates on EVERY seed and still fits the
     // manifest budget, with the boss-room count a player at that dlvl would
     // actually run (rooms R unlocks at dlvl R - 3, per 01 §8 "3 + dlvl").
-    int MeasureRoomCap(int seeds, bool verbose, int theme = 1)
+    int MeasureRoomCap(int seeds, bool verbose, int theme = 1, int eventChancePct = 0)
     {
         if (verbose)
         {
             std::printf("room-cap measurement: %d seeds per row, field 8x8, "
-                        "theme %d, manifest budget %d B\n\n", seeds, theme,
-                        PD_GAME_MANIFEST_BUDGET_B);
+                        "theme %d, eventChancePct %d, manifest budget %d B\n\n", seeds, theme,
+                        eventChancePct, PD_GAME_MANIFEST_BUDGET_B);
             std::printf("  rooms  boss  cells   genfail  maxManifest  verdict\n");
         }
 
@@ -3866,7 +4242,7 @@ namespace
             // floor constant.
             int const unlockDlvl = rooms > 3 ? rooms - 3 : 0;
             int const boss = GameBossRooms(unlockDlvl);
-            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds, theme);
+            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds, theme, eventChancePct);
             bool const ok = row.failures == 0 &&
                             row.maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B);
             if (ok)
@@ -3891,13 +4267,22 @@ namespace
         // blow the packet budget theme 1 measured its way under.
         std::printf("\n");
         int const measuredCity = MeasureRoomCap(seeds, true, 2);
+        // Round E / WP5, the worst case the cap has to survive: the widest
+        // chunk ids AND an event pocket in every boss segment. Events are
+        // additional blocks - at most bossRooms rooms plus their corridor
+        // routes - so this is the row that decides whether the cap can stay
+        // where it is once the engine starts asking for them (Task 2).
+        std::printf("\n");
+        int const measuredEvents = MeasureRoomCap(seeds, true, 2, 100);
         std::printf("\nlargest room count clean on every seed: %d (theme 1), "
-                    "%d (theme 2)\n", measured, measuredCity);
+                    "%d (theme 2), %d (theme 2 + events at 100%%)\n",
+                    measured, measuredCity, measuredEvents);
         std::printf("PD_GAME_ROOMS_CAP_MEASURED currently encodes: %d\n",
                     PD_GAME_ROOMS_CAP_MEASURED);
         bool const ok = measured >= PD_GAME_ROOMS_CAP_MEASURED &&
-                        measuredCity >= PD_GAME_ROOMS_CAP_MEASURED;
-        std::printf("%s\n", ok ? "the encoded cap holds for both themes"
+                        measuredCity >= PD_GAME_ROOMS_CAP_MEASURED &&
+                        measuredEvents >= PD_GAME_ROOMS_CAP_MEASURED;
+        std::printf("%s\n", ok ? "the encoded cap holds for both themes, events and all"
                                 : "THE ENCODED CAP IS TOO HIGH - update PDv2GameMath.h");
         return ok ? 0 : 1;
     }
@@ -4701,14 +5086,24 @@ namespace
     // manifest bytes and would notice most draw-order moves, but two
     // different chains can in principle emit the same block set; this pin
     // reads the chain order, the pockets and the loop rooms directly.
-    // Format: chain cells `|` pockets `host>x,y;` `|` loops `into>x,y;`.
+    // Format: chain cells `|` pockets `host>x,y;` `|` loops `into>x,y;`
+    // `|` event pockets `host>x,y;` (Round E / WP5).
+    //
+    // The event field is a FORMAT extension, not a re-capture, and the
+    // difference matters: the two pin strings below gained one trailing `|`
+    // and NOTHING else. Every chain cell, every pocket and every loop room
+    // they name is the byte it was before WP5, which is the statement the
+    // event pass had to leave true - eventChancePct defaults to 0, Chance
+    // draws nothing at 0, and no event pocket is seated. Proven before the
+    // field was added: a build carrying only the planner half of WP5 Task 1
+    // ran `pdblock --batch 500` green against the UNCHANGED pins.
     // Captured by RUNNING `pdblock --batch` and reading the "the chain moved"
     // message, never by reasoning about the value.
     // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE: the chain is one cell
     // longer and the pockets moved with the stream. The four cells this pin
     // used to hold are its first four, unchanged, with 263,263 appended.
     // Before R2: "258,261;259,259;261,260;262,262;|1>258,257;2>260,262;|".
-    char const* const PD_CHAIN_PIN = "258,261;259,259;261,260;262,262;263,263;|2>260,262;3>261,263;|";
+    char const* const PD_CHAIN_PIN = "258,261;259,259;261,260;262,262;263,263;|2>260,262;3>261,263;||";
 
     // A SECOND chain, because the pin above ends in an empty loop field: seed
     // 12345 draws no loop room at the default DetourChance, so it pins the
@@ -4724,7 +5119,7 @@ namespace
     // Chance draws land before the first chain step, so a longer chain cannot
     // reach them. Before R2:
     // "263,259;259,259;258,257;260,256;|2>257,258;1>260,260;|1>261,258;".
-        "263,259;259,259;258,257;260,256;263,256;|2>256,257;3>262,257;|1>261,258;";
+        "263,259;259,259;258,257;260,256;263,256;|2>256,257;3>262,257;|1>261,258;|";
 
     std::string ChainPinString(BlockPlan const& plan)
     {
@@ -4732,10 +5127,15 @@ namespace
         std::vector<PlacedBlock const*> chain(static_cast<size_t>(len), nullptr);
         std::vector<PlacedBlock const*> pockets;
         std::vector<PlacedBlock const*> loops;
+        std::vector<PlacedBlock const*> events;
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.chainIndex >= 0) chain[static_cast<size_t>(b.chainIndex)] = &b;
-            if (b.branchOf >= 0) pockets.push_back(&b);
+            // Round E / WP5: an event pocket carries branchOf like a pocket,
+            // so it has to be split off here or it would appear in the pocket
+            // field and read as a pocket that moved.
+            if (b.isEvent) events.push_back(&b);
+            else if (b.branchOf >= 0) pockets.push_back(&b);
             if (b.detourOf >= 0) loops.push_back(&b);
         }
         std::string got;
@@ -4755,6 +5155,12 @@ namespace
         for (PlacedBlock const* l : loops)
         {
             std::snprintf(buf, sizeof(buf), "%d>%d,%d;", l->detourOf, l->bx, l->by);
+            got += buf;
+        }
+        got += '|';
+        for (PlacedBlock const* e : events)
+        {
+            std::snprintf(buf, sizeof(buf), "%d>%d,%d;", e->branchOf, e->bx, e->by);
             got += buf;
         }
         return got;
@@ -7004,6 +7410,12 @@ namespace
         // fixed sweep of the draw space rather than a sample whose size means
         // anything.
         RunOrdinaryRoomCountChecks(200);
+        // Round E / WP5, and 300 seeds per (rooms, bossRooms) pair regardless
+        // of --batch n for the same reason as the sweep above: the event
+        // rules are structural. The drop RATE is the one statistical number
+        // in it, which is why the sweep is fixed - a rate measured on a
+        // sample whose size moved with the flag would mean nothing.
+        RunEventPocketChecks(300);
         RunLayoutFreezeCheck();
         RunTypedAnchorChecks();
         // Outside the mask guard on purpose: the corner cases are hand-built
@@ -7164,6 +7576,19 @@ namespace
             Check(cityCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
         }
 
+        // Round E / WP5, on the same sample: the cap has to hold with an
+        // event pocket in every boss segment as well, or turning the conf up
+        // in Task 2 would silently take a room off the top of the slider.
+        // Theme 2 again - widest ids, so the worst manifest.
+        {
+            int const eventCap = MeasureRoomCap(count / 5 + 1, false, 2, 100);
+            char msg[180];
+            std::snprintf(msg, sizeof(msg),
+                          "theme-2 room cap with event pockets at 100%% is %d, below the "
+                          "encoded %d", eventCap, PD_GAME_ROOMS_CAP_MEASURED);
+            Check(eventCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
+        }
+
         // The encoded room cap is a MEASUREMENT, so it has to be re-measured or
         // it rots: a generator change that makes packing harder would otherwise
         // only surface as accounts whose dungeon stopped generating.
@@ -7240,15 +7665,24 @@ namespace
             // that plus the boss rooms plus the entrance. Written out of
             // cfg.bossRooms rather than as a literal, so the expression says
             // which room each summand is.
+            //
+            // Round E / WP5 event pockets are additional in the same sense
+            // and appear on the same side of the equation. The batch runs at
+            // eventChancePct 0, so the term is 0 here - it is in the sum so
+            // that a planner seating events at 0 % fails THIS check with a
+            // readable count instead of failing the manifest pins with a byte
+            // difference.
             int rooms_found = 0;
             int loopsHere = 0;
+            int eventsHere = 0;
             for (PlacedBlock const& b : plan.blocks)
             {
                 if (b.roomId >= 0) ++rooms_found;
                 if (b.detourOf >= 0) ++loopsHere;
+                if (b.isEvent) ++eventsHere;
             }
-            Check(rooms_found == rooms + cfg.bossRooms + 1 + loopsHere,
-                  "room count does not match the config plus the loop rooms", seed);
+            Check(rooms_found == rooms + cfg.bossRooms + 1 + loopsHere + eventsHere,
+                  "room count does not match the config plus the loop and event rooms", seed);
 
             // Entrance and boss must be distinct blocks.
             Check(plan.entranceIndex != plan.bossIndex, "entrance and boss are the same block", seed);
@@ -7318,7 +7752,9 @@ namespace
             int pocketsHere = 0;
             for (PlacedBlock const& b : plan.blocks)
             {
-                if (b.branchOf >= 0) ++pocketsHere;
+                // Ordinary pockets only: an event pocket carries branchOf but
+                // is not part of the pocket budget the summary reports.
+                if (b.branchOf >= 0 && !b.isEvent) ++pocketsHere;
             }
             loopRoomsSeen += loopsHere;
             segmentsSeen += std::max(1, cfg.bossRooms);
@@ -7381,8 +7817,11 @@ int main(int argc, char** argv)
         int const oby = (argc >= 7) ? std::atoi(argv[6]) : 32 * 8;
         int const theme = (argc >= 8) ? std::atoi(argv[7]) : 1;
         int const bossRooms = (argc >= 9) ? std::atoi(argv[8]) : 1;
+        // Round E / WP5: the last optional argument, so every existing
+        // invocation keeps its meaning and its bytes.
+        int const eventChancePct = (argc >= 10) ? std::atoi(argv[9]) : 0;
         WriteManifest(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)),
-                      rooms, argv[3], obx, oby, theme, bossRooms);
+                      rooms, argv[3], obx, oby, theme, bossRooms, eventChancePct);
         return 0;
     }
 
@@ -7395,6 +7834,9 @@ int main(int argc, char** argv)
 
     uint32_t const seed = (argc >= 2) ? static_cast<uint32_t>(std::strtoul(argv[1], nullptr, 10)) : 12345u;
     int const rooms = (argc >= 3) ? std::atoi(argv[2]) : 5;
-    PrintOne(seed, rooms);
+    // Round E / WP5: the last optional argument again, so `pdblock <seed>
+    // [rooms]` keeps printing exactly what it printed before.
+    int const eventChancePct = (argc >= 4) ? std::atoi(argv[3]) : 0;
+    PrintOne(seed, rooms, eventChancePct);
     return 0;
 }
