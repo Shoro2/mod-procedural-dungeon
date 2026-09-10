@@ -429,6 +429,20 @@ namespace PDungeon
         // total: an unknown GUID answers Idle.
         EventState EventStateFor(ObjectGuid host) const;
 
+        // The HUD's read of the event, taken from the FIRST event that is
+        // Running: how many whole seconds are left on its clock, and how much
+        // of the host's health bar is still there (0..100). False - with both
+        // outputs untouched - when nothing is running, which is what tells
+        // the UI link to leave the two fields off the wire (WP5 Task 5).
+        //
+        // A run can carry one event per boss segment, so several may exist;
+        // only one can sensibly be running, because they are dead-end rooms
+        // off different segments and the party stands in one of them. "The
+        // first Running one" is therefore a rule that never has to arbitrate,
+        // and is stated rather than computed so a second one cannot silently
+        // change what the HUD shows halfway through a fight.
+        bool EventHudFields(uint32& secLeft, uint32& npcPct) const;
+
     private:
         void SpawnFromPlan(BlockPlan const& plan);
 
@@ -577,6 +591,69 @@ namespace PDungeon
         // Ambush::x/y are the block centre and, since C2 dropped the disc,
         // only what the arm log prints.
         void FireAmbush(Ambush& ambush, Player* player);
+
+        // Round E / WP5. One event pocket, standing or spent.
+        //
+        // Everything the fight needs is decided at BUILD time and stored
+        // here - the host, the twelve attackers, where each of them walks in
+        // and where the reward will stand - for the same two reasons the
+        // ambush stores its wave: the draw is seeded, so the same layout
+        // fights the same twelve creatures every time it is entered, and the
+        // tick that runs the fight then does nothing it could have done
+        // minutes earlier. What the tick owns is the CLOCK.
+        //
+        // `rim` is the room's own spawn anchors in world x/y, farthest from
+        // the block centre first, so wave 1 walks the longest way to the host
+        // and the party has the most time to meet it. It is never empty:
+        // SpawnEventRooms falls back to the block centre, which is walkable
+        // in every room variant the kit ships.
+        struct EventRoom
+        {
+            int bx = 0;                 // the pocket's block, for the log
+            int by = 0;
+            int segment = 0;            // SegmentOf - which stream it drew on
+            ObjectGuid host;            // NPC_EVENT_HOST, also in _spawnedGuids
+            EventState state = EventState::Idle;
+            // Wrap-safe deadlines, read the way TickFinale reads its own:
+            // signed differences against getMSTime(), never `>=`.
+            uint32 deadlineMs = 0;      // when a Running event is WON
+            uint32 nextSpawnMs = 0;     // when the next attacker walks in
+            std::vector<SpawnPick> picks;   // the whole wave, drawn at build
+            size_t nextPick = 0;        // how much of it has walked in
+            std::vector<ObjectGuid> wave;   // what it put on the map
+            std::vector<std::pair<float, float>> rim;   // world x,y, far first
+            float chestX = 0.0f;        // the reward's spot, grid-vetoed
+            float chestY = 0.0f;
+            float chestZ = 0.0f;
+            float z = 0.0f;             // the pocket's floor plane
+            // The closing beat - despawn, notice, reward - has already run.
+            // It is a separate flag and not a fourth state because the state
+            // can be moved to Lost from OUTSIDE the tick (OnEventHostDied,
+            // which runs inside the death and may not despawn anything), and
+            // this is what still gets that event exactly one closing pass.
+            bool closed = false;
+        };
+
+        // Build time, after SpawnAmbushPlan: one host per `isEvent` block,
+        // its wave drawn on the event stream, its rim and its chest spot
+        // computed and vetoed against the walk grid. Summons the host and
+        // nothing else - the attackers arrive on the tick, after a player has
+        // actually asked for them.
+        void SpawnEventRooms(BlockPlan const& plan);
+
+        // 1 Hz, BEFORE the HUD push: the event's whole clock. Sends the next
+        // attacker in, wins on the deadline, loses on a dead host, and hands
+        // a finished event to CloseEvent exactly once.
+        void TickEvents();
+
+        // The closing beat of one event, won or lost by `event.state`. Never
+        // called from a death hook - it despawns creatures - and never twice,
+        // which `closed` is what guarantees.
+        void CloseEvent(EventRoom& event);
+
+        // The event staged around `host`, or nullptr. Linear over at most one
+        // entry per boss segment, i.e. at most a handful.
+        EventRoom* EventFor(ObjectGuid host);
 
         // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
         // is safe: everyone recorded there who is still on this map and still
@@ -798,6 +875,12 @@ namespace PDungeon
         // that this corridor is spent - and the rebuild, not the firing, is
         // what forgets it. Same shape and same reasoning as _barriers.
         std::vector<Ambush> _ambushes;
+        // Round E / WP5. One entry per event pocket the layout carries, in
+        // plan order. A won or lost event STAYS in here - that is the record
+        // that this pocket is spent, and the record the gossip reads to show
+        // the host's closing line - and the rebuild, not the ending, is what
+        // forgets it. Same shape and same reasoning as _barriers/_ambushes.
+        std::vector<EventRoom> _events;
         // Round C / C8. Inert until the last boss dies and inert again once
         // the portal is up, so the 1 Hz branch pays one bool for it on every
         // other tick of every other run. The rebuild resets it whole, the same

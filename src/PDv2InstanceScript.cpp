@@ -44,6 +44,17 @@
 #include "Timer.h"
 #include "WorldSession.h"
 
+// Round E / WP5. Paragon integration is OPTIONAL: mod-paragon owns
+// ParagonUtils.h, and in the full server build every module's src/ is on the
+// include path (modules/CMakeLists.txt), so the header and IncreaseParagonXP
+// are there and a won event pays XP. A module-only CI build has no
+// mod-paragon, so both the include and the call are guarded and this file
+// still compiles standalone - the same shape fl-underground-dungeon uses.
+#if __has_include("ParagonUtils.h")
+#include "ParagonUtils.h"
+#define PDV2_HAS_PARAGON 1
+#endif
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -173,6 +184,22 @@ namespace PDungeon
             { -2.0f,  4.0f },
             { -2.0f, -4.0f }
         };
+
+        // Round E / WP5: the threat an arriving event attacker is handed on
+        // the host. AttackStart alone only picks the FIRST victim; this is the
+        // standing entry on the mob's threat list that decides who it goes for
+        // NEXT - so a wave mob whose target dies, vanishes or gets out of
+        // reach turns back to the pilgrim instead of finding an empty list and
+        // dropping combat. A full evade is a different thing and takes the
+        // list with it (CreatureAI::_EnterEvadeMode -> CombatStop ->
+        // EndAllPvECombat); PDv2MobAI's proximity aggro is what re-engages
+        // then, which is the same recovery every other mob on this map has.
+        //
+        // 1000 is far above the few points a first swing generates and far
+        // below what a player produces in a second of real threat, so a party
+        // that fights for him still takes the wave off him - which is the
+        // whole mechanic.
+        float const EVENT_WAVE_HOST_THREAT = 1000.0f;
 
         // Where a Lil' Bro's two children land relative to the corpse. That
         // module's own offsets, mirrored (DungeonChallengeScripts.cpp:877-878);
@@ -373,6 +400,13 @@ namespace PDungeon
             // rebuilt with the run"). A rebuild re-arms every one of them,
             // which is the whole difference between a trap and a one-off.
             _ambushes.clear();
+            // Round E / WP5, and for the same reason: the pilgrim and every
+            // attacker still standing went with _spawnedGuids in DespawnAll
+            // and the won event's cache with _decorGuids, so what is left
+            // here is only the run's memory that a pocket was already played.
+            // A rebuild re-stages every event, which is what makes a re-entry
+            // a new dungeon rather than a spent one.
+            _events.clear();
             // Round C / C8. Chromie, her cache and the portal went with
             // _spawnedGuids and _decorGuids in DespawnAll above; this is the
             // state machine that was walking them, and it has to go too. Note
@@ -437,6 +471,13 @@ namespace PDungeon
             // it belongs at the end of the same guard as everything else the
             // rebuild tears down.
             SpawnAmbushPlan(*plan);
+            // Round E / WP5, and genuinely last: the pilgrim is a summon, so
+            // it belongs after everything that reads the walk grid rather than
+            // adds to it, and its rim points are vetoed against the grid
+            // SpawnBarriers has already cut. Nothing else in the build depends
+            // on it - the event pocket was skipped by the room pass, plans no
+            // trash, moves no counter and carries no barrier denominator.
+            SpawnEventRooms(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -1938,6 +1979,19 @@ namespace PDungeon
                 continue;
             }
 
+            // Round E / WP5. An event pocket is a Room with a roomId and
+            // would otherwise be filled like any other, which would be wrong
+            // four times over: it would draw a pack, take a dense roomIndex,
+            // count toward roomsTotal on the HUD and add its trash to its
+            // segment's barrier denominator - so the party would be asked to
+            // clear an optional side room before the gate to the boss opened.
+            // The pocket's whole content is the pilgrim and the wave he
+            // brings, both of which SpawnEventRooms puts there.
+            if (b.isEvent)
+            {
+                continue;
+            }
+
             RoomRequest room;
             room.roomIndex = static_cast<int>(roomBlocks.size());
             room.isBoss = b.role == BlockRole::RoomBoss;
@@ -2787,6 +2841,20 @@ namespace PDungeon
         uint32 loops = 0;
         for (PlacedBlock const& b : plan.blocks)
         {
+            // Round E / WP5. An event pocket is a dead-END room but not a
+            // dead-end STUB and not a loop, so the two tests below already
+            // miss it (role Room, detourOf -1 - both proved by
+            // ValidateBlockPlan's "an event pocket carries the wrong role or
+            // fields"). Stated as its own line anyway, because the free cache
+            // and the event's own won-cache would then stand in one small
+            // room and the reward for holding the line would be the reward
+            // for walking in - and a later planner change that gave an event
+            // pocket either field would open exactly that hole silently.
+            if (b.isEvent)
+            {
+                continue;
+            }
+
             // Exclusive by construction: the planner validates that a loop
             // room is a Room block (PDBlockPlan.cpp, "a loop room carries the
             // wrong role or fields"), never a corridor.
@@ -3936,6 +4004,15 @@ namespace PDungeon
                 _run.elapsedSec = GetMSTimeDiffToNow(_run.startedMs) / 1000;
             }
 
+            // Round E / WP5, and BEFORE the push below rather than beside the
+            // finale: the event's countdown and the host's health bar are HUD
+            // fields, so the second in which the clock moves has to be the
+            // second the frame carries. Ticking after the push would show
+            // every player a value that was already one second stale, and the
+            // last tick of a won event would push "1 second left" and only
+            // then win it. Inert on every run whose layout has no event.
+            TickEvents();
+
             // The HUD's whole pull side, after the clock so the frame carries
             // the second it was sent in. The link decides whether anything is
             // worth saying; a still dungeon costs nothing on the wire.
@@ -3962,34 +4039,648 @@ namespace PDungeon
     }
 
     // ----------------------------------------------------------------------
-    // Round E / WP5: event rooms ("Hold the line") - STUBS.
+    // Round E / WP5: event rooms ("Hold the line").
     //
-    // WP5 Task 3 ships the host NPC (creature 910551, its gossip, its passive
-    // AI and the binder yield that keeps PDv2MobAI away from it). The state
-    // machine that makes the event actually happen is WP5 Task 4, and these
-    // three bodies are what lets Task 3 link and be tested on its own: the
-    // NPC is spawnable, clickable and inert. Task 4 replaces the bodies and
-    // keeps the signatures declared in the header.
+    // The optional dead-end pocket the planner seats off a boss segment holds
+    // one creature, NPC_EVENT_HOST. A player talks to him, a clock starts,
+    // one attacker walks in every few seconds, and the party wins by keeping
+    // him alive until the clock runs out.
+    //
+    // Everything below splits along one line: SpawnEventRooms DECIDES (at
+    // build time, on a seeded stream) and the tick EXECUTES. The wave, where
+    // each of its members walks in and where the reward will stand are all
+    // fixed the moment the dungeon is populated, so the same layout always
+    // fights the same fight and the second a player is busy being attacked
+    // costs the server nothing it could have paid minutes earlier. It is the
+    // same division SpawnAmbushPlan/FireAmbush already draw.
+    //
+    // Nothing here rolls anything of its own - no urand, no PDRandom. The one
+    // draw is SelectSpawns on the event stream, which is the layout seed
+    // mixed with PD_EVENT_SEED_MIX and the segment.
     // ----------------------------------------------------------------------
 
-    bool PDv2InstanceScript::StartEvent(Creature* /*host*/, Player* /*starter*/)
+    void PDv2InstanceScript::SpawnEventRooms(BlockPlan const& plan)
     {
-        // Nothing is armed yet, so nothing can be started. The gossip has
-        // already closed its menu by the time this returns, so a player who
-        // clicks the offer simply sees the window shut.
-        return false;
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        PDv2AccountState const account = sPDv2Mgr->GetAccountState(_accountId);
+
+        // How many attackers one defence sends in: the whole duration divided
+        // by the gap between them, i.e. twelve on the defaults (60 / 5). The
+        // last one therefore walks in at 55 s and the clock runs out five
+        // seconds later, which is what makes the final stretch a fight rather
+        // than a wait. Guarded against a zero gap because both numbers are
+        // live conf values and a division is not a place to trust a clamp.
+        int const waveSize = cfg.eventSpawnEverySec > 0
+                             ? cfg.eventDurationSec / cfg.eventSpawnEverySec
+                             : 0;
+
+        double const mid = PD_BLOCK_SIZE_YD / 2.0;
+        WalkGrid const* grid = GetWalkGrid();
+
+        // The veto the room pass, the patrol spawn and the finale spots all
+        // take, for the reason they all take it: an anchor is a kit constant
+        // while the walk grid is what this instance actually composed, and
+        // gravity is off on this map - so anything seated off the floor
+        // hovers over the void for ever. Here it matters most for the HOST:
+        // a pilgrim in the void could not be reached by the wave that is
+        // supposed to kill him, and the event would be unlosable.
+        auto vetoSpot = [this, grid](float& x, float& y, char const* what)
+        {
+            if (!grid)
+            {
+                return;
+            }
+
+            int gcx = 0, gcy = 0;
+            WorldToCell(x, y, gcx, gcy);
+            GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+            if (grid->At(cell.x, cell.y))
+            {
+                return;
+            }
+
+            GridPoint snapped;
+            if (!NearestWalkable(*grid, cell.x, cell.y, SPAWN_FALLBACK_SNAP_CELLS,
+                                 snapped))
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} event {} stands on a void cell and "
+                                 "found no floor within {} cell(s) - it stays where it was",
+                         instance->GetInstanceId(), what, SPAWN_FALLBACK_SNAP_CELLS);
+                return;
+            }
+
+            int scx = 0, scy = 0;
+            grid->GlobalFromLocalCell(snapped, scx, scy);
+            double wx = 0.0, wy = 0.0;
+            CellCentreToWorld(scx, scy, wx, wy);
+            x = static_cast<float>(wx);
+            y = static_cast<float>(wy);
+        };
+
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (!b.isEvent)
+            {
+                continue;
+            }
+
+            EventRoom event;
+            event.bx = b.bx;
+            event.by = b.by;
+            // A pocket's segment is its HOST's segment (SegmentOf reads
+            // branchOf for exactly this case), which is what puts one event
+            // per boss segment on its own draw.
+            event.segment = SegmentOf(plan, b);
+
+            float centreX = 0.0f, centreY = 0.0f, centreZ = 0.0f;
+            sPDv2Mgr->BlockToWorld(b.bx, b.by, mid, mid, centreX, centreY, centreZ);
+            // One block, one floor plane: BlockToWorld's Z is a property of
+            // the block, so the host, the wave and the cache all stand on it.
+            event.z = centreZ;
+
+            RoomAnchors const* anchors = sPDv2Mgr->RoomAnchorsFor(b.chunkId);
+
+            // The host on the ENTRY anchor - the cell every walk into the
+            // room arrives on, so a player who enters is already looking at
+            // him and the wave that follows them in has the whole room to
+            // cross. The block centre is the fallback for a chunk that
+            // publishes no anchors; it is walkable in every room variant the
+            // kit ships.
+            float hostX = centreX;
+            float hostY = centreY;
+            if (anchors && anchors->hasEntry)
+            {
+                float unusedZ = 0.0f;
+                sPDv2Mgr->BlockToWorld(b.bx, b.by, anchors->entry.u,
+                                       anchors->entry.v, hostX, hostY, unusedZ);
+            }
+            vetoSpot(hostX, hostY, "host");
+
+            // The reward's spot, decided now and summoned only if the party
+            // wins. The kit's chest anchor is the one the loop rooms' caches
+            // already use, clear of the walls and of the socket track.
+            event.chestX = centreX;
+            event.chestY = centreY;
+            event.chestZ = centreZ;
+            if (anchors && anchors->hasChest)
+            {
+                float unusedZ = 0.0f;
+                sPDv2Mgr->BlockToWorld(b.bx, b.by, anchors->chest.u,
+                                       anchors->chest.v, event.chestX,
+                                       event.chestY, unusedZ);
+            }
+            vetoSpot(event.chestX, event.chestY, "cache");
+
+            // The rim: the room's own six spawn anchors, FARTHEST FROM THE
+            // BLOCK CENTRE FIRST. The distance is taken in the block's own
+            // (u, v) frame, before the veto can nudge a point by a cell or
+            // two, so the order is a property of the kit rather than of this
+            // instance's walk grid - the same chunk always sends its wave in
+            // through the same door.
+            //
+            // Farthest first is the whole point: the outermost pair are the
+            // caster anchors (12.0 yd against the melee ring's 11.31), so the
+            // first attackers walk the longest way in and the party standing
+            // at the host has the most time to meet them.
+            //
+            // stable_sort and not sort: two anchors at the same radius keep
+            // the kit's own order, and "the same seed fights the same fight"
+            // must not turn on an implementation's choice of pivot.
+            struct RimAnchor
+            {
+                double d2 = 0.0;
+                float  x = 0.0f;
+                float  y = 0.0f;
+            };
+            std::vector<RimAnchor> ring;
+            if (anchors)
+            {
+                for (SpawnAnchor const& anchor : anchors->spawns)
+                {
+                    RimAnchor point;
+                    double const du = anchor.u - mid;
+                    double const dv = anchor.v - mid;
+                    point.d2 = du * du + dv * dv;
+                    float unusedZ = 0.0f;
+                    sPDv2Mgr->BlockToWorld(b.bx, b.by, anchor.u, anchor.v,
+                                           point.x, point.y, unusedZ);
+                    vetoSpot(point.x, point.y, "rim");
+                    ring.push_back(point);
+                }
+            }
+            std::stable_sort(ring.begin(), ring.end(),
+                             [](RimAnchor const& lhs, RimAnchor const& rhs)
+                             {
+                                 return lhs.d2 > rhs.d2;
+                             });
+            for (RimAnchor const& point : ring)
+            {
+                event.rim.emplace_back(point.x, point.y);
+            }
+            if (event.rim.empty())
+            {
+                // A chunk with no anchors at all. The wave then walks in on
+                // the host's own square, which is a worse fight and not a
+                // broken one - and TickEvents' modulo needs a non-empty rim.
+                event.rim.emplace_back(centreX, centreY);
+                LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} publishes no spawn anchors - "
+                                 "its event wave arrives on the block centre",
+                         instance->GetInstanceId(), b.chunkId);
+            }
+
+            // ONE synthetic room's worth of trash on the EVENT stream, drawn
+            // here and stored. Same inputs the ambush uses, with two on
+            // purpose: casterPct is the event's own key (a wave has to CLOSE
+            // on the host, not shoot him from the doorway) and affixPct is
+            // copied for the SHAPE of the stream only - the draw rolls
+            // `affixed` per pick either way, and proto.affixMask staying 0 in
+            // the tick is what says an event mob wears no affix.
+            SpawnSelectInputs in;
+            RoomRequest room;
+            room.roomIndex = 0;
+            room.isBoss = false;
+            in.rooms.push_back(room);
+            in.spawnsPerRoom = waveSize;
+            in.bossRoomAdds = 0;
+            in.casterPct = cfg.eventCasterPct;
+            in.affixPct = cfg.affixPct;
+            in.bandMin = account.cfgBandMin;
+            in.unlockedDlvl = static_cast<int>(account.dlvl);
+
+            std::vector<RoomSpawns> out;
+            uint32 const seed = plan.effectiveSeed ^ PD_EVENT_SEED_MIX ^
+                                (static_cast<uint32>(event.segment) * PD_SEGMENT_SEED_STEP);
+            if (sPDv2PackMgr->SelectSpawns(seed, in, out) && !out.empty() &&
+                !out[0].picks.empty())
+            {
+                event.picks = out[0].picks;
+            }
+            else if (waveSize > 0)
+            {
+                // The same degradation the room draw and the ambush take when
+                // the pack SQL was never applied: placeholder mammoths rather
+                // than a defence with nothing to defend against, which would
+                // be an unloseable free chest.
+                event.picks.assign(static_cast<size_t>(waveSize),
+                                   SpawnPick{ PLACEHOLDER_CREATURE, PACK_ROLE_MELEE, 0 });
+            }
+
+            Creature* host = instance->SummonCreature(
+                NPC_EVENT_HOST, Position(hostX, hostY, event.z, 0.0f));
+            if (!host)
+            {
+                // No host, no event - and deliberately no EventRoom either, so
+                // every entry in _events has a live GUID and EventStateFor
+                // cannot answer for a creature that was never born.
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the event host "
+                                  "(missing creature_template {}?) - block ({}, {}) "
+                                  "stays empty",
+                          instance->GetInstanceId(), uint32(NPC_EVENT_HOST), b.bx, b.by);
+                continue;
+            }
+
+            host->SetHomePosition(hostX, hostY, event.z, 0.0f);
+            // The module's blanket policy, and it applies to him too: nothing
+            // this dungeon summons pays kill reputation (SpawnTaggedMob states
+            // the case in full). He is meant to be killable, so unlike Chromie
+            // the flag is not academic here.
+            host->SetReputationRewardDisabled(true);
+            // _spawnedGuids, not _decorGuids: he is a creature, and that is
+            // the list DespawnAll walks with DespawnOrUnsummon - so a rebuild
+            // takes him down with the run he belongs to.
+            _spawnedGuids.push_back(host->GetGUID());
+
+            // NO SetDungeonHealth HERE, and the absence is deliberate.
+            //
+            // The design asks that the host scale like the mobs do, i.e. by
+            // the run's difficulty factor 100 + difficulty *
+            // V2.Diff.HealthPctPerLevel percent. He already does: the summon
+            // above went through PDv2Scaling exactly like every trash mob -
+            // IsDungeonCreature is true for him (map 760, no critter type, no
+            // player owner), so OnBeforeCreatureSelectLevel set him to
+            // PD_MOB_LEVEL and OnCreatureSelectLevel then applied that very
+            // multiplier inside SummonCreature (PDv2Scaling.cpp:232-263, and
+            // SpawnTaggedMob's affix comment says the same thing about the
+            // ordering). Re-applying it here would SQUARE it and hand a
+            // difficulty-10 party a host with several times the intended bar.
+            //
+            // What tunes the fight is therefore the template
+            // (mod_pdungeon_event.sql: rank 1 elite, HealthModifier 50,
+            // RegenHealth 0), which is where a retune belongs.
+            //
+            // Nothing touches his npcflag here either: the template already
+            // carries UNIT_NPC_FLAG_GOSSIP, which is what makes him clickable
+            // in the first place, and StartEvent is what takes it away.
+
+            event.host = host->GetGUID();
+
+            LOG_INFO(PD_LOG, "PDv2: instance {} staged an event in block ({}, {}) chunk {} "
+                             "- segment {}, host at ({:.1f}, {:.1f}, {:.1f}) with {} hp, "
+                             "{} attacker(s) on {} rim point(s)",
+                     instance->GetInstanceId(), b.bx, b.by, b.chunkId, event.segment,
+                     hostX, hostY, event.z, host->GetMaxHealth(),
+                     uint32(event.picks.size()), uint32(event.rim.size()));
+
+            _events.push_back(std::move(event));
+        }
     }
 
-    void PDv2InstanceScript::OnEventHostDied(Creature* /*host*/)
+    PDv2InstanceScript::EventRoom* PDv2InstanceScript::EventFor(ObjectGuid host)
     {
-        // No event is running, so a host that dies loses nothing.
+        if (host.IsEmpty())
+        {
+            return nullptr;
+        }
+        for (EventRoom& event : _events)
+        {
+            if (event.host == host)
+            {
+                return &event;
+            }
+        }
+        return nullptr;
+    }
+
+    bool PDv2InstanceScript::StartEvent(Creature* host, Player* starter)
+    {
+        if (!host)
+        {
+            return false;
+        }
+
+        EventRoom* event = EventFor(host->GetGUID());
+        // Idle and ONLY Idle. A running event must not have its clock reset
+        // by a second click, and a finished one must never go back to
+        // Running - the gossip already refuses both by offering the item only
+        // on Idle, but the gossip is a menu a client sends and this is the
+        // server's own answer to it.
+        if (!event || event->state != EventState::Idle)
+        {
+            return false;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        uint32 const now = getMSTime();
+
+        event->state = EventState::Running;
+        event->deadlineMs = now + static_cast<uint32>(cfg.eventDurationSec) * 1000;
+        // Now, not one interval from now: the first attacker walks in on the
+        // very next tick, so the fight starts when the player says it does
+        // rather than five silent seconds later.
+        event->nextSpawnMs = now;
+        event->nextPick = 0;
+
+        // No second offer while he is busy being defended. Put back by
+        // CloseEvent on a win, so his closing line has a menu to live in; a
+        // lost event leaves him dead and the flag with him.
+        host->RemoveNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+
+        std::string const notice = Acore::StringFormat(
+            "Hold the line! {} seconds.", cfg.eventDurationSec);
+        ForEachRunPlayer(instance, [&notice](Player* player)
+        {
+            sPDv2UILink->SendNotice(player, notice);
+        });
+
+        MarkRunDirty();
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} started the event in block ({}, {}) - "
+                         "{} s, {} attacker(s) every {} s, started by {}",
+                 instance->GetInstanceId(), event->bx, event->by,
+                 cfg.eventDurationSec, uint32(event->picks.size()),
+                 cfg.eventSpawnEverySec, starter ? starter->GetName() : "nobody");
+        return true;
+    }
+
+    void PDv2InstanceScript::TickEvents()
+    {
+        if (_events.empty())
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        uint32 const now = getMSTime();
+
+        for (EventRoom& event : _events)
+        {
+            // The steady state of every event on almost every tick: one that
+            // nobody has started yet, and one whose closing beat already ran.
+            if (event.state == EventState::Idle || event.closed)
+            {
+                continue;
+            }
+
+            // Not Running and not closed means OnEventHostDied moved it to
+            // Lost from inside the host's death, where despawning anything is
+            // forbidden, and left the closing to this pass.
+            if (event.state != EventState::Running)
+            {
+                CloseEvent(event);
+                continue;
+            }
+
+            Creature* host = instance->GetCreature(event.host);
+            if (!host || !host->IsAlive())
+            {
+                // He died between two ticks, or something took him off the
+                // map entirely. The same loss either way - "the pilgrim is no
+                // longer standing" is the whole losing condition.
+                event.state = EventState::Lost;
+                CloseEvent(event);
+                continue;
+            }
+
+            // Wrap-safe, exactly as TickFinale reads its own deadline:
+            // getMSTime() is a uint32 of milliseconds that wraps every 49.7
+            // days, and a plain `>=` across that wrap would park the event
+            // for another 49 of them.
+            if (static_cast<int32>(now - event.deadlineMs) >= 0)
+            {
+                event.state = EventState::Won;
+                CloseEvent(event);
+                continue;
+            }
+
+            if (static_cast<int32>(now - event.nextSpawnMs) < 0 ||
+                event.nextPick >= event.picks.size())
+            {
+                continue;
+            }
+
+            SpawnPick const& pick = event.picks[event.nextPick];
+
+            PDv2MobData proto;
+            proto.role = pick.role;
+            proto.casterSpellId = pick.casterSpellId;
+            // In no room, in no counter and never in the layout at all. The
+            // first two are what an ambush and a patrol already carry - an
+            // event attacker must not move a room's kill count or a barrier's
+            // numerator - and isExtra is the third, which is what keeps a
+            // wave that can be farmed for ever off the currency faucet while
+            // still dropping materials (PDv2MobData::isExtra says why).
+            proto.roomIndex = PD_ROOM_NONE;
+            proto.countsForRun = false;
+            proto.isExtra = true;
+            // affixMask stays 0: the draw rolled the flag, the design gives
+            // an event wave no affix, and 0 is what says so.
+
+            // Round-robin over the rim, so twelve attackers arriving through
+            // six doors come in pairs from opposite sides rather than all
+            // through one. The rim is never empty (SpawnEventRooms falls back
+            // to the block centre), so the modulo is safe.
+            std::pair<float, float> const& spot =
+                event.rim[event.nextPick % event.rim.size()];
+
+            if (Creature* mob = SpawnTaggedMob(pick.entry, proto, spot.first,
+                                               spot.second, event.z))
+            {
+                event.wave.push_back(mob->GetGUID());
+
+                // Straight at the pilgrim. His faction (1727, friendGroup 7 /
+                // enemyGroup 8) already makes him a valid enemy of every pack
+                // faction this dungeon spawns, so this only decides who the
+                // mob walks to FIRST.
+                if (CreatureAI* ai = mob->AI())
+                {
+                    ai->AttackStart(host);
+                }
+                // ...and the standing threat entry behind it, which is what
+                // decides who the mob turns to when its current victim is
+                // gone (EVENT_WAVE_HOST_THREAT says how much and why).
+                mob->GetThreatMgr().AddThreat(host, EVENT_WAVE_HOST_THREAT);
+            }
+
+            // Advanced whether or not the summon worked: a failed spawn costs
+            // the party one attacker, it must not stall the queue and hand
+            // them a silent, empty minute instead.
+            event.nextSpawnMs += static_cast<uint32>(cfg.eventSpawnEverySec) * 1000;
+            ++event.nextPick;
+        }
+    }
+
+    void PDv2InstanceScript::CloseEvent(EventRoom& event)
+    {
+        // EXACTLY ONCE. Two callers can reach a finished event - the tick
+        // that ended it, and the tick after a death that ended it from
+        // outside - and paying the reward twice is the failure this flag
+        // exists to make impossible.
+        if (event.closed)
+        {
+            return;
+        }
+        event.closed = true;
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        bool const won = event.state == EventState::Won;
+
+        // The wave leaves with the fight. Only the LIVE ones: a corpse is
+        // somebody's loot until they walk over to it, and mats drop from an
+        // extra mob always (PDv2MobData::isExtra). They are all in
+        // _spawnedGuids as well, so anything still standing at a rebuild goes
+        // with the run regardless.
+        uint32 dismissed = 0;
+        for (ObjectGuid const& guid : event.wave)
+        {
+            Creature* mob = instance->GetCreature(guid);
+            if (!mob || !mob->IsAlive())
+            {
+                continue;
+            }
+            mob->DespawnOrUnsummon();
+            ++dismissed;
+        }
+        event.wave.clear();
+
+        // A notice and not a chat line, for the reason the finale's portal is
+        // one: the addon paints these as raid warnings, and the end of a
+        // sixty-second defence is exactly the beat that must not scroll past.
+        char const* const line = won
+            ? "The pilgrim lives! Hold the line - won."
+            : "The pilgrim has fallen. The line is lost.";
+        ForEachRunPlayer(instance, [line](Player* player)
+        {
+            sPDv2UILink->SendNotice(player, line);
+        });
+
+        uint32 xp = 0;
+        if (won)
+        {
+            // The dead-end cache, on the spot SpawnEventRooms vetoed. Same
+            // GameObject and the same orientation literal as every other
+            // cache in the dungeon (SpawnDeadEndChests spells out why the
+            // four zeros after it are not a facing), so WP1's loot injection
+            // reaches it without knowing this room exists.
+            if (GameObject* cache = instance->SummonGameObject(
+                    GO_CHEST, event.chestX, event.chestY, event.chestZ,
+                    4.712389f, 0.0f, 0.0f, 0.0f, 0.0f, 0))
+            {
+                _decorGuids.push_back(cache->GetGUID());
+            }
+            else
+            {
+                LOG_ERROR(PD_LOG, "PDv2: instance {} won an event but failed to summon its "
+                                  "cache (missing gameobject_template {}?)",
+                          instance->GetInstanceId(), uint32(GO_CHEST));
+            }
+
+            // Scaled by the run's own loot multiplier, which is the number
+            // every other reward in this dungeon is already measured in - so
+            // a harder run pays more for the same minute of defence. uint64
+            // through the multiply: 1000 * 255 fits an uint32 comfortably,
+            // but the conf key is a uint32 and a wide product costs nothing.
+            xp = static_cast<uint32>(static_cast<uint64>(cfg.eventParagonXp) *
+                                     static_cast<uint64>(_run.lootMultX100) / 100);
+
+            // Everybody who is standing in the dungeon, not only whoever
+            // clicked: holding a line is what the whole party did.
+#ifdef PDV2_HAS_PARAGON
+            ForEachRunPlayer(instance, [xp](Player* player)
+            {
+                IncreaseParagonXP(player, xp);
+                ChatHandler(player->GetSession()).PSendSysMessage(
+                    "[Hold the line] +{} Paragon XP.", xp);
+            });
+#else
+            // No mod-paragon in this build, so nothing was paid - and the log
+            // line below must not claim that anything was.
+            xp = 0;
+#endif
+
+            // His menu back, so the gossip has something to open onto: the
+            // CreatureScript offers its one item only while EventStateFor
+            // says Idle, and this event says Won for the rest of the run.
+            if (Creature* host = instance->GetCreature(event.host))
+            {
+                host->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+            }
+        }
+
+        // The HUD's countdown and the host's health bar both come off this
+        // state, so the frame that follows has to be sent.
+        MarkRunDirty();
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} {} the event in block ({}, {}) - "
+                         "{} attacker(s) sent in, {} dismissed, {} paragon XP",
+                 instance->GetInstanceId(), won ? "won" : "lost", event.bx,
+                 event.by, uint32(event.nextPick), dismissed, xp);
+    }
+
+    void PDv2InstanceScript::OnEventHostDied(Creature* host)
+    {
+        if (!host)
+        {
+            return;
+        }
+
+        EventRoom* event = EventFor(host->GetGUID());
+        if (!event || event->state != EventState::Running)
+        {
+            return;
+        }
+
+        // RECORDED, not acted on. This runs inside Unit::setDeathState, so it
+        // may not despawn the wave that killed him - the next TickEvents pass
+        // sees a state that is neither Running nor closed and does the whole
+        // closing beat there, at most one second later.
+        //
+        // Doing it here rather than leaving the death entirely to the tick's
+        // own !IsAlive() test is what makes the LOSS instant: the gossip and
+        // the HUD read this state, and a pilgrim lying dead under a menu that
+        // still says "Hold the line with me!" is a second of nonsense.
+        event->state = EventState::Lost;
+        MarkRunDirty();
     }
 
     PDv2InstanceScript::EventState
-    PDv2InstanceScript::EventStateFor(ObjectGuid /*host*/) const
+    PDv2InstanceScript::EventStateFor(ObjectGuid host) const
     {
-        // Every host is Idle until Task 4 tracks them, which is also what
-        // keeps the gossip showing its one offer.
+        if (host.IsEmpty())
+        {
+            return EventState::Idle;
+        }
+        for (EventRoom const& event : _events)
+        {
+            if (event.host == host)
+            {
+                return event.state;
+            }
+        }
+        // Total by design: any creature, at any time, in any run - including
+        // one whose layout has no event at all - answers Idle. That is what
+        // makes the gossip's call safe without a second gate.
         return EventState::Idle;
+    }
+
+    bool PDv2InstanceScript::EventHudFields(uint32& secLeft, uint32& npcPct) const
+    {
+        uint32 const now = getMSTime();
+        for (EventRoom const& event : _events)
+        {
+            if (event.state != EventState::Running)
+            {
+                continue;
+            }
+
+            Creature* host = instance->GetCreature(event.host);
+            if (!host)
+            {
+                // He is gone and the next tick will call it lost. Reporting
+                // nothing for that one second is better than a bar read off
+                // a creature that is not there.
+                continue;
+            }
+
+            // Ceiling, so a defence with 200 ms left still reads "1" and the
+            // countdown only shows 0 once it is actually over. Wrap-safe like
+            // every other read of this deadline.
+            int32 const leftMs = static_cast<int32>(event.deadlineMs - now);
+            secLeft = leftMs > 0 ? static_cast<uint32>((leftMs + 999) / 1000) : 0u;
+            // Truncated on purpose, the way a health bar is read everywhere
+            // else: 99.6 % is not yet full and must not print as 100.
+            npcPct = static_cast<uint32>(host->GetHealthPct());
+            return true;
+        }
+        return false;
     }
 }
