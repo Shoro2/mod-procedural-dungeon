@@ -503,10 +503,13 @@ namespace PDungeon
                 }
                 if (PDv2Debug())
                 {
+                    // The count is the news, not the clause: 0 here means the
+                    // class alone found nothing either and the raw union is
+                    // drawn next.
                     LOG_INFO(PD_LOG, "PDv2 loot: the union of {} and {} held "
                                      "nothing for class {} at stat profile {} "
-                                     "- profile dropped, class kept ({} "
-                                     "candidates)", a, b,
+                                     "- retried with the class alone: {} "
+                                     "candidate(s)", a, b,
                              uint32(looter->getClass()), uint32(profile),
                              uint32(candidates.size()));
                 }
