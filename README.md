@@ -105,6 +105,18 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > module reads the talent by its aura tag (`EffectMiscValue` 76001), never by spell id, so the FT
 > content can renumber freely.
 >
+> **After Runde 31 (Round E / WP8).** Dungeon creatures drop **no item loot of their own**
+> any more (`V2.Loot.NativeItems`, default off; gold stays): the packs are stock Shadowfang,
+> Scholomance and Twilight creatures whose tables are not FL content — everything worth
+> having comes from the pools (mats and Remnants into the bags, gear on bosses and in
+> caches). The **mats pool is exactly what the Endless Storage stores** (trade goods and
+> raw gems, stackable; no cut gems). The HUD's gate line describes the segment you stand in
+> and says `Gate open` once its barrier is up; the event row is a bar (time left, NPC
+> health). A won event leaves a small **Pilgrim's Cache** where the pilgrim stood and he
+> departs; he and every boss face the doorway they are entered through. If a chest shows
+> the cursor but does nothing on click, the client's object cache is stale — the server's
+> `ClientCacheVersion` bump refreshes it on the next login.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
