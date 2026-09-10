@@ -20,6 +20,12 @@ pool sizes in the Round E spec (§1.3) were measured. Nothing here was applied.
 | `p6b.sql` | P6 materials census with the entry-band expansion heuristic and the junk filter |
 | `bossmap.sql` | the `boss_*` ScriptName → map attribution scan used to find summoned bosses |
 
+The generator these seeds became is `scripts/106_pd_loot_pools.py` in the workspace
+(`C:\wowstuff\ForgottenLand2.0\scripts\`, backed up in the vault at
+`share-public/python_scripts/pdv2-loot/106_pd_loot_pools.py`); it parameterises `tmpl4.sql`
+once per pool and writes `data/sql/db-world/mod_pdungeon_loot_pools.sql` — regenerate it,
+never hand-edit it.
+
 Six schema facts the resolver depends on (all measured, see the spec §1.3):
 `rank = 3` is *world boss*, not dungeon boss; `Reference <> 0` means the `Item`
 column is not an item; difficulty clones keep `rank` but lose `ScriptName`;
