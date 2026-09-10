@@ -3960,4 +3960,36 @@ namespace PDungeon
             TickAmbushes();
         }
     }
+
+    // ----------------------------------------------------------------------
+    // Round E / WP5: event rooms ("Hold the line") - STUBS.
+    //
+    // WP5 Task 3 ships the host NPC (creature 910551, its gossip, its passive
+    // AI and the binder yield that keeps PDv2MobAI away from it). The state
+    // machine that makes the event actually happen is WP5 Task 4, and these
+    // three bodies are what lets Task 3 link and be tested on its own: the
+    // NPC is spawnable, clickable and inert. Task 4 replaces the bodies and
+    // keeps the signatures declared in the header.
+    // ----------------------------------------------------------------------
+
+    bool PDv2InstanceScript::StartEvent(Creature* /*host*/, Player* /*starter*/)
+    {
+        // Nothing is armed yet, so nothing can be started. The gossip has
+        // already closed its menu by the time this returns, so a player who
+        // clicks the offer simply sees the window shut.
+        return false;
+    }
+
+    void PDv2InstanceScript::OnEventHostDied(Creature* /*host*/)
+    {
+        // No event is running, so a host that dies loses nothing.
+    }
+
+    PDv2InstanceScript::EventState
+    PDv2InstanceScript::EventStateFor(ObjectGuid /*host*/) const
+    {
+        // Every host is Idle until Task 4 tracks them, which is also what
+        // keeps the gossip showing its one offer.
+        return EventState::Idle;
+    }
 }

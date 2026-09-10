@@ -1952,6 +1952,24 @@ public:
             return nullptr;
         }
 
+        // Round E / WP5. The event room's host is the one creature on this
+        // map that is attackable, ownerless, not a critter - and must never
+        // engage anything. He is the DEFENDED party, not a combatant.
+        //
+        // This yield is not optional and not a nicety. AllCreatureScript::
+        // GetCreatureAI runs BEFORE template scripts (the comment above), so
+        // without it this binder wins and npc_pdungeon_event::GetAI is never
+        // asked: the host would get PDv2MobAI, whose UpdateProximityAggro is
+        // NOT gated on the `_mob` tag (that is why Chromie survives it - her
+        // unit_flags 514 make her harmless, and 910551 deliberately has
+        // unit_flags 0). A pilgrim who charges the party the moment one walks
+        // past is the exact bug. Returning nullptr hands the decision on to
+        // the template script, which supplies EventHostAI (a PassiveAI).
+        if (creature->GetEntry() == PDungeon::NPC_EVENT_HOST)
+        {
+            return nullptr;
+        }
+
         return new PDungeon::PDv2MobAI(creature);
     }
 };

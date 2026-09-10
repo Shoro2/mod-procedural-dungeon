@@ -388,6 +388,47 @@ namespace PDungeon
         // no script at all - {0, 0} - can never look like a real one.
         uint32 RunGeneration() const { return _runGeneration; }
 
+        // ------------------------------------------------------------------
+        // Round E / WP5: event rooms ("Hold the line")
+        //
+        // The three entry points the event host NPC (creature 910551,
+        // src/PDv2EventNPC.cpp) needs. They live here and not on the script
+        // because the event is a property of the RUN - its waves are drawn
+        // from this run's packs, its clock rides this class's 1 Hz tick and
+        // its reward is paid into this run's state - while the creature is
+        // only the thing a player clicks and the waves hit.
+        //
+        // WP5 Task 3 declares them with the minimal bodies below (in the
+        // .cpp) so the NPC links and behaves inertly: a click closes the
+        // menu and nothing happens, a death is ignored. WP5 Task 4 replaces
+        // those bodies with the state machine and keeps these signatures.
+        // ------------------------------------------------------------------
+
+        // Where one event stands. `Idle` is also the answer for a host this
+        // run has never heard of, which is what makes EventStateFor safe to
+        // call from a gossip hello on any creature at any time.
+        enum class EventState : uint8
+        {
+            Idle,
+            Running,
+            Won,
+            Lost
+        };
+
+        // A player accepted the host's offer. Returns whether an event was
+        // actually armed - false while the stub stands, and later false for
+        // a host that is already running, already finished, or has no room.
+        bool StartEvent(Creature* host, Player* starter);
+
+        // The host was killed. Called from EventHostAI::JustDied, i.e. from
+        // inside the death itself, so it must never teleport or despawn
+        // anything - it only records the loss for the tick to act on.
+        void OnEventHostDied(Creature* host);
+
+        // The state of the event staged around `host`, by GUID. Const and
+        // total: an unknown GUID answers Idle.
+        EventState EventStateFor(ObjectGuid host) const;
+
     private:
         void SpawnFromPlan(BlockPlan const& plan);
 

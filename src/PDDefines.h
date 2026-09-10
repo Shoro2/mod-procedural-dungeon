@@ -64,7 +64,16 @@ namespace PDungeon
         // AND 910549 never reaches her; her row lives in its own file,
         // mod_pdungeon_chromie.sql. No ScriptName - PDv2InstanceScript's
         // _finale holds her GUID and speaks her lines.
-        NPC_CHROMIE      = 910550
+        NPC_CHROMIE      = 910550,
+        // Round E / WP5: the event room's host, the "Weary Pilgrim" a party
+        // defends while waves walk in. Second entry of the 910550-910599
+        // sub-block; his row lives in its own file, mod_pdungeon_event.sql,
+        // for the same reason hers does. ScriptName 'npc_pdungeon_event'
+        // (src/PDv2EventNPC.cpp) supplies both his gossip and his AI, and
+        // PDv2CreatureAIBinder yields on this entry so he can never be handed
+        // PDv2MobAI - unlike Chromie he is attackable, so that AI's proximity
+        // aggro would make him hunt players.
+        NPC_EVENT_HOST   = 910551
     };
 
     enum PDSpells : uint32
