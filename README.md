@@ -95,6 +95,16 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > counts toward the run, the gates or the room total. The layout decides where an event room
 > sits (layout version 5), so a stored dungeon rerolls once.
 >
+> **Respawn echoes (Round E / WP6).** The Forgotten Talents node *Restless Echoes* (a legendary node
+> behind the deepest combat milestone, two ranks) makes every ordinary kill in the depths rise again
+> as one or two **echoes** of the same creature — full copies that attack the killer at once. Echoes
+> are rewards, not progress: they count toward no room, gate or run total, drop materials but no
+> Remnants (`V2.Loot.Currency.ExtraMobsDropCurrency`), pay Paragon XP like any kill, and never echo
+> themselves; bosses, event waves and Lil' Bro children never echo either. `V2.Respawn.Enable`
+> switches the feature, `V2.Respawn.MaxCopies` (2) caps the count below whatever the node says. The
+> module reads the talent by its aura tag (`EffectMiscValue` 76001), never by spell id, so the FT
+> content can renumber freely.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
