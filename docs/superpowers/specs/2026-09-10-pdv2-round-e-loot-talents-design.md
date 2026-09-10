@@ -1,9 +1,9 @@
 # PDv2 Round E — loot, five currencies, the Forgotten-Talents purchase model, run cap, and the leftovers
 
 **Date** 2026-09-10 · **Status** **APPROVED 2026-09-10 — the operator accepted the design and every default
-in §2 ("ok machen wir so"). WP1 (L1–L5), WP3 (R1–R4), WP2 (T1), WP4 (K1+K2 = kit v39) and WP5 (R5
-event rooms) are BUILT and T1 on the workbench (PD branch, FT `c6e2221`, core `adec223ba`; installed, booted,
-patch-9 rebuilt, kit v39 deployed; runde31 §1–§8); T2 = Runde 31; WP6 (T2 legendary nodes) not started** ·
+in §2 ("ok machen wir so"). WP1 (L1–L5), WP3 (R1–R4), WP2 (T1), WP4 (K1+K2 = kit v39), WP5 (R5
+event rooms) and WP6 (T2 legendary nodes) are BUILT and T1 on the workbench (PD branch, FT `bba4d30` + `fe2bbee`, core `adec223ba`, itemgen `1605a7c` + `547f4de`; installed, booted,
+patch-9 rebuilt twice, kit v39 deployed; runde31 §1–§9); T2 = Runde 31 — nothing merged** ·
 **Branches** `claude/pdv2-round-e-63ac9a2a` in `mod-procedural-dungeon` (off the plan branch `117b629` =
 `main` `d47e015` + docs), the same name in `mod-forgotten-talents`, `azerothcore-wotlk` (one
 prepared-statement block) and, for WP6, `mod-paragon-itemgen` · **Plans**
@@ -479,7 +479,7 @@ Delivery: patch-9 rebuild via workspace script 30 (`FT_ADDON` = the module check
 
 **Everywhere active**: nothing in T1 depends on the map — the tree works exactly as before outside the dungeon.
 
-### T2 — three legendary nodes (WP6, design only here)
+### T2 — three legendary nodes (WP6 — BUILT 2026-09-10; plan `docs/superpowers/plans/2026-09-10-pdv2-round-e-wp6-legendary-nodes.md`; three measured deviations: template 120733 has `DurationIndex` 0 and levels 0, stock icons 221/335/3421 because the Ebonhold `SpellIcon.dbc` is not on the workbench (icon test stays 83), questing parent = 199)
 
 - **Extension contract** in the importer: `content/extra_nodes.json` (nodes with `id ≥ 2000`, `parents`, `x/y`
   on free grid points, `ranks[]` with the spell's name/icon/description/basePoints, `costMult`) merged after
@@ -593,7 +593,7 @@ columns `cfg_loot_*` and the tab itself are WP7.
 | **WP3** | R1 cap, R2 rooms, R3 debug, R4 preview | mod-procedural-dungeon | `…-round-e-wp3-cap-rooms-debug-preview.md` (written) | Runde 31 |
 | **WP4** | K1 + K2 = kit v39 | workspace scripts 48/51 (+ notes diffs), module chunk-meta SQL | written at start | Runde 32 (+ launcher) |
 | **WP5** | R5 event rooms | mod-procedural-dungeon | written at start | Runde 33 |
-| **WP6** | T2 three legendary nodes + PD respawn + itemgen curse hooks | mod-forgotten-talents, mod-procedural-dungeon, mod-paragon-itemgen | written at start | Runde 33 |
+| **WP6** | T2 three legendary nodes + PD respawn + itemgen curse hooks | mod-forgotten-talents, mod-procedural-dungeon, mod-paragon-itemgen | `2026-09-10-pdv2-round-e-wp6-legendary-nodes.md` | Runde 31 §9 |
 | **WP7** | F1 | — | not scheduled | — |
 
 Order: **WP1 → WP3 → WP2** (WP2 only needs the five item ids, fixed above, so it can run in parallel in its own
