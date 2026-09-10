@@ -155,6 +155,31 @@ namespace PDungeon
         _config.ambushStunSpell = sConfigMgr->GetOption<uint32>(
             "ProceduralDungeon.V2.Ambush.StunSpell", 20170);
 
+        // Round E / WP5: the event room. ChancePct is clamped into a percent
+        // for both of the reasons V2.Branches is clamped - it IS one, and it is
+        // persisted into a TINYINT UNSIGNED column (gen_event_pct) that a typo
+        // above 255 would make unwritable, taking the layout that was just
+        // generated down with it. It is also the only one of the five read at
+        // GENERATION time; the four below are engine-side and read live.
+        _config.eventChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Event.ChancePct", 25)));
+        // 10..600 s. Under ten seconds the wave timer barely gets its first
+        // attacker out and the reward is free; over ten minutes one event
+        // outlasts the run it sits in.
+        _config.eventDurationSec = std::min(600, std::max(10, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Event.DurationSec", 60)));
+        // 1..60 s. One per second is as fast as the 1 Hz tick can spawn, and a
+        // gap longer than a minute outlives the longest defence above.
+        _config.eventSpawnEverySec = std::min(60, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Event.SpawnEverySec", 5)));
+        _config.eventCasterPct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Event.CasterPct", 10)));
+        // Unclamped on purpose, exactly like the ambush's stun spell above: the
+        // type is already the bound, 0 means "pay no Paragon XP", and what one
+        // module pays into another's progression is the operator's call.
+        _config.eventParagonXp = sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Event.ParagonXp", 1000);
+
         // Round E / L2: the five currency items. Clamped to at least 1 because
         // 0 is not an item id and every grant would silently fail on it; a tier
         // is retired with its ChancePct, never by blanking its item. These five
@@ -305,6 +330,9 @@ namespace PDungeon
                                    GameFieldBlocksForRooms(cfg.rooms + cfg.bossRooms + 1));
         cfg.detourChancePct = _config.detourChancePct;
         cfg.branches = _config.branches;
+        // Round E / WP5: a layout input like the two above it, so the value the
+        // plan was generated with is the one SavePlanToDB stores (gen_event_pct).
+        cfg.eventChancePct = _config.eventChancePct;
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;
         cfg.theme = themeOverride ? themeOverride : _config.theme;
@@ -349,21 +377,24 @@ namespace PDungeon
         // cached state keeps a first `v2 gen` from silently disagreeing with
         // the state the server has been using since login.
 
-        // gen_loop_pct carries V2.DetourChance since B0b
+        // gen_loop_pct carries V2.DetourChance since B0b; gen_event_pct carries
+        // V2.Event.ChancePct since Round E / WP5
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
-            "gen_loop_pct, gen_branches, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
-            "cfg_packs) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
+            "gen_loop_pct, gen_branches, gen_event_pct, cfg_rooms, cfg_difficulty, "
+            "cfg_caster_pct, cfg_mob_level_min, cfg_packs) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE theme = VALUES(theme), "
             "layout_seed = VALUES(layout_seed), layout_version = VALUES(layout_version), "
             "gen_rooms = VALUES(gen_rooms), gen_boss_rooms = VALUES(gen_boss_rooms), "
             "gen_field_blocks = VALUES(gen_field_blocks), gen_origin_bx = VALUES(gen_origin_bx), "
             "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct), "
-            "gen_branches = VALUES(gen_branches)",
+            "gen_branches = VALUES(gen_branches), gen_event_pct = VALUES(gen_event_pct)",
             accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
             cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.detourChancePct, cfg.branches,
-            state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct, state.cfgBandMin, packs);
+            cfg.eventChancePct, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
+            state.cfgBandMin, packs);
     }
 
     void PDv2Mgr::LoadAccountState(uint32_t accountId)
@@ -593,7 +624,8 @@ namespace PDungeon
 
         QueryResult result = CharacterDatabase.Query(
             "SELECT layout_seed, layout_version, theme, gen_rooms, gen_boss_rooms, "
-            "gen_field_blocks, gen_origin_bx, gen_origin_by, gen_loop_pct, gen_branches "
+            "gen_field_blocks, gen_origin_bx, gen_origin_by, gen_loop_pct, gen_branches, "
+            "gen_event_pct "
             "FROM pdungeon_account WHERE accountId = {}", accountId);
         if (!result)
         {
@@ -607,6 +639,12 @@ namespace PDungeon
         {
             return;
         }
+        // A foreign version means the stored inputs no longer describe the
+        // dungeon this generator would build from them, so the row is kept and
+        // the account rerolls on its next `v2 gen`. What makes a row written
+        // yesterday foreign is v5: `gen_event_pct` joined the generation inputs,
+        // and a v4 row would otherwise come back at the column default of 0 - an
+        // eventless dungeon, silently and for ever (PDv2Mgr.h, the ladder).
         if (version != PD_LAYOUT_VERSION)
         {
             LOG_INFO(PD_LOG, "PDv2: account {} has a layout stamped v{} (current v{}) - "
@@ -625,6 +663,7 @@ namespace PDungeon
         cfg.originBY = fields[7].Get<uint16>();
         cfg.detourChancePct = fields[8].Get<uint8>();
         cfg.branches = fields[9].Get<uint8>();
+        cfg.eventChancePct = fields[10].Get<uint8>();
 
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))

@@ -1126,3 +1126,104 @@ ProceduralDungeon.V2.Ambush.Mobs = 4
 
 ProceduralDungeon.V2.Ambush.StunSpell = 20170
 
+#
+#    ProceduralDungeon.V2.Event.ChancePct
+#        Description: Round E / WP5 (2026-09-10): percent chance, per boss
+#                     segment, that the segment gets an EVENT ROOM - a
+#                     dead-end pocket off the main path with a lost pilgrim
+#                     in it who asks to be defended. A gossip click starts
+#                     the defence: attackers spawn at the room's rim and go
+#                     for him, and if he is still standing when the timer
+#                     runs out a cache appears and everyone on the map is
+#                     paid Paragon XP. At most one per segment, and a
+#                     segment with no free spine room to hang the pocket
+#                     off gets none.
+#
+#                     A LAYOUT input, and the only one of the five V2.Event
+#                     keys that is: the room is drawn by the GENERATOR, so
+#                     this value is read when a dungeon is generated and
+#                     stored with it (pdungeon_account.gen_event_pct) for
+#                     login to rebuild the same dungeon from. A .reload
+#                     config therefore reaches the NEXT dungeon somebody
+#                     generates and leaves every stored one exactly as it
+#                     is - `.pdungeon v2 gen` is what applies a new value
+#                     to an account.
+#
+#                     0 switches event rooms off and costs no draw at all,
+#                     so a layout generated at 0 is identical to one from
+#                     before the feature existed.
+#        Default:     25
+#
+
+ProceduralDungeon.V2.Event.ChancePct = 25
+
+#
+#    ProceduralDungeon.V2.Event.DurationSec
+#        Description: Round E / WP5: how long one defence runs, in seconds.
+#                     The event IS this countdown - the pilgrim only has to
+#                     be alive when it reaches zero - so a longer timer
+#                     makes the event harder, not slower.
+#
+#                     Clamped to 10..600. Under ten seconds the wave timer
+#                     barely gets its first attacker out and the reward
+#                     would be free; over ten minutes one event outlasts
+#                     the run it sits in. Read LIVE, so a .reload config
+#                     retunes the next defence that is STARTED and leaves
+#                     one that is already being fought alone.
+#        Default:     60
+#
+
+ProceduralDungeon.V2.Event.DurationSec = 60
+
+#
+#    ProceduralDungeon.V2.Event.SpawnEverySec
+#        Description: Round E / WP5: how often a running defence sends the
+#                     next attacker, in seconds. With the two defaults that
+#                     is roughly a dozen creatures over a 60 s fight,
+#                     arriving one at a time - the pressure comes from the
+#                     stream, not from the size of any one wave.
+#
+#                     Clamped to 1..60: one per second is as fast as the
+#                     1 Hz tick can spawn anything, and a gap longer than a
+#                     minute outlives the longest defence the key above
+#                     allows. Read LIVE.
+#        Default:     5
+#
+
+ProceduralDungeon.V2.Event.SpawnEverySec = 5
+
+#
+#    ProceduralDungeon.V2.Event.CasterPct
+#        Description: Round E / WP5: percent of an event wave drawn as
+#                     casters, the rest melee. Deliberately far below the
+#                     account's own caster ratio: the attackers have to
+#                     CLOSE on the pilgrim for the defence to be a fight
+#                     worth standing in, and a caster-heavy wave would
+#                     simply shoot him from the rim while the players give
+#                     chase.
+#
+#                     Clamped to 0..100. Read LIVE, when a defence draws
+#                     its wave.
+#        Default:     10
+#
+
+ProceduralDungeon.V2.Event.CasterPct = 10
+
+#
+#    ProceduralDungeon.V2.Event.ParagonXp
+#        Description: Round E / WP5: the Paragon XP every player on the map
+#                     is paid when a defence is WON, before the run's loot
+#                     multiplier scales it. Nothing is paid for a defence
+#                     that fails; 0 pays nothing at all and leaves the
+#                     cache as the whole reward.
+#
+#                     Unclamped on purpose, like V2.Ambush.StunSpell above:
+#                     the type (unsigned) is already the only bound that
+#                     matters, and what one module pays into another's
+#                     progression is the operator's call and not this
+#                     module's. Read LIVE, at the moment the event is won.
+#        Default:     1000
+#
+
+ProceduralDungeon.V2.Event.ParagonXp = 1000
+

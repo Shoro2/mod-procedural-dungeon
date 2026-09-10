@@ -184,6 +184,33 @@ namespace PDungeon
         int         ambushMobs = 4;
         uint32_t    ambushStunSpell = 20170;
 
+        // Round E / WP5 (2026-09-10). The event room: a dead-end pocket off
+        // the spine with a host who asks to be defended, one per boss segment
+        // at most.
+        //
+        // ChancePct is a LAYOUT input, and the only one of the five that is:
+        // the generator draws the pocket, so this value is read when a plan is
+        // GENERATED, stored with it as pdungeon_account.gen_event_pct and read
+        // back on login to rebuild the same dungeon. A `.reload config`
+        // therefore reaches the NEXT generated dungeon and leaves every stored
+        // one alone. Clamped 0..100 for two reasons at once: it is a percent,
+        // and the column is TINYINT UNSIGNED - a typo above it would make
+        // SavePlanToDB fail under strict sql_mode and lose the layout that was
+        // just generated (the gen_branches lesson, LoadConfig says it again).
+        int         eventChancePct = 25;
+
+        // The other four are engine-side and read LIVE, like the ambush trio
+        // above: how long one defence runs, how often it sends the next
+        // attacker, how much of a wave is casters (far below the account's own
+        // ratio on purpose - the wave has to CLOSE on the host, not shoot him
+        // from the rim), and the Paragon XP a won defence pays. None of them
+        // is part of what a layout IS, so retuning them re-arms the next event
+        // instead of rerolling anybody's dungeon.
+        int         eventDurationSec = 60;
+        int         eventSpawnEverySec = 5;
+        int         eventCasterPct = 10;
+        uint32_t    eventParagonXp = 1000;
+
         // Round E / L2-L4 (2026-09-10). The loot half of a run: five
         // currencies, the room factor their chances are scaled by, the per-mob
         // material band, how much gear each source pays, where the gear pools
@@ -337,7 +364,18 @@ namespace PDungeon
     // so a stored v3 seed at the same cfg_rooms now builds one room more and
     // the whole chain draw shifts with it. Every stored layout rerolls once;
     // dlvl/dxp untouched, as before.
-    constexpr uint32_t PD_LAYOUT_VERSION = 4;
+    //
+    // v5 (2026-09-10, Round E / WP5): event pockets are a layout input. The
+    // generator seats up to one dead-end event room per boss segment from
+    // V2.Event.ChancePct, and `gen_event_pct` joins the stored generation
+    // inputs beside gen_branches. A v4 row predates that column and carries
+    // its DEFAULT 0, so it regenerates once rather than for ever: a plan
+    // stored at 25 % that was generated with 0 % would silently miss its
+    // events, and nothing would say so - at 0 % the coin costs no draw, so the
+    // old seed still regenerates cleanly and not even the "should have been
+    // bumped" error path below would fire. Every stored layout rerolls once;
+    // dlvl/dxp untouched, as before.
+    constexpr uint32_t PD_LAYOUT_VERSION = 5;
 
     class PDv2Mgr
     {
