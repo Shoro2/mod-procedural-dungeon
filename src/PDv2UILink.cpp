@@ -783,18 +783,30 @@ namespace PDungeon
             }
 
             // The whole point of HELLO: one round trip restores everything a
-            // relog or a /reload lost. Outside the dungeon that is the panel;
-            // inside it is also the map and the run frame, which is the gap
-            // the dungeon-challenge HUD never closed.
+            // relog or a /reload lost. Outside the dungeon that is the panel
+            // and the layout it previews; inside it is also the run frame,
+            // which is the gap the dungeon-challenge HUD never closed.
+            //
+            // The map is no longer sent only on the dungeon map (Round E / R4):
+            // the gen panel draws its layout preview from the same M and K
+            // payloads the HUD does, so an account with a STORED plan that
+            // opens /pd anywhere else must receive them too - otherwise the
+            // preview stays empty until the player presses Generate. Doing it
+            // unconditionally costs nothing when there is no plan: both send
+            // nothing at all in that case, which is the same silence the map
+            // gate used to produce.
             SendCfg(player);
+            SendMap(player);
+            // Round C / C7, and immediately after the map it colours: a
+            // player who walked in halfway through someone else's run has
+            // no other way to learn which rooms are already empty, and the
+            // tick alone would only ever tell them about the NEXT clear.
+            // ScriptFor is nullptr outside the dungeon, and that is the
+            // answer rather than a shortcut - no run means no cleared rooms,
+            // which is exactly the uncoloured layout the preview wants.
+            SendCleared(player, ScriptFor(player));
             if (player->GetMapId() == sPDv2Mgr->GetConfig().mapId)
             {
-                SendMap(player);
-                // Round C / C7, and immediately after the map it colours: a
-                // player who walked in halfway through someone else's run has
-                // no other way to learn which rooms are already empty, and the
-                // tick alone would only ever tell them about the NEXT clear.
-                SendCleared(player, ScriptFor(player));
                 SendRunTick(player);
             }
             return;
