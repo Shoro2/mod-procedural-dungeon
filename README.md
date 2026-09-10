@@ -52,6 +52,24 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > centre pad. Eight conf keys tune the three hazards; every code default equals the shipped
 > `.conf.dist` value, so none has to be set.
 >
+> **Round E (2026-09-10) gives the dungeon its loot.** Every kill pays every player on the map
+> personally: a **Faded Remnant** (white) always, a **Gleaming Remnant** (green) at 5 %, a
+> **Radiant Remnant** (blue) at 1 % — the five Round-E currencies 920105–920109 that the
+> Forgotten Talents tree is bought with — scaled by a **room factor** (a ten-room run pays the
+> listed chance, a one-room run a tenth of it, +1 % per room above ten, so one-room farming
+> does not pay), plus 1..5 random **materials** from every expansion, the count growing with
+> the dungeon level. **Gear** comes from six pools generated out of the world DB by workspace
+> script 106 (`pdungeon_loot_pool`): the Shifting Cache in dead ends and loop rooms holds a
+> WotLK heroic-dungeon or non-ICC normal-raid epic (ICC normal from dungeon level 10), every
+> boss corpse a ToGC / Ruby-Sanctum heroic item, Chromie's Cache an ICC 10/25 item (ICC heroic
+> from dungeon level 10) plus the **Sovereign** (purple, difficulty ≥ 50, 50 %) and **Eternal**
+> (orange, ≥ 75, 10 %) Remnants and the old Azealia-Underground rares (five mounts at
+> 1/10 000, the Expert Emblem, the Exobeast plate, the Mystery Boxes). Finished **tier-set
+> pieces** are in the pools; tier tokens, VoA and PvP gear are not. Gear is filtered to what
+> the looter's class and race can wear, item counts scale with the loot multiplier, and every
+> number is a `ProceduralDungeon.V2.Loot.*` key whose code default equals the shipped
+> `.conf.dist`. All loot rolls use the core's `urand` — the layout is seeded, the loot never is.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
