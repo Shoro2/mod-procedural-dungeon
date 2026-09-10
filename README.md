@@ -126,6 +126,14 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > the profile is dropped first, never the class. The choice is per account; the unlock
 > is per character (the talent).
 >
+> **Night fixes (Round E / WP10–WP11).** Every cache disappears once it is looted empty
+> (it used to refill from its template on the next click). The portal after the last boss
+> lands on the `game_tele` row named in `V2.Finale.TeleName` (`flcapital`). Materials from
+> kills and bonus rolls go **straight into the Endless Storage** (`V2.Loot.MatsToStorage`),
+> with a `[Depths] Stored …` line in chat; Remnants stay in the bags because the talent tree
+> spends them from there — and the storage's own deposit button will happily take them, so
+> withdraw before buying.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
