@@ -66,14 +66,22 @@ INSERT INTO `creature_template_model` (`CreatureID`, `Idx`, `CreatureDisplayID`,
 -- at this Entry. The GO row itself lives in mod_pdungeon_templates_fix.sql
 -- (that file owns the whole 910040-910099 sub-block; see its header).
 --
--- PLACEHOLDER CONTENT by decision (spec C8.1): the five FL crafting mats
--- 920100-920104 at 100 %, so the finale has something to hand out until the
--- real reward table is designed. The cache is Data3 = 1 (consumable), so this
--- pays out once per spawned chest, not once per restock tick.
+-- FILLER, not the reward. Round E's real payout for this cache is injected
+-- at RUNTIME - 25 % filler beside the Round-E gear/currency/bonus injection
+-- at GO_ACTIVATED (src/PDv2ChestLoot.cpp), which adds the rolled ICC gear,
+-- the T4/T5 currencies and the L5 legacy-rare bonus hits to go->loot after
+-- Player::SendLoot has filled these template rows (Player.cpp:7893) and
+-- before the loot packet goes out (Player.cpp:8200-8205). Five GUARANTEED
+-- mat stacks on top of that would drown it, so the Chance below is 25 and
+-- not the C8.1 placeholder's 100: on average a bit over one mat stack per
+-- cache instead of five. The Min/MaxCount ladder is unchanged.
+--
+-- The cache is Data3 = 1 (consumable), so this pays out once per spawned
+-- chest, not once per restock tick.
 DELETE FROM `gameobject_loot_template` WHERE `Entry` = 910068;
 INSERT INTO `gameobject_loot_template` (`Entry`, `Item`, `Reference`, `Chance`, `QuestRequired`, `LootMode`, `GroupId`, `MinCount`, `MaxCount`, `Comment`) VALUES
-(910068, 920100, 0, 100, 0, 1, 0, 3, 5, 'PD finale cache - Forgotten Shard (placeholder)'),
-(910068, 920101, 0, 100, 0, 1, 0, 2, 4, 'PD finale cache - Forgotten Sliver (placeholder)'),
-(910068, 920102, 0, 100, 0, 1, 0, 1, 2, 'PD finale cache - Forgotten Fragment (placeholder)'),
-(910068, 920103, 0, 100, 0, 1, 0, 1, 1, 'PD finale cache - Forgotten Core (placeholder)'),
-(910068, 920104, 0, 100, 0, 1, 0, 1, 1, 'PD finale cache - Forgotten Relic (placeholder)');
+(910068, 920100, 0, 25, 0, 1, 0, 3, 5, 'PD finale cache - Forgotten Shard (filler)'),
+(910068, 920101, 0, 25, 0, 1, 0, 2, 4, 'PD finale cache - Forgotten Sliver (filler)'),
+(910068, 920102, 0, 25, 0, 1, 0, 1, 2, 'PD finale cache - Forgotten Fragment (filler)'),
+(910068, 920103, 0, 25, 0, 1, 0, 1, 1, 'PD finale cache - Forgotten Core (filler)'),
+(910068, 920104, 0, 25, 0, 1, 0, 1, 1, 'PD finale cache - Forgotten Relic (filler)');

@@ -128,6 +128,27 @@ namespace PDungeon
         bool   dmgReduceActive = false;
     };
 
+    // Round E / L4. The chest half of the tag above, on its OWN DataMap
+    // key: a GameObject and a Creature never share an object, but they do
+    // share the DataMap's type-per-key contract, and one key holding two
+    // unrelated structs is a bad cast waiting for whoever copies an idiom
+    // across next.
+    char const* const PD_CHEST_DATA_KEY = "mod-procedural-dungeon-chest";
+
+    // "This chest has already been paid out." One bool, because the
+    // injection hook (PDv2ChestLoot.cpp) fires on EVERY loot-state change
+    // and a chest that reaches GO_ACTIVATED twice must not roll a second
+    // set of gear into the same window.
+    //
+    // Unlike PDv2MobData this one IS taken with GetDefault - a flag has to
+    // be created on first sight to be set at all - which is exactly why the
+    // whole map/entry/run gate runs BEFORE it: GetDefault on an ungated
+    // hook would allocate an entry on every gameobject on the server.
+    struct PDv2ChestData : public DataMap::Base
+    {
+        bool injected = false;
+    };
+
     // What a player is doing right now, in the form the UI wants to read it.
     //
     // difficulty, lootMultX100, roomFactorX100 and dlvl are FROZEN into this at

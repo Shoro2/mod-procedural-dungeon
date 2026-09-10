@@ -25,6 +25,7 @@ void AddPDv2CommandScripts();
 void AddPDv2MapScripts();
 void AddPDv2CreatureScripts();
 void AddPDv2ScalingScripts();
+void AddPDv2LootScripts();
 void AddPDClientLinkScripts();
 void AddPDv2UILinkScripts();
 
@@ -42,6 +43,7 @@ void Addmod_procedural_dungeonScripts()
     AddPDv2MapScripts();
     AddPDv2CreatureScripts();
     AddPDv2ScalingScripts();
+    AddPDv2LootScripts();
     AddPDClientLinkScripts();
     AddPDv2UILinkScripts();
 }
