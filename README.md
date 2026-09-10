@@ -70,6 +70,15 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > number is a `ProceduralDungeon.V2.Loot.*` key whose code default equals the shipped
 > `.conf.dist`. All loot rolls use the core's `urand` — the layout is seeded, the loot never is.
 >
+> Round E also **caps the difficulty dial per account**: everyone starts at 1, a completed run
+> unlocks up to its difficulty **+5** without a death and **+3** with one (`V2.Cap.CleanUnlock` /
+> `.DeathUnlock`), account-wide and never lowered by play; the panel's slider follows the cap.
+> The **rooms slider now counts ordinary rooms** — the entrance and the boss rooms come on top —
+> so "14" on the panel is "0/14 rooms" on the HUD (bosses have their own counter; stored layouts
+> reroll once, layout version 4). **`ProceduralDungeon.V2.Debug`** gates every per-creature and
+> per-tick line, so a quiet log is the default. And the gen panel **draws the planned layout**
+> after Generate, the same map the HUD shows once you are inside.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
