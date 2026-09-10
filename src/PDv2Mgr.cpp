@@ -234,6 +234,12 @@ namespace PDungeon
         _config.lootExtraMobsDropCurrency = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Loot.Currency.ExtraMobsDropCurrency", false);
 
+        // WP8. No clamp to write: a bool has no range to get wrong, and it is
+        // read live like every other V2 key, so `.reload config` decides what
+        // the NEXT corpse carries without disturbing the run being walked.
+        _config.lootNativeItems = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Loot.NativeItems", false);
+
         // L3. The chance is the on/off switch for materials; the ceiling is a
         // count and gets the [0, 10] count clamp. 0 and 1 both mean one
         // material per mob, because GameMatsMaxCount floors its band at 1 - the

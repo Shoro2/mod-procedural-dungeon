@@ -664,21 +664,30 @@ namespace PDungeon
 
         int const state = run.complete ? 2 : (run.started ? 1 : 0);
 
-        // Round C / C7: the next sealed gate, appended AFTER `state` so an
-        // addon that predates this field set simply drops the tail (there is
-        // no null script to worry about here - SendRunTick returned above
-        // without one). NextClosedBarrier zeroes all three when nothing is
-        // sealed, and three zeros is exactly the wire's "no gate", so its
-        // answer carries no information this payload needs.
+        // Round C / C7: the gate, appended AFTER `state` so an addon that
+        // predates this field set simply drops the tail (there is no null
+        // script to worry about here - SendRunTick returned above without one).
+        // All three are zeroed when there is no gate to report, and three zeros
+        // is exactly the wire's "no gate".
         //
         // This is the tail-append RULE, not a one-off: every later field set
         // goes on the END of the payload in its own group, and the addon
         // reads the groups it knows and drops the rest (ParseRun in
         // flpdui.lua). Round E / WP5 adds the second group below.
+        //
+        // Round E / WP8 changed WHICH gate: GateFieldsFor answers for the
+        // segment THIS PLAYER is standing in, so the line keeps describing the
+        // rooms they are clearing after its barrier has opened instead of
+        // jumping to the next segment's 0/n (operator finding 5). That is also
+        // why it is called per player rather than once per tick - two members
+        // of a party in different segments now get different numbers, which is
+        // the whole point. NextClosedBarrier stays for its other callers, and
+        // is still the answer for a player who is not in a room.
         uint32 segPlanned = 0;
         uint32 segKilled = 0;
         uint32 segPct = 0;
-        script->NextClosedBarrier(segPlanned, segKilled, segPct);
+        bool segOpen = false;
+        script->GateFieldsFor(player, segPlanned, segKilled, segPct, segOpen);
 
         // Round E / WP5: the running event's clock and its host's health, the
         // second appended group. Zeroes mean "no event is running" - which is
@@ -692,6 +701,16 @@ namespace PDungeon
         uint32 eventSecLeft = 0;
         uint32 eventNpcPct = 0;
         script->EventHudFields(eventSecLeft, eventNpcPct);
+
+        // Round E / WP8: the gate's open state, the THIRD appended group and a
+        // single field - behind the event pair, not beside the three gate
+        // numbers it belongs to, because the rule is append-only and a field
+        // inserted in the middle would silently re-number everything after it
+        // for every client that has not been redeployed. 0 is what a 15-field
+        // server's silence means and what an addon that predates this field
+        // assumes anyway: the barrier of the segment on the line is sealed,
+        // which is the only state the gate line could ever show before.
+        uint32 const segOpenField = segOpen ? 1u : 0u;
 
         std::ostringstream out;
         out << "R " << run.elapsedSec
@@ -708,7 +727,8 @@ namespace PDungeon
             << ' ' << segKilled
             << ' ' << segPct
             << ' ' << eventSecLeft
-            << ' ' << eventNpcPct;
+            << ' ' << eventNpcPct
+            << ' ' << segOpenField;
 
         SendAddonWhisper(player, PREFIX_UI_DOWN, out.str());
     }

@@ -1091,7 +1091,10 @@ namespace PDungeon
 
         // 01 §8: the FL mats drop ON TOP of whatever the creature's own loot
         // table gives, which is what makes the dungeon a way to farm existing
-        // content rather than a replacement for it.
+        // content rather than a replacement for it. Round E / WP8 narrowed
+        // "whatever it gives" to the GOLD by default - the items are dropped
+        // unless V2.Loot.NativeItems says otherwise, and the block below it
+        // says why.
         //
         // A Lil' Bro child pays nothing, native table included - one carrier is
         // seven corpses (1 -> 2 -> 4), and seven loot tables plus seven bonus
@@ -1127,6 +1130,34 @@ namespace PDungeon
             }
             RollMaterials(creature, *tag);
 
+            // WP8, operator finding 4 of Runde 31: "the Shadowfang mobs keep
+            // their stock loot". They do, and that is the bug - the packs are
+            // drawn from STOCK creature_template entries (SFK 2529/3853-3859,
+            // Scholomance 10471-11551, Ahn'kahet, Twilight), so a PDv2 corpse
+            // hands out those dungeons' loot tables: their greens, their
+            // quest-chain drops, their vendor trash. None of it is FL content
+            // and none of it is what a PDv2 kill is supposed to be worth - the
+            // currency and the materials go straight to the bags above, and a
+            // room boss carries the injected gear below. So the item half of
+            // the native table goes, and BEFORE InjectBossGear: this clear
+            // would otherwise wipe the very gear the next lines add.
+            //
+            // The GOLD is kept ON PURPOSE, and it is the whole reason the loot
+            // is not simply emptied: Unit::Kill filled this loot at
+            // Unit.cpp:14083-14092 - FillLoot for the items, generateMoneyLoot
+            // for the coins - and nothing has opened the corpse yet, so the
+            // money is sitting there ready. Money is not content: it does not
+            // belong to Shadowfang, it is what any mob of level 80 is worth,
+            // and taking it away would make every kill in the dungeon a net
+            // repair-bill loss. SetLootMode(0) would have killed both halves
+            // at once, which is exactly why it is not the tool here.
+            if (!cfg.lootNativeItems)
+            {
+                uint32 const gold = creature->loot.gold;
+                creature->loot.clear();
+                creature->loot.gold = gold;
+            }
+
             // isRunBoss, NOT the creature's entry: the boss slot of a room is
             // whatever PDv2PackMgr put in it, trash stand-in included, and the
             // tag is the only thing that knows the room is done with it. The
@@ -1135,6 +1166,20 @@ namespace PDungeon
             {
                 InjectBossGear(creature, killer);
             }
+        }
+
+        // An empty corpse must not sparkle. Unit::Kill set UNIT_DYNFLAG_LOOTABLE
+        // a few lines before JustDied (Unit.cpp:14221-14227) on a loot that was
+        // still full, so a mob that dropped no gold and whose items were just
+        // dropped would keep the golden shimmer and hand every player an empty
+        // loot window. The Lil' Bro branch above clears the flag for the same
+        // reason; this is the same statement made once for every other path
+        // through the funnel, and Loot::empty() is what decides - it counts the
+        // GOLD as well (LootMgr.h:367), so a corpse that still carries coins
+        // stays lootable exactly as it should.
+        if (creature->loot.empty())
+        {
+            creature->RemoveDynamicFlag(UNIT_DYNFLAG_LOOTABLE);
         }
 
         // Round E / WP6 / D7: the respawn echoes, and they come after the whole
@@ -1693,9 +1738,69 @@ namespace PDungeon
                   uint32(_grid.WalkableCount()));
     }
 
+    float PDv2InstanceScript::FacingTowardDoorway(BlockPlan const& plan,
+                                                  PlacedBlock const& block,
+                                                  float fromX, float fromY) const
+    {
+        unsigned bit = 0;
+        if (block.isEvent)
+        {
+            // A pocket is a dead end, so its ONE socket is the way in and the
+            // way out. The popcount test is what says "one", and a mask with
+            // two bits on an event block would mean the planner changed under
+            // this function - in which case guessing is worse than declining.
+            if (block.socketMask && (block.socketMask & (block.socketMask - 1u)) == 0)
+            {
+                bit = block.socketMask;
+            }
+        }
+        else if (block.chainIndex >= 1)
+        {
+            // The SAME walk SpawnBarriers seals and ValidateBlockPlan proved,
+            // so the doorway the boss looks at is the doorway the party's own
+            // portcullis stands in. Chain 0 is the entrance and answers 0.
+            bit = SpineRunInto(plan, block.chainIndex, nullptr);
+        }
+
+        if (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W)
+        {
+            // The contract check SpawnBarriers makes for the same reason:
+            // LaneCellsForSocket reads anything that is not one of the four as
+            // SOCKET_E, and a boss staring at the wrong wall is worse than one
+            // staring due north, which is what 0 keeps.
+            return 0.0f;
+        }
+
+        int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+        LaneCellsForSocket(bit, cells);
+
+        // The midpoint of the doorway's two lane cells, i.e. the centre of the
+        // gap rather than one of its jambs. (row, col) -> global cell
+        // (x = col, y = row) is the one translation the planner's table leaves
+        // to an engine - the same one SpawnBarriers' laneCells makes.
+        double mx = 0.0, my = 0.0;
+        for (int i = 0; i < 2; ++i)
+        {
+            double wx = 0.0, wy = 0.0;
+            CellCentreToWorld(block.bx * PD_CELLS_PER_BLOCK + cells[i][1],
+                              block.by * PD_CELLS_PER_BLOCK + cells[i][0], wx, wy);
+            mx += wx * 0.5;
+            my += wy * 0.5;
+        }
+
+        // 2D, like every other geometry question this module asks: the dungeon
+        // is one floor plane, and a Z term would only measure the height of a
+        // jump. GetAngle already answers in [0, 2 PI); the normalise is the
+        // house shape for "this is an orientation" (the finale cache's facing
+        // is built the same way).
+        Position const from(fromX, fromY, 0.0f, 0.0f);
+        return Position::NormalizeOrientation(
+            from.GetAngle(static_cast<float>(mx), static_cast<float>(my)));
+    }
+
     Creature* PDv2InstanceScript::SpawnTaggedMob(uint32 entry, PDv2MobData const& proto,
                                                  float x, float y, float z,
-                                                 uint32 baseHealthOverride)
+                                                 uint32 baseHealthOverride, float orientation)
     {
         // Exactly ON the floor plane. This used to add 0.5 yd "so a creature is
         // not spawned inside the floor", and the offset was a PERMANENT hover:
@@ -1705,13 +1810,20 @@ namespace PDungeon
         // home position - operator report 2026-08-06. Round D / D3 removed the
         // gravity flag that made the same mistake a second time; the floor
         // plane this function is handed is the only Z a summon ever gets.
-        Creature* c = instance->SummonCreature(entry, Position(x, y, z, 0.0f));
+        //
+        // The facing is the caller's (Round E / WP8) and defaults to the 0.0f
+        // every spawn used before, so a mob nobody has an opinion about still
+        // looks due north.
+        Creature* c = instance->SummonCreature(entry, Position(x, y, z, orientation));
         if (!c)
         {
             return nullptr;
         }
 
-        c->SetHomePosition(x, y, z, 0.0f);
+        // ...and the SAME angle into the home position, because an evade snaps
+        // a creature back to it: a boss turned to face his doorway only at the
+        // summon would forget it the first time a party pulled him and ran.
+        c->SetHomePosition(x, y, z, orientation);
 
         // NOTHING THIS DUNGEON SUMMONS PAYS KILL REPUTATION. A policy of the
         // module, not a patch for one pack: PDv2 fills its rooms from arbitrary
@@ -2523,7 +2635,28 @@ namespace PDungeon
                 // quietly take away (PDv2Affixes.h).
                 proto.affixMask = picks[i].affixed ? _runAffixMask : uint16(0);
 
-                if (SpawnTaggedMob(picks[i].entry, proto, x, y, z))
+                // Round E / WP8, operator finding 6: the BOSS looks at the door
+                // his party will come through, and nobody else does. Trash is a
+                // pack standing around a room and reads as one from any angle;
+                // a boss with his back to the entrance reads as a bug, because
+                // he is the one creature the room is arranged around. Measured
+                // from his OWN anchor - the arena centre, after the veto has
+                // had its say - so the angle describes where he actually ends
+                // up rather than where the kit planned to put him.
+                float orientation = 0.0f;
+                if (proto.isRunBoss)
+                {
+                    orientation = FacingTowardDoorway(plan, b, x, y);
+                    if (PDv2Debug())
+                    {
+                        LOG_INFO(PD_LOG, "PDv2: instance {} boss of room {} (block {}, {}, "
+                                         "chain {}) faces {:.3f} rad toward its doorway",
+                                 instance->GetInstanceId(), uint32(r), b.bx, b.by,
+                                 b.chainIndex, orientation);
+                    }
+                }
+
+                if (SpawnTaggedMob(picks[i].entry, proto, x, y, z, 0, orientation))
                 {
                     if (proto.isRunBoss)
                     {
@@ -2742,6 +2875,90 @@ namespace PDungeon
         // clamp that segment's gate line would read past 100 %.
         pct = planned ? std::min<uint32>(100, killed * 100 / planned) : 100;
         return true;
+    }
+
+    int PDv2InstanceScript::RoomIndexAt(float x, float y) const
+    {
+        // Non-negative first, exactly as TickAmbushes checks it: global cells
+        // are non-negative inside the field and integer division truncates
+        // TOWARDS ZERO, so a position outside it would divide to a block it is
+        // not in - and here that would name somebody else's room.
+        int gcx = 0, gcy = 0;
+        WorldToCell(x, y, gcx, gcy);
+        if (gcx < 0 || gcy < 0)
+        {
+            return -1;
+        }
+
+        int const bx = gcx / PD_CELLS_PER_BLOCK;
+        int const by = gcy / PD_CELLS_PER_BLOCK;
+        for (size_t r = 0; r < _roomBX.size() && r < _roomBY.size(); ++r)
+        {
+            if (_roomBX[r] == bx && _roomBY[r] == by)
+            {
+                return static_cast<int>(r);
+            }
+        }
+        return -1;
+    }
+
+    bool PDv2InstanceScript::GateFieldsFor(Player const* player, uint32& planned,
+                                           uint32& killed, uint32& pct, bool& open) const
+    {
+        // Zeroed up front the way NextClosedBarrier zeroes its three, and for
+        // the same reason: a caller that ignores the answer still puts the
+        // wire's own "no gate" on the wire.
+        planned = 0;
+        killed = 0;
+        pct = 0;
+        open = false;
+
+        int const room = player ? RoomIndexAt(player->GetPositionX(),
+                                              player->GetPositionY())
+                                : -1;
+
+        // A boss hall is skipped ON PURPOSE and not as a bound check: its pack
+        // stands BEHIND the barrier and is deliberately out of the segment's
+        // denominator (design 2026-09-03 §B3.1, the single-boss-segment
+        // softlock), so the honest answer for a player standing in one is the
+        // run's next gate rather than a number that pretends their kills there
+        // count towards anything.
+        if (room >= 0 && static_cast<size_t>(room) < _roomSegment.size() &&
+            static_cast<size_t>(room) < _roomIsBoss.size() && !_roomIsBoss[room])
+        {
+            int const segment = _roomSegment[room];
+            if (segment >= 1 && static_cast<size_t>(segment) < _segmentPlanned.size())
+            {
+                size_t const seg = static_cast<size_t>(segment);
+                planned = _segmentPlanned[seg];
+                killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+                // The same clamp NextClosedBarrier carries, and the same
+                // argument: a Lil' Bro split makes more corpses than the frozen
+                // denominator planned, so the raw ratio can run past 100 %.
+                pct = planned ? std::min<uint32>(100, killed * 100 / planned) : 100;
+
+                // "Open" includes "never had one". SpawnBarriers skips a
+                // segment whose entry run it cannot name (a boss on the
+                // entrance, a fork), and a segment nothing seals is a segment
+                // the party may walk out of - which is what the HUD has to say.
+                open = true;
+                for (Barrier const& barrier : _barriers)
+                {
+                    if (barrier.segment == segment)
+                    {
+                        open = barrier.open;
+                        break;
+                    }
+                }
+                return true;
+            }
+        }
+
+        // Not in a room this can answer for: a corridor, a boss hall, an event
+        // pocket, the entrance's segment 0. The run's next sealed gate is the
+        // useful thing to show there, and it is sealed by definition - `open`
+        // stays false.
+        return NextClosedBarrier(planned, killed, pct);
     }
 
     void PDv2InstanceScript::ClearedRoomBlocks(std::vector<std::pair<int, int>>& out) const
@@ -4368,20 +4585,29 @@ namespace PDungeon
             }
             vetoSpot(hostX, hostY, "host");
 
-            // The reward's spot, decided now and summoned only if the party
-            // wins. The kit's chest anchor is the one the loop rooms' caches
-            // already use, clear of the walls and of the socket track.
-            event.chestX = centreX;
-            event.chestY = centreY;
-            event.chestZ = centreZ;
-            if (anchors && anchors->hasChest)
+            // Round E / WP8, operator finding 6: he FACES the doorway, i.e. the
+            // party he is waiting for, and computed here because this is the
+            // one pass that holds the PlacedBlock the doorway belongs to. An
+            // event pocket is a dead end, so its single socket is that doorway;
+            // FacingTowardDoorway answers 0 - the old due-north summon - for
+            // anything it cannot read, which is a plain look and never a wrong
+            // one.
+            //
+            // Stored on the EventRoom because the CHEST inherits it: WP8's won
+            // event leaves the reward on his square, turned the way he was, and
+            // deriving the same angle a second time in CloseEvent is how the
+            // two would eventually disagree. The kit's chest anchor that used
+            // to be decided here is gone with the same change - the reward has
+            // no spot of its own to choose any more.
+            event.hostX = hostX;
+            event.hostY = hostY;
+            event.hostO = FacingTowardDoorway(plan, b, hostX, hostY);
+            if (PDv2Debug())
             {
-                float unusedZ = 0.0f;
-                sPDv2Mgr->BlockToWorld(b.bx, b.by, anchors->chest.u,
-                                       anchors->chest.v, event.chestX,
-                                       event.chestY, unusedZ);
+                LOG_INFO(PD_LOG, "PDv2: instance {} event host in block ({}, {}) faces "
+                                 "{:.3f} rad toward its doorway",
+                         instance->GetInstanceId(), b.bx, b.by, event.hostO);
             }
-            vetoSpot(event.chestX, event.chestY, "cache");
 
             // The rim: the room's own six spawn anchors, FARTHEST FROM THE
             // BLOCK CENTRE FIRST. The distance is taken in the block's own
@@ -4478,7 +4704,7 @@ namespace PDungeon
             }
 
             Creature* host = instance->SummonCreature(
-                NPC_EVENT_HOST, Position(hostX, hostY, event.z, 0.0f));
+                NPC_EVENT_HOST, Position(hostX, hostY, event.z, event.hostO));
             if (!host)
             {
                 // No host, no event - and deliberately no EventRoom either, so
@@ -4491,7 +4717,11 @@ namespace PDungeon
                 continue;
             }
 
-            host->SetHomePosition(hostX, hostY, event.z, 0.0f);
+            // The facing goes into the home position too, the same rule
+            // SpawnTaggedMob follows: he never moves, but a home orientation
+            // that disagreed with the summon would turn him the moment
+            // anything resets him.
+            host->SetHomePosition(hostX, hostY, event.z, event.hostO);
             // The module's blanket policy, and it applies to him too: nothing
             // this dungeon summons pays kill reputation (SpawnTaggedMob states
             // the case in full). He is meant to be killable, so unlike Chromie
@@ -4582,9 +4812,10 @@ namespace PDungeon
         event->nextSpawnMs = now;
         event->nextPick = 0;
 
-        // No second offer while he is busy being defended. Put back by
-        // CloseEvent on a win, so his closing line has a menu to live in; a
-        // lost event leaves him dead and the flag with him.
+        // No second offer while he is busy being defended, and never put back
+        // (Round E / WP8): a won event now despawns him and leaves his chest
+        // instead, a lost one leaves him dead, so the flag has nothing left to
+        // return to either way.
         host->RemoveNpcFlag(UNIT_NPC_FLAG_GOSSIP);
 
         std::string const notice = Acore::StringFormat(
@@ -4758,14 +4989,26 @@ namespace PDungeon
         uint32 xp = 0;
         if (won)
         {
-            // The dead-end cache, on the spot SpawnEventRooms vetoed. Same
-            // GameObject and the same orientation literal as every other
-            // cache in the dungeon (SpawnDeadEndChests spells out why the
-            // four zeros after it are not a facing), so WP1's loot injection
-            // reaches it without knowing this room exists.
+            // Round E / WP8, operator finding 8: "when the event is won a small
+            // chest spawns where the NPC stood and the NPC despawns". His own
+            // square, his own facing, and then he leaves - the pilgrim is
+            // rescued, so a rescued pilgrim standing about for the rest of the
+            // run with an empty menu was the thing that read wrong. The reward
+            // is GO_EVENT_CHEST and not GO_CHEST: a small Chest01 rather than
+            // the dungeon's big TreasureChest01, which is what makes it read as
+            // his parting gift instead of as another dead-end cache. The LOOT
+            // is a dead-end cache's, and PDv2ChestLoot says so at the dispatch.
+            //
+            // The angle is his, straight off the EventRoom - unlike the finale
+            // cache, which turns display 259 by a measured quarter turn, this
+            // model needs no offset, so nothing is added to it here.
+            //
+            // Order matters only in one direction: the chest is summoned FIRST
+            // and the host dismissed after, so a failed summon still leaves
+            // somebody standing rather than an empty room and no reward.
             if (GameObject* cache = instance->SummonGameObject(
-                    GO_CHEST, event.chestX, event.chestY, event.chestZ,
-                    4.712389f, 0.0f, 0.0f, 0.0f, 0.0f, 0))
+                    GO_EVENT_CHEST, event.hostX, event.hostY, event.z,
+                    event.hostO, 0.0f, 0.0f, 0.0f, 0.0f, 0))
             {
                 _decorGuids.push_back(cache->GetGUID());
             }
@@ -4773,7 +5016,7 @@ namespace PDungeon
             {
                 LOG_ERROR(PD_LOG, "PDv2: instance {} won an event but failed to summon its "
                                   "cache (missing gameobject_template {}?)",
-                          instance->GetInstanceId(), uint32(GO_CHEST));
+                          instance->GetInstanceId(), uint32(GO_EVENT_CHEST));
             }
 
             // Scaled by the run's own loot multiplier, which is the number
@@ -4799,12 +5042,19 @@ namespace PDungeon
             xp = 0;
 #endif
 
-            // His menu back, so the gossip has something to open onto: the
-            // CreatureScript offers its one item only while EventStateFor
-            // says Idle, and this event says Won for the rest of the run.
+            // ...and he goes. His gossip flag used to be handed back here so a
+            // won event still had a menu to open onto; WP8 took that away
+            // instead, because the menu was empty (PDv2EventNPC's Idle-only
+            // offer) and a rescued man who never leaves is the thing the
+            // operator called out. DespawnOrUnsummon and not Delete: he is a
+            // creature and that is this module's teardown for one, the same
+            // call DespawnAll would make on his GUID at the rebuild - which is
+            // why his entry may stay in _spawnedGuids, where a second despawn
+            // of a creature that is already gone is a lookup that finds
+            // nothing.
             if (Creature* host = instance->GetCreature(event.host))
             {
-                host->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+                host->DespawnOrUnsummon();
             }
         }
 

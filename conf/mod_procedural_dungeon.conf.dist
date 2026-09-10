@@ -629,6 +629,37 @@ ProceduralDungeon.V2.Loot.Currency.RoomsBonusPctPerRoom = 1
 ProceduralDungeon.V2.Loot.Currency.ExtraMobsDropCurrency = 0
 
 #
+#    ProceduralDungeon.V2.Loot.NativeItems
+#        Description: Round E / WP8 (2026-09-10): whether a dungeon mob keeps
+#                     the ITEM half of its own creature_template loot table.
+#
+#                     Off, and what the packs are made of is the reason: PDv2
+#                     fills its rooms with STOCK creature entries - Shadowfang
+#                     Keep, Scholomance, Ahn'kahet, Twilight - so every corpse
+#                     hands out those dungeons' loot, from their greens to
+#                     their quest-chain drops. None of that is FL content and
+#                     none of it is what a kill in here is meant to be worth:
+#                     the currency and the materials go straight into the bags
+#                     of everybody on the map, and a room boss carries the gear
+#                     this module injects (V2.Loot.Boss.Items). Turn this on to
+#                     get the stock tables back on top of all of that.
+#
+#                     The GOLD is kept whatever this key says. It is not
+#                     content - it is what any level-80 mob is worth - and
+#                     dropping it as well would make every pull in the dungeon
+#                     a net repair-bill loss. A corpse left with neither gold
+#                     nor items stops shimmering instead of opening an empty
+#                     loot window.
+#
+#                     Read live like every other V2 key, so `.reload config`
+#                     decides what the NEXT corpse carries.
+#        Default:     0 - this module's own funnel only
+#                     1 - the creature's stock item table on top of it
+#
+
+ProceduralDungeon.V2.Loot.NativeItems = 0
+
+#
 #    ProceduralDungeon.V2.Loot.Mats.ChancePct
 #    ProceduralDungeon.V2.Loot.Mats.MaxPerMobAtCap
 #        Description: Round E (2026-09-10): crafting materials from every

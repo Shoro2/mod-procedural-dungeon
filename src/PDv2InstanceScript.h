@@ -369,6 +369,32 @@ namespace PDungeon
         // with it - it opens on sight (the single-boss-segment case).
         bool NextClosedBarrier(uint32& planned, uint32& killed, uint32& pct) const;
 
+        // Round E / WP8. The gate line as ONE PLAYER should read it: the
+        // segment they are standing in, and whether its portcullis is already
+        // up. This is finding 5 of Runde 31 - "the boss-gate line does not
+        // update" - and it was never a plumbing bug. NextClosedBarrier answers
+        // "the lowest still-sealed gate of the run", so the moment a barrier
+        // opens the line jumps to the NEXT segment's 0/n and sits there while
+        // the party is still clearing the segment it is standing in. Nothing
+        // moved because nothing in that segment was being counted any more.
+        //
+        // So the question changes rather than the counting (recon risk 6: what
+        // COUNTS must not move, or the B3 softlock guard breaks). The room the
+        // player stands in names the segment, that segment's own frozen
+        // denominator and live numerator are the numbers, and `open` says which
+        // of the two sentences the HUD writes - "Gate open n/n" while a cleared
+        // segment is finished, "Gate n/m (p %)" while its wall still stands.
+        //
+        // Falls back to NextClosedBarrier whenever the player is not in a room
+        // this can answer for - a corridor, a boss hall (its pack stands behind
+        // the barrier and is deliberately out of the denominator), an event
+        // pocket, or segment 0 - so a player walking between rooms sees the
+        // run's next gate rather than a blank line. `open` is false on that path:
+        // a gate that NextClosedBarrier names is by definition still sealed.
+        // planned == 0 means "no gate" on the wire, exactly as before.
+        bool GateFieldsFor(Player const* player, uint32& planned, uint32& killed,
+                           uint32& pct, bool& open) const;
+
         // Round C / C7. The block coordinates of every room whose pack is
         // dead, in the PLAN's own frame - the UI link shifts them into the map
         // payload's frame with the same origin it shifts the M payload's
@@ -633,9 +659,19 @@ namespace PDungeon
             size_t nextPick = 0;        // how much of it has walked in
             std::vector<ObjectGuid> wave;   // what it put on the map
             std::vector<std::pair<float, float>> rim;   // world x,y, far first
-            float chestX = 0.0f;        // the reward's spot, grid-vetoed
-            float chestY = 0.0f;
-            float chestZ = 0.0f;
+            // Round E / WP8: where the HOST was staged and which way he was
+            // turned, kept because the reward inherits both. The kit's chest
+            // anchor these three replaced is gone with the same change - the
+            // won event's chest now stands on the pilgrim's own square, so
+            // there is nothing left for a second anchor to decide (operator
+            // finding 8: "a small chest spawns where the NPC stood and the NPC
+            // despawns"). The facing is stored rather than re-derived in
+            // CloseEvent because SpawnEventRooms is the pass that has the
+            // PlacedBlock in hand, and computing it twice from two different
+            // places is how the host and his chest would come to disagree.
+            float hostX = 0.0f;         // his spot, grid-vetoed
+            float hostY = 0.0f;
+            float hostO = 0.0f;         // FacingTowardDoorway, into the chest too
             float z = 0.0f;             // the pocket's floor plane
             // The closing beat - despawn, notice, reward - has already run.
             // It is a separate flag and not a fourth state because the state
@@ -682,6 +718,40 @@ namespace PDungeon
         // entrance, which is the normal case for the first half of a run.
         bool CheckpointSpot(float& x, float& y, float& z) const;
 
+        // Round E / WP8. The dense room index a world position stands in, or -1
+        // for anything that is not one of this run's rooms - a corridor, an
+        // event pocket, the entrance, or a point outside the field entirely.
+        //
+        // The test is the BLOCK, the same one TickAmbushes makes and for the
+        // same reason: a room IS its block, so WorldToCell then two integer
+        // divisions answer exactly, with no radius to tune and nothing to break
+        // when the kit's room sizes change. The scan over _roomBX/_roomBY is a
+        // handful of comparisons on a run of at most a few dozen rooms, run
+        // once per player per second - a map keyed on the block pair would buy
+        // nothing measurable and would be a second thing to keep in step with
+        // the vectors SpawnFromPlan fills.
+        int RoomIndexAt(float x, float y) const;
+
+        // Round E / WP8, operator finding 6: "the event NPC and the bosses
+        // should face the entrance". The angle from (fromX, fromY) to the
+        // centre of `block`'s DOORWAY - the two lane cells LaneCellsForSocket
+        // names on the edge a player walks in through, which is the one point
+        // in a room that "the entrance" can mean without a kit constant.
+        //
+        // Which doorway depends on the kind of block, and both readings come
+        // out of the planner rather than out of geometry guessed here: an event
+        // pocket is a dead end, so its single socket IS its door; a chain room
+        // is entered from the spine, so SpineRunInto names the socket the run
+        // from the previous chain room arrives through - the same walk the
+        // barrier of that segment is sealed on, so the boss looks at the wall
+        // the party will come through.
+        //
+        // Returns 0 - the module's old summon orientation, i.e. no change - for
+        // any block this cannot answer for: no socket, more than one on a
+        // pocket, a chain room with no single entry run, an unnamed socket bit.
+        float FacingTowardDoorway(BlockPlan const& plan, PlacedBlock const& block,
+                                  float fromX, float fromY) const;
+
         // Summons ONE dungeon mob: the floor plane, the disabled gravity, the
         // tag copied off `proto`, the run's affix auras and their spawn-time
         // health effects. Every creature this module puts on the map is born
@@ -691,10 +761,18 @@ namespace PDungeon
         // `baseHealthOverride` is written BEFORE the affix multipliers, which
         // is what makes a split child a small copy that a Big Boy bit then
         // grows again - the order that module's own split relies on.
+        //
+        // `orientation` goes into the summon AND into the home position (Round
+        // E / WP8): an evade snaps a creature back to its home orientation, so
+        // a facing written only into the summon would be lost the first time
+        // somebody pulls the boss and runs out of the room. Defaulted to the
+        // 0.0f every spawn used before, so only the callers that have something
+        // to say about a facing - the room bosses - pass anything.
         // Returns nullptr when the summon failed; the caller owns the counters.
         Creature* SpawnTaggedMob(uint32 entry, PDv2MobData const& proto,
                                  float x, float y, float z,
-                                 uint32 baseHealthOverride = 0);
+                                 uint32 baseHealthOverride = 0,
+                                 float orientation = 0.0f);
 
         // Lil' Bro (affix 7). Called from OnMobDied BEFORE the death moves any
         // counter, which is the only ordering that keeps them honest.

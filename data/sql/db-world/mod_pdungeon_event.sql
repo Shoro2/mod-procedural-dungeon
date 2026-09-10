@@ -34,6 +34,18 @@
 -- 910500-910549 added to this file would be silently deleted again on every
 -- fresh database.
 --
+-- ...and the same trap with a different range is why the event chest's
+-- `gameobject_template` row (910034 'Pilgrim''s Cache', Round E / WP8) is NOT
+-- in this file: mod_pdungeon_templates.sql deletes gameobject_template
+-- 910000-910099 and re-inserts only 910000-910033, so any GO row this file
+-- inserted in that block would be wiped on every fresh database. The template
+-- row therefore lives in mod_pdungeon_templates_fix.sql, the one module file
+-- that sorts after that DELETE (its header carries the full argument); only
+-- the chest's LOOT rows are here, at the bottom, because every
+-- `gameobject_loot_template` DELETE in this module is entry-exact and nothing
+-- can reach Entry 910034. That is the same split 910068 'Chromie''s Cache'
+-- already uses with mod_pdungeon_chromie.sql.
+--
 -- `creature_template` carries no modelid column in this core; the model lives
 -- in `creature_template_model` (the same shape mod_pdungeon_chromie.sql and
 -- mod_pdungeon_templates.sql use).
@@ -93,3 +105,31 @@ INSERT INTO `creature_template` (`entry`, `name`, `subname`, `minlevel`, `maxlev
 DELETE FROM `creature_template_model` WHERE `CreatureID` = 910551;
 INSERT INTO `creature_template_model` (`CreatureID`, `Idx`, `CreatureDisplayID`, `DisplayScale`, `Probability`, `VerifiedBuild`) VALUES
 (910551, 0, 3718, 1, 1, NULL);
+
+-- ----------------------------------------------------------------------------
+-- Round E / WP8 (2026-09-10): the loot of 910034 'Pilgrim''s Cache', the small
+-- chest a WON event leaves on the host's square when he despawns (operator
+-- finding 8). Its `gameobject_template` row is in
+-- mod_pdungeon_templates_fix.sql - see this file's header for why the two
+-- halves live apart.
+--
+-- The three rows are a VERBATIM copy of 910030's (the loop-room / pocket
+-- cache), read out of the live `gameobject_loot_template` on 2026-09-10, and
+-- that is the design and not a shortcut: a won defence is a POCKET reward, so
+-- it pays what a pocket pays. The gear on top of these three is injected in
+-- C++ - src/PDv2ChestLoot.cpp sends 910034 through InjectShiftingCache, the
+-- same path 910030 takes - and what makes the defence worth more than a walk
+-- into a stub is the Paragon XP CloseEvent pays the whole party, not a fatter
+-- table here.
+--
+-- Nothing in this module can reach Entry 910034 with a range DELETE: every
+-- `gameobject_loot_template` DELETE it ships names one Entry (910030 in
+-- mod_pdungeon_templates.sql and mod_pdungeon_phase2.sql, 910068 in
+-- mod_pdungeon_chromie.sql). The entry-exact DELETE below is what makes this
+-- file idempotent on a re-apply, nothing more.
+-- ----------------------------------------------------------------------------
+DELETE FROM `gameobject_loot_template` WHERE `Entry` = 910034;
+INSERT INTO `gameobject_loot_template` (`Entry`, `Item`, `Reference`, `Chance`, `QuestRequired`, `LootMode`, `GroupId`, `MinCount`, `MaxCount`, `Comment`) VALUES
+(910034, 33470, 0, 100, 0, 1, 0, 3, 5, 'PD event chest - Frostweave Cloth'),
+(910034, 33447, 0, 60, 0, 1, 0, 2, 3, 'PD event chest - Runic Healing Potion'),
+(910034, 43102, 0, 20, 0, 1, 0, 1, 1, 'PD event chest - Frozen Orb');

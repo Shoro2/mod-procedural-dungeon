@@ -248,6 +248,15 @@ namespace PDungeon
         // always drop: mats are a crafting input, currency is progression.
         bool        lootExtraMobsDropCurrency = false;
 
+        // Round E / WP8 (2026-09-10, operator finding 4). Whether a dungeon mob
+        // keeps the item half of its OWN creature_template loot table. Off,
+        // because the packs are drawn from stock entries - Shadowfang Keep,
+        // Scholomance, Ahn'kahet - and their tables are those dungeons' content,
+        // not this one's: what a PDv2 kill is worth is the currency, the
+        // materials and, on a room boss, the injected gear. The GOLD is kept
+        // whatever this key says; only the items are dropped.
+        bool        lootNativeItems = false;
+
         // Materials, per tagged mob and per player. The chance is the whole
         // gate (0 turns materials off); the count is urand(1, max), with the
         // max running from 1 at dlvl 0 to lootMatsMaxPerMobAtCap at V2.DlvlCap,

@@ -49,7 +49,19 @@ namespace PDungeon
         // mod_pdungeon_templates_fix.sql; the cache's loot (910068) is in
         // mod_pdungeon_chromie.sql.
         GO_AZEALIA_PORTAL = 910067, // C8: type 10, click teleports to Azealia
-        GO_REWARD_CHEST   = 910068  // C8: "Chromie's Cache", lock 57
+        GO_REWARD_CHEST   = 910068, // C8: "Chromie's Cache", lock 57
+        // Round E / WP8 (2026-09-10): the small chest a WON event room leaves
+        // on the pilgrim's own square when he walks away. A THIRD chest entry
+        // and not a second spawn of GO_CHEST, because the operator asked for a
+        // reward that reads as the small one (display 10 Chest01 against 259
+        // TreasureChest01) - and PDv2ChestLoot keys its injection on the ENTRY,
+        // so a distinct look has to be a distinct id. 910034 is the first free
+        // id of the reserved 910034-910039 gap; its template row lives in
+        // mod_pdungeon_templates_fix.sql - the only module file that sorts
+        // after mod_pdungeon_templates.sql's wide DELETE of 910000-910099 -
+        // and its loot rows in mod_pdungeon_event.sql, the same split 910068
+        // already has with mod_pdungeon_chromie.sql.
+        GO_EVENT_CHEST    = 910034
     };
 
     enum PDCreatureEntries : uint32

@@ -376,11 +376,12 @@ namespace
                 return;
             }
 
-            // The entry compare before anything else that dereferences: two
+            // The entry compare before anything else that dereferences: three
             // template ids out of the tens of thousands a realm has do the
             // real filtering, and they cost one field read.
             uint32 const entry = go->GetEntry();
-            if (entry != GO_CHEST && entry != GO_REWARD_CHEST)
+            if (entry != GO_CHEST && entry != GO_REWARD_CHEST &&
+                entry != GO_EVENT_CHEST)
             {
                 return;
             }
@@ -415,7 +416,14 @@ namespace
             }
             data->injected = true;
 
-            if (entry == GO_CHEST)
+            // GO_EVENT_CHEST pays exactly what a dead-end cache pays (Round E /
+            // WP8): the won event's reward is a POCKET reward, not the run's
+            // payout, and the finale's tiers are what the last boss is worth.
+            // Its own gameobject_loot_template copies 910030's three rows for
+            // the same reason, so the two chests differ in look and in nothing
+            // else - the Paragon XP CloseEvent pays is where a defence earns
+            // more than a walk into a stub.
+            if (entry == GO_CHEST || entry == GO_EVENT_CHEST)
             {
                 InjectShiftingCache(go, run, looter);
             }
