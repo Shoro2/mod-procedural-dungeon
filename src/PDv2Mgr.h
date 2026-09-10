@@ -358,6 +358,19 @@ namespace PDungeon
         // touched the setting still gets real creatures instead of an empty
         // pool. A stored row is always taken at face value.
         int         cfgBandMin = PD_GAME_BAND_MAX;
+        // Round E / WP9 (cfg_stat_profile): which stat line the gear rolls
+        // prefer - Off / Strength / Agility / Caster. A uint8_t and not an int
+        // like its neighbours because it is a 0..3 wire value end to end (the
+        // C payload, the column, PDv2LootMgr::RollGear's argument), and a
+        // wider type would only invite a cast at each of those.
+        //
+        // The UNLOCK is not stored anywhere: it is the Forgotten Talents node
+        // Discerning Eye, read live off the character's auras
+        // (PD_TALENT_TAG_STATFILTER). A profile chosen and then refunded
+        // therefore stops biting the moment the aura goes, and starts again if
+        // the node is bought back - which is what a permission that lives on a
+        // talent tree should do. Everything below this line still reads Off.
+        uint8_t     cfgStatProfile = PD_STAT_PROFILE_OFF;
         std::string cfgPacks;
         bool        loaded = false;
     };

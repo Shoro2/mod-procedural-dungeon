@@ -3376,6 +3376,164 @@ namespace
         }
     }
 
+    // --- Round E / WP9 stat profile (FitsProfileRaw) ------------------------
+    //
+    // The other pure half of the loot filter, pinned for the same reason the
+    // class table is: PDv2LootMgr::StatMaskFor turns an ItemTemplate into one
+    // byte and everything after that byte is decidable here, with no
+    // worldserver, no item and no player.
+    //
+    // Read the cases as the items they are. The masks below are hand-built
+    // rather than taken from a pool, because the POINT of the pin is that the
+    // rule holds for masks nobody has measured yet - a future expansion's
+    // itemisation is exactly the input that would break a rule tuned on today's
+    // 3 887 rows.
+    void RunFitsProfileChecks()
+    {
+        uint8_t const NONE = 0;
+        uint8_t const STR = PD_STAT_STR;
+        uint8_t const AGI = PD_STAT_AGI;
+        uint8_t const INT_ = PD_STAT_INT;
+        uint8_t const CAST = PD_STAT_CASTER_EVIDENCE;
+        uint8_t const PHYS = PD_STAT_PHYS_EVIDENCE;
+
+        // A trinket, a relic, a legendary replica: no stat line at all, and it
+        // must reach every looter. This is the case that turns the filter from
+        // a narrowing into a rejection if it is ever got wrong.
+        Check(FitsProfileRaw(NONE, PD_STAT_PROFILE_OFF) &&
+              FitsProfileRaw(NONE, PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(NONE, PD_STAT_PROFILE_AGILITY) &&
+              FitsProfileRaw(NONE, PD_STAT_PROFILE_CASTER),
+              "an item with no stats must fit every profile there is", 0);
+
+        // Off is Off: the default, and what every account that never bought
+        // Discerning Eye rolls with for ever.
+        Check(FitsProfileRaw(STR, PD_STAT_PROFILE_OFF) &&
+              FitsProfileRaw(AGI, PD_STAT_PROFILE_OFF) &&
+              FitsProfileRaw(INT_, PD_STAT_PROFILE_OFF) &&
+              FitsProfileRaw(static_cast<uint8_t>(STR | AGI | INT_ | CAST | PHYS),
+                             PD_STAT_PROFILE_OFF),
+              "profile Off must pass everything, whatever the mask says", 0);
+
+        // The three primaries, each fitting exactly its own profile. A plate
+        // helm of strength, a leather chest of agility, a cloth robe of
+        // intellect.
+        Check(FitsProfileRaw(STR, PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(STR, PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(STR, PD_STAT_PROFILE_CASTER),
+              "a strength item fits Strength and neither of the others", 0);
+        Check(FitsProfileRaw(AGI, PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(AGI, PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(AGI, PD_STAT_PROFILE_CASTER),
+              "an agility item fits Agility and neither of the others", 0);
+        Check(FitsProfileRaw(INT_, PD_STAT_PROFILE_CASTER) &&
+              !FitsProfileRaw(INT_, PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(INT_, PD_STAT_PROFILE_AGILITY),
+              "an intellect item fits Caster and neither of the others", 0);
+
+        // "Primary stat wins" is what makes the hybrids work. A retribution
+        // paladin and a holy paladin are the same class and want opposite
+        // halves of the same drop table; a rule of "no intellect" would have
+        // thrown the holy half away.
+        Check(FitsProfileRaw(static_cast<uint8_t>(STR | INT_), PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(static_cast<uint8_t>(STR | INT_), PD_STAT_PROFILE_CASTER) &&
+              !FitsProfileRaw(static_cast<uint8_t>(STR | INT_), PD_STAT_PROFILE_AGILITY),
+              "a strength+intellect hybrid fits Strength AND Caster", 0);
+        Check(FitsProfileRaw(static_cast<uint8_t>(AGI | INT_), PD_STAT_PROFILE_AGILITY) &&
+              FitsProfileRaw(static_cast<uint8_t>(AGI | INT_), PD_STAT_PROFILE_CASTER) &&
+              !FitsProfileRaw(static_cast<uint8_t>(AGI | INT_), PD_STAT_PROFILE_STRENGTH),
+              "an agility+intellect hybrid fits Agility AND Caster", 0);
+        Check(FitsProfileRaw(static_cast<uint8_t>(STR | AGI), PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(static_cast<uint8_t>(STR | AGI), PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(static_cast<uint8_t>(STR | AGI), PD_STAT_PROFILE_CASTER),
+              "a strength+agility hybrid fits both physical profiles", 0);
+
+        // The no-primary items, which are most of the jewellery and every
+        // cloak. Evidence is all there is to go on, and it only ever rejects.
+        Check(FitsProfileRaw(CAST, PD_STAT_PROFILE_CASTER) &&
+              !FitsProfileRaw(CAST, PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(CAST, PD_STAT_PROFILE_AGILITY),
+              "a spirit / spell-power ring is a caster ring with no intellect on it", 0);
+        Check(FitsProfileRaw(PHYS, PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(PHYS, PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(PHYS, PD_STAT_PROFILE_CASTER),
+              "a defence / dodge tank ring fits both physical profiles and not Caster", 0);
+
+        // Stamina, hit, crit, haste and resilience leave the mask empty on
+        // purpose, so this is the same case as the stat-less trinket - stated
+        // separately because it is the one an operator will ask about.
+        Check(FitsProfileRaw(NONE, PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(NONE, PD_STAT_PROFILE_CASTER),
+              "a pure stamina / crit item is nobody's and therefore everybody's", 0);
+
+        // Contradictory evidence with no primary stat - spell power AND attack
+        // power, which real 3.3.5a items do carry. Neither bucket wins; the
+        // profile that finds its own evidence absent is the one that passes,
+        // and both physical profiles read the caster bit first.
+        Check(!FitsProfileRaw(static_cast<uint8_t>(CAST | PHYS), PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(static_cast<uint8_t>(CAST | PHYS), PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(static_cast<uint8_t>(CAST | PHYS), PD_STAT_PROFILE_CASTER),
+              "an item that is evidence for both is evidence for neither", 0);
+
+        // A primary stat OUTRANKS the other side's evidence, which is question
+        // 1 beating question 3: an intellect staff with spell power is a
+        // caster staff, and an agility bow with attack power is a hunter's.
+        Check(FitsProfileRaw(static_cast<uint8_t>(INT_ | CAST), PD_STAT_PROFILE_CASTER) &&
+              FitsProfileRaw(static_cast<uint8_t>(AGI | PHYS), PD_STAT_PROFILE_AGILITY) &&
+              FitsProfileRaw(static_cast<uint8_t>(STR | PHYS), PD_STAT_PROFILE_STRENGTH),
+              "a primary stat decides before its own evidence is even read", 0);
+
+        // The wire is a TINYINT column and a client panel, so an out-of-range
+        // profile is a thing that can arrive. It must read as Off - a value
+        // nobody can name must never be a value that fits nothing.
+        Check(FitsProfileRaw(STR, 4) && FitsProfileRaw(INT_, 200) &&
+              FitsProfileRaw(static_cast<uint8_t>(AGI | CAST), 255),
+              "a profile outside 0..3 must behave exactly like Off", 0);
+
+        // The clamp that keeps such a value out of the column in the first
+        // place, and the one that keeps a negative out of a uint8_t.
+        Check(GameClampStatProfile(-1) == PD_STAT_PROFILE_OFF &&
+              GameClampStatProfile(0) == PD_STAT_PROFILE_OFF &&
+              GameClampStatProfile(3) == PD_STAT_PROFILE_CASTER &&
+              GameClampStatProfile(4) == PD_STAT_PROFILE_MAX &&
+              GameClampStatProfile(5000) == PD_STAT_PROFILE_MAX,
+              "the stat profile clamp must hold 0..3 from both sides", 0);
+
+        // EVERY mask the five bits can make must fit at least one profile.
+        // This is the pin that says the filter can never empty a pool on its
+        // own: whatever an item turns out to look like, some profile still
+        // wants it, so no single mask is a hole in the reward table. The
+        // fallback in RollGear covers the pool-level case; this covers the
+        // item-level one.
+        bool everyMaskPlaced = true;
+        int orphanMask = -1;
+        for (int mask = 0; mask < 32; ++mask)
+        {
+            bool fitsAny = false;
+            for (uint8_t p = PD_STAT_PROFILE_STRENGTH; p <= PD_STAT_PROFILE_MAX; ++p)
+            {
+                if (FitsProfileRaw(static_cast<uint8_t>(mask), p))
+                {
+                    fitsAny = true;
+                }
+            }
+            // CAST|PHYS with no primary is the one mask that fits no profile
+            // by design (checked above), and it is the one exception this
+            // sweep allows - stated as a value and not as a skip, so a second
+            // orphan appearing would still fail here.
+            if (!fitsAny && mask != (PD_STAT_CASTER_EVIDENCE | PD_STAT_PHYS_EVIDENCE))
+            {
+                everyMaskPlaced = false;
+                orphanMask = mask;
+            }
+        }
+        char orphanMsg[128];
+        std::snprintf(orphanMsg, sizeof(orphanMsg),
+                      "stat mask %d fits no profile at all - the filter has a hole",
+                      orphanMask);
+        Check(everyMaskPlaced, orphanMsg, 0);
+    }
+
     // --- boss rooms (01 §8 "1 + dlvl/10", flagged as the N deepest) ---------
 
     // The layout with bossRooms = 1 is FROZEN, and this is what freezes it.
@@ -7507,6 +7665,9 @@ namespace
 
         RunLinkStateChecks();
         RunGameMathChecks();
+        // Round E / WP9, beside the class table it shares a filter with: both
+        // are pure functions of a couple of integers and neither needs a seed.
+        RunFitsProfileChecks();
         // Once, not per seed, and before anything that needs a layout: the
         // block derivation is a property of PDv2WorldMath.h alone, and it is
         // what Round C / C2's ambush trigger stands on.

@@ -35,6 +35,7 @@
 #include "PDv2LootMgr.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
+#include "PDv2TaggedAura.h"
 #include "PDv2UILink.h"
 #include "Player.h"
 #include "Position.h"
@@ -305,43 +306,12 @@ namespace PDungeon
             "When you are ready, step through. Azealia is waiting."
         };
 
-        // Round E / WP6. How this module reads a Forgotten Talents node, and
-        // it names NO SPELL ID on purpose: FT synthesises the spell records for
-        // its extension nodes and its id map is sticky rather than frozen, so
-        // an id copied over here would be a promise the other module never
-        // made. The TAG is the promise - EffectMiscValue_1 on a passive
-        // SPELL_AURA_DUMMY effect - and the rank's value rides in the amount
-        // (FT writes BasePoints = value - 1 with DieSides 1, which is the
-        // spell_dbc off-by-one, so GetAmount() hands back the value itself).
-        //
-        // The MAXIMUM over the matching effects, never the sum: the ranks of
-        // one node are separate spells and a player who bought rank 2 may
-        // still be carrying rank 1, in which case a sum would pay for a rank
-        // nobody ever learned. A negative amount folds to 0 - a tag is a count
-        // here - and GetAmount() is already 0 for an aura the core disabled.
-        //
-        // Deliberately file-local, and deliberately duplicated rather than
-        // shared: mod-paragon-itemgen keeps its own ten lines for its own two
-        // tags. A header between two modules that otherwise do not know each
-        // other would buy nothing and cost a build dependency.
-        uint32 TaggedAuraAmount(Unit const* unit, int32 miscValue)
-        {
-            if (!unit)
-            {
-                return 0;
-            }
-
-            int32 best = 0;
-            for (AuraEffect const* effect : unit->GetAuraEffectsByType(SPELL_AURA_DUMMY))
-            {
-                if (effect && effect->GetMiscValue() == miscValue
-                    && effect->GetAmount() > best)
-                {
-                    best = effect->GetAmount();
-                }
-            }
-            return static_cast<uint32>(best);
-        }
+        // WP6's TaggedAuraAmount stood here, file-local, and said so at
+        // length. Round E / WP9 moved it to PDv2TaggedAura.h unchanged: the
+        // loot path asks the same question of a SECOND tag, from two other
+        // translation units, and two copies of "what has this player
+        // unlocked" inside one module is how the answer starts differing by
+        // call site. The header carries the whole FT contract with it.
     }
 
     PDv2InstanceScript::PDv2InstanceScript(InstanceMap* map) : InstanceScript(map)
@@ -968,9 +938,16 @@ namespace PDungeon
         Player* looter = killer ? killer->GetCharmerOrOwnerPlayerOrPlayerItself()
                                 : nullptr;
 
+        // Round E / WP9, once per corpse rather than once per item, and a
+        // looter we could not resolve above answers Off here - so a boss that
+        // died to a void zone rolls exactly what it rolled before this
+        // existed, unfiltered on both counts.
+        uint8_t const profile = PDv2LootMgr::StatProfileFor(looter);
+
         for (int i = 0; i < count; ++i)
         {
-            uint32 const item = sPDv2LootMgr->RollGear(LOOT_POOL_BOSS, looter);
+            uint32 const item =
+                sPDv2LootMgr->RollGear(LOOT_POOL_BOSS, looter, profile);
             if (!item)
             {
                 // An empty or unloaded pool. Nothing to add, and nothing to

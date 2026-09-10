@@ -404,8 +404,8 @@ namespace PDungeon
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
             "gen_loop_pct, gen_branches, gen_event_pct, cfg_rooms, cfg_difficulty, "
-            "cfg_caster_pct, cfg_mob_level_min, cfg_packs) "
-            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
+            "cfg_caster_pct, cfg_mob_level_min, cfg_stat_profile, cfg_packs) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE theme = VALUES(theme), "
             "layout_seed = VALUES(layout_seed), layout_version = VALUES(layout_version), "
             "gen_rooms = VALUES(gen_rooms), gen_boss_rooms = VALUES(gen_boss_rooms), "
@@ -415,7 +415,7 @@ namespace PDungeon
             accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
             cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.detourChancePct, cfg.branches,
             cfg.eventChancePct, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
-            state.cfgBandMin, packs);
+            state.cfgBandMin, uint32(state.cfgStatProfile), packs);
     }
 
     void PDv2Mgr::LoadAccountState(uint32_t accountId)
@@ -431,7 +431,8 @@ namespace PDungeon
         PDv2AccountState state;
         QueryResult result = CharacterDatabase.Query(
             "SELECT dlvl, dxp, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
-            "cfg_packs, diff_cap FROM pdungeon_account WHERE accountId = {}", accountId);
+            "cfg_packs, diff_cap, cfg_stat_profile FROM pdungeon_account WHERE accountId = {}",
+            accountId);
         if (result)
         {
             Field* fields = result->Fetch();
@@ -447,6 +448,10 @@ namespace PDungeon
             // positional read of this one statement and renumbering them buys
             // nothing but a chance to get one wrong.
             state.diffCap = fields[7].Get<uint8>();
+            // Round E / WP9, appended for exactly the same reason as diff_cap
+            // above: the tail of this SELECT is where a new column goes, and
+            // renumbering the seven reads above it buys nothing.
+            state.cfgStatProfile = fields[8].Get<uint8>();
             state.loaded = true;
         }
 
@@ -475,6 +480,14 @@ namespace PDungeon
         state.cfgDifficulty = std::min(state.cfgDifficulty, state.diffCap);
         state.cfgCasterPct = GameClampCasterPct(state.cfgCasterPct);
         state.cfgBandMin = GameClampBandMin(state.cfgBandMin);
+        // Round E / WP9. The column is a TINYINT an operator can edit and the
+        // value crosses a wire from a client panel, so it gets the same
+        // treatment as every knob above it. Note what is NOT re-checked here:
+        // whether the account may HAVE a profile at all. That is the FT node,
+        // it is per character, and a stored 2 on an account whose characters
+        // all refunded it simply never bites (PDv2LootMgr::StatProfileFor) -
+        // storing it is not the same as honouring it.
+        state.cfgStatProfile = GameClampStatProfile(state.cfgStatProfile);
 
         std::lock_guard<std::mutex> guard(_lock);
         _accounts[accountId] = state;
@@ -502,6 +515,13 @@ namespace PDungeon
         state.cfgDifficulty = std::min(GameClampDiff(cfg.cfgDifficulty), state.diffCap);
         state.cfgCasterPct = GameClampCasterPct(cfg.cfgCasterPct);
         state.cfgBandMin = GameClampBandMin(cfg.cfgBandMin);
+        // Round E / WP9, and NO unlock parameter beside it on purpose: this
+        // function clamps, it does not authorise. Whether the player owns
+        // Discerning Eye at all is decided by the SET handler in
+        // PDv2UILink.cpp before it ever calls here - the same shape the locked
+        // band row has - so that every future caller of SetAccountCfg cannot
+        // accidentally become a way around the node.
+        state.cfgStatProfile = GameClampStatProfile(cfg.cfgStatProfile);
         state.cfgPacks = cfg.cfgPacks;
         state.loaded = true;
     }
@@ -519,12 +539,14 @@ namespace PDungeon
         // change must never touch progression or the stored layout.
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, cfg_rooms, cfg_difficulty, "
-            "cfg_caster_pct, cfg_mob_level_min, cfg_packs) VALUES ({}, {}, {}, {}, {}, '{}') "
+            "cfg_caster_pct, cfg_mob_level_min, cfg_stat_profile, cfg_packs) "
+            "VALUES ({}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE cfg_rooms = VALUES(cfg_rooms), "
             "cfg_difficulty = VALUES(cfg_difficulty), cfg_caster_pct = VALUES(cfg_caster_pct), "
-            "cfg_mob_level_min = VALUES(cfg_mob_level_min), cfg_packs = VALUES(cfg_packs)",
+            "cfg_mob_level_min = VALUES(cfg_mob_level_min), "
+            "cfg_stat_profile = VALUES(cfg_stat_profile), cfg_packs = VALUES(cfg_packs)",
             accountId, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
-            state.cfgBandMin, packs);
+            state.cfgBandMin, uint32(state.cfgStatProfile), packs);
     }
 
     int PDv2Mgr::RaiseDiffCap(uint32_t accountId, int wanted)

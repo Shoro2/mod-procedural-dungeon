@@ -746,15 +746,28 @@ ProceduralDungeon.V2.Loot.IccDlvl = 10
 #
 #                     On, because an unfiltered draw from a pool of a thousand
 #                     items is mostly disenchant fodder and the reward at the
-#                     end of a run should feel like a reward. Stat lines are
-#                     deliberately NOT filtered: a spell-power ring may still
-#                     drop for a rogue, because filtering by stat profile would
-#                     shrink the pool to the same handful of items every run.
+#                     end of a run should feel like a reward.
 #
-#                     Whenever the filter would leave nothing to roll, the
-#                     unfiltered pool is used instead - so a class the pool has
-#                     no gear for gets something rather than nothing. 0 is for
-#                     an operator who wants the raw pool.
+#                     Round E / WP9 added the STAT line on top of that, and it
+#                     is the PLAYER's choice rather than a second server
+#                     switch: a character who owns the Forgotten Talents node
+#                     "Discerning Eye" gets a stat-profile row in the /pd panel
+#                     (Off / Strength / Agility / Caster), the choice is stored
+#                     per account, and every gear roll of the run then also
+#                     asks whether the item's stats suit it - so a spell-power
+#                     ring stops dropping for a rogue who asked it to. Off for
+#                     everybody else, so a realm that never grants the node
+#                     behaves exactly as it did. There is deliberately no key
+#                     for it here: a talent an account bought is not something
+#                     a .conf should be able to overrule.
+#
+#                     Whenever the filter would leave nothing to roll, it is
+#                     given up in the order the player himself would give it up
+#                     - the stat profile first, the class only if that still
+#                     leaves nothing, the raw pool last. So a class the pool
+#                     has no gear for gets something rather than nothing. 0 is
+#                     for an operator who wants the raw pool; it turns the stat
+#                     profile off with it, because the same roll applies both.
 #        Default:     1 - filtered to the looter
 #                     0 - raw pool
 #

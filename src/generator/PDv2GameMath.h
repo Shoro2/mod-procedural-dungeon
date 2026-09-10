@@ -531,10 +531,18 @@ namespace PDungeon
     // and spell), and a mage may legally carry a plate helm - it simply may
     // not wear it. D5 asks a different question, "is this a sensible reward
     // for this looter", and the answer to that is a design decision, not a
-    // client rule. It is also why the table is deliberately generous: a
-    // spell-power ring for a rogue still passes, because stat profile is
-    // explicitly NOT filtered (spec D5) and second-guessing itemisation is
-    // how a filter starts handing out nothing at all.
+    // client rule.
+    //
+    // The STAT line used to be out of scope here - "a spell-power ring for a
+    // rogue still passes, because stat profile is explicitly NOT filtered" was
+    // the rule until Round E / WP9. It IS filtered now, by FitsProfileRaw
+    // below, and only because the player asked for it: the profile is a
+    // per-account setting that the Forgotten Talents node *Discerning Eye*
+    // unlocks, it reads Off for everybody who never bought that node, and a
+    // roll the profile empties drops the PROFILE before it drops the class
+    // (the two stages in PDv2LootMgr::RollGear). The old worry - that
+    // second-guessing itemisation is how a filter starts handing out nothing
+    // at all - is exactly what those two stages answer.
     //
     // The four numbers are exactly item_template.AllowableClass, .class,
     // .subclass and the looter's class id. Every id below is a 3.3.5a
@@ -736,6 +744,141 @@ namespace PDungeon
         // Everything else a pool can hold - a container, a consumable, a
         // recipe - is gated by AllowableClass alone.
         return true;
+    }
+
+    // --- Round E / WP9: does an item fit a STAT PROFILE? -------------------
+    //
+    // The second half of the same filter, and the same split: everything
+    // decidable from two integers lives here where the harness can pin it,
+    // and PDv2LootMgr::StatMaskFor is the one place that reads ItemStat[] out
+    // of an ItemTemplate. A pool row carries the resulting mask as a single
+    // byte computed once at Load(), so a filtered draw over 2 235 entries
+    // costs 2 235 byte tests and not 2 235 template lookups.
+    //
+    // The profile is the PLAYER's choice, not the server's guess: Off until
+    // the Forgotten Talents node *Discerning Eye* is bought, then one of three
+    // words in the /pd panel. That is why the rule below may be opinionated at
+    // all - nobody is having a filter applied to them that they did not ask
+    // for, and RollGear drops the profile before it drops the class when a
+    // pool has nothing left.
+    //
+    // The values are stored in pdungeon_account.cfg_stat_profile and travel on
+    // the C payload, so they are a WIRE CONTRACT: 0..3 and never renumbered.
+    constexpr uint8_t PD_STAT_PROFILE_OFF = 0;
+    constexpr uint8_t PD_STAT_PROFILE_STRENGTH = 1;
+    constexpr uint8_t PD_STAT_PROFILE_AGILITY = 2;
+    constexpr uint8_t PD_STAT_PROFILE_CASTER = 3;
+    constexpr uint8_t PD_STAT_PROFILE_MAX = 3;
+
+    // What a pool row's one byte can say about an item. Three primary stats,
+    // and two "evidence" buckets for the items that have no primary stat at
+    // all - a ring of spirit and spell power is a caster ring even though it
+    // names no intellect, and a tank ring of defence and dodge is not.
+    //
+    // Stamina, hit, crit, haste and resilience are deliberately in NEITHER
+    // bucket: every profile wants them, so a bit for them would only ever
+    // reject something. Anything else the column can hold (mana, health,
+    // health regen, the resistances) is neutral for the same reason.
+    enum PDStatMaskBits : uint8_t
+    {
+        PD_STAT_STR = 1,
+        PD_STAT_AGI = 2,
+        PD_STAT_INT = 4,
+        PD_STAT_CASTER_EVIDENCE = 8,
+        PD_STAT_PHYS_EVIDENCE = 16
+    };
+
+    // 0..PD_STAT_PROFILE_MAX. Clamps to the RANGE like every sibling clamp in
+    // this file rather than folding an illegal value to Off - the setting only
+    // ever narrows a pool, so there is nothing to exploit by asking for 99,
+    // and FitsProfileRaw treats anything out of range as Off on its own. The
+    // two therefore cannot disagree into a profile that fits nothing.
+    constexpr uint8_t GameClampStatProfile(int wanted)
+    {
+        if (wanted < static_cast<int>(PD_STAT_PROFILE_OFF))
+        {
+            return PD_STAT_PROFILE_OFF;
+        }
+        return wanted > static_cast<int>(PD_STAT_PROFILE_MAX)
+                   ? PD_STAT_PROFILE_MAX
+                   : static_cast<uint8_t>(wanted);
+    }
+
+    // "PRIMARY STAT WINS, and zero evidence passes."
+    //
+    // Read it as three questions asked in order:
+    //
+    //   1. does the item name the profile's own primary stat? Then it fits,
+    //      full stop. This is what lets a hybrid pass BOTH of its profiles: a
+    //      strength/intellect plate helm is a holy paladin's and a protection
+    //      paladin's, and no rule that starts from "no intellect" can say so.
+    //   2. does it name a DIFFERENT primary stat instead? Then it does not.
+    //      This is the whole point of the filter - the agility dagger a mage
+    //      cannot use, the intellect ring a rogue cannot.
+    //   3. it names no primary stat at all (a ring, a neck, a cloak, a
+    //      trinket). Then only the evidence decides, and only against it: a
+    //      ring of spirit and spell power is refused by the two physical
+    //      profiles, a ring of expertise and armour penetration is refused by
+    //      Caster, and a ring of pure stamina and crit fits everybody.
+    //
+    // Mask 0 - a trinket with no stats, a relic, a legendary replica whose
+    // whole text is one use effect - passes EVERY profile. Rejecting those
+    // would be the filter deciding it knows better than an item that
+    // deliberately has no stat line (recon risk 3), and it is 39 of the 3 887
+    // gear rows.
+    //
+    // A profile this function does not know is treated as Off. That is not
+    // politeness: the value crosses a wire from a client panel and lands in a
+    // TINYINT column an operator can edit, and "unknown means unfiltered" is
+    // the only reading that cannot end a run with an empty loot window.
+    constexpr bool FitsProfileRaw(uint8_t statMask, uint8_t profile)
+    {
+        if (profile == PD_STAT_PROFILE_OFF || profile > PD_STAT_PROFILE_MAX)
+        {
+            return true;
+        }
+        if (statMask == 0)
+        {
+            return true;
+        }
+
+        if (profile == PD_STAT_PROFILE_STRENGTH)
+        {
+            if ((statMask & PD_STAT_STR) != 0)
+            {
+                return true;
+            }
+            if ((statMask & (PD_STAT_AGI | PD_STAT_INT)) != 0)
+            {
+                return false;
+            }
+            return (statMask & PD_STAT_CASTER_EVIDENCE) == 0;
+        }
+
+        if (profile == PD_STAT_PROFILE_AGILITY)
+        {
+            if ((statMask & PD_STAT_AGI) != 0)
+            {
+                return true;
+            }
+            if ((statMask & (PD_STAT_STR | PD_STAT_INT)) != 0)
+            {
+                return false;
+            }
+            return (statMask & PD_STAT_CASTER_EVIDENCE) == 0;
+        }
+
+        // PD_STAT_PROFILE_CASTER, and the mirror image of the two above -
+        // except that the evidence it rejects is the PHYSICAL one.
+        if ((statMask & PD_STAT_INT) != 0)
+        {
+            return true;
+        }
+        if ((statMask & (PD_STAT_STR | PD_STAT_AGI)) != 0)
+        {
+            return false;
+        }
+        return (statMask & PD_STAT_PHYS_EVIDENCE) == 0;
     }
 }
 

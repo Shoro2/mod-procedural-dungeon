@@ -133,13 +133,28 @@ namespace PDungeon
     // promise the other module never made. What it does promise is this
     // number in EffectMiscValue_1 and the rank's value in the aura's amount.
     //
-    // Nothing in this module includes an FT header for it - the reader is ten
-    // file-local lines in PDv2InstanceScript.cpp, and the tag band
-    // 76001-76003 is registered in share-public 06-custom-ids.md.
+    // Nothing in this module includes an FT header for it - the reader is
+    // PDv2TaggedAura.h, ten lines of our own - and the tag band 76001-76004 is
+    // registered in share-public 06-custom-ids.md.
     //
     // int32 rather than the uint32 above because AuraEffect::GetMiscValue()
     // is signed and this constant exists to be compared against it.
     int32 const PD_TALENT_TAG_RESPAWN = 76001;
+
+    // Round E / WP9, the same contract for the "Discerning Eye" node: owning
+    // it UNLOCKS the stat-profile row in the /pd panel and makes the account's
+    // chosen profile bite on every gear roll of the run. One rank, so the
+    // amount is only ever 0 or 1 and the whole question is "does he own it".
+    //
+    // The unlock is a per-CHARACTER aura and the profile it unlocks is a
+    // per-ACCOUNT column, which is deliberate rather than an oversight: every
+    // other knob on this panel is per account, so the CHOICE is shared, while
+    // each character has to buy its own way to make it.
+    //
+    // 76002 and 76003 are Forgotten Talents' own (the two nodes
+    // mod-paragon-itemgen reads), which is why this one is 76004 and not the
+    // next number after 76001.
+    int32 const PD_TALENT_TAG_STATFILTER = 76004;
 
     char const* const PD_LOG = "module.pdungeon";
 }

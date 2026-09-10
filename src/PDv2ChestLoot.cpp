@@ -191,14 +191,24 @@ namespace
         // chests still standing in it.
         bool const icc = static_cast<int>(state.dlvl) >= cfg.lootIccDlvl;
 
+        // Round E / WP9. ONCE per cache and not once per item: this is a walk
+        // of the looter's dummy auras plus a lock-guarded map lookup, and the
+        // answer cannot change between two rolls of the same chest. Off unless
+        // this character owns Discerning Eye - which is what every account
+        // that never bought the node rolls with, exactly as before.
+        //
+        // The looter is the FIRST opener, so a shared chest is filtered to his
+        // profile the same way it has always been filtered to his class.
+        uint8_t const profile = PDv2LootMgr::StatProfileFor(looter);
+
         int dropped = 0;
         for (int i = 0; i < count; ++i)
         {
             uint32 const item =
-                icc ? sPDv2LootMgr->RollGear(LOOT_POOL_ICC_N, looter)
+                icc ? sPDv2LootMgr->RollGear(LOOT_POOL_ICC_N, looter, profile)
                     : sPDv2LootMgr->RollGearUnion(LOOT_POOL_CHEST_LOW_A,
                                                   LOOT_POOL_CHEST_LOW_B,
-                                                  looter);
+                                                  looter, profile);
             if (!item)
             {
                 // An empty or unloaded pool. Nothing to add, and nothing to
@@ -327,10 +337,18 @@ namespace
                             static_cast<int>(state.lootMultX100),
                             static_cast<int>(urand(1, 100)));
 
+        // WP9, and once per cache for the reason InjectShiftingCache states.
+        // The legacy rares above are deliberately NOT profiled: they are the
+        // headline of a finished run, there are nine of them in the whole
+        // module, and RollBonus picks the looter's ARMOUR class for the rows
+        // that ask - a stat filter over nine hand-picked rows could only ever
+        // take one away.
+        uint8_t const profile = PDv2LootMgr::StatProfileFor(looter);
+
         int gear = 0;
         for (int i = 0; i < wanted; ++i)
         {
-            uint32 const item = sPDv2LootMgr->RollGear(pool, looter);
+            uint32 const item = sPDv2LootMgr->RollGear(pool, looter, profile);
             if (!item)
             {
                 continue;

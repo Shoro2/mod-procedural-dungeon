@@ -24,11 +24,15 @@
 #include "ObjectMgr.h"
 #include "PDDefines.h"
 #include "PDv2Mgr.h"
+#include "PDv2TaggedAura.h"
 #include "Player.h"
 #include "QueryResult.h"
 #include "Random.h"
 #include "Timer.h"
+#include "WorldSession.h"
 #include "generator/PDv2GameMath.h"
+
+#include <algorithm>
 
 namespace PDungeon
 {
@@ -136,7 +140,8 @@ namespace PDungeon
             // was deleted under them. Dropping it here is the difference
             // between a regenerate-the-pools warning at boot and a player
             // being handed an id his client cannot draw.
-            if (!sObjectMgr->GetItemTemplate(item))
+            ItemTemplate const* const proto = sObjectMgr->GetItemTemplate(item);
+            if (!proto)
             {
                 if (missing < LOOT_MAX_NAMED_DROPS)
                 {
@@ -152,6 +157,12 @@ namespace PDungeon
             entry.item = item;
             entry.weight = fields[2].Get<uint16>();
             entry.expansion = fields[3].Get<uint8>();
+            // Round E / WP9. The template is already in hand from the
+            // existence check above, so the stat mask costs this loader
+            // nothing beyond the ten-slot walk - and it is the LAST moment it
+            // is cheap. Computing it per roll instead would put an
+            // sObjectMgr lookup on every candidate of every gear roll.
+            entry.statMask = StatMaskFor(proto);
             entry.category = fields[4].Get<std::string>();
 
             // LOAD-BEARING, not tidiness: RollMaterial tests
@@ -297,7 +308,7 @@ namespace PDungeon
     }
 
     void PDv2LootMgr::Collect(LootPool const& pool, Player const* filterFor,
-                              uint8_t expansionMask,
+                              uint8_t expansionMask, uint8_t profile,
                               std::vector<LootPoolEntry const*>& out)
     {
         // Read once, not per entry: a filtered draw over RAID_N asks these
@@ -309,6 +320,15 @@ namespace PDungeon
         for (LootPoolEntry const& entry : pool.entries)
         {
             if (((1u << entry.expansion) & expansionMask) == 0)
+            {
+                continue;
+            }
+            // WP9, and BEFORE the class test on purpose: this one is a byte
+            // compare against a mask the loader already computed, while the
+            // class test costs an sObjectMgr lookup per surviving candidate.
+            // The cheaper question first is worth stating, because the two
+            // read as though their order were arbitrary.
+            if (!FitsProfileRaw(entry.statMask, profile))
             {
                 continue;
             }
@@ -362,8 +382,8 @@ namespace PDungeon
         return found ? static_cast<uint32_t>(found->entries.size()) : 0u;
     }
 
-    uint32_t PDv2LootMgr::RollGear(std::string_view pool,
-                                   Player const* looter) const
+    uint32_t PDv2LootMgr::RollGear(std::string_view pool, Player const* looter,
+                                   uint8_t profile) const
     {
         LootPool const* found = FindPool(pool);
         if (!found || found->entries.empty())
@@ -372,13 +392,19 @@ namespace PDungeon
         }
 
         std::vector<LootPoolEntry const*> candidates;
+        // Which rung of the header's ladder actually PAID, for the debug line
+        // below: 2 = class and profile, 1 = class only, 0 = the raw pool.
+        // Assigned from what came back rather than from what was tried, so a
+        // line reading "stage 1" is a line where the profile really was given
+        // up - which is the only thing anybody reads this number for.
+        int stage = 0;
         if (looter && sPDv2Mgr->GetConfig().lootClassFilter)
         {
             // Built per call and thrown away: the pools top out around 2 200
             // entries, gear is rolled a handful of times per run, and a cache
-            // keyed by (pool, class, race) would have to be invalidated by
-            // hand the day the pools are regenerated. The gated line below is
-            // the measurement that says the choice still holds.
+            // keyed by (pool, class, race, profile) would have to be
+            // invalidated by hand the day the pools are regenerated. The gated
+            // line below is the measurement that says the choice still holds.
             //
             // ONE LINE PER GEAR ROLL since Round E / R3, so it takes V2.Debug
             // like every other per-roll line: a chest, a boss and the final
@@ -386,30 +412,50 @@ namespace PDungeon
             // in PDv2ChestLoot.cpp is the ungated record of what was PAID -
             // this one is only the filter's own cost.
             uint32 const startMs = getMSTime();
-            Collect(*found, looter, PD_LOOT_EXPANSION_ALL, candidates);
+            Collect(*found, looter, PD_LOOT_EXPANSION_ALL, profile, candidates);
+            stage = candidates.empty() ? 0 : 2;
+
+            // Round E / WP9, the middle rung: the profile is dropped and the
+            // class is KEPT. This is the whole reason the fallback grew one -
+            // before WP9 an empty filtered set went straight to the raw pool,
+            // which for a chosen stat profile would have meant "ask for
+            // strength gear, be handed a wand".
+            if (candidates.empty() && profile != PD_STAT_PROFILE_OFF)
+            {
+                Collect(*found, looter, PD_LOOT_EXPANSION_ALL,
+                        PD_STAT_PROFILE_OFF, candidates);
+                stage = candidates.empty() ? 0 : 1;
+            }
+
             if (PDv2Debug())
             {
                 LOG_INFO(PD_LOG, "PDv2 loot: pool {} filtered to {} of {} "
-                                 "entries for class {} in {} ms", found->name,
+                                 "entries for class {} at stat profile {} "
+                                 "(stage {}) in {} ms", found->name,
                          uint32(candidates.size()),
                          uint32(found->entries.size()),
-                         uint32(looter->getClass()),
+                         uint32(looter->getClass()), uint32(profile), stage,
                          GetMSTimeDiffToNow(startMs));
             }
         }
 
-        // Also the path a disabled filter takes. An empty filtered set is
-        // NOT an error: a pool can legitimately hold nothing for one class,
-        // and paying the wrong gear beats paying none (spec D5).
+        // Stage 3, and also the path a disabled filter takes. An empty
+        // filtered set is NOT an error: a pool can legitimately hold nothing
+        // for one class, and paying the wrong gear beats paying none (spec
+        // D5). By the time control reaches here the profile has already been
+        // given up above, so this is the class filter's own last resort and
+        // nothing else.
         if (candidates.empty())
         {
-            Collect(*found, nullptr, PD_LOOT_EXPANSION_ALL, candidates);
+            Collect(*found, nullptr, PD_LOOT_EXPANSION_ALL,
+                    PD_STAT_PROFILE_OFF, candidates);
         }
         return PickWeighted(candidates);
     }
 
     uint32_t PDv2LootMgr::RollGearUnion(std::string_view a, std::string_view b,
-                                        Player const* looter) const
+                                        Player const* looter,
+                                        uint8_t profile) const
     {
         LootPool const* poolA = FindPool(a);
         LootPool const* poolB = FindPool(b);
@@ -430,11 +476,40 @@ namespace PDungeon
         {
             if (poolA)
             {
-                Collect(*poolA, looter, PD_LOOT_EXPANSION_ALL, candidates);
+                Collect(*poolA, looter, PD_LOOT_EXPANSION_ALL, profile,
+                        candidates);
             }
             if (poolB)
             {
-                Collect(*poolB, looter, PD_LOOT_EXPANSION_ALL, candidates);
+                Collect(*poolB, looter, PD_LOOT_EXPANSION_ALL, profile,
+                        candidates);
+            }
+
+            // WP9 stage 2, and over BOTH pools again rather than over the one
+            // that came up empty: the union is one reward tier, so a partial
+            // re-collect would quietly turn it back into the pool-first draw
+            // this function exists to avoid.
+            if (candidates.empty() && profile != PD_STAT_PROFILE_OFF)
+            {
+                if (poolA)
+                {
+                    Collect(*poolA, looter, PD_LOOT_EXPANSION_ALL,
+                            PD_STAT_PROFILE_OFF, candidates);
+                }
+                if (poolB)
+                {
+                    Collect(*poolB, looter, PD_LOOT_EXPANSION_ALL,
+                            PD_STAT_PROFILE_OFF, candidates);
+                }
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 loot: the union of {} and {} held "
+                                     "nothing for class {} at stat profile {} "
+                                     "- profile dropped, class kept ({} "
+                                     "candidates)", a, b,
+                             uint32(looter->getClass()), uint32(profile),
+                             uint32(candidates.size()));
+                }
             }
         }
 
@@ -442,11 +517,13 @@ namespace PDungeon
         {
             if (poolA)
             {
-                Collect(*poolA, nullptr, PD_LOOT_EXPANSION_ALL, candidates);
+                Collect(*poolA, nullptr, PD_LOOT_EXPANSION_ALL,
+                        PD_STAT_PROFILE_OFF, candidates);
             }
             if (poolB)
             {
-                Collect(*poolB, nullptr, PD_LOOT_EXPANSION_ALL, candidates);
+                Collect(*poolB, nullptr, PD_LOOT_EXPANSION_ALL,
+                        PD_STAT_PROFILE_OFF, candidates);
             }
         }
         return PickWeighted(candidates);
@@ -460,12 +537,13 @@ namespace PDungeon
             return 0;
         }
 
-        // No class filter and no fallback, deliberately on both counts: a
-        // material fits every class, and a mask that matches nothing is a
-        // caller asking for a band that does not exist - answering it with
-        // some other expansion's material would ignore what F1 asked for.
+        // No class filter, no STAT profile and no fallback, deliberately on
+        // all three counts: a material fits every class and has no stat line
+        // to profile, and a mask that matches nothing is a caller asking for
+        // a band that does not exist - answering it with some other
+        // expansion's material would ignore what F1 asked for.
         std::vector<LootPoolEntry const*> candidates;
-        Collect(*pool, nullptr, expansionMask, candidates);
+        Collect(*pool, nullptr, expansionMask, PD_STAT_PROFILE_OFF, candidates);
         return PickWeighted(candidates);
     }
 
@@ -531,6 +609,112 @@ namespace PDungeon
                FitsClassRaw(proto->AllowableClass,
                             static_cast<uint8_t>(proto->Class),
                             static_cast<uint8_t>(proto->SubClass), classId);
+    }
+
+    uint8_t PDv2LootMgr::StatMaskFor(ItemTemplate const* proto)
+    {
+        if (!proto)
+        {
+            return 0;
+        }
+
+        // Heirlooms and any other scaling item: ItemStat[] is empty and the
+        // real stat line comes out of ScalingStatValues.dbc at equip time,
+        // scaled to the wearer's level. 0 - "no stat line" - is the only
+        // honest answer, and it is also the harmless one: mask 0 fits every
+        // profile. The shipped pools contain none (measured: every gear row
+        // has ScalingStatDistribution 0), so this is a guard against a pool
+        // regenerated from a different item_template rather than a live case.
+        if (proto->ScalingStatDistribution != 0)
+        {
+            return 0;
+        }
+
+        // ObjectMgr packs the non-zero stats DENSELY into the front of the
+        // array and sets StatsCount to how many it wrote (ObjectMgr.cpp:3399),
+        // so 0..StatsCount-1 has no holes and no zero values. std::min all the
+        // same: StatsCount is a uint32 field and the array is ten entries, and
+        // a walk past it would be undefined behaviour rather than a bad mask.
+        uint32 const count =
+            std::min<uint32>(proto->StatsCount, MAX_ITEM_PROTO_STATS);
+
+        uint8_t mask = 0;
+        for (uint32 i = 0; i < count; ++i)
+        {
+            switch (proto->ItemStat[i].ItemStatType)
+            {
+                case ITEM_MOD_STRENGTH:
+                    mask |= PD_STAT_STR;
+                    break;
+                case ITEM_MOD_AGILITY:
+                    mask |= PD_STAT_AGI;
+                    break;
+                case ITEM_MOD_INTELLECT:
+                    mask |= PD_STAT_INT;
+                    break;
+                // Caster evidence. Spirit and mp5 are on healing gear that
+                // often names no intellect at all, spell power and spell
+                // penetration on the rest of it; 41 and 42 are the deprecated
+                // pre-3.0 healing/damage columns, which the legacy pools DO
+                // still contain - dropping them would let a classic caster
+                // ring through the strength profile.
+                case ITEM_MOD_SPIRIT:
+                case ITEM_MOD_SPELL_HEALING_DONE:
+                case ITEM_MOD_SPELL_DAMAGE_DONE:
+                case ITEM_MOD_MANA_REGENERATION:
+                case ITEM_MOD_SPELL_POWER:
+                case ITEM_MOD_SPELL_PENETRATION:
+                    mask |= PD_STAT_CASTER_EVIDENCE;
+                    break;
+                // Physical evidence, and the TANK ratings are in it on
+                // purpose: a ring of defence and dodge is a warrior's or a
+                // paladin's, and no caster profile should be offered one.
+                case ITEM_MOD_DEFENSE_SKILL_RATING:
+                case ITEM_MOD_DODGE_RATING:
+                case ITEM_MOD_PARRY_RATING:
+                case ITEM_MOD_BLOCK_RATING:
+                case ITEM_MOD_EXPERTISE_RATING:
+                case ITEM_MOD_ATTACK_POWER:
+                case ITEM_MOD_RANGED_ATTACK_POWER:
+                case ITEM_MOD_ARMOR_PENETRATION_RATING:
+                case ITEM_MOD_BLOCK_VALUE:
+                    mask |= PD_STAT_PHYS_EVIDENCE;
+                    break;
+                // Stamina, hit, crit, haste, resilience, mana, health and the
+                // rest: NEUTRAL, so they set no bit. Every profile wants them,
+                // and a bit for them could only ever reject something.
+                default:
+                    break;
+            }
+        }
+        return mask;
+    }
+
+    uint8_t PDv2LootMgr::StatProfileFor(Player const* looter)
+    {
+        // A boss killed by nobody we can resolve to a player, or a caller that
+        // has already given up on a looter: profile Off, which is exactly what
+        // the class filter does with the same input.
+        if (!looter || !looter->GetSession())
+        {
+            return PD_STAT_PROFILE_OFF;
+        }
+
+        // ONE aura walk per injection. The unlock is per character, so this is
+        // the looter's OWN node and not the run owner's - the player standing
+        // at the chest is the one whose reward this is.
+        if (!TaggedAuraAmount(looter, PD_TALENT_TAG_STATFILTER))
+        {
+            return PD_STAT_PROFILE_OFF;
+        }
+
+        // ...and the setting is per account. An account the manager has never
+        // loaded answers with a default-constructed state, whose profile is
+        // Off - so a looter from a realm-crossing edge case degrades to the
+        // pre-WP9 behaviour instead of to an empty window.
+        return sPDv2Mgr
+            ->GetAccountState(looter->GetSession()->GetAccountId())
+            .cfgStatProfile;
     }
 
     std::string PDv2LootMgr::Describe() const

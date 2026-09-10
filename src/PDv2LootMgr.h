@@ -18,6 +18,11 @@
 #ifndef MOD_PDUNGEON_V2_LOOT_MGR_H
 #define MOD_PDUNGEON_V2_LOOT_MGR_H
 
+// Engine-free and header-only, and here rather than only in the .cpp because
+// the two gear rolls default their stat profile to PD_STAT_PROFILE_OFF - a
+// default argument has to be a value the caller's translation unit can see.
+#include "generator/PDv2GameMath.h"
+
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -68,6 +73,13 @@ namespace PDungeon
         uint32_t item = 0;
         uint16_t weight = 0;
         uint8_t expansion = PD_LOOT_EXPANSION_MAX;
+        // Round E / WP9. What the item's stat line says about who it is for,
+        // as the five bits of PDStatMaskBits. PRECOMPUTED at Load() and never
+        // again: a filtered draw over RAID_N asks this question 2 235 times
+        // per roll, and asking it of sObjectMgr each time would trade a byte
+        // per row for a template lookup per candidate per roll. 0 means "no
+        // stat line", which every profile accepts.
+        uint8_t statMask = 0;
         std::string category;
     };
 
@@ -117,18 +129,31 @@ namespace PDungeon
         // item 0.
         //
         // With V2.Loot.ClassFilter on (D5) the candidates are first narrowed
-        // to what `looter` can use; if that leaves NOTHING the roll falls
-        // back to the whole pool, because a run that pays no gear at all is
-        // worse than a run that pays the wrong gear.
-        uint32_t RollGear(std::string_view pool, Player const* looter) const;
+        // to what `looter` can use, and with `profile` set (Round E / WP9) to
+        // what its stat line suits as well. THREE stages, narrowest first,
+        // because a run that pays no gear at all is worse than a run that pays
+        // the wrong gear:
+        //
+        //   1. class + race + profile
+        //   2. class + race        - the profile is dropped, and only it
+        //   3. the raw pool        - the pre-D5 behaviour, last resort
+        //
+        // The order is the whole design: the profile is the setting the player
+        // chose most recently and the one they can change in a second, so it is
+        // the first thing given up. Dropping the class instead would hand a
+        // rogue a plate helm to satisfy a stat preference nobody has any more.
+        uint32_t RollGear(std::string_view pool, Player const* looter,
+                          uint8_t profile = PD_STAT_PROFILE_OFF) const;
 
         // The same draw over two pools at once - HC5_EPIC + RAID_N is one
         // reward tier, not two, so a chest must not first pick a pool (which
         // would pay the 158-row pool as often as the 2 235-row one) and then
         // pick an item. The weight of every entry of both pools competes in
-        // ONE walk.
+        // ONE walk, and the three stages above are taken over both pools
+        // together for the same reason.
         uint32_t RollGearUnion(std::string_view a, std::string_view b,
-                               Player const* looter) const;
+                               Player const* looter,
+                               uint8_t profile = PD_STAT_PROFILE_OFF) const;
 
         // One material, weighted, restricted to the expansions in the mask
         // (F1 narrows it; the default is all three). No class filter: a
@@ -150,6 +175,26 @@ namespace PDungeon
         // two-line wrapper that reads the item.
         static bool ItemFitsPlayer(ItemTemplate const* proto, uint8_t classId,
                                    uint32_t raceMask);
+
+        // WP9's half of the same split, and THE ONLY place in the module that
+        // reads ItemTemplate::ItemStat[]. Called once per pool row at Load(),
+        // never at roll time; what the rolls see is the byte it returns and
+        // FitsProfileRaw in generator/PDv2GameMath.h, where the harness pins
+        // the rule.
+        static uint8_t StatMaskFor(ItemTemplate const* proto);
+
+        // The effective stat profile of a roll for this looter: the account's
+        // chosen profile if the character carries Discerning Eye, and Off if
+        // it does not. ONE implementation for all three injection sites (the
+        // two caches and the boss), because the unlock rule is exactly the
+        // kind of two-line expression that grows a third, subtly different
+        // copy - and the SET handler enforcing the same rule server-side is
+        // already the second half of it.
+        //
+        // Note what is per WHAT: the aura is per CHARACTER and the knob is per
+        // ACCOUNT, deliberately. The choice is shared across an account; each
+        // character earns the right to make it on its own.
+        static uint8_t StatProfileFor(Player const* looter);
 
         // The `.pdungeon v2 info` line: "pools 6 - HC5_EPIC 158 - ... -
         // bonus 9". 0 anywhere in it means the SQL never reached the world DB
@@ -175,12 +220,14 @@ namespace PDungeon
 
         // Appends the entries of `pool` a roll may pick to `out`. `filterFor`
         // null means "no class filter" - the whole pool - which is what both
-        // the disabled filter and the empty-filtered-pool fallback pass.
+        // the disabled filter and the last-resort fallback pass;
+        // `profile` PD_STAT_PROFILE_OFF likewise means "no stat filter", which
+        // is what the middle stage passes with the class filter still on.
         // POINTERS, not copies: the union roll draws over two pools as one
         // set, and the filtered roll must not copy a category string per
         // candidate on every kill.
         static void Collect(LootPool const& pool, Player const* filterFor,
-                            uint8_t expansionMask,
+                            uint8_t expansionMask, uint8_t profile,
                             std::vector<LootPoolEntry const*>& out);
 
         // The weighted walk itself: urand(1, total) and step through the

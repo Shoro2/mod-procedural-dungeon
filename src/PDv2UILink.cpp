@@ -25,6 +25,7 @@
 #include "PDv2InstanceScript.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
+#include "PDv2TaggedAura.h"
 #include "Player.h"
 #include "Random.h"
 #include "ScriptMgr.h"
@@ -491,6 +492,26 @@ namespace PDungeon
             // Lua that disagreed with the server for months.
             << ' ' << sPDv2PackMgr->AffixCountForDifficulty(account.cfgDifficulty)
             << ' ' << static_cast<int>(verdict)
+            // Round E / WP9, fields 25 and 26, and APPENDED - before the
+            // free-text tail below, which has to stay last because the addon
+            // reads the tail as "everything after the numbers". The rule
+            // (PDv2UILink.h): fields are only ever added at the end, so an
+            // older panel drops these two and draws a true, if older, picture.
+            //
+            // The profile the account chose, and whether the character in
+            // front of us has earned the right to choose it. The unlock is a
+            // live aura read and NOT a stored flag: it costs one walk of this
+            // player's dummy auras per panel refresh, and it is right the
+            // moment a node is bought or refunded.
+            //
+            // static_cast<int> is not decoration - cfgStatProfile is a uint8_t
+            // and an ostream would write it as a CHARACTER.
+            //
+            // Like diffMax above, both are a HINT and never a permission: the
+            // SET handler asks the same aura again before it lets the value
+            // through, because a panel is a thing an untrusted client runs.
+            << ' ' << static_cast<int>(account.cfgStatProfile)
+            << ' ' << (TaggedAuraAmount(player, PD_TALENT_TAG_STATFILTER) ? 1 : 0)
             << ' ' << Sanitize(LinkState::Describe(verdict));
 
         SendAddonWhisper(player, PREFIX_UI_DOWN, out.str());
@@ -927,6 +948,32 @@ namespace PDungeon
                     return;
                 }
                 wanted.cfgBandMin = value;
+            }
+            else if (key == "statprofile")
+            {
+                // Round E / WP9, and the band branch above is the pattern
+                // exactly: a setting the panel is not allowed to show is a
+                // setting no panel may move. The difference is only where the
+                // permission comes from - a server constant there, the
+                // player's own Forgotten Talents node here. Asked ONCE, right
+                // here, and never again inside SetAccountCfg: that function
+                // clamps, it does not authorise.
+                if (!TaggedAuraAmount(player, PD_TALENT_TAG_STATFILTER))
+                {
+                    if (PDv2Debug())
+                    {
+                        LOG_INFO(PD_LOG, "PDv2 UI: account {} tried to set the stat profile "
+                                         "without owning Discerning Eye", accountId);
+                    }
+                    return;
+                }
+                // Clamped HERE as well as in SetAccountCfg, unlike its three
+                // int siblings: the field is a uint8_t, so a wire value of
+                // 5000 would WRAP on the way into `wanted` and reach the clamp
+                // as something else entirely. The clamp downstream is still
+                // the one that matters - this is only what keeps the trip
+                // through the struct honest.
+                wanted.cfgStatProfile = GameClampStatProfile(value);
             }
             else
             {
