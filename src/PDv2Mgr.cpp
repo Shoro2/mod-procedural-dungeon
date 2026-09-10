@@ -30,6 +30,28 @@
 
 namespace PDungeon
 {
+    namespace
+    {
+        // Round E / WP10. Does the Endless Storage table exist on THIS realm?
+        //
+        // SHOW TABLES and not `SELECT 1 FROM custom_endless_storage LIMIT 1`,
+        // because the two failures are indistinguishable through the second
+        // one: a missing table and an EMPTY table both come back as a null
+        // QueryResult, and a fresh realm has an empty storage on the day it is
+        // installed. SHOW TABLES answers about the schema and nothing else -
+        // one row means the table is there whatever is in it.
+        //
+        // Asked from LoadConfig, which is safe: World::SetInitialWorldSettings
+        // starts the database pools well before it reads the config
+        // (World.cpp:318, and LoadDBAllowedSecurityLevel queries three lines
+        // later), so this never runs against a pool that is not up.
+        bool StorageTableExists()
+        {
+            return CharacterDatabase.Query(
+                       "SHOW TABLES LIKE 'custom_endless_storage'") != nullptr;
+        }
+    }
+
     PDv2Mgr* PDv2Mgr::instance()
     {
         static PDv2Mgr mgr;
@@ -248,6 +270,26 @@ namespace PDungeon
             "ProceduralDungeon.V2.Loot.Mats.ChancePct", 100)));
         _config.lootMatsMaxPerMobAtCap = std::min(10, std::max(0, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Loot.Mats.MaxPerMobAtCap", 5)));
+
+        // Round E / WP10: materials into the Endless Storage instead of the
+        // bags. The key says what the operator WANTS; the probe below decides
+        // whether it is possible, because the table belongs to another module
+        // and PDv2 does not require it.
+        _config.lootMatsToStorage = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Loot.MatsToStorage", true);
+        if (_config.lootMatsToStorage && !StorageTableExists())
+        {
+            // Off for this session rather than per deposit: without it every
+            // material of every kill would be one failed INSERT and one line in
+            // the DB error log, on a hot path, for as long as the realm runs.
+            // `.reload config` probes again, so an operator who installs
+            // mod-endless-storage gets the feature without a restart.
+            _config.lootMatsToStorage = false;
+            LOG_WARN(PD_LOG, "PDv2: V2.Loot.MatsToStorage is on but the characters "
+                             "table `custom_endless_storage` does not exist - materials "
+                             "go to the bags. The table belongs to mod-endless-storage; "
+                             "install it (or set the key to 0) and `.reload config`");
+        }
 
         // L4. Counts, clamped into [0, 10]: 0 silences that one source and 10
         // is already three times what a difficulty-100 run multiplies it to.

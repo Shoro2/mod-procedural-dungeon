@@ -917,6 +917,21 @@ namespace PDungeon
         // reads as a drop that never happened.
         void GrantItem(Player* player, uint32 item, uint32 count) const;
 
+        // Round E / WP10, operator 2026-09-11: "die beim Mob-Kill geaddeten
+        // Mats gehen noch immer in den Bag und nicht in den Endless Storage.
+        // das soll automatisch passieren". One stack of MATERIAL to a player -
+        // straight into custom_endless_storage where V2.Loot.MatsToStorage is
+        // on and the item is something the storage would show, and through
+        // GrantItem's bags-then-mail funnel in every other case.
+        //
+        // Materials and the bonus mat, never currency. The five Remnants are
+        // trade goods that stack, so they pass the storage predicate on their
+        // own - but the Forgotten Talents tree counts them in the BAGS, so a
+        // Remnant deposited is a Remnant the player cannot spend. RollCurrency
+        // therefore calls GrantItem directly, and this function refuses the
+        // five conf entries besides.
+        void GrantMaterial(Player* player, uint32 item, uint32 count) const;
+
         // Every player on `map` that still has a session, which is who a
         // personal roll is made for. Static and taking the map explicitly:
         // it is a plain walk of GetPlayers() and the callers name the map they

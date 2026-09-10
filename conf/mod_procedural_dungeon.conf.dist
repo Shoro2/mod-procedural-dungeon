@@ -685,6 +685,42 @@ ProceduralDungeon.V2.Loot.Mats.ChancePct = 100
 ProceduralDungeon.V2.Loot.Mats.MaxPerMobAtCap = 5
 
 #
+#    ProceduralDungeon.V2.Loot.MatsToStorage
+#        Description: Round E / WP10 (2026-09-11): put the materials a kill
+#                     pays straight into the Endless Storage instead of the
+#                     player's bags.
+#
+#                     The operator's ask, and the reason is arithmetic: a run
+#                     pays materials on every tagged kill, to every player on
+#                     the map, in stacks of up to Mats.MaxPerMobAtCap - the
+#                     bags are full by the third room, and the Endless Storage
+#                     is where those materials were always going to end up
+#                     anyway. The bonus rare from Loot.BonusRollPct takes the
+#                     same route.
+#
+#                     Only what the storage would actually SHOW is deposited -
+#                     recipes, food and drink that stacks, trade goods and gems
+#                     that stack, which is the storage's own rule read off its
+#                     Lua. Anything else still goes to the bags, and to the
+#                     mailbox from Chromie when those are full.
+#
+#                     The five Remnant currencies are NEVER deposited, whatever
+#                     this says: they are trade goods and would qualify, but
+#                     the Forgotten Talents tree counts them in the bags, so a
+#                     deposited Remnant is one the player cannot spend.
+#
+#                     Needs mod-endless-storage: the deposit is one INSERT into
+#                     its characters table `custom_endless_storage`. PDv2 does
+#                     not require that module, so the worldserver checks for
+#                     the table when it reads this config and turns the feature
+#                     off for the session with one WARN when it is not there -
+#                     `.reload config` probes again after an install.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.Loot.MatsToStorage = 1
+
+#
 #    ProceduralDungeon.V2.Loot.Chest.Items
 #    ProceduralDungeon.V2.Loot.Boss.Items
 #    ProceduralDungeon.V2.Loot.Final.Items

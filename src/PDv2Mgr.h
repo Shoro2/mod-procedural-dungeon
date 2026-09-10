@@ -264,6 +264,21 @@ namespace PDungeon
         int         lootMatsChancePct = 100;
         int         lootMatsMaxPerMobAtCap = 5;
 
+        // Round E / WP10 (2026-09-11, operator: "die beim Mob-Kill geaddeten
+        // Mats gehen noch immer in den Bag und nicht in den Endless Storage.
+        // das soll automatisch passieren"). Whether a granted material is
+        // deposited straight into custom_endless_storage instead of the bags.
+        // On: a run pays five kinds of material per kill and 16 bag slots are
+        // gone by the third room, which is the whole reason the Endless
+        // Storage exists.
+        //
+        // NOT purely an operator switch: LoadConfig turns it off for the
+        // session when the table is not there, so a realm running PDv2 without
+        // mod-endless-storage degrades to bags rather than to a stream of
+        // failed INSERTs. The currency Remnants are excluded from it by entry
+        // whatever this key says - the talent tree counts them in the bags.
+        bool        lootMatsToStorage = true;
+
         // Gear per source, before lootMult scales it (GameScaledCount rolls the
         // fraction, so one item at x2.50 is two plus a coin flip). Three keys
         // rather than one because the three sources are three different

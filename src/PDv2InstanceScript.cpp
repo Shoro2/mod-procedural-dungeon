@@ -312,6 +312,47 @@ namespace PDungeon
         // translation units, and two copies of "what has this player
         // unlocked" inside one module is how the answer starts differing by
         // call site. The header carries the whole FT contract with it.
+
+        // Round E / WP10. "May this item live in the Endless Storage?"
+        //
+        // A COPY of mod-loot-filter's IsStorageEligible
+        // (mod-loot-filter/src/LootFilter.cpp:377-386), on purpose and not an
+        // include: the two modules do not otherwise know each other, and a
+        // shared header between them would buy a build dependency for four
+        // lines - the same trade PDv2TaggedAura.h states for
+        // mod-paragon-itemgen's copy of TaggedAuraAmount.
+        //
+        // The copy that MATTERS is a third one, the storage's own Lua
+        // (lua_scripts/Storage/endless_storage_server.lua:88-99), because that
+        // is what decides whether a deposited item can be listed and taken out
+        // again. An item this predicate accepts and that one rejects would be
+        // deposited into a row nobody can reach. All three say the same thing
+        // today - recipes; food and drink that stacks; trade goods or gems
+        // that stack - and this comment is where a fourth copy gets caught.
+        bool StorageEligible(ItemTemplate const* proto)
+        {
+            if (!proto)
+            {
+                return false;
+            }
+            if (proto->Class == ITEM_CLASS_RECIPE)
+            {
+                return true;
+            }
+            if (proto->Class == ITEM_CLASS_CONSUMABLE &&
+                proto->SubClass == ITEM_SUBCLASS_FOOD &&
+                proto->GetMaxStackSize() > 1)
+            {
+                return true;
+            }
+            if ((proto->Class == ITEM_CLASS_TRADE_GOODS ||
+                 proto->Class == ITEM_CLASS_GEM) &&
+                proto->GetMaxStackSize() > 1)
+            {
+                return true;
+            }
+            return false;
+        }
     }
 
     PDv2InstanceScript::PDv2InstanceScript(InstanceMap* map) : InstanceScript(map)
@@ -718,13 +759,17 @@ namespace PDungeon
             }
         }
 
-        // AddItem sends the standard received-item line, and says so itself
-        // when the bags are full - nothing to add in that case.
-        if (!player->AddItem(entry, 1))
-        {
-            return;
-        }
+        // Round E / WP10: the bonus rares are materials like any other, so they
+        // take the material funnel - Endless Storage first, bags and then a
+        // letter from Chromie after. This replaces a bare AddItem whose failure
+        // dropped the roll on the floor without a word; the mail fallback it
+        // inherits is strictly the better answer to full bags.
+        GrantMaterial(player, entry, 1);
 
+        // Said whatever the funnel did with it, because this line marks the
+        // ROLL and not the delivery: a bonus rare is rare, and a player who
+        // reads "Stored [Primal Might] x1" alone cannot tell that the dungeon
+        // just paid something it usually does not.
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
         ChatHandler(player->GetSession()).PSendSysMessage(
             "Bonus: {}", proto ? proto->Name1 : std::string("?"));
@@ -810,6 +855,84 @@ namespace PDungeon
             ChatHandler(session).PSendSysMessage(
                 "Your bags are full - {} was mailed to you.", proto->Name1);
         }
+    }
+
+    void PDv2InstanceScript::GrantMaterial(Player* player, uint32 item,
+                                           uint32 count) const
+    {
+        if (!player || !item || !count)
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        // THE CURRENCY GUARD, and it is not theoretical. The five Remnants are
+        // trade goods with a stack, so StorageEligible says yes to every one of
+        // them - and mod-forgotten-talents counts them in the BAGS, so a
+        // Remnant in the storage is a Remnant nobody can spend. RollCurrency
+        // deliberately calls GrantItem and never this, which makes this loop
+        // dead code today; it is here because the call site somebody adds next
+        // is the one that will not remember, and five integer compares on a
+        // kill are not a cost worth arguing about. The ids come from the conf
+        // for the reason PDv2Mgr.h gives - the module names no item id
+        // anywhere - so a regenerated currency SQL moves the guard with it.
+        bool isCurrency = false;
+        for (uint32 const currency : cfg.lootCurrencyItem)
+        {
+            if (currency == item)
+            {
+                isCurrency = true;
+                break;
+            }
+        }
+
+        if (cfg.lootMatsToStorage && !isCurrency)
+        {
+            // The same lookup GrantItem makes and for the same reason: a conf
+            // or pool id that does not exist must not reach Item::CreateItem,
+            // and here it must not reach the INSERT either - the storage rows
+            // carry the item's class and subclass, which only the template
+            // knows.
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item);
+            if (proto && StorageEligible(proto))
+            {
+                // mod-loot-filter's DepositToStorage (LootFilter.cpp:389-398)
+                // verbatim, down to the ON DUPLICATE KEY: the table's primary
+                // key is (character_id, item_entry), so a second stack of the
+                // same material adds instead of failing, and the storage's Lua
+                // reads the row without knowing who wrote it.
+                //
+                // Fire-and-forget Execute, not Query: this runs on the kill
+                // path once per player per kill, the row is not read back, and
+                // an async write is what every other module doing this uses.
+                CharacterDatabase.Execute(
+                    "INSERT INTO custom_endless_storage "
+                    "(character_id, item_entry, item_class, item_subclass, amount) "
+                    "VALUES ({}, {}, {}, {}, {}) "
+                    "ON DUPLICATE KEY UPDATE amount = amount + {}",
+                    player->GetGUID().GetCounter(), item,
+                    uint32(proto->Class), uint32(proto->SubClass), count, count);
+
+                // The storage swallows the client's own "You receive item"
+                // line - nothing ever entered the bags - so this is the only
+                // thing that tells the player the kill paid. Same shape as
+                // mod-loot-filter's, with our own tag, so a player running both
+                // reads one sentence and not two dialects.
+                if (WorldSession* session = player->GetSession())
+                {
+                    ChatHandler(session).PSendSysMessage(
+                        "|cff888888[Depths]|r Stored [{}] x{} in Storage.",
+                        proto->Name1, count);
+                }
+                return;
+            }
+        }
+
+        // Everything else - the feature off, the table missing, a currency, an
+        // item the storage would not show - is the funnel this module already
+        // had: bags, then a letter from Chromie.
+        GrantItem(player, item, count);
     }
 
     void PDv2InstanceScript::RollCurrency(Creature* creature,
@@ -906,7 +1029,14 @@ namespace PDungeon
             {
                 return;
             }
-            GrantItem(player, item, urand(1, static_cast<uint32>(maxCount)));
+
+            // Round E / WP10: GrantMaterial and not GrantItem, so the stack
+            // goes to the Endless Storage where the player has one. This is the
+            // hot path the operator was looking at - a run pays materials on
+            // every tagged kill, for every player on the map, and 16 bag slots
+            // are gone by the third room. GrantMaterial says its own line when
+            // it deposits, which is why nothing is printed here.
+            GrantMaterial(player, item, urand(1, static_cast<uint32>(maxCount)));
         });
     }
 
