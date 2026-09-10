@@ -60,13 +60,19 @@
 // opens ONE window holding the template rows and our rolls together - no
 // second packet, no re-open, and nothing for the client to reconcile.
 //
-// The :7867 gate is also why re-filling is not our problem: the template loot
-// is only (re)generated while the state is GO_READY, and both chests are
-// Data3 = 1 (consumable), so a second open never refills. The `injected` flag
-// guards the other half - a chest that reaches GO_ACTIVATED twice (a restock,
-// a GM, a scripted re-open) must not roll a second set of gear - and it is set
-// BEFORE the first roll, so an early return anywhere below still leaves the
-// chest spent.
+// The `injected` flag guards the other half of GO_ACTIVATED - a chest that
+// reaches it twice (a restock, a GM, a scripted re-open) must not roll a second
+// set of gear - and it is set BEFORE the first roll, so an early return
+// anywhere below still leaves the chest paid out.
+//
+// WHY GO_JUST_DEACTIVATED IS ALSO OURS (Round E / WP10). This file used to say
+// here that "the template loot is only regenerated while the state is GO_READY,
+// and both chests are Data3 = 1 (consumable), so a second open never refills".
+// The first half is true and the conclusion was wrong: a MAP-SUMMONED
+// consumable chest with respawn time 0 is put BACK to GO_READY by the core and
+// then left standing, so a second open does refill it, out of
+// gameobject_loot_template, for ever. DespawnSpentCache below carries the
+// measurement and the fix.
 namespace
 {
     using namespace PDungeon;
@@ -378,6 +384,72 @@ namespace
         WarnDropped(go, run->GetAccountId(), dropped);
     }
 
+    // Round E / WP10. An emptied cache leaves the world instead of going back
+    // to GO_READY.
+    //
+    // THE BUG, as the operator put it: "man kann die Endboss-Truhe immer
+    // weiter oeffnen und bekommt jedes Mal Loot". Every PDv2 cache is summoned
+    // by the instance map with respawn time 0, no owner and no spell - the
+    // three SummonGameObject(..., 0) calls in PDv2InstanceScript.cpp are the
+    // dead-end and loop caches, the finale cache beside Chromie, and the
+    // Pilgrim's Cache a won event leaves behind. In GameObject::Update's
+    // GO_JUST_DEACTIVATED case (GameObject.cpp:821-890) that combination falls
+    // through every exit the core has:
+    //
+    //   :846  all three templates are type 3 with Data3 = 1, so
+    //         IsDespawnAtAction() is true and the "do not delete chests that
+    //         are not consumed on loot" branch does not take it;
+    //   :868  GetOwnerGUID() and GetSpellId() are both empty - a map summon
+    //         has neither - so the summoned-object `SetRespawnTime(0);
+    //         Delete();` does not take it either;
+    //   :870  SetLootState(GO_READY);
+    //   :881  m_respawnDelayTime is 0, because SummonGameObject was handed 0,
+    //         so `if (!m_respawnDelayTime) return;` leaves the chest standing
+    //         in the dungeon, READY, for the rest of the run.
+    //
+    // GO_READY is exactly the state Player::SendLoot tests at Player.cpp:7867
+    // before it calls FillLoot, so the next click re-fills the chest from
+    // gameobject_loot_template and pays those rows again, and again. The WP1
+    // injection is one-shot (PDv2ChestData::injected), which is why what
+    // repeats is the FILLER and never a second set of gear - and why the
+    // symptom reads as "loot every time" rather than "the boss gear twice".
+    //
+    // THE FIX is the delete the core would have done for an owned summon,
+    // :868-871 verbatim, taken from the one place that knows these three
+    // entries are ours.
+    //
+    // `spent` is a re-entrancy guard, not bookkeeping. Delete() removes the
+    // object LAZILY - AddObjectToRemoveList (GameObject.cpp:993), so it is
+    // still standing on the map until the map's next removal pass - and a
+    // second release inside that window reaches GO_JUST_DEACTIVATED again:
+    // under group loot a second player can still have the window open, and
+    // WorldSession::DoLootRelease sends an already cleared loot straight down
+    // the `loot->isLooted()` branch. Delete()'s own SetLootState is
+    // GO_NOT_READY (GameObject.cpp:975), which the state gate in the hook
+    // already rejects, so the flag guards that second RELEASE rather than the
+    // delete's own re-entry.
+    //
+    // A WINDOW CLOSED WITH ITEMS STILL IN IT does not come through here at
+    // all: DoLootRelease only reaches GO_JUST_DEACTIVATED once
+    // loot->isLooted() (LootHandler.cpp:299-330) and puts a partly looted
+    // chest back to GO_ACTIVATED instead. GO_ACTIVATED is not GO_READY, so
+    // :7867 never re-fills it, and the leftovers - the injected gear included
+    // - are still there on the next click.
+    void DespawnSpentCache(GameObject* go, PDv2ChestData* data)
+    {
+        if (data->spent)
+        {
+            return;
+        }
+        data->spent = true;
+
+        // Both calls, and in this order, because that is what the core does
+        // for the summon it DOES clean up: the respawn time first so nothing
+        // downstream can schedule a return, the delete second.
+        go->SetRespawnTime(0);
+        go->Delete();
+    }
+
     // One script for both chests. The hook is GLOBAL - it fires for every
     // gameobject on the realm - so the gate has to live here, and one gate is
     // both cheaper to run and easier to read than two.
@@ -389,7 +461,12 @@ namespace
         void OnGameObjectLootStateChanged(GameObject* go, uint32 state,
                                           Unit* unit) override
         {
-            if (state != GO_ACTIVATED || !go || !sPDv2Mgr->IsEnabled())
+            // Two states, and only two: GO_ACTIVATED is where the gear goes in
+            // (the block at the top of this file says why that is the moment),
+            // GO_JUST_DEACTIVATED is where a spent cache leaves the world
+            // (DespawnSpentCache above says why it has to).
+            if (!go || !sPDv2Mgr->IsEnabled() ||
+                (state != GO_ACTIVATED && state != GO_JUST_DEACTIVATED))
             {
                 return;
             }
@@ -404,6 +481,27 @@ namespace
                 return;
             }
 
+            PDv2InstanceScript* const run = RunOf(go);
+            if (!run)
+            {
+                return;
+            }
+
+            // LAST, because GetDefault CREATES the entry: run any earlier and
+            // it would allocate a DataMap node on every gameobject on the
+            // realm. Both branches below need it, so it is taken once here,
+            // after the whole map/entry/run gate and never before it.
+            PDv2ChestData* const data =
+                go->CustomData.GetDefault<PDv2ChestData>(PD_CHEST_DATA_KEY);
+
+            if (state == GO_JUST_DEACTIVATED)
+            {
+                DespawnSpentCache(go, data);
+                return;
+            }
+
+            // GO_ACTIVATED from here down.
+            //
             // `unit` is the player Player::SendLoot handed to SetLootState at
             // Player.cpp:7930, which is exactly the looter whose class the D5
             // filter narrows the pools to. Anything that is not a player rolls
@@ -416,18 +514,8 @@ namespace
                 return;
             }
 
-            PDv2InstanceScript* const run = RunOf(go);
-            if (!run)
-            {
-                return;
-            }
-
-            // LAST, because GetDefault CREATES the entry: run any earlier and
-            // it would allocate a DataMap node on every gameobject on the
-            // realm. Set BEFORE the first roll, so an early return further
-            // down still leaves the chest spent rather than re-rollable.
-            PDv2ChestData* const data =
-                go->CustomData.GetDefault<PDv2ChestData>(PD_CHEST_DATA_KEY);
+            // Set BEFORE the first roll, so an early return further down still
+            // leaves the chest paid out rather than re-rollable.
             if (data->injected)
             {
                 return;

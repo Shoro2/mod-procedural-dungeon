@@ -146,10 +146,10 @@ namespace PDungeon
     // across next.
     char const* const PD_CHEST_DATA_KEY = "mod-procedural-dungeon-chest";
 
-    // "This chest has already been paid out." One bool, because the
-    // injection hook (PDv2ChestLoot.cpp) fires on EVERY loot-state change
-    // and a chest that reaches GO_ACTIVATED twice must not roll a second
-    // set of gear into the same window.
+    // What a PDv2 cache has already had done to it. The injection hook
+    // (PDv2ChestLoot.cpp) fires on EVERY loot-state change of every
+    // gameobject on the realm, so both halves of a cache's life need a flag
+    // of their own.
     //
     // Unlike PDv2MobData this one IS taken with GetDefault - a flag has to
     // be created on first sight to be set at all - which is exactly why the
@@ -157,7 +157,21 @@ namespace PDungeon
     // hook would allocate an entry on every gameobject on the server.
     struct PDv2ChestData : public DataMap::Base
     {
+        // "This chest has already been paid out": a chest that reaches
+        // GO_ACTIVATED twice must not roll a second set of gear into the
+        // same window.
         bool injected = false;
+
+        // Round E / WP10. "This chest has already been despawned." A second
+        // flag rather than a reuse of `injected`, because the two answer
+        // different questions at different moments - `injected` is set when
+        // the window is FILLED (GO_ACTIVATED), `spent` when it is EMPTIED
+        // (GO_JUST_DEACTIVATED) - and a cache is routinely the first without
+        // ever being the second: a run can end with a chest nobody opened,
+        // and a window closed with items left in it stays ACTIVATED.
+        // PDv2ChestLoot.cpp's DespawnSpentCache is the only writer and
+        // carries the whole argument.
+        bool spent = false;
     };
 
     // What a player is doing right now, in the form the UI wants to read it.
