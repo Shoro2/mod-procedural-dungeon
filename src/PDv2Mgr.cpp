@@ -146,6 +146,90 @@ namespace PDungeon
         _config.ambushStunSpell = sConfigMgr->GetOption<uint32>(
             "ProceduralDungeon.V2.Ambush.StunSpell", 20170);
 
+        // Round E / L2: the five currency items. Clamped to at least 1 because
+        // 0 is not an item id and every grant would silently fail on it; a tier
+        // is retired with its ChancePct, never by blanking its item. These five
+        // reads are the module's only knowledge of a PD item id.
+        _config.lootCurrencyItem[0] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier1.Item", 920105));
+        _config.lootCurrencyItem[1] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier2.Item", 920106));
+        _config.lootCurrencyItem[2] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier3.Item", 920107));
+        _config.lootCurrencyItem[3] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier4.Item", 920108));
+        _config.lootCurrencyItem[4] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier5.Item", 920109));
+
+        // Percent rolls, so the same [0, 100] every other chance here gets: 0
+        // retires a tier without touching the other four, 100 is every mob (T1,
+        // T2, T3) or every looter (T4, T5), before the room factor scales it.
+        _config.lootCurrencyChancePct[0] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier1.ChancePct", 100)));
+        _config.lootCurrencyChancePct[1] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier2.ChancePct", 5)));
+        _config.lootCurrencyChancePct[2] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier3.ChancePct", 1)));
+        _config.lootCurrencyChancePct[3] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier4.ChancePct", 50)));
+        _config.lootCurrencyChancePct[4] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier5.ChancePct", 10)));
+
+        // Only the two cache tiers are gated, so only those two have a key -
+        // slots 0..2 keep the header's 1, the bottom of the dial, which every
+        // run clears. Both are clamped into the run's own 1..100 difficulty
+        // range, exactly like V2.Patrol.Size2Diff/Size3Diff: a gate outside the
+        // dial would be a tier that can never drop or one that is not gated at
+        // all, and neither is what the key says it does.
+        _config.lootCurrencyMinDiff[3] = std::min(100, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier4.MinDiff", 50)));
+        _config.lootCurrencyMinDiff[4] = std::min(100, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier5.MinDiff", 75)));
+
+        // The room factor's two inputs (GameRoomFactorX100, which takes both as
+        // parameters precisely so this pair stays the only copy of them). The
+        // baseline is a room COUNT and never 0: at 0 every run would count as
+        // full and the length of a dungeon would stop paying anything. The
+        // per-room bonus is a percent and gets the percent clamp; 0 makes a
+        // long run merely as good as the baseline, never worse.
+        _config.lootRoomsBaseline = std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.RoomsBaseline", 10));
+        _config.lootRoomsBonusPctPerRoom = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.RoomsBonusPctPerRoom", 1)));
+
+        _config.lootExtraMobsDropCurrency = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Loot.Currency.ExtraMobsDropCurrency", false);
+
+        // L3. The chance is the on/off switch for materials; the ceiling is a
+        // count and gets the [0, 10] count clamp. 0 and 1 both mean one
+        // material per mob, because GameMatsMaxCount floors its band at 1 - the
+        // way to stop materials dropping is Mats.ChancePct 0.
+        _config.lootMatsChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Mats.ChancePct", 100)));
+        _config.lootMatsMaxPerMobAtCap = std::min(10, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Mats.MaxPerMobAtCap", 5)));
+
+        // L4. Counts, clamped into [0, 10]: 0 silences that one source and 10
+        // is already three times what a difficulty-100 run multiplies it to.
+        _config.lootChestItems = std::min(10, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Chest.Items", 1)));
+        _config.lootBossItems = std::min(10, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Boss.Items", 1)));
+        _config.lootFinalItems = std::min(10, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Final.Items", 1)));
+
+        // Clamped into [0, V2.DlvlCap] and therefore read AFTER it: the key is
+        // a dlvl and a dlvl above the cap is one no account can reach, which
+        // would be an ICC switch that never happens. The cap itself is floored
+        // at 0 here because V2.DlvlCap is deliberately unclamped above and a
+        // negative one must not drag this key below zero.
+        int const dlvlCeil = std::max(0, _config.dlvlCap);
+        _config.lootIccDlvl = std::min(dlvlCeil, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.IccDlvl", 10)));
+
+        _config.lootClassFilter = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Loot.ClassFilter", true);
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} detour {}%",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,

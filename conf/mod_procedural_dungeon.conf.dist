@@ -497,6 +497,237 @@ ProceduralDungeon.V2.BossRoomAdds = 2
 ProceduralDungeon.V2.Loot.BonusRollPct = 15
 
 #
+#    ProceduralDungeon.V2.Loot.Currency.Tier1.Item
+#    ProceduralDungeon.V2.Loot.Currency.Tier2.Item
+#    ProceduralDungeon.V2.Loot.Currency.Tier3.Item
+#    ProceduralDungeon.V2.Loot.Currency.Tier4.Item
+#    ProceduralDungeon.V2.Loot.Currency.Tier5.Item
+#        Description: Round E (2026-09-10): the five dungeon currencies, from
+#                     the white Faded Remnant to the orange Eternal Remnant.
+#                     They are what a run pays out in, and what Forgotten
+#                     Talents are bought with.
+#
+#                     These five keys are the ONLY place the module names an
+#                     item id - no PD item id is written anywhere in the code -
+#                     so regenerating mod_pdungeon_currency.sql at different
+#                     entries needs a conf edit and no rebuild. Point
+#                     mod-forgotten-talents' own ForgottenTalents.Currency.*
+#                     keys at the same five ids, or it will take payment in
+#                     something nobody drops.
+#
+#                     0 is refused (it is not an item and every grant would
+#                     fail silently). Retire a tier with its ChancePct below.
+#        Default:     920105 / 920106 / 920107 / 920108 / 920109 - the rows
+#                     mod_pdungeon_currency.sql creates
+#
+
+ProceduralDungeon.V2.Loot.Currency.Tier1.Item = 920105
+ProceduralDungeon.V2.Loot.Currency.Tier2.Item = 920106
+ProceduralDungeon.V2.Loot.Currency.Tier3.Item = 920107
+ProceduralDungeon.V2.Loot.Currency.Tier4.Item = 920108
+ProceduralDungeon.V2.Loot.Currency.Tier5.Item = 920109
+
+#
+#    ProceduralDungeon.V2.Loot.Currency.Tier1.ChancePct
+#    ProceduralDungeon.V2.Loot.Currency.Tier2.ChancePct
+#    ProceduralDungeon.V2.Loot.Currency.Tier3.ChancePct
+#    ProceduralDungeon.V2.Loot.Currency.Tier4.ChancePct
+#    ProceduralDungeon.V2.Loot.Currency.Tier5.ChancePct
+#        Description: Round E (2026-09-10): the chance of one unit of that
+#                     tier, in percent, BEFORE the room factor scales it (see
+#                     RoomsBaseline below).
+#
+#                     Tiers 1 to 3 are rolled on every dungeon mob, for every
+#                     player on the map - so nobody loses a drop to somebody
+#                     else's tag, and the steep 100 / 5 / 1 curve is what makes
+#                     the blue one worth the walk. Tiers 4 and 5 come out of
+#                     Chromie's Cache alone, rolled once per looter when the
+#                     cache is opened, and are gated by the two MinDiff keys.
+#
+#                     0 retires that one tier without touching the other four;
+#                     100 is every mob (tiers 1 to 3) or every looter (4, 5).
+#                     Nothing here says how MUCH drops - a hit is one unit, and
+#                     the way to pay more per kill is the room factor or a
+#                     longer dungeon.
+#        Default:     100 / 5 / 1 / 50 / 10
+#
+
+ProceduralDungeon.V2.Loot.Currency.Tier1.ChancePct = 100
+ProceduralDungeon.V2.Loot.Currency.Tier2.ChancePct = 5
+ProceduralDungeon.V2.Loot.Currency.Tier3.ChancePct = 1
+ProceduralDungeon.V2.Loot.Currency.Tier4.ChancePct = 50
+ProceduralDungeon.V2.Loot.Currency.Tier5.ChancePct = 10
+
+#
+#    ProceduralDungeon.V2.Loot.Currency.Tier4.MinDiff
+#    ProceduralDungeon.V2.Loot.Currency.Tier5.MinDiff
+#        Description: Round E (2026-09-10): the run difficulty the two cache
+#                     tiers need before they can drop at all, on the same
+#                     1..100 dial `.pdungeon v2 set difficulty` moves. The
+#                     run's difficulty is frozen when it is generated, so
+#                     raising the dial mid-run does not unlock anything.
+#
+#                     Tiers 1 to 3 have no such key on purpose: they sit at the
+#                     bottom of the dial and every run clears them. These two
+#                     gates are the whole reason to set a hard run up - without
+#                     them the purple and the orange would rain on difficulty 1
+#                     and the dial would only cost the player health bars.
+#
+#                     Clamped into 1..100 like the patrol size gates, and NOT
+#                     against each other: Tier5 at or below Tier4 is a legal
+#                     thing to ask for.
+#        Default:     50 / 75
+#
+
+ProceduralDungeon.V2.Loot.Currency.Tier4.MinDiff = 50
+ProceduralDungeon.V2.Loot.Currency.Tier5.MinDiff = 75
+
+#
+#    ProceduralDungeon.V2.Loot.Currency.RoomsBaseline
+#    ProceduralDungeon.V2.Loot.Currency.RoomsBonusPctPerRoom
+#        Description: Round E (2026-09-10): the room factor, which scales every
+#                     currency chance by the LENGTH of the run. A dungeon of
+#                     RoomsBaseline ordinary rooms pays full price; a shorter
+#                     one pays its plain share (5 of 10 rooms = 50 %); every
+#                     room past the baseline adds RoomsBonusPctPerRoom percent
+#                     on top (15 rooms = 105 %).
+#
+#                     Without it the shortest dungeon would be the most
+#                     profitable one per minute - one room, one boss, reset -
+#                     and nobody would ever build a long one again. The bonus
+#                     above the baseline is deliberately thin: length should be
+#                     worth choosing, not the only thing worth choosing.
+#
+#                     Counted in ORDINARY rooms, the same number the gen panel
+#                     shows, and frozen with the run at spawn. The baseline is
+#                     a room count and 0 is refused - at 0 every run would
+#                     count as full and length would stop paying anything.
+#        Default:     10 / 1
+#
+
+ProceduralDungeon.V2.Loot.Currency.RoomsBaseline = 10
+ProceduralDungeon.V2.Loot.Currency.RoomsBonusPctPerRoom = 1
+
+#
+#    ProceduralDungeon.V2.Loot.Currency.ExtraMobsDropCurrency
+#        Description: Round E (2026-09-10): whether the mobs that were never in
+#                     the layout - event-room waves and the respawn copies -
+#                     pay currency as well.
+#
+#                     Off, because those two are spawned in place and on demand:
+#                     with currency on them the dungeon stops being a run and
+#                     becomes a spot to stand in. Materials they DO always drop
+#                     whatever this key says - mats are a crafting input and are
+#                     supposed to be farmable, currency is progression.
+#        Default:     0 - layout mobs only
+#                     1 - event and respawn mobs pay too
+#
+
+ProceduralDungeon.V2.Loot.Currency.ExtraMobsDropCurrency = 0
+
+#
+#    ProceduralDungeon.V2.Loot.Mats.ChancePct
+#    ProceduralDungeon.V2.Loot.Mats.MaxPerMobAtCap
+#        Description: Round E (2026-09-10): crafting materials from every
+#                     dungeon mob, drawn from the weighted FL mat pool across
+#                     all three expansions - the same funnel and the same
+#                     per-player recipients as the currencies.
+#
+#                     ChancePct is the whole gate: 0 stops materials entirely.
+#                     MaxPerMobAtCap is the TOP of the band, not the count -
+#                     the drop is a roll of 1 to that maximum, and the maximum
+#                     itself grows with the ACCOUNT's dungeon level, from 1 at
+#                     dlvl 0 to this value at V2.DlvlCap (so at the shipped 5
+#                     and a cap of 30: dlvl 0 -> 1, 8 -> 2, 15 -> 3, 23 -> 4,
+#                     30 -> 5). That is what puts account progression in the
+#                     bag and not only on the character sheet.
+#
+#                     0 and 1 both mean one material per mob - the band floors
+#                     at 1 - so turn materials off with ChancePct, not here.
+#        Default:     100 / 5
+#
+
+ProceduralDungeon.V2.Loot.Mats.ChancePct = 100
+ProceduralDungeon.V2.Loot.Mats.MaxPerMobAtCap = 5
+
+#
+#    ProceduralDungeon.V2.Loot.Chest.Items
+#    ProceduralDungeon.V2.Loot.Boss.Items
+#    ProceduralDungeon.V2.Loot.Final.Items
+#        Description: Round E (2026-09-10): how many pieces of GEAR each of the
+#                     three sources pays - a Shifting Cache in a dead end or a
+#                     loop room, the run boss, and Chromie's Cache at the end.
+#
+#                     Each count is multiplied by the run's lootMult (x1.00 at
+#                     difficulty 1 up to x3.00 at 100, times the caster factor)
+#                     and the fraction left over is rolled: one item at x2.50
+#                     is two items plus a coin flip, and pays 2.50 on average.
+#                     Without that the difficulty dial would do nothing at all
+#                     for gear.
+#
+#                     Three keys rather than one because the three sources are
+#                     three different promises - a chest is a find, a boss is a
+#                     fight, the final cache is the run's payout - and an
+#                     operator who wants only one of them to be worth chasing
+#                     must be able to say so. 0 silences that one source; the
+#                     ceiling of 10 is already three times what difficulty 100
+#                     multiplies it to.
+#        Default:     1 / 1 / 1
+#
+
+ProceduralDungeon.V2.Loot.Chest.Items = 1
+ProceduralDungeon.V2.Loot.Boss.Items = 1
+ProceduralDungeon.V2.Loot.Final.Items = 1
+
+#
+#    ProceduralDungeon.V2.Loot.IccDlvl
+#        Description: Round E (2026-09-10): the account dungeon level from which
+#                     chests and the final cache stop drawing from the heroic-5
+#                     and normal-raid pools and start drawing from the ICC ones
+#                     - so the reward tier follows how far the account has come.
+#
+#                     The run's DIFFICULTY dial deliberately does not move this.
+#                     Difficulty already pays in quantity (see the three .Items
+#                     keys above); letting it also buy item level would let a
+#                     brand-new account set the dial to 100 once and skip the
+#                     progression the dungeon is built around. The run boss is
+#                     not affected either way - it draws from the heroic raid
+#                     pool at every dlvl.
+#
+#                     Clamped into 0..V2.DlvlCap: a value above the cap is a
+#                     level no account can reach, which would be a switch that
+#                     never happens. 0 puts every account on the ICC pools.
+#        Default:     10
+#
+
+ProceduralDungeon.V2.Loot.IccDlvl = 10
+
+#
+#    ProceduralDungeon.V2.Loot.ClassFilter
+#        Description: Round E (2026-09-10): roll gear the LOOTER can actually
+#                     wear - armour type (the class's highest), weapon
+#                     subclass, shields for warrior/paladin/shaman, relics, and
+#                     the item's own AllowableClass/AllowableRace. The looter
+#                     is whoever opened the chest, or the killer at a boss.
+#
+#                     On, because an unfiltered draw from a pool of a thousand
+#                     items is mostly disenchant fodder and the reward at the
+#                     end of a run should feel like a reward. Stat lines are
+#                     deliberately NOT filtered: a spell-power ring may still
+#                     drop for a rogue, because filtering by stat profile would
+#                     shrink the pool to the same handful of items every run.
+#
+#                     Whenever the filter would leave nothing to roll, the
+#                     unfiltered pool is used instead - so a class the pool has
+#                     no gear for gets something rather than nothing. 0 is for
+#                     an operator who wants the raw pool.
+#        Default:     1 - filtered to the looter
+#                     0 - raw pool
+#
+
+ProceduralDungeon.V2.Loot.ClassFilter = 1
+
+#
 #    ProceduralDungeon.V2.CastRangeYd
 #        Description: How far a range-role creature will hold and cast from.
 #                     A range mob is only given a filler whose spell actually

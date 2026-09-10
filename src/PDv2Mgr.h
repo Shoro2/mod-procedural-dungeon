@@ -168,6 +168,71 @@ namespace PDungeon
         int         ambushChancePct = 50;
         int         ambushMobs = 4;
         uint32_t    ambushStunSpell = 20170;
+
+        // Round E / L2-L4 (2026-09-10). The loot half of a run: five
+        // currencies, the room factor their chances are scaled by, the per-mob
+        // material band, how much gear each source pays, where the gear pools
+        // switch to ICC, and whether what drops fits the looter. All read live
+        // like every other V2 knob and cached nowhere else, so `.reload config`
+        // retunes the next kill and the next chest without disturbing the run
+        // that is being walked.
+
+        // The five currency item ids, tier 1..5. The conf is the ONLY place
+        // this module names them - no PD item id is written anywhere in the
+        // code - so an operator who regenerates mod_pdungeon_currency.sql at
+        // other entries needs no rebuild, and mod-forgotten-talents, which
+        // spends them, is pointed at the same five ids from its own keys.
+        uint32_t    lootCurrencyItem[5] = { 920105, 920106, 920107, 920108, 920109 };
+        // Base chance for one unit of that tier, before the room factor scales
+        // it. T1-T3 are rolled per tagged mob for every player on the map, T4
+        // and T5 once per looter when the final cache is opened - one array,
+        // because the roll is one formula and only its call site differs.
+        int         lootCurrencyChancePct[5] = { 100, 5, 1, 50, 10 };
+        // The run difficulty a tier needs before it drops at all. T1-T3 sit at
+        // 1, the bottom of the dial, which is the same as ungated and is why
+        // those three have no conf key; only the two cache tiers are gated, and
+        // those two gates are what makes a hard run worth setting up.
+        int         lootCurrencyMinDiff[5] = { 1, 1, 1, 50, 75 };
+        // The room factor (D8, GameRoomFactorX100): a run of lootRoomsBaseline
+        // ordinary rooms pays full price, a shorter one pays its share, and
+        // every room past the baseline adds lootRoomsBonusPctPerRoom percent.
+        // Without it the shortest dungeon would be the most profitable one per
+        // minute and nobody would ever build a long one again.
+        int         lootRoomsBaseline = 10;
+        int         lootRoomsBonusPctPerRoom = 1;
+        // Whether the mobs that were never in the layout - event waves, respawn
+        // copies - pay currency too. Off, because those mobs exist to be farmed
+        // in place and would turn the currency into a faucet. Materials they do
+        // always drop: mats are a crafting input, currency is progression.
+        bool        lootExtraMobsDropCurrency = false;
+
+        // Materials, per tagged mob and per player. The chance is the whole
+        // gate (0 turns materials off); the count is urand(1, max), with the
+        // max running from 1 at dlvl 0 to lootMatsMaxPerMobAtCap at V2.DlvlCap,
+        // so account progression shows up in the bag and not only on the sheet.
+        int         lootMatsChancePct = 100;
+        int         lootMatsMaxPerMobAtCap = 5;
+
+        // Gear per source, before lootMult scales it (GameScaledCount rolls the
+        // fraction, so one item at x2.50 is two plus a coin flip). Three keys
+        // rather than one because the three sources are three different
+        // promises: a chest is a find, a boss is a fight, and the final cache
+        // is the run's payout.
+        int         lootChestItems = 1;
+        int         lootBossItems = 1;
+        int         lootFinalItems = 1;
+        // The account dlvl from which chests and the final cache draw from the
+        // ICC pools instead of the heroic-5 / raid ones. The run's difficulty
+        // dial deliberately does NOT move it: dlvl is the account's
+        // progression, and the item level of a reward should follow that rather
+        // than how hard one single run was set to.
+        int         lootIccDlvl = 10;
+        // Roll gear the looter's class can actually wear - armour type, weapon
+        // subclass, AllowableClass/AllowableRace. On, because a pure draw from
+        // a thousand items is mostly disenchant fodder; off is for an operator
+        // who wants the raw pool, and the filter falls back to the unfiltered
+        // pool anyway whenever it would leave nothing to roll.
+        bool        lootClassFilter = true;
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the
