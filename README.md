@@ -117,6 +117,15 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > the cursor but does nothing on click, the client's object cache is stale — the server's
 > `ClientCacheVersion` bump refreshes it on the next login.
 >
+> **Stat profile (Round E / WP9).** The talent *Discerning Eye* (end of the treasure branch)
+> adds a **stat profile** slider to the gen panel — Off, Strength, Agility or Caster — and
+> from then on every cache, the final cache and every boss corpse roll only gear that fits
+> it on top of the class fit: an item's primary stat decides (a Strength/Intellect hybrid
+> fits both), trinkets and relics without stats always drop, and a ring with only ratings
+> is judged by what those ratings are for. If a pool runs dry for your class and profile
+> the profile is dropped first, never the class. The choice is per account; the unlock
+> is per character (the talent).
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
