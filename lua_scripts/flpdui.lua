@@ -220,6 +220,8 @@ end
 local PANEL_W = 420
 local PANEL_H = 364            -- +20 current-depths (2026-08-07), +14 affixes
 local BAND_ROW_H = 52           -- what the hidden band row would add back
+local PREVIEW = 160             -- the layout preview: the HUD map's square, verbatim
+local PREVIEW_ROW_H = 170       -- what the hidden preview row would add back: 160 + its gap
 local BAR_W = PANEL_W - 48
 
 local Panel = CreateFrame("Frame", "FLPDGenPanel", UIParent)
@@ -354,6 +356,23 @@ local affixLine = Panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall
 affixLine:SetPoint("TOP", curLine, "BOTTOM", 0, -4)
 affixLine:SetText("")
 
+-- The layout the account is holding, drawn by the HUD's own map code from the
+-- M payload the server sends after a generation - the SAME payload the in-run
+-- HUD reads, so the two pictures cannot disagree about the dungeon they show.
+-- Nothing about the plan is worked out here: the blocks, their roles and their
+-- socket masks all arrive finished, and a payload that never comes leaves the
+-- row folded away rather than showing an empty box that claims a layout.
+local previewCanvas = CreateFrame("Frame", nil, Panel)
+previewCanvas:SetWidth(PREVIEW)
+previewCanvas:SetHeight(PREVIEW)
+previewCanvas:SetPoint("TOP", affixLine, "BOTTOM", 0, -10)
+previewCanvas:Hide()
+
+-- What BuildMap draws into. The rectangle pool is the target's own because a
+-- texture belongs to the frame it was created on: the HUD and the panel cannot
+-- lend each other one, and each hides its own leftovers.
+local previewTarget = { canvas = previewCanvas, pool = {}, size = PREVIEW }
+
 local sep2 = Panel:CreateTexture(nil, "ARTWORK")
 sep2:SetPoint("TOP", affixLine, "BOTTOM", 0, -8)
 sep2:SetWidth(BAR_W)
@@ -384,21 +403,45 @@ verdictLine:SetWidth(BAR_W)
 verdictLine:SetJustifyH("CENTER")
 verdictLine:SetText("Client link: ...")
 
+-- The two optional rows, and the panel height that follows from them.
+--
 -- The band row is built exactly like the others and hidden on the SERVER's
 -- flag, so the day a multi-band pack set exists the server clears bandLocked
 -- and the row appears - no new client code, and its limits are already on the
 -- wire waiting for it.
-local function LayoutBandRow(show)
+--
+-- The preview row is the same idea from the other side: it is up only while a
+-- layout has actually arrived to draw in it. Both flags are the server's word,
+-- never a guess, and PANEL_H is the panel with neither row.
+local bandRow = false      -- bandSlider up: the server's bandLocked is clear
+local previewRow = false   -- previewCanvas up: an M payload has been drawn
+
+local function LayoutPanel()
     lootLine:ClearAllPoints()
-    if show then
+    if bandRow then
         bandSlider:Show()
         lootLine:SetPoint("TOP", bandSlider, "BOTTOM", 0, -16)
-        Panel:SetHeight(PANEL_H + BAND_ROW_H)
     else
         bandSlider:Hide()
         lootLine:SetPoint("TOP", casterSlider, "BOTTOM", 0, -16)
-        Panel:SetHeight(PANEL_H)
     end
+
+    -- The preview sits between the affix line and the separator, so the band
+    -- row above pushes it down with everything else and neither row needs to
+    -- know about the other.
+    sep2:ClearAllPoints()
+    if previewRow then
+        previewCanvas:Show()
+        sep2:SetPoint("TOP", previewCanvas, "BOTTOM", 0, -8)
+    else
+        previewCanvas:Hide()
+        sep2:SetPoint("TOP", affixLine, "BOTTOM", 0, -8)
+    end
+
+    local height = PANEL_H
+    if bandRow then height = height + BAND_ROW_H end
+    if previewRow then height = height + PREVIEW_ROW_H end
+    Panel:SetHeight(height)
 end
 
 local function ApplySlider(s, value, lo, hi, step)
@@ -431,7 +474,13 @@ local function ApplyCfg(c)
     ApplySlider(diffSlider, c.diff, c.diffMin, c.diffMax, c.diffStep)
     ApplySlider(casterSlider, c.caster, c.casterMin, c.casterMax, 1)
     ApplySlider(bandSlider, c.bandMin, c.bandLo, c.bandHi, c.bandStep)
-    LayoutBandRow(c.bandLocked == 0)
+
+    -- curRooms 0 is the server saying the account holds no layout at all, so
+    -- whatever the preview last drew describes a dungeon that is gone. The row
+    -- folds away and the next M brings it back.
+    bandRow = c.bandLocked == 0
+    if c.curRooms == 0 then previewRow = false end
+    LayoutPanel()
 
     lootLine:SetText(string.format("Loot  |cffFFD700x%.2f|r", c.lootMultX100 / 100))
 
@@ -546,8 +595,10 @@ local CLEARED_COLOUR = {
     B = { 0.10, 0.50, 0.20 },   -- cleared boss room: darker green
 }
 
-local cells = {}
-local cellsUsed = 0
+-- This HUD's draw target, shaped like the panel's preview one: the frame to
+-- draw on, that frame's own rectangle pool, and the edge length a plan is
+-- normalised onto. Two targets exist and they share nothing but the code.
+local hudTarget = { canvas = canvas, pool = {}, size = CANVAS }
 
 local dot = canvas:CreateTexture(nil, "OVERLAY")
 dot:SetWidth(6)
@@ -555,19 +606,20 @@ dot:SetHeight(6)
 dot:SetTexture(1.0, 0.95, 0.20, 1.0)
 dot:Hide()
 
--- One pooled rectangle. A block is no longer one texture: a corridor is up to
--- four bars, so the pool hands out however many a layout needs and hides the
--- rest.
-local function Rect(x, y, w, h, colour)
-    cellsUsed = cellsUsed + 1
-    local t = cells[cellsUsed]
+-- One pooled rectangle, from the TARGET's pool. A block is no longer one
+-- texture: a corridor is up to four bars, so the pool hands out however many a
+-- layout needs and hides the rest. `used` is BuildMap's running count on the
+-- target it is drawing, which is what lets the same code fill two frames.
+local function Rect(target, x, y, w, h, colour)
+    target.used = target.used + 1
+    local t = target.pool[target.used]
     if not t then
-        t = canvas:CreateTexture(nil, "ARTWORK")
-        cells[cellsUsed] = t
+        t = target.canvas:CreateTexture(nil, "ARTWORK")
+        target.pool[target.used] = t
     end
     t:SetTexture(colour[1], colour[2], colour[3], 0.9)
     t:ClearAllPoints()
-    t:SetPoint("TOPLEFT", canvas, "TOPLEFT", x, -y)
+    t:SetPoint("TOPLEFT", target.canvas, "TOPLEFT", x, -y)
     t:SetWidth(math.max(1, w))
     t:SetHeight(math.max(1, h))
     t:Show()
@@ -583,18 +635,14 @@ end
 -- four neighbours and the first in-game test read that as doors that do not
 -- exist. Rooms never touch each other (the planner keeps them 2 apart), so
 -- every real connection is a corridor bar reaching the room's edge.
-local function BuildMap(m)
-    -- A DIFFERENT map table is a different run, and last run's cleared blocks
-    -- would paint a brand-new dungeon green until its own K arrived. The K
-    -- handler re-runs this function with the cached table, so identity - not
-    -- content - is the test that keeps that repaint free.
-    if m ~= mapData then
-        clearedSet = {}
-    end
-    mapData = m
-    cellsUsed = 0
-    local bw = CANVAS / m.w
-    local bh = CANVAS / m.h
+--
+-- The target says WHERE (frame, pool, edge length); the payload says what. The
+-- run HUD and the gen panel's preview are the same picture at the same size,
+-- and the only reason there are two is that they hang on different frames.
+local function BuildMap(m, target)
+    target.used = 0
+    local bw = target.size / m.w
+    local bh = target.size / m.h
     local bar = math.max(3, math.floor(math.min(bw, bh) / 3))
 
     for _, b in ipairs(m.blocks) do
@@ -606,34 +654,50 @@ local function BuildMap(m)
             local cy = y0 + bh / 2
             local mask = b.mask or 0
             if mask == 0 then
-                Rect(cx - bar / 2, cy - bar / 2, bar, bar, colour)
+                Rect(target, cx - bar / 2, cy - bar / 2, bar, bar, colour)
             end
             if mask >= 8 then                               -- W: toward x0
-                Rect(x0, cy - bar / 2, bw / 2 + bar / 2, bar, colour)
+                Rect(target, x0, cy - bar / 2, bw / 2 + bar / 2, bar, colour)
                 mask = mask - 8
             end
             if mask >= 4 then                               -- S: toward y0 + bh
-                Rect(cx - bar / 2, cy - bar / 2, bar, bh / 2 + bar / 2, colour)
+                Rect(target, cx - bar / 2, cy - bar / 2, bar, bh / 2 + bar / 2, colour)
                 mask = mask - 4
             end
             if mask >= 2 then                               -- E: toward x0 + bw
-                Rect(cx - bar / 2, cy - bar / 2, bw / 2 + bar / 2, bar, colour)
+                Rect(target, cx - bar / 2, cy - bar / 2, bw / 2 + bar / 2, bar, colour)
                 mask = mask - 2
             end
             if mask >= 1 then                               -- N: toward y0
-                Rect(cx - bar / 2, y0, bar, bh / 2 + bar / 2, colour)
+                Rect(target, cx - bar / 2, y0, bar, bh / 2 + bar / 2, colour)
             end
         else
             if clearedSet[b.bx .. "," .. b.by] then
                 colour = CLEARED_COLOUR[b.role] or colour
             end
-            Rect(x0 + 1, y0 + 1, bw - 2, bh - 2, colour)
+            Rect(target, x0 + 1, y0 + 1, bw - 2, bh - 2, colour)
         end
     end
 
-    for i = cellsUsed + 1, #cells do
-        cells[i]:Hide()
+    for i = target.used + 1, #target.pool do
+        target.pool[i]:Hide()
     end
+end
+
+-- One payload, both pictures. The panel's preview is drawn from the very table
+-- the HUD draws, so the map the player picks a dungeon by and the map they
+-- walk it with are the same map by construction.
+local function DrawMap(m)
+    -- A DIFFERENT map table is a different run, and last run's cleared blocks
+    -- would paint a brand-new dungeon green until its own K arrived. The K
+    -- handler re-runs this function with the cached table, so identity - not
+    -- content - is the test that keeps that repaint free.
+    if m ~= mapData then
+        clearedSet = {}
+    end
+    mapData = m
+    BuildMap(m, hudTarget)
+    BuildMap(m, previewTarget)
 end
 
 local function PlaceDot(px, py)
@@ -825,14 +889,24 @@ driver:SetScript("OnEvent", function(self, event, arg1, arg2)
         if c then ApplyCfg(c) end
     elseif kind == "M" then
         local m = ParseMap(body)
-        if m then BuildMap(m) end
+        if m then
+            -- A map on the wire is the server saying a layout exists, which is
+            -- the one thing that puts the panel's preview row back up after a
+            -- C reported no depths. It happens whether the panel is open or
+            -- not, so opening it later shows the map already drawn.
+            previewRow = true
+            LayoutPanel()
+            DrawMap(m)
+        end
     elseif kind == "K" then
         -- The map's second half, and the only payload that repaints one. A K
         -- with no map yet is stored and paints nothing; the M that follows
-        -- drops it again (see BuildMap) and brings its own K behind it, which
-        -- is the order the server sends them in.
+        -- drops it again (see DrawMap) and brings its own K behind it, which
+        -- is the order the server sends them in. A K never arrives without a
+        -- plan behind it, and it never raises the preview row by itself - only
+        -- a map does that.
         clearedSet = ParseCleared(body)
-        if mapData then BuildMap(mapData) end
+        if mapData then DrawMap(mapData) end
     elseif kind == "R" then
         local r = ParseRun(body)
         if r then ApplyRun(r) end
