@@ -233,6 +233,22 @@ namespace PDungeon
         // who wants the raw pool, and the filter falls back to the unfiltered
         // pool anyway whenever it would leave nothing to roll.
         bool        lootClassFilter = true;
+
+        // Round E / R1 (2026-09-10, spec D15). How far ONE completed run may
+        // push the account's difficulty cap: the cap becomes
+        // min(100, max(cap, runDifficulty + unlock)), and the unlock is the
+        // clean value when nobody died in the run and the death value when
+        // somebody did. Two keys rather than one factor because the whole
+        // point is the gap between them - dying still progresses the account,
+        // just more slowly, so a wipe-heavy clear is never a dead end.
+        //
+        // Measured against the run's OWN difficulty, never against the cap, so
+        // farming easy runs at a high cap cannot inch it upwards. Both are
+        // clamped into 0..100: 0 makes that outcome pay nothing (a legitimate
+        // way to say "deaths do not unlock anything"), and no unlock can be
+        // bigger than the whole dial.
+        int         capDeathUnlock = 3;
+        int         capCleanUnlock = 5;
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the
@@ -251,6 +267,18 @@ namespace PDungeon
         // anywhere any more - see mod_pdungeon_account_difficulty.sql for why
         // the column survives its own retirement.
         int         cfgDifficulty = PD_GAME_DIFF_DEFAULT;
+        // Round E / R1 (spec D15): the ceiling cfgDifficulty may be set to.
+        // Per ACCOUNT and earned by finishing runs, which is why it lives here
+        // beside the knobs the player owns and not on the run - a run records
+        // the difficulty it was PLAYED at, and the cap only bounds the choice
+        // that started it.
+        //
+        // PD_GAME_DIFF_MIN rather than PD_GAME_DIFF_MAX: a state with no row
+        // behind it has to read as "capped at the floor". The dial was freely
+        // choosable from 2026-08-08 until Round E, so a default of 100 would
+        // silently hand that back to every account whose row is missing - and
+        // 1 is exactly what the column's own DEFAULT says a fresh account gets.
+        int         diffCap = PD_GAME_DIFF_MIN;
         int         cfgCasterPct = PD_GAME_CASTER_PCT_DEFAULT;
         // 76 rather than the column's default of 1: 76..80 is the only band v1's
         // imported pack stock actually covers, so a fresh account that never
@@ -344,6 +372,19 @@ namespace PDungeon
         // documents for the layout columns: settings must never clobber
         // progression, and a reroll must never clobber settings.
         void SaveAccountCfg(uint32_t accountId);
+
+        // Round E / R1 (spec D15). Raises the account's difficulty cap towards
+        // `wanted` and returns the cap now in force. `wanted` is clamped into
+        // [1, 100] and the cap NEVER moves down - a run finished at a low
+        // difficulty, a stale cached state or a second call with an older
+        // value all have to be no-ops, so the caller may pass whatever a run
+        // computed without checking it first.
+        //
+        // Writes `diff_cap` and nothing else, the fourth disjoint writer of
+        // this row beside SavePlanToDB (layout), SaveAccountCfg (cfg_*) and
+        // GrantRunReward (dlvl/dxp) - unlocking a difficulty must not speak
+        // for the player's settings, the stored layout or the progression.
+        int RaiseDiffCap(uint32_t accountId, int wanted);
 
         // Pays out a finished run: 01 §8 dxp (difficulty-independent by
         // design), recomputes dlvl, and persists dlvl/dxp only.

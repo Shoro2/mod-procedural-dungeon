@@ -230,6 +230,16 @@ namespace PDungeon
         _config.lootClassFilter = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Loot.ClassFilter", true);
 
+        // Round E / R1. The two unlock steps of the account-wide difficulty
+        // cap. Clamped into [0, 100] and not into the dial's [1, 100]: 0 is a
+        // meaningful setting here - it says that outcome unlocks nothing - and
+        // an unlock wider than the dial itself cannot mean anything, because
+        // RaiseDiffCap clamps the resulting cap into the dial anyway.
+        _config.capDeathUnlock = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Cap.DeathUnlock", 3)));
+        _config.capCleanUnlock = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Cap.CleanUnlock", 5)));
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} detour {}%",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,
@@ -356,7 +366,7 @@ namespace PDungeon
         PDv2AccountState state;
         QueryResult result = CharacterDatabase.Query(
             "SELECT dlvl, dxp, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
-            "cfg_packs FROM pdungeon_account WHERE accountId = {}", accountId);
+            "cfg_packs, diff_cap FROM pdungeon_account WHERE accountId = {}", accountId);
         if (result)
         {
             Field* fields = result->Fetch();
@@ -367,6 +377,11 @@ namespace PDungeon
             state.cfgCasterPct = fields[4].Get<uint8>();
             state.cfgBandMin = fields[5].Get<uint8>();
             state.cfgPacks = fields[6].Get<std::string>();
+            // Round E / R1. Appended to the SELECT rather than slotted in
+            // beside cfg_difficulty, because every index below it is a
+            // positional read of this one statement and renumbering them buys
+            // nothing but a chance to get one wrong.
+            state.diffCap = fields[7].Get<uint8>();
             state.loaded = true;
         }
 
@@ -383,6 +398,16 @@ namespace PDungeon
         // No dlvl argument any more: the dial is open from the first run, so
         // the only illegal difficulty is one outside [1, 100].
         state.cfgDifficulty = GameClampDiff(state.cfgDifficulty);
+        // Round E / R1. The cap gets the same clamp for the same reason - a
+        // hand-edited 0 or 200 must not become a live ceiling - and then bounds
+        // the dial itself. Order matters: the cap has to be legal before it can
+        // be used as a limit, and cfgDifficulty has to have passed its own
+        // clamp before this one narrows it further. A row where the player's
+        // chosen difficulty sits above the cap is not a fault to log about: it
+        // is exactly what the pre-Round-E rows look like, and what a GM
+        // `.pdungeon v2 cap` lowering leaves behind.
+        state.diffCap = GameClampDiff(state.diffCap);
+        state.cfgDifficulty = std::min(state.cfgDifficulty, state.diffCap);
         state.cfgCasterPct = GameClampCasterPct(state.cfgCasterPct);
         state.cfgBandMin = GameClampBandMin(state.cfgBandMin);
 
@@ -403,7 +428,13 @@ namespace PDungeon
         PDv2AccountState& state = _accounts[accountId];
         int const dlvl = static_cast<int>(state.dlvl);
         state.cfgRooms = GameClampRooms(cfg.cfgRooms, dlvl);
-        state.cfgDifficulty = GameClampDiff(cfg.cfgDifficulty);
+        // Round E / R1: the dial is bounded by the account's own cap on top of
+        // its 1..100 clamp. `state.diffCap` and NOT `cfg.diffCap` on purpose -
+        // the cap is progression, not a setting, and this entry point is fed
+        // by player-facing commands and the UI link. Letting a caller hand in
+        // a cap here would make every one of them a way around it; RaiseDiffCap
+        // is the only door, and it only opens upwards.
+        state.cfgDifficulty = std::min(GameClampDiff(cfg.cfgDifficulty), state.diffCap);
         state.cfgCasterPct = GameClampCasterPct(cfg.cfgCasterPct);
         state.cfgBandMin = GameClampBandMin(cfg.cfgBandMin);
         state.cfgPacks = cfg.cfgPacks;
@@ -429,6 +460,47 @@ namespace PDungeon
             "cfg_mob_level_min = VALUES(cfg_mob_level_min), cfg_packs = VALUES(cfg_packs)",
             accountId, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
             state.cfgBandMin, packs);
+    }
+
+    int PDv2Mgr::RaiseDiffCap(uint32_t accountId, int wanted)
+    {
+        int cap = 0;
+        {
+            std::lock_guard<std::mutex> guard(_lock);
+            PDv2AccountState& state = _accounts[accountId];
+            // The ratchet, and it lives HERE rather than at the call site: the
+            // caller computes "difficulty + unlock" from the run it just
+            // finished and cannot know whether some other session raised the
+            // cap in the meantime, so a value below the cached cap has to be a
+            // silent no-op instead of a downgrade.
+            state.diffCap = std::max(state.diffCap, GameClampDiff(wanted));
+            cap = state.diffCap;
+            // Deliberately NOT touching cfgDifficulty: raising the ceiling
+            // never moves the dial the player set under it. The cap only
+            // bounds the next choice, and SetAccountCfg applies that bound.
+            state.loaded = true;
+        }
+
+        // diff_cap only - the disjoint-writer rule this row is built on
+        // (SavePlanToDB owns the layout, SaveAccountCfg the cfg_*, and
+        // GrantRunReward dlvl/dxp). The INSERT half names the columns this
+        // writer owns and lets the column defaults speak for the rest, exactly
+        // as GrantRunReward does; on the path that matters the row always
+        // exists by now, because a finished run means a stored layout, which
+        // means SavePlanToDB has already seeded the cfg_* columns from the
+        // cached state.
+        //
+        // GREATEST on the UPDATE half so the ratchet holds in the DATABASE too,
+        // and not only in this process's cache: two worldservers on one
+        // characters DB, or a cache built before a manual edit, must not be
+        // able to write a cap backwards. VALUES(diff_cap) rather than the bound
+        // parameter is the SaveAccountCfg idiom - one value, named once.
+        CharacterDatabase.Execute(
+            "INSERT INTO pdungeon_account (accountId, diff_cap) VALUES ({}, {}) "
+            "ON DUPLICATE KEY UPDATE diff_cap = GREATEST(diff_cap, VALUES(diff_cap))",
+            accountId, cap);
+
+        return cap;
     }
 
     PDv2RunReward PDv2Mgr::GrantRunReward(uint32_t accountId, int roomsUsed)

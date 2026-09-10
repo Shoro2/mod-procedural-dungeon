@@ -728,6 +728,43 @@ ProceduralDungeon.V2.Loot.IccDlvl = 10
 ProceduralDungeon.V2.Loot.ClassFilter = 1
 
 #
+#    ProceduralDungeon.V2.Cap.DeathUnlock
+#    ProceduralDungeon.V2.Cap.CleanUnlock
+#        Description: Round E (2026-09-10): how far one finished run pushes the
+#                     account's DIFFICULTY CAP - the ceiling the 1..100 dial may
+#                     be set to, which since this round is earned instead of
+#                     given. Every account starts capped at 1, the operator's
+#                     own included, and a completed run raises the cap to
+#                     the run's own difficulty plus one of these two steps:
+#                     CleanUnlock when nobody died during the run, DeathUnlock
+#                     when somebody did.
+#
+#                     At the defaults a first clear at difficulty 1 unlocks 6, a
+#                     clear of that at 6 unlocks 11, and a run that cost a death
+#                     still moves the ceiling - just by less. That gap is the
+#                     whole reason there are two keys and not one: dying has to
+#                     cost something without ever becoming a dead end.
+#
+#                     Measured against the run's difficulty and NEVER against
+#                     the cap, so grinding easy runs at a high ceiling cannot
+#                     inch it upwards - the only way to unlock 50 is to clear
+#                     something near 50. The cap only ever rises; the run's own
+#                     frozen difficulty is untouched by it, and lowering these
+#                     keys later takes nothing away from an account that has
+#                     already earned its ceiling.
+#
+#                     Read live, at the moment a run is finished, so
+#                     `.reload config` retunes the next completion. 0 means that
+#                     outcome unlocks nothing at all; the GM test path is
+#                     `.pdungeon v2 cap <n>`, which is the only thing in the
+#                     module that may also lower a cap.
+#        Default:     3 / 5
+#
+
+ProceduralDungeon.V2.Cap.DeathUnlock = 3
+ProceduralDungeon.V2.Cap.CleanUnlock = 5
+
+#
 #    ProceduralDungeon.V2.CastRangeYd
 #        Description: How far a range-role creature will hold and cast from.
 #                     A range mob is only given a filler whose spell actually
