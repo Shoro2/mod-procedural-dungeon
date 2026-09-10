@@ -411,10 +411,12 @@ bandSlider:Hide()
 -- does not say which loot it shapes, and this panel is the only place a player
 -- who just bought Discerning Eye finds that out. Hidden and shown with the
 -- slider by LayoutPanel, and no SetWidth on purpose: an unwrapped FontString is
--- one line tall, which is the line PROFILE_ROW_H pays for.
+-- one line tall, which is the line PROFILE_ROW_H pays for - so the copy is kept
+-- short enough (well under BAR_W at this font) that it can never run past the
+-- panel border, which Panel would not clip.
 local profileHint = Panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 profileHint:SetPoint("TOP", profileSlider, "BOTTOM", 0, -11)
-profileHint:SetText("|cffaaaaaaDiscerning Eye: caches and bosses roll only gear that fits|r")
+profileHint:SetText("|cffaaaaaaDiscerning Eye: loot follows this profile|r")
 profileHint:Hide()
 
 local lootLine = Panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
