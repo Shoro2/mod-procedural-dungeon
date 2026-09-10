@@ -38,6 +38,7 @@
 #include "PDv2UILink.h"
 #include "Player.h"
 #include "Position.h"
+#include "SpellAuraEffects.h"
 #include "SpellMgr.h"
 #include "StringFormat.h"
 #include "TemporarySummon.h"
@@ -303,6 +304,44 @@ namespace PDungeon
             "Take what the Depths owe you - you have earned every bit of it.",
             "When you are ready, step through. Azealia is waiting."
         };
+
+        // Round E / WP6. How this module reads a Forgotten Talents node, and
+        // it names NO SPELL ID on purpose: FT synthesises the spell records for
+        // its extension nodes and its id map is sticky rather than frozen, so
+        // an id copied over here would be a promise the other module never
+        // made. The TAG is the promise - EffectMiscValue_1 on a passive
+        // SPELL_AURA_DUMMY effect - and the rank's value rides in the amount
+        // (FT writes BasePoints = value - 1 with DieSides 1, which is the
+        // spell_dbc off-by-one, so GetAmount() hands back the value itself).
+        //
+        // The MAXIMUM over the matching effects, never the sum: the ranks of
+        // one node are separate spells and a player who bought rank 2 may
+        // still be carrying rank 1, in which case a sum would pay for a rank
+        // nobody ever learned. A negative amount folds to 0 - a tag is a count
+        // here - and GetAmount() is already 0 for an aura the core disabled.
+        //
+        // Deliberately file-local, and deliberately duplicated rather than
+        // shared: mod-paragon-itemgen keeps its own ten lines for its own two
+        // tags. A header between two modules that otherwise do not know each
+        // other would buy nothing and cost a build dependency.
+        uint32 TaggedAuraAmount(Unit const* unit, int32 miscValue)
+        {
+            if (!unit)
+            {
+                return 0;
+            }
+
+            int32 best = 0;
+            for (AuraEffect const* effect : unit->GetAuraEffectsByType(SPELL_AURA_DUMMY))
+            {
+                if (effect && effect->GetMiscValue() == miscValue
+                    && effect->GetAmount() > best)
+                {
+                    best = effect->GetAmount();
+                }
+            }
+            return static_cast<uint32>(best);
+        }
     }
 
     PDv2InstanceScript::PDv2InstanceScript(InstanceMap* map) : InstanceScript(map)
@@ -1098,6 +1137,35 @@ namespace PDungeon
             }
         }
 
+        // Round E / WP6 / D7: the respawn echoes, and they come after the whole
+        // funnel above for the same reason the boss gear comes before the
+        // finale - the kill has to be FINISHED, scored and looted and its
+        // corpse complete, before that corpse is allowed to raise anything.
+        //
+        // The guard list, in order: the operator has the mechanic on
+        // (V2.Respawn.Enable); this was an ordinary LAYOUT mob, because a
+        // patrol, an ambush or an event attacker is risk on the road and
+        // echoing one would turn a corridor into a treadmill; it was not the
+        // room's boss, whose hall the run has already been credited for and
+        // whose second corpse would read as a second boss; it was not a Lil'
+        // Bro child, not an echo itself and not any other extra, or one corpse
+        // would breed for ever; and the finale is not staged yet, because
+        // nothing new may walk in over Chromie's three lines.
+        //
+        // AND NO COUNTER MOVES HERE - the whole difference to SplitOnDeath,
+        // which raises _run.total and _roomAlive on purpose. A split child IS
+        // the planned mob, still owed to the run; an echo is a reward paid for
+        // a kill that is already scored, so adding it to the total would push
+        // the denominator up on every single pull and leave a HUD that can
+        // never reach its own number. The copies carry countsForRun = false
+        // and PD_ROOM_NONE, so OnMobDied will never score them either - both
+        // halves have to agree or the arithmetic drifts apart.
+        if (sPDv2Mgr->GetConfig().respawnEnable && tag->countsForRun && !tag->isRunBoss
+            && !tag->splitDepth && !tag->isRespawnCopy && !tag->isExtra && !_run.complete)
+        {
+            SpawnRespawnCopies(creature, *tag, killer);
+        }
+
         // AFTER the injection, and that order is the point: FinishRun stages
         // the finale, and the corpse the player is about to loot has to be
         // complete before Chromie starts talking over it.
@@ -1750,9 +1818,15 @@ namespace PDungeon
         tag->patrolGoalCellY = proto.patrolGoalCellY;
         tag->patrolLeader = proto.patrolLeader;
         tag->patrolRank = proto.patrolRank;
-        // Round E / D7: set by TickEvents on an event-wave attacker (and by
-        // any later respawn copy), read by the currency gate in OnMobDied.
+        // Round E / D7: set by TickEvents on an event-wave attacker and by
+        // SpawnRespawnCopies on an echo, read by the currency gate in
+        // OnMobDied.
         tag->isExtra = proto.isExtra;
+        // Round E / WP6: set by SpawnRespawnCopies, read by its own guard in
+        // OnMobDied so an echo cannot echo. Copied here for the reason 1f66c74
+        // paid for with isExtra - EVERY field a proto can carry is copied in
+        // this block, or the spawner's intent is silently thrown away.
+        tag->isRespawnCopy = proto.isRespawnCopy;
 
         // Before the affixes, never after: a Lil' Bro child is a TENTH of its
         // parent that a Big Boy bit then grows by half again, and reversing
@@ -1931,6 +2005,138 @@ namespace PDungeon
             LOG_INFO(PD_LOG, "PDv2: instance {} Lil' Bro depth {} split into {} - run total {}",
                      instance->GetInstanceId(), uint32(proto.splitDepth), uint32(born),
                      uint32(_run.total));
+        }
+    }
+
+    void PDv2InstanceScript::SpawnRespawnCopies(Creature* corpse, PDv2MobData const& tag,
+                                                Unit* killer)
+    {
+        // The talent belongs to a PLAYER, so a kill by a pet, a guardian or a
+        // totem has to be walked back to its owner - the same walk-back
+        // RollBonusLoot and InjectBossGear do, for the same reason. A kill by
+        // nobody at all (a void zone, a fall, a despawn the AI reports as a
+        // death) owes nothing and leaves here.
+        Player* player = killer ? killer->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
+        if (!player)
+        {
+            return;
+        }
+
+        // The node's RANK is the count - that is the whole talent - and the
+        // conf ceiling is the operator's last word on it (PDv2Mgr.h says why
+        // both exist). A player without the node reads 0 here, which is the
+        // common case and the cheapest one: one walk of the dummy-aura list.
+        uint32 const copies = std::min(TaggedAuraAmount(player, PD_TALENT_TAG_RESPAWN),
+                                       sPDv2Mgr->GetConfig().respawnMaxCopies);
+        if (!copies)
+        {
+            return;
+        }
+
+        // What an echo INHERITS is what it looks and fights like; what it does
+        // not inherit is the run's arithmetic. Field by field rather than a
+        // copy of `tag`, so a field added to PDv2MobData has to be decided on
+        // here instead of arriving by accident.
+        PDv2MobData proto;
+        proto.role = tag.role;
+        proto.casterSpellId = tag.casterSpellId;
+
+        // The affixes come along, exactly as they do for a Lil' Bro child: the
+        // echo is the same creature the player just fought, and one that shed
+        // its affixes would be a different, easier fight wearing its face.
+        proto.affixMask = tag.affixMask;
+
+        // In no room and in no counter. The room this mob was planned for has
+        // already been credited for it, and PD_ROOM_NONE is the value every
+        // `roomIndex < _roomAlive.size()` guard in this file rejects on its own
+        // - the tag's 0 default would have decremented room 0 instead.
+        proto.roomIndex = PD_ROOM_NONE;
+        proto.countsForRun = false;
+
+        // Never a boss, whatever the corpse was. The call site's guard already
+        // keeps a boss out; this says it a second time at the place where it
+        // would matter if that guard were ever loosened, because a second
+        // killable boss is a run that can be finished twice.
+        proto.isRunBoss = false;
+
+        // D7, both halves at once. isExtra is what pays the materials and puts
+        // the currency behind V2.Loot.Currency.ExtraMobsDropCurrency;
+        // isRespawnCopy is what stops the echo from echoing. splitDepth is
+        // left at 0 DELIBERATELY rather than inherited: a Lil' Bro echo may
+        // still split, and its children pay nothing exactly as they do today.
+        //
+        // The patrol block and the Damage Reduce cache keep the struct's own
+        // defaults - an echo is born in combat and walks no beat, and the
+        // cache is per-creature runtime state no proto ever carries.
+        proto.isExtra = true;
+        proto.isRespawnCopy = true;
+        proto.splitDepth = 0;
+
+        WalkGrid const* grid = GetWalkGrid();
+        float const floorZ = sPDv2Mgr->GetConfig().floorZ;
+
+        uint32 born = 0;
+        for (uint32 i = 0; i < copies; ++i)
+        {
+            // SplitOnDeath's offsets and SplitOnDeath's veto, because this is
+            // the same problem: two creatures out of one corpse, far enough
+            // apart to be two bodies and close enough to read as the corpse
+            // getting back up. Past the second they stack on the pair, which
+            // no shipped rank reaches - the conf ceiling is what an operator
+            // would have to raise to get there.
+            float const sign = (i == 0) ? 1.0f : -1.0f;
+            float cx = corpse->GetPositionX() + sign * LIL_BRO_OFFSET_X_YD;
+            float cy = corpse->GetPositionY() + sign * LIL_BRO_OFFSET_Y_YD;
+
+            // A mob can die standing at a platform edge, and 2 yd past that
+            // edge is the void - where a gravity-less echo would hover for
+            // ever, unreachable and permanently in combat with the player who
+            // earned it. The walk grid is the only thing on this server that
+            // knows where floor is (pd/02 §7), so it decides; the corpse's own
+            // feet are the fallback, because the corpse is provably on floor.
+            if (grid)
+            {
+                int gcx = 0, gcy = 0;
+                WorldToCell(cx, cy, gcx, gcy);
+                GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                if (!grid->At(cell.x, cell.y))
+                {
+                    cx = corpse->GetPositionX();
+                    cy = corpse->GetPositionY();
+                }
+            }
+
+            // Z from the config, never from the corpse: the floor plane is
+            // where every other spawn on this map stands, and a mob that was
+            // knocked upward before it died must not hand its echo a hover.
+            // No baseHealthOverride either - an echo is the mob at full size,
+            // which is exactly what makes the node worth its place at the far
+            // end of the tree.
+            Creature* echo = SpawnTaggedMob(corpse->GetEntry(), proto, cx, cy, floorZ);
+            if (!echo)
+            {
+                continue;
+            }
+            ++born;
+
+            // Straight at the player who earned it, and not at whatever the
+            // corpse was last fighting: the talent is that player's, the echo
+            // is that player's consequence, and a corpse has usually lost its
+            // victim by the time JustDied runs anyway.
+            if (CreatureAI* ai = echo->AI())
+            {
+                ai->AttackStart(player);
+            }
+        }
+
+        // One line per echoing kill, gated like every other R3 diagnostic - the
+        // one an operator arms for a single pull when somebody reports too many
+        // echoes or none at all. No MarkRunDirty(): nothing the HUD shows moved.
+        if (born && PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} respawn echo x{} (of {} owed) of entry {} for {}",
+                     instance->GetInstanceId(), born, copies, corpse->GetEntry(),
+                     player->GetName());
         }
     }
 

@@ -97,6 +97,17 @@ namespace PDungeon
         // mob that comes back for ever would make it a faucet.
         bool   isExtra = false;
 
+        // Round E / WP6. Born from a kill by a player carrying the Forgotten
+        // Talents respawn node (PD_TALENT_TAG_RESPAWN). It always comes with
+        // `isExtra`, and it is a SECOND flag rather than a reading of that one
+        // because it answers the question isExtra cannot: an echo must never
+        // echo. Without it the first kill of a run would be the last one that
+        // ever ended - every copy would owe two more copies, for ever, and the
+        // guard in OnMobDied has nothing else to test (`splitDepth` cannot
+        // carry it: a split child pays NO loot at all, and D7 wants an echo to
+        // pay materials).
+        bool   isRespawnCopy = false;
+
         // B4: this creature walks a beat out of combat. Since Round D / D2 the
         // beat is ONE CORRIDOR - both of its ends are doorway lane cells of
         // that corridor run, in GLOBAL grid cells, and the patrol never enters
@@ -688,6 +699,18 @@ namespace PDungeon
         // Lil' Bro (affix 7). Called from OnMobDied BEFORE the death moves any
         // counter, which is the only ordering that keeps them honest.
         void SplitOnDeath(Creature* parent, PDv2MobData const& parentTag, Unit* killer);
+
+        // Round E / WP6 / D7. The Forgotten Talents respawn node: an ordinary
+        // kill rises again as up to V2.Respawn.MaxCopies echoes. Called from
+        // OnMobDied AFTER the counters and the loot, which is the exact mirror
+        // of SplitOnDeath's ordering above and for the opposite reason - a
+        // split IS the mob the run is still owed, an echo is a reward for a
+        // kill that is already finished, so it must not be part of it.
+        //
+        // Moves NO counter (the call site says why at length). `killer` is
+        // whatever JustDied handed over: a pet, a guardian or nothing at all,
+        // so the owner walk-back and the null case both live inside.
+        void SpawnRespawnCopies(Creature* corpse, PDv2MobData const& tag, Unit* killer);
         void MarkRunDirty() { _runDirty = true; }
 
         // Round B / B3. A segment's kill counter moved: re-decide whether that

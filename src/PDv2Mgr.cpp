@@ -274,6 +274,21 @@ namespace PDungeon
         _config.capCleanUnlock = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
             "ProceduralDungeon.V2.Cap.CleanUnlock", 5)));
 
+        // Round E / WP6: the respawn echoes. Engine-side and read LIVE like the
+        // four V2.Event keys above, so `.reload config` arms or disarms the
+        // Forgotten Talents node on a run that is already being walked - the
+        // only way an operator can answer "is THIS what is flooding the room"
+        // without a restart.
+        _config.respawnEnable = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Respawn.Enable", true);
+        // Only a ceiling, no floor: the type is unsigned, so 0 is already the
+        // bottom and it means "the mechanic runs and pays nothing". Five is
+        // more corpses per pull than the L2-L4 loot funnel was ever tuned for,
+        // and the node's own maximum is 2 - this clamp is what a content change
+        // or a typo in the FT extension contract runs into, not the default.
+        _config.respawnMaxCopies = std::min<uint32>(5, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Respawn.MaxCopies", 2));
+
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} detour {}%",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,

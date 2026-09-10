@@ -1227,3 +1227,54 @@ ProceduralDungeon.V2.Event.CasterPct = 10
 
 ProceduralDungeon.V2.Event.ParagonXp = 1000
 
+#
+#    ProceduralDungeon.V2.Respawn.Enable
+#        Description: Round E / WP6 (2026-09-10): whether the Forgotten
+#                     Talents node "Restless Echoes" does anything in this
+#                     dungeon. With it on, an ordinary monster killed by a
+#                     player who owns that node rises again on the spot as
+#                     one echo per rank - the same creature, freshly hostile
+#                     and already coming for the killer.
+#
+#                     The TALENT is the entitlement: nobody who has not
+#                     bought the node gets an echo whatever this key says.
+#                     What the module reads is not a spell id but the
+#                     node's tag - EffectMiscValue 76001 on its passive
+#                     dummy aura - so mod-forgotten-talents can regenerate
+#                     its spells without this ever noticing.
+#
+#                     An echo is never part of the run: it moves no kill
+#                     counter, clears no room, opens no barrier and cannot
+#                     be the boss of one. What it does pay is materials,
+#                     always, and Paragon XP - currency only when
+#                     V2.Loot.Currency.ExtraMobsDropCurrency is on, because
+#                     a monster that comes back for ever would otherwise be
+#                     a currency faucet. An echo never echoes again, and a
+#                     boss never echoes at all.
+#
+#                     0 makes the node inert without touching anybody's
+#                     talent tree - the switch to reach for when a farm
+#                     turns out to be one. Read LIVE, so a .reload config
+#                     arms and disarms it on a run already being walked.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.Respawn.Enable = 1
+
+#
+#    ProceduralDungeon.V2.Respawn.MaxCopies
+#        Description: Round E / WP6: the most echoes ONE kill may raise,
+#                     whatever the talent's rank says. The node's own
+#                     maximum is 2 today, so this default costs nothing;
+#                     it is the operator's ceiling for the day a later rank
+#                     - or a typo in the talent extension contract - asks
+#                     for more than the loot funnel was tuned for.
+#
+#                     Clamped to 0..5. 0 is the softer of the two switches
+#                     above: the mechanic still runs and simply raises
+#                     nothing. Read LIVE.
+#        Default:     2
+#
+
+ProceduralDungeon.V2.Respawn.MaxCopies = 2
+

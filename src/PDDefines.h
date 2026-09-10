@@ -113,6 +113,22 @@ namespace PDungeon
     // room 0 instead.
     uint32 const PD_ROOM_NONE = 0xFFFFFFFFu;
 
+    // Round E / WP6. The EffectMiscValue of the Forgotten Talents "Restless
+    // Echoes" node's passive dummy aura - and the WHOLE contract between the
+    // two modules. Deliberately a TAG and not a spell id: mod-forgotten-talents
+    // synthesises the spell records for its extension nodes and its id map is
+    // sticky rather than frozen, so an id written down over here would be a
+    // promise the other module never made. What it does promise is this
+    // number in EffectMiscValue_1 and the rank's value in the aura's amount.
+    //
+    // Nothing in this module includes an FT header for it - the reader is ten
+    // file-local lines in PDv2InstanceScript.cpp, and the tag band
+    // 76001-76003 is registered in share-public 06-custom-ids.md.
+    //
+    // int32 rather than the uint32 above because AuraEffect::GetMiscValue()
+    // is signed and this constant exists to be compared against it.
+    int32 const PD_TALENT_TAG_RESPAWN = 76001;
+
     char const* const PD_LOG = "module.pdungeon";
 }
 

@@ -291,6 +291,28 @@ namespace PDungeon
         // bigger than the whole dial.
         int         capDeathUnlock = 3;
         int         capCleanUnlock = 5;
+
+        // Round E / WP6 (2026-09-10, spec D7). The respawn echoes: an ordinary
+        // kill by a player who carries the Forgotten Talents "Restless Echoes"
+        // node rises again as that many tagged copies. The TALENT is the
+        // entitlement - a player who has not bought it gets nothing whatever
+        // these two say - and this pair is only the operator's brake on it.
+        //
+        // Enable is the kill switch: off makes the node inert without touching
+        // anyone's talent tree or refunding anything, which is what an
+        // operator needs the evening a farm turns out to be one. MaxCopies is
+        // the ceiling the node's own rank is capped against, clamped to 0..5:
+        // the node maxes at 2 today, so the default costs nothing, and a later
+        // rank - or a typo in the extension contract - cannot outgrow the
+        // server's opinion of how many echoes one corpse may owe. 0 is the
+        // softer switch of the two (the mechanic runs and pays nothing).
+        //
+        // Both read LIVE like every other engine-side V2 knob. Whether an echo
+        // pays currency as well as materials is NOT here: that is the D7 half
+        // V2.Loot.Currency.ExtraMobsDropCurrency already governs, for the event
+        // waves and the echoes together.
+        bool        respawnEnable = true;
+        uint32_t    respawnMaxCopies = 2;
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the
