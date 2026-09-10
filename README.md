@@ -79,6 +79,11 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > per-tick line, so a quiet log is the default. And the gen panel **draws the planned layout**
 > after Generate, the same map the HUD shows once you are inside.
 >
+> Kit **`t1b-v39`** (Round E / WP4) closes the two visual leftovers: the tower room's side walls
+> are lined with houses again (the facade reserve was still sized for a pad ring Round B removed),
+> and the ground texture no longer breaks at chunk edges — every MCNK carries `0x8000`
+> (`do_not_fix_alpha_map`), so the alpha feather is authored edge to edge instead of pinned.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
