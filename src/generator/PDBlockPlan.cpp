@@ -619,7 +619,7 @@ namespace PDungeon
         //
         // One optional dead-end room per BOSS SEGMENT, hung off an ordinary
         // spine room of that segment with exactly the machinery above: the
-        // same host rule, the same single StepCandidates step, the same
+        // same kind of host, the same single StepCandidates step, the same
         // CommitRoute. Geometrically an event pocket IS a pocket; the only
         // differences are bookkeeping ones:
         //
@@ -637,32 +637,45 @@ namespace PDungeon
         //     the 0 % default leaves every pre-WP5 stream untouched, and the
         //     harness's 100 % sweep leaves the coin out of the picture.)
         //
-        // `hosted` starts from the pockets the search seated, which is what
-        // makes "one hanger per host" hold across both passes - the rule
-        // ValidateBlockPlan proves from the other side.
+        // `hostedEvent` tracks the EVENT pockets this pass seats, and nothing
+        // else. Design call 2026-09-10 (WP5 Task 1 report §6, option 2): an
+        // event pocket MAY share its host with an ordinary pocket. A room
+        // chunk has four sockets - chain in, chain out, pocket, event - so a
+        // spine room carrying both is an ordinary mask-15 room chunk, which
+        // the kit ships for both themes. The rule that survives is the one
+        // the engine cares about: two EVENTS never share a host, so a
+        // segment's scripted encounter always stands alone in its own dead
+        // end. Ordinary pockets keep their own one-per-host rule inside
+        // PlacePockets; this pass simply stops reading it.
+        //
+        // What the change buys: at 5 rooms / 1 boss the old host set was
+        // whatever single ordinary spine room the two pockets had left over,
+        // which is where the measured 19.6 % geometric drop rate came from.
+        // Every ordinary spine room of the segment is a candidate again.
+        //
+        // `hostedEvent` is belt and braces and says so: the host set below is
+        // already filtered to segment k, and the segments partition the chain,
+        // so no index can be drawn twice by construction. It is kept because
+        // "two events never share a host" is a RULE of the design - one that
+        // ValidateBlockPlan states from the outside - and a rule inferred from
+        // a partition somewhere else is one a later loop change can lose
+        // silently.
         void PlaceEventPockets(PDRandom& rng, std::vector<int> const& bosses, int chancePct,
-                               std::vector<Pocket> const& pockets, Field& f,
-                               std::vector<Pocket>& out, int& dropped)
+                               Field& f, std::vector<Pocket>& out, int& dropped)
         {
             int const chainLen = static_cast<int>(f.chain.size());
-            std::vector<bool> hosted(static_cast<size_t>(chainLen), false);
-            for (Pocket const& p : pockets)
-            {
-                if (p.host >= 0 && p.host < chainLen)
-                {
-                    hosted[static_cast<size_t>(p.host)] = true;
-                }
-            }
+            std::vector<bool> hostedEvent(static_cast<size_t>(chainLen), false);
             for (size_t k = 1; k <= bosses.size(); ++k)
             {
                 if (!rng.Chance(chancePct))
                 {
                     continue;
                 }
-                // The same host set as PlacePockets - chain 1..L-2, never a
-                // boss, never already hanging something - narrowed to segment
-                // k. Enumerated in chain order so a draw index means the same
-                // on every compiler.
+                // PlacePockets' host set - chain 1..L-2, never a boss, with a
+                // free cell to step into - narrowed to segment k, and closed
+                // only against the events THIS pass has already seated.
+                // Enumerated in chain order so a draw index means the same on
+                // every compiler.
                 std::vector<int> hosts;
                 for (int i = 1; i < chainLen - 1; ++i)
                 {
@@ -670,7 +683,7 @@ namespace PDungeon
                     {
                         continue;
                     }
-                    if (IsBossIndex(bosses, i) || hosted[static_cast<size_t>(i)])
+                    if (IsBossIndex(bosses, i) || hostedEvent[static_cast<size_t>(i)])
                     {
                         continue;
                     }
@@ -698,7 +711,7 @@ namespace PDungeon
                 CommitRoute(f, from, cand.cell, ChooseXFirst(rng, cand.orders));
                 f.occ[f.Index(cand.cell)] = 1;
                 f.rooms.push_back(cand.cell);
-                hosted[static_cast<size_t>(host)] = true;
+                hostedEvent[static_cast<size_t>(host)] = true;
 
                 Pocket event;
                 event.cell = cand.cell;
@@ -1385,10 +1398,15 @@ namespace PDungeon
         //     and a chest stub opening a second doorway would put the player
         //     past it without meeting it. The stub pass in GenerateBlockPlan
         //     skips event cells for this reason and this rule is the proof;
-        //   * one hanger per host, ACROSS both kinds: an ordinary spine room
-        //     carries either a pocket or an event pocket, never both and
-        //     never two of either. `hosted` above is the pocket half of that
-        //     statement, `hostedEvent` the event half.
+        //   * ONE EVENT PER HOST - and only that. Design call 2026-09-10 (WP5
+        //     Task 1 report §6, option 2): an event pocket may hang off a
+        //     spine room that already hosts an ordinary pocket, because a room
+        //     chunk has four sockets and chain in + chain out + pocket + event
+        //     is exactly four. So there is deliberately NO test against
+        //     `hosted` here; the ordinary pockets keep their own one-per-host
+        //     rule in the loop above, and `hostedEvent` keeps the events'.
+        //     What the design refuses is two SCRIPTED encounters sharing one
+        //     junction, which is what a player would actually notice.
         int const eventCount = EventPocketCount(plan);
         std::vector<bool> hostedEvent(static_cast<size_t>(chainLen), false);
         for (PlacedBlock const& b : plan.blocks)
@@ -1410,10 +1428,6 @@ namespace PDungeon
                 plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.branchOf)])].role != BlockRole::Room)
             {
                 return fail("an event pocket hangs off the entrance, a boss or nothing");
-            }
-            if (hosted[static_cast<size_t>(b.branchOf)])
-            {
-                return fail("an event pocket and a pocket share one host");
             }
             if (hostedEvent[static_cast<size_t>(b.branchOf)])
             {
@@ -1931,7 +1945,7 @@ namespace PDungeon
             // nothing.
             std::vector<Pocket> events;
             int eventsDropped = 0;
-            PlaceEventPockets(rng, bossIdx, cfg.eventChancePct, pockets, field,
+            PlaceEventPockets(rng, bossIdx, cfg.eventChancePct, field,
                               events, eventsDropped);
 
             // Hand over to the ordered (y, x) map the rest of the pipeline has

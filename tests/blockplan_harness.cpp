@@ -2452,19 +2452,27 @@ namespace
     //      pockets would otherwise pass this sweep by doing nothing.
     //   3. The DROP RATE over the whole sweep, split into the two kinds of
     //      drop, because they mean opposite things:
-    //        * STRUCTURAL - the segment has no ordinary spine room free to
-    //          hang anything off. At rooms 1 / boss 2, segment 2 is the boss
-    //          room and nothing else, so its event is arithmetically
-    //          impossible; at rooms 5 / boss 2 the last segment has a single
-    //          candidate that the pocket pass may already have taken. Those
-    //          are the room budget's shape, not a planner fault, and the
-    //          layouts that show them are exactly the ones WP5 Task 2's
-    //          engine will have to cope with anyway.
+    //        * STRUCTURAL - the segment has no ordinary spine room at all, so
+    //          no planner could hang anything there. At rooms 1 / boss 2,
+    //          segment 2 is the boss room and nothing else, so its event is
+    //          arithmetically impossible. That is the room budget's shape, not
+    //          a planner fault, and the layouts that show it are exactly the
+    //          ones WP5 Task 2's engine will have to cope with anyway.
+    //          Since the design call of 2026-09-10 an ordinary pocket on a
+    //          room no longer disqualifies it, so "the pocket pass took the
+    //          only candidate" is no longer one of these - the eligible set
+    //          below is the segment's ordinary spine rooms, full stop.
     //        * GEOMETRIC - hosts existed and none of them had a free cell to
     //          step into. That IS a planner fault if it happens often, and it
     //          is the number this check holds to a threshold.
     //      Both are printed; the sweep's totals are the measurement the
     //      report quotes.
+    //
+    // Since the same design call this function also proves the NEW freedom is
+    // real rather than merely permitted: it counts the hosts that carry a
+    // pocket AND an event, refuses a sweep where that number is zero, and
+    // checks each such host is the ordinary four-socket (mask 15) room chunk
+    // the kit ships - which is the whole reason the rule could be dropped.
     void RunEventPocketChecks(int seeds)
     {
         char msg[300];
@@ -2475,10 +2483,33 @@ namespace
         int dropsTotal = 0;
         int dropsStructural = 0;
         int dropsGeometric = 0;
+        int dropsGeometric1 = 0;    // of those, segments down to a single eligible host
         int layouts = 0;
+        int sharedHosts = 0;        // spine rooms carrying a pocket AND an event
+
+        // The mask-15 room chunk is what a shared host renders as, so its
+        // existence in the kit is a precondition of the whole design call, not
+        // a detail of one layout. Stated here over both themes and every alt
+        // rather than only where a sweep happens to produce one.
+        if (!g_masks.empty())
+        {
+            for (int theme = 1; theme <= 2; ++theme)
+            {
+                for (int alt = 0; alt < AltCountFor(BlockRole::Room); ++alt)
+                {
+                    int const base = (theme == 1) ? 2000 : 12000;
+                    int const id = base + alt * 1000 + 15;
+                    std::snprintf(msg, sizeof(msg),
+                                  "theme %d alt %d: the four-socket room chunk %d has no walk "
+                                  "mask in the kit SQL - a host carrying a pocket AND an event "
+                                  "could not render", theme, alt, id);
+                    Check(MaskFor(id) != nullptr, msg, 0);
+                }
+            }
+        }
 
         std::printf("event pockets at eventChancePct 100, %d seeds per row:\n", seeds);
-        std::printf("  rooms  boss  segments  placed  drop:struct  drop:geom\n");
+        std::printf("  rooms  boss  segments  placed  drop:struct  drop:geom  geom:1host\n");
 
         for (int rooms : roomChoices)
         {
@@ -2488,7 +2519,7 @@ namespace
                 // happen rather than as one blended number: the structural
                 // ones are a property of (rooms, boss) alone, the geometric
                 // ones of how full an 8x8 field gets at that room count.
-                int rowSegments = 0, rowPlaced = 0, rowStruct = 0, rowGeom = 0;
+                int rowSegments = 0, rowPlaced = 0, rowStruct = 0, rowGeom = 0, rowGeom1 = 0;
                 for (int i = 0; i < seeds; ++i)
                 {
                     // The same seed ladder RunOrdinaryRoomCountChecks walks,
@@ -2515,12 +2546,15 @@ namespace
                           err.empty() ? "validation failed with event pockets" : err.c_str(), seed);
 
                     // The spine by chain index, and which of its rooms an
-                    // ORDINARY pocket already hangs off - the "one hanger per
-                    // host" rule needs both, and the drop split below reads
-                    // the pocket flags too.
+                    // ORDINARY pocket hangs off. Since the design call an
+                    // event may join one of those - `hostedPocket` is no
+                    // longer an exclusion but the thing that identifies a
+                    // SHARED host, and the socket check below is what proves
+                    // sharing is legal geometry rather than an overwrite.
                     int const chainLen = ChainLength(plan);
                     std::vector<int> chainAt(static_cast<size_t>(chainLen), -1);
                     std::vector<bool> hostedPocket(static_cast<size_t>(chainLen), false);
+                    std::vector<bool> hostedEvent(static_cast<size_t>(chainLen), false);
                     for (size_t bi = 0; bi < plan.blocks.size(); ++bi)
                     {
                         PlacedBlock const& b = plan.blocks[bi];
@@ -2577,10 +2611,51 @@ namespace
                                           static_cast<int>(host.role));
                             Check(host.role == BlockRole::Room, msg, seed);
 
+                            // Two EVENTS never share a host - the one half of
+                            // the old rule the design call kept. Re-derived
+                            // here rather than read off the planner, which is
+                            // the point of a harness rule.
                             std::snprintf(msg, sizeof(msg),
-                                          "event pocket (%d,%d) shares chain %d with an ordinary "
-                                          "pocket - one hanger per host", b.bx, b.by, b.branchOf);
-                            Check(!hostedPocket[static_cast<size_t>(b.branchOf)], msg, seed);
+                                          "two event pockets share chain %d - a segment's "
+                                          "scripted encounter must stand alone in its dead end",
+                                          b.branchOf);
+                            Check(!hostedEvent[static_cast<size_t>(b.branchOf)], msg, seed);
+                            hostedEvent[static_cast<size_t>(b.branchOf)] = true;
+
+                            // A host carrying BOTH is the case the design call
+                            // unlocked, so it is checked rather than forbidden:
+                            // chain in, chain out, pocket, event is exactly the
+                            // four sockets a room chunk has, and the chunk id
+                            // must be the ordinary mask-15 room the kit ships.
+                            // A fifth hanger would have to show up here as a
+                            // popcount of 4 that is not mask 15, or as a chunk
+                            // id with no walk mask.
+                            if (hostedPocket[static_cast<size_t>(b.branchOf)])
+                            {
+                                ++sharedHosts;
+                                int hostSockets = 0;
+                                for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                                {
+                                    if (host.socketMask & bit) ++hostSockets;
+                                }
+                                std::snprintf(msg, sizeof(msg),
+                                              "chain %d hosts a pocket and an event but carries "
+                                              "mask %u (%d socket(s)) and chunk %d - want the "
+                                              "four-socket room chunk %d",
+                                              b.branchOf, host.socketMask, hostSockets,
+                                              host.chunkId, 2000 + host.alt * 1000 + 15);
+                                Check(hostSockets == 4 && host.socketMask == 15u &&
+                                      host.chunkId == 2000 + host.alt * 1000 + 15, msg, seed);
+
+                                if (!g_masks.empty())
+                                {
+                                    std::snprintf(msg, sizeof(msg),
+                                                  "chain %d hosts a pocket and an event as chunk "
+                                                  "%d, which has no walk mask in the kit SQL",
+                                                  b.branchOf, host.chunkId);
+                                    Check(MaskFor(host.chunkId) != nullptr, msg, seed);
+                                }
+                            }
                         }
 
                         // The chunk id must be an ordinary ROOM chunk of the
@@ -2638,9 +2713,12 @@ namespace
                     // segment with no event was dropped, and it is STRUCTURAL
                     // when the segment had no eligible host to begin with.
                     // The eligible set is re-derived here from the finished
-                    // plan (ordinary spine rooms of the segment, 1..L-2, not
-                    // already hosting a pocket) rather than read out of the
-                    // planner, which is the whole point of measuring it.
+                    // plan rather than read out of the planner, which is the
+                    // whole point of measuring it - and since the design call
+                    // it is simply the segment's ordinary spine rooms
+                    // (1..L-2, role Room). A pocket on one of them no longer
+                    // takes it out of the set, which is exactly the change
+                    // this table is here to measure.
                     for (int k = 1; k <= boss; ++k)
                     {
                         if (perSegment[static_cast<size_t>(k)] > 0)
@@ -2659,15 +2737,22 @@ namespace
                             {
                                 continue;
                             }
-                            if (hostedPocket[static_cast<size_t>(idx)])
-                            {
-                                continue;
-                            }
                             ++eligible;
                         }
                         if (eligible > 0)
                         {
                             ++rowGeom;
+                            // A geometric drop in a segment with exactly ONE
+                            // eligible host is a different animal from one in
+                            // a segment with several: no host rule can widen a
+                            // set of size one, so the only lever left there is
+                            // the STEP (a two-cell route, report §6 option 3).
+                            // Split out because the two numbers point at
+                            // different fixes and a blended rate hides which.
+                            if (eligible == 1)
+                            {
+                                ++rowGeom1;
+                            }
                         }
                         else
                         {
@@ -2680,12 +2765,13 @@ namespace
                     dropsTotal += plan.eventsDropped;
                 }
 
-                std::printf("  %5d  %4d  %8d  %6d  %11d  %9d\n",
-                            rooms, boss, rowSegments, rowPlaced, rowStruct, rowGeom);
+                std::printf("  %5d  %4d  %8d  %6d  %11d  %9d  %10d\n",
+                            rooms, boss, rowSegments, rowPlaced, rowStruct, rowGeom, rowGeom1);
                 segmentsAsked += rowSegments;
                 eventsPlaced += rowPlaced;
                 dropsStructural += rowStruct;
                 dropsGeometric += rowGeom;
+                dropsGeometric1 += rowGeom1;
             }
         }
 
@@ -2695,15 +2781,27 @@ namespace
               "no seed in the sweep placed an event pocket at eventChancePct 100 - the "
               "event pass is dead code", 0);
 
+        // The design call of 2026-09-10 is only worth its comment if the
+        // sweep actually exercises it: at 5 rooms the pocket budget takes two
+        // of the three ordinary spine rooms, so shared hosts are not a corner
+        // case here, they are the common one. Zero would mean the placement
+        // still avoids pocket hosts and the drop rate below improved for some
+        // other reason.
+        std::snprintf(msg, sizeof(msg),
+                      "no host in the sweep carries a pocket AND an event - the one-hanger "
+                      "rule is still in force somewhere");
+        Check(sharedHosts > 0, msg, 0);
+
         int const possible = segmentsAsked - dropsStructural;
         int const pctX10 = segmentsAsked ? (dropsTotal * 1000 + segmentsAsked / 2) / segmentsAsked : 0;
         int const geoX10 = possible ? (dropsGeometric * 1000 + possible / 2) / possible : 0;
         std::printf("event pockets: %d placed over %d boss segment(s) in %d layout(s); "
                     "%d drop(s) = %d.%d%% (structural %d, geometric %d = %d.%d%% of the "
-                    "%d segment(s) that could have carried one)\n",
+                    "%d segment(s) that could have carried one, %d of them in a segment with "
+                    "a SINGLE eligible host); %d host(s) carry a pocket and an event\n",
                     eventsPlaced, segmentsAsked, layouts, dropsTotal,
                     pctX10 / 10, pctX10 % 10, dropsStructural, dropsGeometric,
-                    geoX10 / 10, geoX10 % 10, possible);
+                    geoX10 / 10, geoX10 % 10, possible, dropsGeometric1, sharedHosts);
 
         std::snprintf(msg, sizeof(msg),
                       "the two drop kinds add up to %d, but %d drops were counted",
@@ -2713,41 +2811,50 @@ namespace
         // The threshold is on the GEOMETRIC drops alone, over the segments
         // that could have carried an event at all. A structural drop is the
         // room budget's own shape - at rooms 1 / boss 2 the second segment is
-        // nothing but its boss room, and at rooms 5 / boss 2 the last segment
-        // has a single candidate the pocket pass may already have taken - and
-        // holding the planner to a number it cannot move would only teach the
-        // next reader to raise the number.
+        // nothing but its boss room, and nothing a planner does can change
+        // that - and holding the planner to a number it cannot move would only
+        // teach the next reader to raise the number.
         //
-        // THE NUMBER BELOW IS A REGRESSION FLOOR, NOT A DESIGN TARGET, and
-        // the difference is the one thing to carry away from this check. The
-        // WP5 brief asked for a drop rate under 5 %; MEASURED at 300 seeds
-        // per row on 2026-09-10 the geometric rate is 19.6 % of the 2100
-        // possible segments (411 of them), and the per-row table above says
-        // where it comes from:
+        // HISTORY, because the number moved and the reason matters more than
+        // the number: WP5 Task 1 first shipped with an event host that had to
+        // be free of ordinary pockets too, which at 5 rooms left the event a
+        // single candidate and MEASURED 19.6 % geometric drops (411 of 2100).
+        // That was reported as a deviation rather than tuned away, and the
+        // design call of 2026-09-10 (report §6, option 2) answered it: an
+        // event may share its host with a pocket, because a room chunk has
+        // four sockets and chain in + chain out + pocket + event is exactly
+        // four. The host set is now the segment's ordinary spine rooms, full
+        // stop. In absolute terms that is strictly better - 1689 -> 1910
+        // events placed, 1011 -> 790 drops, 37.4 % -> 29.3 % overall - while
+        // the GEOMETRIC percentage stayed flat at 19.6 % -> 20.4 %, because
+        // the 300 structural drops the change dissolved moved INTO the pool
+        // this rate is measured against (2100 -> 2400 possible segments).
         //
-        //     rooms 5 / boss 1   112 of 300   the worst row by far
-        //     rooms 14 / boss 2  131 of 600
-        //     rooms 1  / boss 1   23 of 300
+        // 25 % IS A REGRESSION FLOOR, NOT A TARGET. Today's sweep measures
+        // 20.4 %, and the controller ACCEPTED that rate on 2026-09-10: an
+        // event room is a bonus, not a promise. At 14 rooms / 1 boss the drop
+        // rate is 1 %, and `V2.Event.ChancePct` is the operator's lever for
+        // how often one is even asked for; balancing is a later round's job.
+        // So the floor's one job is to go red if the host set is ever
+        // narrowed again - it sits above the measurement with room to breathe
+        // and far below the 30 %+ a re-narrowed rule would produce.
         //
-        // The cause is not the event step but the HOST SET the design fixes
-        // for it: an ordinary spine room carries either a pocket or an event,
-        // never both, so at 5 rooms / 1 boss the two pockets take two of the
-        // three ordinary spine rooms and the event has exactly ONE candidate
-        // left - which then has to have a free cell beside it. Widening that
-        // (letting an event share a host with a pocket, or giving it a
-        // two-step route) is a DESIGN decision for the round, not something
-        // this task may quietly take; until it is taken, 25 % in the conf
-        // buys roughly 20 % of runs an event room rather than 25 %.
-        //
-        // So the check guards the direction: 30 % leaves the measurement room
-        // to breathe and still goes red long before "the event pass stopped
-        // fitting anywhere".
+        // The residual is NOT the host set: it is the one-step
+        // `StepCandidates` rule at crowded chain ends, where every eligible
+        // host is boxed in (Manhattan 2..3, MIN_ROOM_GAP 2 against every room
+        // placed, a free L-route). The `geom:1host` column splits off the
+        // segments down to a single eligible host, where no host rule could
+        // ever have helped. A two-step route when the one-step set is empty
+        // (report §6 option 3) is the lever if this ever matters; it is a
+        // task, not a threshold change. If a sweep prints above the floor,
+        // the per-row table above says which (rooms, boss) row moved -
+        // re-measure the host rule rather than raising the floor.
         std::snprintf(msg, sizeof(msg),
                       "%d of the %d boss segments that could have carried an event lost it to "
-                      "a full field (%d.%d%%), regression floor 30%% - re-measure the host "
+                      "a full field (%d.%d%%), regression floor 25%% - re-measure the host "
                       "rule before moving this",
                       dropsGeometric, possible, geoX10 / 10, geoX10 % 10);
-        Check(geoX10 < 300, msg, 0);
+        Check(geoX10 < 250, msg, 0);
     }
 
     void RunGameMathChecks()
