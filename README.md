@@ -84,6 +84,17 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > and the ground texture no longer breaks at chunk edges — every MCNK carries `0x8000`
 > (`do_not_fix_alpha_map`), so the alpha feather is authored edge to edge instead of pinned.
 >
+> **Event rooms (Round E / WP5).** Each boss segment has a `V2.Event.ChancePct` (25 %) chance of
+> an extra dead-end room with its own corridor — purple on the map — where the **Weary Pilgrim**
+> waits. Talk to him and **hold the line** for `V2.Event.DurationSec` (60 s): every
+> `V2.Event.SpawnEverySec` (5 s) one creature of the run's packs (10 % casters) storms in from
+> the room's rim and goes for him; the HUD counts down and shows his health. If he lives, a
+> Shifting Cache appears and everyone on the map earns `V2.Event.ParagonXp` (1 000) × the loot
+> multiplier in Paragon XP; if he falls, the wave vanishes and there is no reward. The wave
+> drops materials but no Remnants (`V2.Loot.Currency.ExtraMobsDropCurrency`), and it never
+> counts toward the run, the gates or the room total. The layout decides where an event room
+> sits (layout version 5), so a stored dungeon rerolls once.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works

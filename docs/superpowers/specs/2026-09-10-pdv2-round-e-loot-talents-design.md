@@ -1,9 +1,9 @@
 # PDv2 Round E — loot, five currencies, the Forgotten-Talents purchase model, run cap, and the leftovers
 
 **Date** 2026-09-10 · **Status** **APPROVED 2026-09-10 — the operator accepted the design and every default
-in §2 ("ok machen wir so"). WP1 (L1–L5), WP3 (R1–R4) and WP2 (T1) are BUILT and T1 on the
-workbench (PD `2ab16ec`, FT `4d4fc55`+, core `adec223ba`; installed, booted 15:00, patch-9 rebuilt;
-runde31 §1–§6); T2 = Runde 31; WP4–WP6 not started** ·
+in §2 ("ok machen wir so"). WP1 (L1–L5), WP3 (R1–R4), WP2 (T1), WP4 (K1+K2 = kit v39) and WP5 (R5
+event rooms) are BUILT and T1 on the workbench (PD branch, FT `c6e2221`, core `adec223ba`; installed, booted,
+patch-9 rebuilt, kit v39 deployed; runde31 §1–§8); T2 = Runde 31; WP6 (T2 legendary nodes) not started** ·
 **Branches** `claude/pdv2-round-e-63ac9a2a` in `mod-procedural-dungeon` (off the plan branch `117b629` =
 `main` `d47e015` + docs), the same name in `mod-forgotten-talents`, `azerothcore-wotlk` (one
 prepared-statement block) and, for WP6, `mod-paragon-itemgen` · **Plans**
