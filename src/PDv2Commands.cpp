@@ -20,6 +20,7 @@
 #include "PDClientLink.h"
 #include "PDDefines.h"
 #include "PDv2InstanceScript.h"
+#include "PDv2LootMgr.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
 #include "PDv2UILink.h"
@@ -316,6 +317,11 @@ private:
         handler->PSendSysMessage("  {} decor rule(s), {} critter rule(s) loaded",
                                  uint32(sPDv2Mgr->DecorRules().size()),
                                  uint32(sPDv2Mgr->CritterRules().size()));
+        // Round E / L1, and the same failure class a fourth time: a pool at 0
+        // means mod_pdungeon_loot_pools.sql never landed, and the run's
+        // chests, bosses and final cache pay nothing at all - which looks
+        // like bad luck in play and like nothing whatsoever in the log.
+        handler->PSendSysMessage("loot: {}", sPDv2LootMgr->Describe());
         handler->PSendSysMessage("pdungeon v2: {}",
                                  sPDClientLink->DebugLine(AccountOf(handler)));
         // The panel's side of the same conversation: whether this account's

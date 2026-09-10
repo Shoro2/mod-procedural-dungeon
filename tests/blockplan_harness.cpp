@@ -2679,6 +2679,122 @@ namespace
             }
             Check(flat, "run dxp must be difficulty-independent (01 §8)", 0);
         }
+
+        // --- Round E / D5 class fit (FitsClassRaw) --------------------------
+        //
+        // The pure half of the loot filter. PDv2LootMgr::ItemFitsPlayer only
+        // reads an ItemTemplate's four fields and ANDs the race mask on top,
+        // so everything that can go wrong in the class table can be caught
+        // here - with no worldserver, no item and no player.
+        //
+        // ALL is the -1 an item_template row carries when it belongs to
+        // everyone (0xFFFFFFFF by the time it reaches this function); MAGE is
+        // what a row that names one single class looks like.
+        {
+            uint32_t const ALL = 0xFFFFFFFFu;
+            uint32_t const MAGE = 1u << (PD_CLASS_MAGE - 1);
+
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 4, PD_CLASS_MAGE),
+                  "plate must never be rolled for a mage", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_MAGE),
+                  "cloth is exactly what a mage is rewarded in", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 3, PD_CLASS_HUNTER) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 2, PD_CLASS_HUNTER),
+                  "a level-80 hunter takes mail and not leather", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 2, PD_CLASS_DRUID) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_DRUID),
+                  "a druid takes leather and not cloth", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 6, PD_CLASS_SHAMAN),
+                  "a shield must be rollable for a shaman", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 6, PD_CLASS_MAGE),
+                  "and never for a mage", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 0, PD_CLASS_WARRIOR) &&
+                  FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 0, PD_CLASS_MAGE),
+                  "a ring (armour misc) must fit every class there is", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 7, PD_CLASS_PALADIN) &&
+                  FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 8, PD_CLASS_DRUID),
+                  "relics are gated by AllowableClass alone (spec D5)", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 15, PD_CLASS_PALADIN),
+                  "a paladin has no dagger in his table", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 4, PD_CLASS_PALADIN),
+                  "a one-hand mace is the paladin weapon", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 19, PD_CLASS_PRIEST),
+                  "a wand must be rollable for a priest", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 19, PD_CLASS_WARRIOR),
+                  "and never for a warrior", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 2, PD_CLASS_HUNTER) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 2, PD_CLASS_PALADIN),
+                  "a bow is a hunter's reward and not a paladin's", 0);
+            Check(!FitsClassRaw(MAGE, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_PRIEST),
+                  "AllowableClass must exclude a class the type allows", 0);
+            Check(FitsClassRaw(MAGE, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_MAGE),
+                  "and must still let the class it names through", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 0) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 12),
+                  "a class id that is not a class must fit nothing", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 40, PD_CLASS_WARRIOR),
+                  "a weapon subclass past the table must not fit either", 0);
+            Check(FitsClassRaw(ALL, 15, 0, PD_CLASS_MAGE),
+                  "an item class with no rule is AllowableClass' business", 0);
+
+            // The index armor_pick adds to a bonus row's base item. Same
+            // table the armour fit reads, so the two cannot disagree.
+            Check(GameArmourIndexForClass(PD_CLASS_WARRIOR) == PD_ARMOUR_PLATE &&
+                  GameArmourIndexForClass(PD_CLASS_DEATH_KNIGHT) == PD_ARMOUR_PLATE &&
+                  GameArmourIndexForClass(PD_CLASS_SHAMAN) == PD_ARMOUR_MAIL &&
+                  GameArmourIndexForClass(PD_CLASS_ROGUE) == PD_ARMOUR_LEATHER &&
+                  GameArmourIndexForClass(PD_CLASS_WARLOCK) == PD_ARMOUR_CLOTH,
+                  "armor_pick adds cloth 0 / leather 1 / mail 2 / plate 3", 0);
+
+            // EXACTLY ONE of the four armour types per class, swept rather
+            // than spot-checked: a filter that accepted two would hand out
+            // the fodder D5 exists to stop, and one that accepted none would
+            // empty the candidate list and fall back to the raw pool - the
+            // same bug wearing the opposite mask.
+            bool armourOk = true;
+            int armourBadAt = 0;
+            for (uint8_t c = PD_CLASS_WARRIOR; c <= PD_CLASS_MAX; ++c)
+            {
+                uint8_t const want = static_cast<uint8_t>(
+                    GameArmourIndexForClass(c) + PD_ITEM_SUBCLASS_ARMOR_CLOTH);
+                for (uint8_t sub = PD_ITEM_SUBCLASS_ARMOR_CLOTH;
+                     sub <= PD_ITEM_SUBCLASS_ARMOR_PLATE; ++sub)
+                {
+                    if (FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, sub, c) !=
+                        (sub == want))
+                    {
+                        armourOk = false;
+                        armourBadAt = c * 10 + sub;
+                    }
+                }
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "one armour type per class broke at class*10+sub %d",
+                          armourBadAt);
+            Check(armourOk, msg, 0);
+
+            // Wands and shields are the two subclasses whose table is a short
+            // named list rather than a rule, so they are counted rather than
+            // read back: three classes each, and a typo in a mask moves the
+            // count instead of hiding in a bit.
+            int wandClasses = 0;
+            int shieldClasses = 0;
+            for (uint8_t c = PD_CLASS_WARRIOR; c <= PD_CLASS_MAX; ++c)
+            {
+                if (FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 19, c))
+                {
+                    ++wandClasses;
+                }
+                if (FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 6, c))
+                {
+                    ++shieldClasses;
+                }
+            }
+            Check(wandClasses == 3,
+                  "exactly priest, mage and warlock may be rolled a wand", 0);
+            Check(shieldClasses == 3,
+                  "exactly warrior, paladin and shaman may be rolled a shield", 0);
+        }
     }
 
     // --- boss rooms (01 §8 "1 + dlvl/10", flagged as the N deepest) ---------

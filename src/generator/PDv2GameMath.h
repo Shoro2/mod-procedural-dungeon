@@ -506,6 +506,226 @@ namespace PDungeon
         }
         return side;
     }
+
+    // --- Round E / D5: does an item fit a class? ---------------------------
+    //
+    // The pure half of the loot class filter. PDv2LootMgr::ItemFitsPlayer is
+    // the two-line wrapper that reads the ItemTemplate fields and adds the
+    // race mask; everything decidable from four integers lives here, so
+    // tests/blockplan_harness.cpp pins the whole table without a worldserver.
+    // A table this large is only safe to carry BECAUSE it is pinned.
+    //
+    // Why a table at all, when Player::CanUseItem exists: that function
+    // answers the EQUIP question (AllowableClass/Race, level, required skill
+    // and spell), and a mage may legally carry a plate helm - it simply may
+    // not wear it. D5 asks a different question, "is this a sensible reward
+    // for this looter", and the answer to that is a design decision, not a
+    // client rule. It is also why the table is deliberately generous: a
+    // spell-power ring for a rogue still passes, because stat profile is
+    // explicitly NOT filtered (spec D5) and second-guessing itemisation is
+    // how a filter starts handing out nothing at all.
+    //
+    // The four numbers are exactly item_template.AllowableClass, .class,
+    // .subclass and the looter's class id. Every id below is a 3.3.5a
+    // ItemClass.dbc / ItemSubClass.dbc value, restated as a constant rather
+    // than included from SharedDefines.h, because this header is engine-free
+    // by the rule at the top of the file.
+
+    // The two item classes this filter has an opinion about.
+    constexpr uint8_t PD_ITEM_CLASS_WEAPON = 2;
+    constexpr uint8_t PD_ITEM_CLASS_ARMOR = 4;
+
+    // Armour subclasses. 0 is misc (rings, necks, cloaks, trinkets - anyone),
+    // 1..4 are the four armour types in ascending order, 5 is the deprecated
+    // buckler, 6 is the shield, and 7..10 are the four relic slots (libram,
+    // idol, totem, sigil), which AllowableClass gates on its own.
+    constexpr uint8_t PD_ITEM_SUBCLASS_ARMOR_CLOTH = 1;
+    constexpr uint8_t PD_ITEM_SUBCLASS_ARMOR_PLATE = 4;
+    constexpr uint8_t PD_ITEM_SUBCLASS_ARMOR_SHIELD = 6;
+
+    // The playable class ids. 10 exists in the enum and in no character.
+    constexpr uint8_t PD_CLASS_WARRIOR = 1;
+    constexpr uint8_t PD_CLASS_PALADIN = 2;
+    constexpr uint8_t PD_CLASS_HUNTER = 3;
+    constexpr uint8_t PD_CLASS_ROGUE = 4;
+    constexpr uint8_t PD_CLASS_PRIEST = 5;
+    constexpr uint8_t PD_CLASS_DEATH_KNIGHT = 6;
+    constexpr uint8_t PD_CLASS_SHAMAN = 7;
+    constexpr uint8_t PD_CLASS_MAGE = 8;
+    constexpr uint8_t PD_CLASS_WARLOCK = 9;
+    constexpr uint8_t PD_CLASS_DRUID = 11;
+    constexpr uint8_t PD_CLASS_MAX = 11;
+
+    // The armour types, as the INDEX the bonus rows' armor_pick adds to their
+    // base item (cloth 0, leather 1, mail 2, plate 3 - the order the four
+    // Mystery Box entries were created in). Subclass = index + 1, which is
+    // why the two are one table and not two.
+    constexpr uint8_t PD_ARMOUR_CLOTH = 0;
+    constexpr uint8_t PD_ARMOUR_LEATHER = 1;
+    constexpr uint8_t PD_ARMOUR_MAIL = 2;
+    constexpr uint8_t PD_ARMOUR_PLATE = 3;
+
+    // One bit per weapon subclass, so a class's whole weapon table is a
+    // single mask and the ten tables below read like the design doc. The
+    // gaps are real: 9, 11, 12, 14, 17 and 20 are obsolete, exotic, misc,
+    // spear and fishing pole - nothing in the loot pools, nobody's table.
+    constexpr uint32_t PD_W_AXE1 = 1u << 0;
+    constexpr uint32_t PD_W_AXE2 = 1u << 1;
+    constexpr uint32_t PD_W_BOW = 1u << 2;
+    constexpr uint32_t PD_W_GUN = 1u << 3;
+    constexpr uint32_t PD_W_MACE1 = 1u << 4;
+    constexpr uint32_t PD_W_MACE2 = 1u << 5;
+    constexpr uint32_t PD_W_POLEARM = 1u << 6;
+    constexpr uint32_t PD_W_SWORD1 = 1u << 7;
+    constexpr uint32_t PD_W_SWORD2 = 1u << 8;
+    constexpr uint32_t PD_W_STAFF = 1u << 10;
+    constexpr uint32_t PD_W_FIST = 1u << 13;
+    constexpr uint32_t PD_W_DAGGER = 1u << 15;
+    constexpr uint32_t PD_W_THROWN = 1u << 16;
+    constexpr uint32_t PD_W_CROSSBOW = 1u << 18;
+    constexpr uint32_t PD_W_WAND = 1u << 19;
+
+    // The ten class weapon tables, transcribed from spec D5. Ranged slots are
+    // in them (a hunter's bow, a warrior's thrown) because those are real
+    // rewards; a wand is a priest/mage/warlock item and nobody else's.
+    constexpr uint32_t PD_WEAPONS_WARRIOR =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_GUN | PD_W_MACE1 |
+        PD_W_MACE2 | PD_W_POLEARM | PD_W_SWORD1 | PD_W_SWORD2 | PD_W_STAFF |
+        PD_W_FIST | PD_W_DAGGER | PD_W_THROWN | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_PALADIN =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_MACE1 | PD_W_MACE2 | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2;
+    constexpr uint32_t PD_WEAPONS_HUNTER =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_GUN | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2 | PD_W_STAFF | PD_W_FIST | PD_W_DAGGER |
+        PD_W_THROWN | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_ROGUE =
+        PD_W_AXE1 | PD_W_BOW | PD_W_GUN | PD_W_MACE1 | PD_W_SWORD1 |
+        PD_W_FIST | PD_W_DAGGER | PD_W_THROWN | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_PRIEST =
+        PD_W_MACE1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_DEATH_KNIGHT =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_MACE1 | PD_W_MACE2 | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2;
+    constexpr uint32_t PD_WEAPONS_SHAMAN =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_MACE1 | PD_W_MACE2 | PD_W_STAFF |
+        PD_W_FIST | PD_W_DAGGER;
+    constexpr uint32_t PD_WEAPONS_MAGE =
+        PD_W_SWORD1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_WARLOCK =
+        PD_W_SWORD1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_DRUID =
+        PD_W_MACE1 | PD_W_MACE2 | PD_W_POLEARM | PD_W_STAFF | PD_W_FIST |
+        PD_W_DAGGER;
+
+    // Which armour type a class is rewarded in - the highest it wears at 80,
+    // which is also the index armor_pick adds. An id outside 1..11 (and the
+    // unused 10) answers cloth rather than refusing: this feeds an item id,
+    // and a bonus row must resolve to SOMETHING even for a class that cannot
+    // exist. FitsClassRaw below rejects such an id outright, so the two
+    // together never hand a nonexistent class a piece of gear.
+    constexpr uint8_t GameArmourIndexForClass(uint8_t classId)
+    {
+        constexpr uint8_t BY_CLASS[PD_CLASS_MAX + 1] =
+        {
+            PD_ARMOUR_CLOTH,        //  0 no class
+            PD_ARMOUR_PLATE,        //  1 warrior
+            PD_ARMOUR_PLATE,        //  2 paladin
+            PD_ARMOUR_MAIL,         //  3 hunter
+            PD_ARMOUR_LEATHER,      //  4 rogue
+            PD_ARMOUR_CLOTH,        //  5 priest
+            PD_ARMOUR_PLATE,        //  6 death knight
+            PD_ARMOUR_MAIL,         //  7 shaman
+            PD_ARMOUR_CLOTH,        //  8 mage
+            PD_ARMOUR_CLOTH,        //  9 warlock
+            PD_ARMOUR_CLOTH,        // 10 unused in 3.3.5a
+            PD_ARMOUR_LEATHER       // 11 druid
+        };
+        return classId <= PD_CLASS_MAX ? BY_CLASS[classId] : PD_ARMOUR_CLOTH;
+    }
+
+    // The class's weapon table. 0 for an id that is not a class, which makes
+    // every weapon fail for it rather than every weapon pass.
+    constexpr uint32_t GameWeaponMaskForClass(uint8_t classId)
+    {
+        constexpr uint32_t BY_CLASS[PD_CLASS_MAX + 1] =
+        {
+            0,                          //  0 no class
+            PD_WEAPONS_WARRIOR,         //  1
+            PD_WEAPONS_PALADIN,         //  2
+            PD_WEAPONS_HUNTER,          //  3
+            PD_WEAPONS_ROGUE,           //  4
+            PD_WEAPONS_PRIEST,          //  5
+            PD_WEAPONS_DEATH_KNIGHT,    //  6
+            PD_WEAPONS_SHAMAN,          //  7
+            PD_WEAPONS_MAGE,            //  8
+            PD_WEAPONS_WARLOCK,         //  9
+            0,                          // 10 unused in 3.3.5a
+            PD_WEAPONS_DRUID            // 11
+        };
+        return classId <= PD_CLASS_MAX ? BY_CLASS[classId] : 0u;
+    }
+
+    // The D5 fit itself. Order matters: AllowableClass first, because it is
+    // the item's own statement about who may have it and it overrules
+    // nothing below - a plate item flagged mage-only is still plate.
+    constexpr bool FitsClassRaw(uint32_t allowableClass, uint8_t itemClass,
+                                uint8_t subclass, uint8_t classId)
+    {
+        if (classId < PD_CLASS_WARRIOR || classId > PD_CLASS_MAX)
+        {
+            return false;
+        }
+
+        // -1 in the column arrives here as 0xFFFFFFFF and passes every class
+        // by itself, so the "all classes" convention needs no special case -
+        // which is exactly how the core tests it (Player.cpp:10746,
+        // `AllowableClass & getClassMask()`, and getClassMask() is
+        // 1 << (class - 1)).
+        if ((allowableClass & (1u << (classId - 1))) == 0)
+        {
+            return false;
+        }
+
+        if (itemClass == PD_ITEM_CLASS_ARMOR)
+        {
+            if (subclass >= PD_ITEM_SUBCLASS_ARMOR_CLOTH &&
+                subclass <= PD_ITEM_SUBCLASS_ARMOR_PLATE)
+            {
+                // The ONE type, not "up to": a level-80 druid is rewarded in
+                // leather, and cloth for a druid is the disenchant fodder
+                // this filter exists to stop.
+                return subclass == GameArmourIndexForClass(classId) +
+                                       PD_ITEM_SUBCLASS_ARMOR_CLOTH;
+            }
+            if (subclass == PD_ITEM_SUBCLASS_ARMOR_SHIELD)
+            {
+                return classId == PD_CLASS_WARRIOR ||
+                       classId == PD_CLASS_PALADIN ||
+                       classId == PD_CLASS_SHAMAN;
+            }
+            // Misc (0), the deprecated buckler (5) and the four relic slots
+            // (7..10): AllowableClass above is the whole gate, which is what
+            // "relics via AllowableClass" means in spec D5.
+            return true;
+        }
+
+        if (itemClass == PD_ITEM_CLASS_WEAPON)
+        {
+            // A subclass the mask cannot hold is one 3.3.5a does not have.
+            // Refusing it also keeps the shift below defined, which is the
+            // real reason the guard is here and not an assumption.
+            if (subclass >= 32)
+            {
+                return false;
+            }
+            return (GameWeaponMaskForClass(classId) & (1u << subclass)) != 0;
+        }
+
+        // Everything else a pool can hold - a container, a consumable, a
+        // recipe - is gated by AllowableClass alone.
+        return true;
+    }
 }
 
 #endif

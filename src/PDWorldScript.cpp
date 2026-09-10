@@ -21,6 +21,7 @@
 #include "PDDefines.h"
 #include "PDMgr.h"
 #include "PDPaletteMgr.h"
+#include "PDv2LootMgr.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
 #include "Player.h"
@@ -70,6 +71,14 @@ public:
             // read-only after this point, which is what lets map threads draw
             // spawns from them without a lock.
             sPDv2PackMgr->LoadFromDB(sPDv2Mgr->GetConfig().theme);
+
+            // Round E / L1, and the same startup-only rule once more: the
+            // loot pools are read-only after this point, which is what lets
+            // a map thread roll a kill's or a cache's loot from them without
+            // a lock. AFTER the packs on purpose - both tables are loaded
+            // from this one hook, and the order of the boot lines is the
+            // order an operator reads them in.
+            sPDv2LootMgr->Load();
 
             // Rescue sweep: a character SAVED inside the composed-only map
             // crashes its client at the character screen (the client loads
