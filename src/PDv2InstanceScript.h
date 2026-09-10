@@ -28,6 +28,7 @@
 #include "generator/PDv2WalkGrid.h"
 
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -83,6 +84,19 @@ namespace PDungeon
         // run counter and no barrier - risk on the road, not progress.
         bool   countsForRun = true;
 
+        // Round E / D7. This creature was never in the LAYOUT: a WP5 event
+        // wave, or a WP6 respawn copy of a pack the player already cleared.
+        // Separate from `countsForRun`, which answers a different question - a
+        // patrol IS in the layout and moves no counter, an event mob is not in
+        // the layout at all - so the two are set independently.
+        //
+        // What it changes is the kill funnel, and only half of it: materials
+        // drop from an extra mob ALWAYS, because mats are a crafting input and
+        // farming one in place is the point of it, while currency needs
+        // V2.Loot.ExtraMobs.DropCurrency, because currency is progression and a
+        // mob that comes back for ever would make it a faucet.
+        bool   isExtra = false;
+
         // B4: this creature walks a beat out of combat. Since Round D / D2 the
         // beat is ONE CORRIDOR - both of its ends are doorway lane cells of
         // that corridor run, in GLOBAL grid cells, and the patrol never enters
@@ -116,10 +130,10 @@ namespace PDungeon
 
     // What a player is doing right now, in the form the UI wants to read it.
     //
-    // difficulty and lootMultX100 are FROZEN into this at spawn time and every
-    // gameplay hook reads them from here, never from the live account row: a
-    // settings change in the middle of a run must not retune the mobs already
-    // standing in the dungeon.
+    // difficulty, lootMultX100, roomFactorX100 and dlvl are FROZEN into this at
+    // spawn time and every gameplay hook reads them from here, never from the
+    // live account row: a settings change in the middle of a run must not
+    // retune the mobs already standing in the dungeon.
     struct PDv2RunState
     {
         uint32 startedMs = 0;
@@ -136,6 +150,22 @@ namespace PDungeon
         // first SummonCreature, so no creature can ever be built from it.
         uint8  difficulty = 0;
         uint16 lootMultX100 = 100;
+        // Round E / D8, x100 like every other multiplier in this module. The
+        // run's ORDINARY room count against V2.Loot.Currency.RoomsBaseline, as
+        // GameRoomFactorX100 works it out, frozen at spawn beside the loot
+        // multiplier and for the same reason: every currency roll of every
+        // kill is scaled by it, so a `.pdungeon v2 set` between two pulls must
+        // not move the price of the second one.
+        //
+        // 100 - "full price" - is the no-run-bound-yet value rather than 0,
+        // because a run whose spawn never happened should pay the ordinary
+        // rate and not silently pay nothing.
+        uint16 roomFactorX100 = 100;
+        // Round E / L3. The ACCOUNT's dungeon level at spawn, which is the top
+        // of the per-mob material band (GameMatsMaxCount). Frozen like the
+        // dial: a dlvl gained by finishing THIS run must not retune the mobs
+        // that are still standing in it.
+        uint8  dlvl = 0;
         bool   complete = false;
         bool   started = false;
     };
@@ -565,6 +595,51 @@ namespace PDungeon
         void VetoFinaleSpot(float& x, float& y, char const* what) const;
 
         void RollBonusLoot(Unit* killer);
+
+        // Round E / L2-L4, the kill funnel. Three sources with three different
+        // shapes, and the shape is the design (D6): currency and materials are
+        // PERSONAL - every player on the map rolls their own dice, so a group
+        // of five is five independent chances and nothing to argue over - while
+        // gear goes into the CORPSE, where the group's own loot rules already
+        // decide who gets it.
+        //
+        // None of them touches PDRandom. The determinism boundary
+        // (RollBonusLoot's comment in the .cpp states it in full) puts layout
+        // and spawn selection on the seeded stream and every loot roll on the
+        // core's urand, because a seed that also decided the drops would turn
+        // farming into a lookup table.
+        //
+        // `tag` is the dead creature's own facts. Neither roll reads it today -
+        // the isExtra gate is applied at the call site, where the whole funnel
+        // is visible in one place - but a per-mob rule (a rarer mob paying
+        // more) has nowhere else to come from, so it is carried rather than
+        // added back later at three call sites.
+        void RollCurrency(Creature* creature, PDv2MobData const& tag);
+        void RollMaterials(Creature* creature, PDv2MobData const& tag);
+
+        // The run boss's gear, added to the corpse loot the core has ALREADY
+        // filled: Unit::Kill generates it (Unit.cpp:14082-14092) and sets the
+        // lootable flag (:14226) well before it calls JustDied (:14238-14241),
+        // which is what reaches this. So the items land in the normal loot
+        // window, under the normal rules, and no second window is invented.
+        // `killer` only picks the class filter's looter; who may loot is the
+        // core's business, not ours.
+        void InjectBossGear(Creature* creature, Unit* killer);
+
+        // One stack into a bag, and a letter from Chromie when there is no room
+        // for it. Player::AddItem already prints the client's "You receive
+        // item" line, so a grant that lands says nothing extra; only the mail
+        // announces itself, because a drop that silently went to the mailbox
+        // reads as a drop that never happened.
+        void GrantItem(Player* player, uint32 item, uint32 count) const;
+
+        // Every player on `map` that still has a session, which is who a
+        // personal roll is made for. Static and taking the map explicitly:
+        // it is a plain walk of GetPlayers() and the callers name the map they
+        // mean (the dead creature's), rather than reaching for `instance`.
+        static void ForEachRunPlayer(Map* map,
+                                     std::function<void(Player*)> const& fn);
+
         void DespawnAll();
         void EnsureWalkGrid(BlockPlan const& plan);
         void CatchFallers();

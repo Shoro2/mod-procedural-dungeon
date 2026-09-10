@@ -22,14 +22,17 @@
 #include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "InstanceScript.h"
+#include "Item.h"
 #include "Log.h"
 #include "LootMgr.h"
+#include "Mail.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "PDDefines.h"
 #include "PDv2Affixes.h"
 #include "PDv2CreatureAI.h"
+#include "PDv2LootMgr.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
 #include "PDv2UILink.h"
@@ -43,8 +46,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <set>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -192,6 +197,29 @@ namespace PDungeon
             { 920103,  4 },     // Forgotten Core
             { 920104,  1 }      // Forgotten Relic
         };
+
+        // Round E / L2. How many of the five conf currency tiers a KILL may
+        // pay: T1..T3, indices 0..2. T4 and T5 share the same arrays because
+        // the roll is one formula, but they belong to Chromie's cache (Task 7)
+        // and are deliberately out of reach here - a trash mob paying the
+        // run's closing tier would leave the finale with nothing to give.
+        int const LOOT_CURRENCY_MOB_TIERS = 3;
+
+        // The gear pool a run boss pays from, at every dlvl. Named here rather
+        // than in PDv2LootMgr.h because the pools are DATA (the header says
+        // so): the engine knows only which name each source asks for, and
+        // pointing the boss at another pool is one string, not a redesign.
+        // Chests and the final cache switch pool with dlvl (V2.Loot.IccDlvl);
+        // the boss does not, because RAID_HC is already the top of the ladder
+        // a five-man boss is worth.
+        std::string_view const LOOT_POOL_BOSS = "RAID_HC";
+
+        // The sender and the subject of the bags-are-full letter. Chromie is
+        // the module's own NPC and the one the player already met at the
+        // entrance, so a letter from her is the dungeon writing rather than an
+        // unattributed system mail.
+        char const* const LOOT_MAIL_SUBJECT = "The Forgotten Depths";
+        char const* const LOOT_MAIL_BODY = "Your bags were full.";
 
         // Round C / C8, the finale's clock. Four seconds is long enough to
         // read a line of chat and short enough that nobody walks off before
@@ -644,6 +672,234 @@ namespace PDungeon
             "Bonus: {}", proto ? proto->Name1 : std::string("?"));
     }
 
+    void PDv2InstanceScript::ForEachRunPlayer(Map* map,
+                                              std::function<void(Player*)> const& fn)
+    {
+        if (!map)
+        {
+            return;
+        }
+
+        // The same walk, and the same null-session skip, FinishRun makes: a
+        // player whose session has gone is on the list for a few more ticks
+        // and can be handed nothing - AddItem would work and the mail would
+        // not, and neither would ever be seen.
+        Map::PlayerList const& players = map->GetPlayers();
+        for (Map::PlayerList::const_iterator it = players.begin();
+             it != players.end(); ++it)
+        {
+            Player* player = it->GetSource();
+            if (!player || !player->GetSession())
+            {
+                continue;
+            }
+            fn(player);
+        }
+    }
+
+    void PDv2InstanceScript::GrantItem(Player* player, uint32 item, uint32 count) const
+    {
+        if (!player || !item || !count)
+        {
+            return;
+        }
+
+        // LOAD-BEARING, and not a defensive formality: Item::CreateItem below
+        // calls ABORT() when the template is unknown (Item.cpp:1120), so an
+        // item id that only exists in the conf - a typo in
+        // V2.Loot.Currency.Tier2.Item, a pool regenerated against a world DB
+        // this realm does not have - would take the worldserver down the first
+        // time somebody's bags were full. Player::AddItem answers that case
+        // with a plain false, which is why the crash is only reachable through
+        // the fallback and only through this one lookup.
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item);
+        if (!proto)
+        {
+            return;
+        }
+
+        // AddItem already sends the client's own "You receive item" line, so a
+        // grant that lands needs nothing said about it.
+        if (player->AddItem(item, count))
+        {
+            return;
+        }
+
+        // Bags full. The drop is NOT dropped: it goes to the mailbox, the way
+        // fl-underground-dungeon has always handled the same moment
+        // (UndergroundUtils.h:127), from the NPC the player already knows.
+        MailDraft draft(LOOT_MAIL_SUBJECT, LOOT_MAIL_BODY);
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        if (Item* mailItem = Item::CreateItem(item, count, player))
+        {
+            // Saved INSIDE the transaction that sends the mail, which is what
+            // every core caller does (cs_send.cpp:129): the item row has to
+            // exist before the mail row points at it, or a crash between the
+            // two leaves a letter holding an item that was never written.
+            mailItem->SaveToDB(trans);
+            draft.AddItem(mailItem);
+        }
+        draft.SendMailTo(trans, MailReceiver(player),
+                         MailSender(MAIL_CREATURE, NPC_CHROMIE));
+        CharacterDatabase.CommitTransaction(trans);
+
+        // The one line the funnel says out loud. Guarded rather than assumed:
+        // every caller today comes through ForEachRunPlayer, which has already
+        // skipped a sessionless player, but the mail above works without a
+        // session and this does not.
+        if (WorldSession* session = player->GetSession())
+        {
+            ChatHandler(session).PSendSysMessage(
+                "Your bags are full - {} was mailed to you.", proto->Name1);
+        }
+    }
+
+    void PDv2InstanceScript::RollCurrency(Creature* creature,
+                                          PDv2MobData const& /*tag*/)
+    {
+        if (!creature)
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        for (int tier = 0; tier < LOOT_CURRENCY_MOB_TIERS; ++tier)
+        {
+            uint32 const item = cfg.lootCurrencyItem[tier];
+            if (!item)
+            {
+                // 0 is how an operator turns one tier off, and the conf is
+                // read live, so it is a per-kill question and not a load-time
+                // one.
+                continue;
+            }
+
+            // The conf's own difficulty gate. The three mob tiers ship at 1,
+            // the bottom of the dial, which is the same as ungated - but the
+            // key is documented as "the run difficulty a tier needs before it
+            // drops at all", and an operator who raises T3's would otherwise
+            // find that it did nothing. The dial is the run's FROZEN one, like
+            // every other gameplay read in this file.
+            if (cfg.lootCurrencyMinDiff[tier] > static_cast<int>(_run.difficulty))
+            {
+                continue;
+            }
+
+            int const chanceBp = GameChanceBp(cfg.lootCurrencyChancePct[tier],
+                                              static_cast<int>(_run.roomFactorX100));
+            if (chanceBp <= 0)
+            {
+                continue;
+            }
+
+            // PERSONAL, per player and per tier (D6). Five people in a dungeon
+            // are five independent rolls of the same chance, not one drop for
+            // five people to argue about - and the roll is urand, never
+            // PDRandom, for the reason RollBonusLoot spells out above.
+            ForEachRunPlayer(creature->GetMap(),
+                             [this, item, chanceBp](Player* player)
+            {
+                if (static_cast<int>(urand(1, PD_GAME_CHANCE_BP_MAX)) <= chanceBp)
+                {
+                    GrantItem(player, item, 1);
+                }
+            });
+        }
+    }
+
+    void PDv2InstanceScript::RollMaterials(Creature* creature,
+                                           PDv2MobData const& /*tag*/)
+    {
+        if (!creature)
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        // The band's TOP, not the count: the run's frozen dlvl decides how
+        // large a stack this dungeon can pay, and the stack itself is rolled
+        // inside it per player. One computation for the whole kill, because
+        // nothing in it is per player.
+        int const maxCount = GameMatsMaxCount(static_cast<int>(_run.dlvl),
+                                              cfg.dlvlCap,
+                                              cfg.lootMatsMaxPerMobAtCap);
+
+        // Same funnel and the same recipients as the currency above, and the
+        // chance roll is INSIDE the walk on purpose: D6 makes materials a
+        // personal roll, so each player either gets their own stack or does
+        // not. Rolling once for the kill would have made it one shared drop
+        // wearing a per-player payout, which is invisible at the shipped 100 %
+        // and wrong at every other value.
+        ForEachRunPlayer(creature->GetMap(),
+                         [this, &cfg, maxCount](Player* player)
+        {
+            if (static_cast<int>(urand(1, 100)) > cfg.lootMatsChancePct)
+            {
+                return;
+            }
+
+            // ONE item id per player per kill, with the count as its stack: a
+            // player who is owed four materials is owed four of SOMETHING, and
+            // four separate draws would fill a bag with singles instead.
+            uint32 const item = sPDv2LootMgr->RollMaterial();
+            if (!item)
+            {
+                return;
+            }
+            GrantItem(player, item, urand(1, static_cast<uint32>(maxCount)));
+        });
+    }
+
+    void PDv2InstanceScript::InjectBossGear(Creature* creature, Unit* killer)
+    {
+        if (!creature)
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        // D9: the whole part of Items x lootMult always drops, the fraction is
+        // the percent chance of one more. The engine rolls the dice the
+        // engine-free formula deliberately does not (PDv2GameMath.h says why).
+        int const count = GameScaledCount(cfg.lootBossItems,
+                                          static_cast<int>(_run.lootMultX100),
+                                          static_cast<int>(urand(1, 100)));
+        if (count <= 0)
+        {
+            return;
+        }
+
+        // The class filter's looter, and nothing more: a pet or a totem landed
+        // the blow as often as its owner did, so the credit follows the same
+        // walk RollBonusLoot takes. Who may actually take the item out of the
+        // corpse is the group's loot rules, which we do not touch - and a
+        // killer we cannot resolve to a player simply rolls unfiltered.
+        Player* looter = killer ? killer->GetCharmerOrOwnerPlayerOrPlayerItself()
+                                : nullptr;
+
+        for (int i = 0; i < count; ++i)
+        {
+            uint32 const item = sPDv2LootMgr->RollGear(LOOT_POOL_BOSS, looter);
+            if (!item)
+            {
+                // An empty or unloaded pool. Nothing to add, and nothing to
+                // say either - PDv2LootMgr::Describe is where an operator sees
+                // that a pool is at 0 rows.
+                continue;
+            }
+
+            // chance 100, no quest flag, group 0, exactly one: a row that is
+            // certain by construction, because the roll already happened above
+            // and the loot table is only being used to carry the result into
+            // the window the player is about to open.
+            creature->loot.AddItem(
+                LootStoreItem(item, 0, 100.0f, false, LOOT_MODE_DEFAULT, 0, 1, 1));
+        }
+    }
+
     void PDv2InstanceScript::OnMobDied(Creature* creature, Unit* killer)
     {
         if (!creature)
@@ -747,8 +1003,38 @@ namespace PDungeon
         else
         {
             RollBonusLoot(killer);
+
+            // Round E / L2-L4, the kill funnel. Everything a dead dungeon mob
+            // is worth beyond its own table, in the one place a reader can see
+            // all of it: currency and materials into the bags of every player
+            // on the map, gear into the corpse when the mob was the room's
+            // boss. Split children are excluded by the branch above, which is
+            // the same reason they pay no native loot either.
+            PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+            // D7. An extra mob - a WP5 event wave, a WP6 respawn copy - pays
+            // currency only when the operator says so, because it can be
+            // farmed in place and currency is progression. Materials it always
+            // pays, which is why only this half is gated.
+            if (!tag->isExtra || cfg.lootExtraMobsDropCurrency)
+            {
+                RollCurrency(creature, *tag);
+            }
+            RollMaterials(creature, *tag);
+
+            // isRunBoss, NOT the creature's entry: the boss slot of a room is
+            // whatever PDv2PackMgr put in it, trash stand-in included, and the
+            // tag is the only thing that knows the room is done with it. The
+            // same flag the completion counter above reads.
+            if (tag->isRunBoss)
+            {
+                InjectBossGear(creature, killer);
+            }
         }
 
+        // AFTER the injection, and that order is the point: FinishRun stages
+        // the finale, and the corpse the player is about to loot has to be
+        // complete before Chromie starts talking over it.
         if (!_run.complete && _run.bossTotal > 0 && _run.bossKilled >= _run.bossTotal)
         {
             FinishRun();
@@ -1532,6 +1818,13 @@ namespace PDungeon
         _run.difficulty = static_cast<uint8>(GameClampDiff(account.cfgDifficulty));
         _run.lootMultX100 = static_cast<uint16>(
             GameLootMultX100(account.cfgDifficulty, account.cfgCasterPct));
+        // Round E / L3. The material band's ceiling is the ACCOUNT's dungeon
+        // level, and it is frozen here with the rest of them: finishing this
+        // run grants dxp and can level the account on the way out, and a mob
+        // killed before that must not pay a different band than the one killed
+        // after it. Clamped into the byte the run state carries - dlvl is a
+        // uint32 on the account row and 255 is far past any cap a conf can set.
+        _run.dlvl = static_cast<uint8>(std::clamp(dlvl, 0, 255));
 
         // Rooms only, in plan order. A corridor is 8.3 yd wide, so anything
         // standing in one would be shoulder to shoulder with the walls; the
@@ -1668,6 +1961,30 @@ namespace PDungeon
 
         _roomAlive.assign(roomBlocks.size(), 0);
         _run.roomsTotal = static_cast<uint8>(roomBlocks.size());
+
+        // Round E / D8. The room factor, frozen beside the loot multiplier and
+        // for the same reason - every currency roll of every kill is scaled by
+        // it, and the dial must not move under a run that is being walked.
+        //
+        // ORDINARY rooms, counted here from _roomIsBoss rather than read off
+        // _run.roomsTotal. The two are not the same number today: roomsTotal
+        // is every room the dungeon built, boss halls included, while the
+        // factor asks how much TRASH the run is worth walking - and D8's whole
+        // point is that a one-room run must not pay what a ten-room run pays.
+        // WP3 makes roomsTotal mean exactly the ordinary count; counting it
+        // explicitly is what keeps this task independent of that one, and it
+        // stays correct either way.
+        // The factor is stored UNSIGNED, so the one thing that has to happen
+        // on the way in is the floor GameRoomFactorX100 deliberately does not
+        // apply (its header says why): a negative RoomsBonusPctPerRoom is not
+        // a legal conf value, but a negative product cast into a uint16 would
+        // come out enormous and GameChanceBp would then clamp every tier to a
+        // certainty - a typo that pays MORE is the wrong way to fail.
+        int const ordinaryRooms = static_cast<int>(
+            std::count(_roomIsBoss.begin(), _roomIsBoss.end(), false));
+        _run.roomFactorX100 = static_cast<uint16>(
+            std::max(0, GameRoomFactorX100(ordinaryRooms, cfg.lootRoomsBaseline,
+                                           cfg.lootRoomsBonusPctPerRoom)));
 
         // The affix set for THIS run's difficulty, resolved once: it is the
         // same list for every affixed mob in the dungeon (that is how
