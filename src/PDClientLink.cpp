@@ -187,7 +187,13 @@ namespace PDungeon
             return;
         }
 
-        LOG_DEBUG(PD_LOG, "PDv2 link: account {} sent an unknown verb ('{}')", accountId, body);
+        // A verb the link does not know still arrives once per client
+        // chat message, so it is a per-client-verb line like the ack
+        // above and takes V2.Debug with them (Round E / R3).
+        if (PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2 link: account {} sent an unknown verb ('{}')", accountId, body);
+        }
     }
 
     bool PDClientLink::PushManifest(Player* player, std::string& error)
