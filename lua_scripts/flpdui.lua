@@ -13,6 +13,8 @@
 --   server whisper  FLPDU\t<kind> <fields...>
 --                   C panel state | M block map | K cleared blocks |
 --                   R run tick | E completion | N one-line notice
+--                   M block letters  E entrance | B boss room | R room |
+--                                    V event room | c corridor
 --   client whisper  FLPD\tUI <verb> [args]
 --                   HELLO | SET <key> <int> | GEN | ENTER | HUD <0|1>
 --
@@ -183,12 +185,27 @@ local function ParseRun(body)
         segPlanned, segKilled, segPct = g[1], g[2], g[3]
     end
 
+    -- The event fields (eventSec eventPct for the event room being defended)
+    -- are the SECOND optional group and sit behind the gate one, because the
+    -- server only ever appends: a worldserver from before Round E sends
+    -- thirteen fields, one from before C7 sends ten, and both mean "no event"
+    -- here. Read off `g.tail` and only when the gate group was there at all,
+    -- since this pair can never arrive without it. Two zeros are not a guess
+    -- about the dungeon: the server sends exactly them while nothing is
+    -- running, and the HUD prints no event line for them either way.
+    local eventSec, eventPct = 0, 0
+    local h = g and SplitHead(g.tail, 2)
+    if h and ToNumbers(h, 2) then
+        eventSec, eventPct = h[1], h[2]
+    end
+
     return {
         elapsed = f[1], killed = f[2], total = f[3],
         bossKilled = f[4], bossTotal = f[5],
         roomsCleared = f[6], roomsTotal = f[7],
         px = f[8], py = f[9], state = f[10],
         segPlanned = segPlanned, segKilled = segKilled, segPct = segPct,
+        eventSec = eventSec, eventPct = eventPct,
     }
 end
 
@@ -532,7 +549,10 @@ local CANVAS = 160
 
 local Hud = CreateFrame("Frame", "FLPDHud", UIParent)
 Hud:SetWidth(HUD_W)
-Hud:SetHeight(256)             -- +16 for the gate line (2026-09-08, C7)
+-- +16 for the gate line (2026-09-08, C7), +14 for the event line
+-- (2026-09-10, Round E): the event line keeps its row whether or not an
+-- event is running, so the map below never jumps as one starts or ends.
+Hud:SetHeight(270)
 Hud:SetPoint("TOP", UIParent, "TOP", 0, -35)
 Hud:SetMovable(true)
 Hud:EnableMouse(true)
@@ -568,8 +588,23 @@ local hudGate = Hud:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 hudGate:SetPoint("TOP", hudCounts, "BOTTOM", 0, -2)
 hudGate:SetText("...")
 
+-- The running event's countdown and the host's remaining health, straight off
+-- the run tick. The SECONDS and the PERCENT are the server's - this line only
+-- formats them, so it can no more disagree with the defence than the timer can
+-- with the run.
+--
+-- Its row is RESERVED rather than reclaimed: the string is emptied when no
+-- event is running and the height is fixed, so hudSep and the map below hold
+-- still. That is the simpler of the two shapes - hiding the line would mean
+-- re-anchoring hudSep to hudGate and back on every transition, and a map that
+-- jumps 14 pixels the moment a timed defence starts is worse than a blank row.
+local hudEvent = Hud:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+hudEvent:SetPoint("TOP", hudGate, "BOTTOM", 0, -2)
+hudEvent:SetHeight(14)
+hudEvent:SetText("")
+
 local hudSep = Hud:CreateTexture(nil, "ARTWORK")
-hudSep:SetPoint("TOP", hudGate, "BOTTOM", 0, -5)
+hudSep:SetPoint("TOP", hudEvent, "BOTTOM", 0, -5)
 hudSep:SetWidth(HUD_W - 20)
 hudSep:SetHeight(1)
 hudSep:SetTexture(0.4, 0.4, 0.6, 0.5)
@@ -585,14 +620,20 @@ local ROLE_COLOUR = {
     E = { 0.20, 0.70, 0.30 },   -- entrance: green
     B = { 0.62, 0.16, 0.16 },   -- boss room: dark red
     c = { 0.30, 0.30, 0.30 },   -- corridor: grey
+    V = { 0.55, 0.25, 0.75 },   -- event room: violet
 }
 
 -- The same blocks once the K payload says every mob in them is dead. Only the
 -- two roles that hold mobs have a cleared colour; the entrance is green
 -- already and a corridor has no room counter behind it.
+--
+-- An event room keeps its own colour: it holds no run mobs, so it never turns
+-- up in a K payload and has nothing to go green for. The entry is spelled out
+-- anyway rather than left to the fallback, so the map says what it means.
 local CLEARED_COLOUR = {
     R = { 0.20, 0.75, 0.30 },   -- cleared room: green
     B = { 0.10, 0.50, 0.20 },   -- cleared boss room: darker green
+    V = { 0.55, 0.25, 0.75 },   -- event room: violet, cleared or not
 }
 
 -- This HUD's draw target, shaped like the panel's preview one: the frame to
@@ -735,6 +776,20 @@ local function RenderCounts(r, flashOn)
             "Gate |cffffffff%d/%d|r  (%d%%)", r.segKilled, r.segPlanned, r.segPct))
     else
         hudGate:SetText("Gate |cff00ff00open|r")
+    end
+
+    -- eventSec 0 is the server's "no event is running" - nothing started, one
+    -- just ended, or this worldserver does not send the pair yet. All three
+    -- read the same from where the player stands: there is no defence to time,
+    -- so the row goes blank rather than print a clock for a fight that is not
+    -- happening. The minutes and seconds are split out of the server's own
+    -- second count; nothing here decides how long is left.
+    if r.eventSec > 0 then
+        hudEvent:SetText(string.format(
+            "Hold the line |cffffffff%d:%02d|r  |cffff8800%d%%|r",
+            math.floor(r.eventSec / 60), r.eventSec % 60, r.eventPct))
+    else
+        hudEvent:SetText("")
     end
 end
 

@@ -201,9 +201,21 @@ namespace PDungeon
         }
 
         // One letter per block, because the client only ever colours by it.
-        char RoleChar(BlockRole role)
+        //
+        // Round E / WP5: `V` is an EVENT room and is asked BEFORE the role,
+        // because an event pocket's role is plain `Room` - it is a pocket in
+        // every geometric respect (PDBlockPlan.h). Reading the role alone
+        // would paint it exactly like the trash pocket next to it, and the
+        // one thing the map owes the player about that room is that it is
+        // not one. The letter travels; the colour stays the client's.
+        char RoleChar(PlacedBlock const& block)
         {
-            switch (role)
+            if (block.isEvent)
+            {
+                return 'V';
+            }
+
+            switch (block.role)
             {
                 case BlockRole::RoomEntrance: return 'E';
                 case BlockRole::RoomBoss:     return 'B';
@@ -520,7 +532,7 @@ namespace PDungeon
             // connections that did not exist - adjacency on the map is not
             // adjacency in the dungeon, only a shared open socket is (operator
             // report, first in-game test 2026-08-07).
-            out << (b.bx - minBX) << ',' << (b.by - minBY) << ',' << RoleChar(b.role)
+            out << (b.bx - minBX) << ',' << (b.by - minBY) << ',' << RoleChar(b)
                 << ',' << b.socketMask << ';';
         }
 
@@ -658,10 +670,28 @@ namespace PDungeon
         // without one). NextClosedBarrier zeroes all three when nothing is
         // sealed, and three zeros is exactly the wire's "no gate", so its
         // answer carries no information this payload needs.
+        //
+        // This is the tail-append RULE, not a one-off: every later field set
+        // goes on the END of the payload in its own group, and the addon
+        // reads the groups it knows and drops the rest (ParseRun in
+        // flpdui.lua). Round E / WP5 adds the second group below.
         uint32 segPlanned = 0;
         uint32 segKilled = 0;
         uint32 segPct = 0;
         script->NextClosedBarrier(segPlanned, segKilled, segPct);
+
+        // Round E / WP5: the running event's clock and its host's health, the
+        // second appended group. Zeroes mean "no event is running" - which is
+        // also what an addon that predates this group reads, because it never
+        // looks past segPct.
+        //
+        // The bool is dropped on purpose: EventHudFields leaves BOTH outputs
+        // untouched when it answers false (PDv2InstanceScript.h), so the
+        // zeros above are already the right answer and there is no second way
+        // to spell "no event" on this wire.
+        uint32 eventSecLeft = 0;
+        uint32 eventNpcPct = 0;
+        script->EventHudFields(eventSecLeft, eventNpcPct);
 
         std::ostringstream out;
         out << "R " << run.elapsedSec
@@ -676,7 +706,9 @@ namespace PDungeon
             << ' ' << state
             << ' ' << segPlanned
             << ' ' << segKilled
-            << ' ' << segPct;
+            << ' ' << segPct
+            << ' ' << eventSecLeft
+            << ' ' << eventNpcPct;
 
         SendAddonWhisper(player, PREFIX_UI_DOWN, out.str());
     }
