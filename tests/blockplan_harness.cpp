@@ -2455,6 +2455,58 @@ namespace
                   "lootMult must clamp its difficulty, not extrapolate it", 0);
         }
 
+        // Round E / D8 room factor - the whole reason a one-room run is not the
+        // most profitable run there is. Below the baseline, just below it, ON
+        // it, above it, and the run that is no run at all.
+        Check(GameRoomFactorX100(1, 10, 1) == 10,
+              "a one-room run must pay a tenth of a ten-room run", 0);
+        Check(GameRoomFactorX100(9, 10, 1) == 90,
+              "nine rooms must pay nine tenths - a share, not a step", 0);
+        Check(GameRoomFactorX100(10, 10, 1) == 100,
+              "the baseline run must pay exactly 1.00", 0);
+        Check(GameRoomFactorX100(15, 10, 1) == 105,
+              "five rooms past the baseline must add 5 %, not 50 %", 0);
+        Check(GameRoomFactorX100(0, 10, 1) == 0,
+              "a run with no rooms must pay nothing", 0);
+
+        // Round E / D9 gear counts: the integer part is certain, the fraction
+        // is a percent chance of one more item, and the roll is a parameter -
+        // which is the only reason this can be pinned at all.
+        Check(GameScaledCount(1, 100, 50) == 1,
+              "one item at lootMult 1.00 is one item, whatever the roll", 0);
+        Check(GameScaledCount(1, 300, 1) == 3,
+              "one item at lootMult 3.00 is three, no fraction left", 0);
+        Check(GameScaledCount(1, 250, 50) == 3,
+              "a roll ON the fraction percent must win the extra item", 0);
+        Check(GameScaledCount(1, 250, 51) == 2,
+              "a roll one past the fraction percent must not", 0);
+        Check(GameScaledCount(2, 360, 100) == 7,
+              "7.20 items must not round up on the highest roll there is", 0);
+        Check(GameScaledCount(1, 250, 0) == 2,
+              "roll 0 is a caller asking for the floor and no gamble", 0);
+
+        // Round E / L3 material ceiling: 1 at dlvl 0, the configured maximum at
+        // the cap, and clamped past it - dlvl is not capped on the way in.
+        Check(GameMatsMaxCount(0, 30, 5) == 1,
+              "a fresh account must still be able to get one material", 0);
+        Check(GameMatsMaxCount(8, 30, 5) == 2,
+              "the mats ceiling must climb with dlvl, integer-floored", 0);
+        Check(GameMatsMaxCount(30, 30, 5) == 5,
+              "the dlvl cap must reach the configured maximum exactly", 0);
+        Check(GameMatsMaxCount(31, 30, 5) == 5,
+              "a dlvl past the cap must not out-earn the cap", 0);
+
+        // Round E / L2 drop chance in basis points: a conf percent times the
+        // room factor, and never past a certainty.
+        Check(GameChanceBp(100, 100) == 10000,
+              "a 100 % chance at the baseline must be exactly certain", 0);
+        Check(GameChanceBp(5, 10) == 50,
+              "a 5 % chance on a one-room run must be 0.50 %", 0);
+        Check(GameChanceBp(1, 105) == 105,
+              "the room factor's decimals must survive a 1 % chance", 0);
+        Check(GameChanceBp(100, 150) == 10000,
+              "no room factor may push a chance past certainty", 0);
+
         // The level-cost chain: each level costs 10 % more than the one before,
         // integer floor at every step. These ten numbers ARE the curve - if one
         // of them moves, every stored dxp means a different level than it did.

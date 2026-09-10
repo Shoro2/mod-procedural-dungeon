@@ -232,6 +232,122 @@ namespace PDungeon
         return static_cast<int>(base * factor / 100);
     }
 
+    // Round E / D8 room factor, carried x100 like every other multiplier here.
+    // Every currency roll and every legacy-rare roll of a run is multiplied by
+    // it, so a one-room run pays a tenth of what a ten-room run pays and an
+    // eleven-room run pays 1 % more. The operator's reason IS the rule ("damit
+    // nicht einfach nur ein-raum-runs gespammt werden"): without it the
+    // shortest run is also the most profitable one per minute, and nobody
+    // would ever build a long dungeon again.
+    //
+    // `baseline` and `bonusPctPerRoom` are parameters and deliberately carry
+    // no default value: both are operator keys (V2.Loot.Currency.RoomsBaseline
+    // and .RoomsBonusPctPerRoom), and a default here would be a second copy of
+    // a conf-owned number - the same thing PDv2UILink.h forbids the panel.
+    //
+    // Below the baseline the factor is the plain share rooms/baseline; at and
+    // above it the run is "full" and only the bonus is left. rooms <= 0 is not
+    // a run at all and pays nothing, which is also what keeps the division
+    // safe: it is only reached with 0 < rooms < baseline, so the divisor is at
+    // least 2. No floor on the result - a negative bonusPctPerRoom is not a
+    // legal conf value, and GameChanceBp below clamps what it is fed anyway.
+    constexpr int GameRoomFactorX100(int rooms, int baseline,
+                                     int bonusPctPerRoom)
+    {
+        if (rooms <= 0)
+        {
+            return 0;
+        }
+        if (rooms < baseline)
+        {
+            return rooms * 100 / baseline;
+        }
+        return 100 + (rooms - baseline) * bonusPctPerRoom;
+    }
+
+    // Round E / D9 item count: "expected = Items x lootMult", split into the
+    // part that is certain and the part that is rolled for. floor(items x mult)
+    // items always drop; the fraction left over is the PERCENT chance of one
+    // more, so one item at lootMult 2.50 is two items plus a coin flip and
+    // pays 2.50 on average. Without it the difficulty dial does nothing at all
+    // for gear - chest 1 / boss 1 / final 1 would be the same three items at
+    // difficulty 1 and at difficulty 100.
+    //
+    // The roll is a PARAMETER and not a urand call. This header is engine-free
+    // by the rule at the top of the file, and a function that rolled its own
+    // dice could not be pinned by the harness; the engine passes urand(1, 100).
+    // A rollPct of 0 is what a caller that wants no gamble passes and takes
+    // the floor alone; anything else outside 1..100 does the same, because the
+    // fraction can never exceed 99.
+    //
+    // Plain int is enough for the product, unlike GameLootMultX100's: `items`
+    // is a per-source count in the low single digits and lootMultX100 tops out
+    // at 360, so reaching the int range would take some 5.9 million items.
+    constexpr int GameScaledCount(int items, int lootMultX100, int rollPct)
+    {
+        if (items <= 0 || lootMultX100 <= 0)
+        {
+            return 0;
+        }
+        int const total = items * lootMultX100;
+        int const whole = total / 100;
+        int const fracPct = total % 100;
+        return (rollPct >= 1 && rollPct <= fracPct) ? whole + 1 : whole;
+    }
+
+    // Round E / L3 material ceiling: 1 at dlvl 0 and maxAtCap at the dlvl cap,
+    // linear and integer-floored in between (with the shipped 5 per mob and a
+    // cap of 30: dlvl 0 -> 1, 8 -> 2, 15 -> 3, 23 -> 4, 30 -> 5). The engine
+    // then rolls urand(1, maxCount), so this is the TOP of the band and never
+    // the count itself.
+    //
+    // Clamped to [1, maxAtCap] at both ends. The floor comes free from the
+    // "1 +" and a non-negative dlvl; the ceiling is load-bearing, because dlvl
+    // is not itself capped anywhere on the way in and an account that somehow
+    // sits past the cap must not out-earn the cap.
+    constexpr int GameMatsMaxCount(int dlvl, int dlvlCap, int maxAtCap)
+    {
+        if (maxAtCap <= 1 || dlvlCap <= 0)
+        {
+            return 1;
+        }
+        int const d = dlvl > 0 ? dlvl : 0;
+        int const n = 1 + (maxAtCap - 1) * d / dlvlCap;
+        return n > maxAtCap ? maxAtCap : n;
+    }
+
+    // A whole chance, in basis points: 10000 = 100 %. The rolls are
+    // urand(1, 10000) - PDv2InstanceScript's bonus-mat roll already works this
+    // way - which is the resolution a 1 % chance needs once the room factor's
+    // two decimals are multiplied into it.
+    constexpr int PD_GAME_CHANCE_BP_MAX = 10000;
+
+    // Round E / L2 drop chance: a percent from the conf, times the D8 room
+    // factor, in basis points. Written as the spec states it - percent to
+    // basis points (x100), then the factor (x roomFactorX100 / 100) - rather
+    // than collapsed into one multiplication, because those are two separate
+    // decisions and whoever tunes one of them next should see which is which.
+    //
+    // Clamped at both ends: at 10000 because a certainty cannot be exceeded
+    // (T1 is already 100 % and any room factor above 1.00 would push it past
+    // the roll's range), and at 0 because a run with no rooms must pay nothing
+    // rather than feed a negative product to the roll.
+    //
+    // int64 intermediate for the same reason GameLootMultX100 uses one: a conf
+    // typo is the only realistic way to get a huge chancePct in here, and it
+    // has to clamp rather than wrap.
+    constexpr int GameChanceBp(int chancePct, int roomFactorX100)
+    {
+        if (chancePct <= 0 || roomFactorX100 <= 0)
+        {
+            return 0;
+        }
+        int64_t const bp =
+            static_cast<int64_t>(chancePct) * 100 * roomFactorX100 / 100;
+        return bp > PD_GAME_CHANCE_BP_MAX ? PD_GAME_CHANCE_BP_MAX
+                                          : static_cast<int>(bp);
+    }
+
     // 01 §8 mob level band in steps of 5: clamp to [1, 76], snap DOWN onto the
     // 1, 6, 11, ... 76 grid. The band the caller gets is [min, min + 4].
     constexpr int GameClampBandMin(int lvl)
