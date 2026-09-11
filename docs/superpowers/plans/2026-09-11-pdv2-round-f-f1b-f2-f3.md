@@ -164,3 +164,15 @@ MDDF use per block per theme, seat-rule readback for theme 3, kit size (~409 MB)
 4. `tools/pd_testlauf_runde32.md` §2 (F1b/F2/F3 — what to see: dropdown under casters, mine walls, forest, own light/music),
    docs (CLAUDE.md row, README), vault (06 ids incl. the Light/LightParams/band registry, 09 tables, queue, log), memory.
 5. Host: ONE MIG after the operator's T2 of everything (server DBC/override-SQL class + launcher payload leg).
+
+## Decisions after the reviews (planner, 2026-09-11)
+
+- **K1 style pick is per RUN, not per side (ratified).** `band_runs` splits a side at sockets and blob bites; each run rolls its
+  own style. A wall showing rock on one run and timbering on the other is right for a mine (and cliff next to tree line is right
+  for a wood); it also gives the variety the operator asked for. K2 builds on the same rule. Recon C's per-side formula is
+  superseded; the code comment and `kit_meta.json` must say per run.
+- **Seat-rule readback becomes a chain script.** `scripts/59_kit_seat_check.py` (from the K1 scratchpad `seat_check.py`,
+  plus an MDDF `scale == 1024` assertion, theme argument) runs on the staged kit after 52 and before 49; documented in the
+  module CLAUDE.md chain line. No chain rerun needed - it verifies output bytes.
+- Nits: stale `# 385` comment on `MDDF_ENTRIES` (48) fixed when 48 is next touched; the K1 report's exclusion-list citation
+  is wrong (gitignored, left).
