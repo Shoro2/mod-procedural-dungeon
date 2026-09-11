@@ -138,6 +138,13 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > the character sheet, not in the bags: no bag space, and the storage button cannot take
 > them any more. Old stacks in your bags move over by themselves the next time you log in.
 >
+> **Themes (Round F).** The kit carries two looks - the **city** (default) and the **mine**
+> (rock floors and walls, rock columns, stalagmites, cave-ins, carts). Since F1 the gen panel
+> has a **Theme** slider (Default / Mine / City); it applies to the next Generate, a stored
+> dungeon keeps the look it was generated with. The mine draws its own creature packs
+> (Defias, Stonevault, Dark Iron) and is lit by glowing crystal formations, with braziers in
+> boss rooms and mining clutter in rooms and corridors. The forest is next (F2).
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
