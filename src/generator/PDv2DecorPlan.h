@@ -80,12 +80,17 @@ namespace PDungeon
     uint32_t const PD_DECOR_SEED_MIX = 0x5EC0DE0Fu;
 
     // Hard ceiling on the props one layout may plan. v1 had a GameObject cap
-    // and v2 lost it; a 17-room layout can already ask for ~100 spots, and
-    // this round adds three rule families on top. 250 is roughly 2.5x the
-    // measured worst case, so it never bites a normal layout and always bites
-    // a runaway rule. The cut is taken at the END, in plan order, so which
-    // props survive is a property of the plan and not of the draw.
-    int const PD_DECOR_MAX_SPOTS = 250;
+    // and v2 lost it. The cut is taken at the END, in plan order, so which
+    // props survive is a property of the plan and not of the draw. The
+    // budget's only job is to catch a rule set that runs away, never to tune
+    // density (that is the rules' min/max). Measured at the 15-room cap by
+    // replaying the placement over 3000 layouts per theme (Round F / F1,
+    // mod_pdungeon_decor_mine.sql header): city 120..189 props, mine
+    // 238..346. The old ceiling of 250 truncated nearly every max-size mine
+    // layout, and the tail it cut is where the boss room sits. 450 clears
+    // the measured maximum with room to spare and stays inert on everything
+    // the shipped rules produce.
+    int const PD_DECOR_MAX_SPOTS = 450;
 
     // How far into its own cell a wall-foot prop is pushed, towards the wall
     // it belongs to. Under half a cell (4.17 yd) on purpose, so the prop stays

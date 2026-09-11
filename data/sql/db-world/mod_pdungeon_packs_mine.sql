@@ -54,7 +54,7 @@
 -- will ACTUALLY hand the creature BEFORE the difficulty multiplier, not the
 -- template's own level-19 number.
 --
--- All 32 entries exist. None carries difficulty_entry_1/2/3 (no heroic twin
+-- All 31 shipped entries (and the dropped 8911) exist. None carries difficulty_entry_1/2/3 (no heroic twin
 -- can be substituted under the player), none carries npcflag, VehicleId or
 -- flags_extra, all are MovementType 1, and every one has a
 -- creature_loot_template of its own (7..33 rows) - which is the whole point
@@ -95,16 +95,17 @@
 --         mech 0x248B3F5B, the widest of the three: adds SILENCE and DISTRACT
 --         -> neither stunnable nor silenceable. The hardest CC target the
 --            module ships; a caster group has to out-damage him.
---   -63   8911 Fireguard Destroyer  *** SCHOOL IMMUNITY, READ THIS ***
+--   -63   8911 Fireguard Destroyer  *** NOT SHIPPED - SCHOOL IMMUNITY ***
 --         SchoolMask 0x4 (FIRE) + mech 0x2206 DISORIENTED|DISARM|SLEEP|
 --         KNOCKOUT. Every other immunity in this module is mechanic-only
---         (pack 4 carries -93, pack 7 -124, both SchoolMask 0). 8911 is the
---         first member that is IMMUNE TO A SCHOOL OF MAGIC: a fire mage or a
---         fire-affix hit does literally nothing to it. It is kept because it
---         is Blackrock's own forge elemental and the pack would be poorer
---         without it - but if the operator reports "my fire spec cannot kill
---         one of the dwarves", this row is the answer, and deleting this one
---         line is the whole fix.
+--         (pack 4 carries -93, pack 7 -124, both SchoolMask 0); 8911 would
+--         have been the first member IMMUNE TO A SCHOOL OF MAGIC - a fire
+--         mage or a fire-affix hit does literally nothing to it, and the PD
+--         scaling keeps every creature_template immunity. Dropped by the
+--         planner in F1 (spec D3 records the deviation): a trash mob one
+--         spec cannot damage is a bug report, not flavour. Blackrock's forge
+--         elemental stays out until the module can strip school immunities
+--         per member.
 --
 -- 4861 Shrike Bat is type_flags 1 (TAMEABLE) and family 24 - a hunter can
 -- tame one out of a mine run. Stock behaviour in any dungeon, harmless here
@@ -227,15 +228,14 @@ INSERT INTO `pdungeon_pack_members`
   (10, 4852, 1, 60015, 100),  -- Stonevault Oracle         uc2, 12822 hp,  3994 mp (RANGE)
   (10, 4853, 1, 60015, 100),  -- Stonevault Geomancer      uc2, 12822 hp,  3994 mp (RANGE)
   (10, 4857, 2,     0, 100),  -- Stone Keeper              BOSS, uc1, 16026 hp, type 4, no immunities
-  -- Pack 11 "Dark Iron Forge" - Blackrock Depths (map 230), 9 members: 5
-  -- melee, 2 range, 2 boss. Faction 54 throughout. The smallest of the three
+  -- Pack 11 "Dark Iron Forge" - Blackrock Depths (map 230), 8 members: 4
+  -- melee, 2 range, 2 boss (8911 dropped, see above). Faction 54 throughout. The smallest of the three
   -- on purpose: the Anvilrage ladder is four near-identical dwarves, and a
   -- fifth would have added a name, not a silhouette.
   (11, 8891, 0,     0, 100),  -- Anvilrage Guardsman         uc1, 16026 hp, 17 loot rows
   (11, 8892, 0,     0, 100),  -- Anvilrage Footman           uc1, 16026 hp, 18 loot rows
   (11, 8893, 0,     0, 100),  -- Anvilrage Soldier           uc1, 16026 hp, 16 loot rows
   (11, 8890, 0,     0, 100),  -- Anvilrage Warden            uc1, 16026 hp,  1 loot row
-  (11, 8911, 0,     0, 100),  -- Fireguard Destroyer         uc1, 16026 hp, type 4, immu -63 FIRE-IMMUNE
   (11, 8894, 1, 69211, 100),  -- Anvilrage Medic             uc8, 11217 hp, 17628 mp (RANGE, senior)
   (11, 8912, 1, 60015, 100),  -- Twilight's Hammer Torturer  uc2, 12822 hp,  7988 mp (RANGE)
   (11, 8923, 2,     0, 100),  -- Panzor the Invincible       BOSS, uc1, 26710 hp, immu -238, rank 2

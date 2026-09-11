@@ -93,8 +93,11 @@ namespace PDungeon
     // Plans a layout for the player's account, stores it and pushes it to the
     // client link. `seed` 0 rolls one. `outPlan` may be nullptr when the
     // caller does not need the plan itself.
-    // themeOverride 0 = the server-configured theme (the panel path); the GM
-    // command may pass 1/2 to aim a test generation at a specific kit theme.
+    // themeOverride 0 follows the server config; a nonzero value is frozen
+    // into the layout. Two callers pass one: the GM test path (`.pdungeon v2
+    // gen [seed] [theme]`) and, since Round F / F1, the panel's Generate
+    // button, which passes the account's own cfg_theme. Both have already
+    // checked the id against PDv2Mgr::HasTheme.
     PDv2GenOutcome PDv2DoGenerate(Player* player, uint32_t seed, BlockPlan* outPlan,
                                   int themeOverride = 0);
 

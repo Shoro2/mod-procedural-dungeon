@@ -112,9 +112,9 @@
 --     rules.
 --
 -- ----------------------------------------------------------------------------
--- *** BUDGET: THIS RULE SET CAN EXCEED PD_DECOR_MAX_SPOTS AT THE ROOM CAP ***
+-- *** BUDGET: THIS RULE SET NEEDS PD_DECOR_MAX_SPOTS = 450 (raised in F1) ***
 --
--- `PD_DECOR_MAX_SPOTS` (src/generator/PDv2DecorPlan.h) is 250, and the cut is
+-- `PD_DECOR_MAX_SPOTS` (src/generator/PDv2DecorPlan.h) was 250 before F1, and the cut is
 -- taken at the END in plan order - so an overflowing layout loses the
 -- dressing of its LAST blocks, which is where the boss room usually sits.
 --
@@ -128,7 +128,7 @@
 --   layout                     city (theme 2)      mine (theme 1)
 --   5 rooms  +  8 corridors    37..73   (55)       77..130  (104)
 --   10 rooms + 15 corridors    79..139  (106)      160..241 (201)
---   15 rooms + 20 corridors    120..189 (155)      238..346 (294)   OVER 250
+--   15 rooms + 20 corridors    120..189 (155)      238..346 (294)   OVER the old 250
 --
 -- The deployed default is `ProceduralDungeon.V2.Rooms = 5`, so ordinary runs
 -- are nowhere near the ceiling; `GameRoomsCap` allows 15 from dlvl 12 up, and
@@ -137,9 +137,9 @@
 -- measured worst case" (that measurement predates rules 4-14).
 --
 -- The fix is one line in PDv2DecorPlan.h - 250 -> 450, well clear of the
--- measured mine maximum - and it is NOT made here because this file may only
--- touch SQL. Round F's planner owns that call; until it is made, a 15-room
--- mine run loses the dressing of its last few blocks. Thinning these rules
+-- measured mine maximum - and F1 made it in the same round (the harness
+-- fixtures are theme 0 and never reach either ceiling, so the decor pin
+-- held). Thinning these rules
 -- instead was measured and does not work: even cutting every scatter rule to
 -- 0..1 and the crystals to 1..2 still crosses 250 on most max-size layouts,
 -- because the count is bounded by the candidate pools and not by the rules.

@@ -366,7 +366,7 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 --             (1.151, 1.353, 2.316) = 2.08 x 2.82 x 2.40 yd - the middle rung
 --         (3) 3 stock rows: 22246 'Tear of Theradras', 22550 'Draenethyst
 --             Crystals', 152622 'Azsharite Formation'
-(910077, 5,  219, 'Cave Crystal',        1.0, 0, 0, ''),
+(910077, 5,  219, 'PD Cave Crystal',        1.0, 0, 0, ''),
 -- 910078: (1) ...\CaveMineCrystalFormation02.mdx
 --         (2) Caveminecrystalformation02.m2, (-0.287, -0.582, -0.232) to
 --             (0.663, 0.531, 1.022) = 0.95 x 1.11 x 1.25 yd - the low rung,
@@ -374,14 +374,14 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 --             model at size 3.47, so scaling it is precedented; we keep 1.0
 --             because the LADDER is what this row exists for.
 --         (3) 2 stock rows: 2705, 178185 'Sapphire of Aku''Mai'
-(910078, 5,  244, 'Cave Crystal',        1.0, 0, 0, ''),
+(910078, 5,  244, 'PD Cave Crystal',        1.0, 0, 0, ''),
 -- 910079: (1) ...\CaveMineCrystalFormation07.mdx
 --         (2) Caveminecrystalformation07.m2, (-1.037, -1.754, -0.111) to
 --             (1.405, 1.406, 2.862) = 2.44 x 3.16 x 2.97 yd - the tall rung,
 --             taller than a player and still under a third of a cell wide
 --         (3) 2 stock rows: 152631 'Azsharite Formation', 175324 'Frostmaul
 --             Shards'
-(910079, 5, 2592, 'Cave Crystal',        1.0, 0, 0, ''),
+(910079, 5, 2592, 'PD Cave Crystal',        1.0, 0, 0, ''),
 -- mine: the boss-room light.
 -- 910080: (1) WORLD\KHAZMODAN\BLACKROCK\ACTIVEDOODADS\DARKIRONBRAZIER\
 --             DARKIRONBRAZIER.MDX
@@ -393,7 +393,7 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 --         (3) 14 stock rows, e.g. 174744/174745 'Shadowforge Brazier' at
 --             size 1.0 (the precedent taken) and six
 --             'Doodad_DarkIronBrazier0n' at 0.67
-(910080, 5, 3411, 'Dark Iron Brazier',   1.0, 0, 0, ''),
+(910080, 5, 3411, 'PD Dark Iron Brazier',   1.0, 0, 0, ''),
 -- mine: the clutter a working dig leaves on the floor. Scattered, never at a
 -- wall foot - these are things you walk around, not things that lean.
 -- 910081: (1) World\Generic\Human\Passive Doodads\LumberPiles\
@@ -409,15 +409,15 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 --         (3) 1 stock row: 181686 'Lumber Pile'
 --         Both stock rows are literally named 'Lumber Pile' on these two
 --         displays, which is where these two names come from.
-(910081, 5, 1108, 'Lumber Pile',         1.0, 0, 0, ''),
-(910082, 5, 1109, 'Lumber Pile',         1.0, 0, 0, ''),
+(910081, 5, 1108, 'PD Lumber Pile',         1.0, 0, 0, ''),
+(910082, 5, 1109, 'PD Lumber Pile',         1.0, 0, 0, ''),
 -- 910083: (1) World\Generic\Human\Passive Doodads\CargoBoxes\
 --             DeadMineCargoBoxes.mdx
 --         (2) Deadminecargoboxes.m2, (-1.272, -1.147, -0.019) to (1.294,
 --             1.120, 1.763) = 2.57 x 2.27 x 1.78 yd
 --         (3) 14 stock rows; the exact precedent is 180052 'Deadmine Cargo
 --             Boxes', which is type 5 at size 1.0 - the same two values
-(910083, 5,   36, 'Ore Crates',          1.0, 0, 0, ''),
+(910083, 5,   36, 'PD Ore Crates',          1.0, 0, 0, ''),
 -- 910084: (1) World\Generic\Human\Passive Doodads\DeadMinePowderKeg\
 --             DeadMinePowderKeg.mdx
 --         (2) Deadminepowderkeg.m2, (-0.239, -0.255, 0.000) to (0.244,
@@ -429,7 +429,7 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 --         is 0.36 x 0.41 x 0.44 yd, under half a yard in every axis, which on
 --         a 66 yd room floor is a pebble nobody sees. 1.0 leaves it the
 --         smallest thing here and still readable as a keg.
-(910084, 5,  436, 'Powder Keg',          1.0, 0, 0, ''),
+(910084, 5,  436, 'PD Powder Keg',          1.0, 0, 0, ''),
 -- 910085: (1) WORLD\GENERIC\PASSIVEDOODADS\MISC\WHEELBARROW\
 --             CAVEMINEWHEELBARROW01.MDX
 --         (2) Caveminewheelbarrow01.m2, (-1.728, -0.710, 0.031) to (1.149,
@@ -437,7 +437,7 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 --         (3) 1 stock row: 190859 (type 5, size 1, no name) - the thinnest
 --             precedent of the ten, but a real one, and unlike 910066 it is
 --             a GameObject row rather than terrain dressing
-(910085, 5,  215, 'Wheelbarrow',         1.0, 0, 0, ''),
+(910085, 5,  215, 'PD Wheelbarrow',         1.0, 0, 0, ''),
 -- 910086: (1) World\Azeroth\Stranglethorn\PassiveDoodads\GemMineCar02\
 --             GemMineCar03.mdx  (the folder name is Blizzard's, not a typo)
 --         (2) Gemminecar03.m2, (-1.025, -0.769, -0.041) to (1.025, 1.075,
@@ -447,7 +447,7 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 --             190767 'Inconspicuous Mine Car' (type 10, 0.65). Ours is type 5
 --             GENERIC, so unlike 192058 it is never clickable and satisfies
 --             nobody's objective - the same argument the clutter ids make.
-(910086, 5, 7997, 'Ore Cart',            1.0, 0, 0, '');
+(910086, 5, 7997, 'PD Ore Cart',            1.0, 0, 0, '');
 
 -- Chest data beyond the INSERT's column list: Data3 = consumable (one loot per spawn),
 -- Data2 = restock 0. Without Data3 the cache refilled every tick (Round C research 1.3).
