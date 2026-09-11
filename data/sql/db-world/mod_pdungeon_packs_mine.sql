@@ -85,18 +85,18 @@
 -- is a step past the shipped corpus, so it is stated here rather than
 -- discovered in a fight:
 --   -229  646 Mr. Smite, 3586 Miner Johnson
---         mech 0x244B3653 CHARM|DISORIENTED|FEAR|ROOT|SLEEP|SNARE|FREEZE|
+--         mech 0x48966CA6 CHARM|DISORIENTED|FEAR|ROOT|SLEEP|SNARE|FREEZE|
 --         KNOCKOUT|POLYMORPH|BANISH|SHACKLE|TURN|DAZE|SAPPED
 --         -> both are still STUNNABLE and SILENCEABLE.
 --   -238  8923 Panzor the Invincible
---         mech 0x24813E53, the -229 set minus BANISH/SHACKLE/TURN PLUS STUN
+--         mech 0x49027CA6, the -229 set minus BANISH/SHACKLE/TURN PLUS STUN
 --         -> stun-immune, silence still lands.
 --   -251  9033 General Angerforge
---         mech 0x248B3F5B, the widest of the three: adds SILENCE and DISTRACT
+--         mech 0x49167EB6, the widest of the three: adds SILENCE and DISTRACT
 --         -> neither stunnable nor silenceable. The hardest CC target the
 --            module ships; a caster group has to out-damage him.
 --   -63   8911 Fireguard Destroyer  *** NOT SHIPPED - SCHOOL IMMUNITY ***
---         SchoolMask 0x4 (FIRE) + mech 0x2206 DISORIENTED|DISARM|SLEEP|
+--         SchoolMask 0x4 (FIRE) + mech 0x440C DISORIENTED|DISARM|SLEEP|
 --         KNOCKOUT. Every other immunity in this module is mechanic-only
 --         (pack 4 carries -93, pack 7 -124, both SchoolMask 0); 8911 would
 --         have been the first member IMMUNE TO A SCHOOL OF MAGIC - a fire

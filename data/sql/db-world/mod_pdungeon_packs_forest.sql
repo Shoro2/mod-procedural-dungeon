@@ -118,12 +118,12 @@
 -- discovered in a fight:
 --   -93   3654 Mutanus, 3669 Cobrahn, 3670 Pythas, 3671 Anacondra,
 --         3673 Serpentis
---         SchoolMask 0, mech 0x800010 FEAR|HORROR
+--         SchoolMask 0, mech 0x1000020 FEAR|HORROR
 --         -> the mildest row in the module; stun, silence, root and
 --            polymorph all still land on every Wailing Caverns boss.
 --   -229  4420 Ramtusk, 4421 Charlga, 4422 Agathelos, 12203 Landslide,
 --         12258 Razorlash, 13596 Rotgrip
---         SchoolMask 0, mech 0x244B3653 CHARM|DISORIENTED|FEAR|ROOT|SLEEP|
+--         SchoolMask 0, mech 0x48966CA6 CHARM|DISORIENTED|FEAR|ROOT|SLEEP|
 --         SNARE|FREEZE|KNOCKOUT|POLYMORPH|BANISH|SHACKLE|TURN|DAZE|SAPPED
 --         -> the same row 646 Mr. Smite and 3586 Miner Johnson already carry
 --            (pack 9): still STUNNABLE and SILENCEABLE, and no wider than
