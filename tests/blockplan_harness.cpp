@@ -3681,10 +3681,13 @@ namespace
     void RunPhase2Checks(int seeds)
     {
         // Rooms ship all 15 masks; straight corridors the two facing pairs;
-        // dead ends exactly the four single bits. Both theme namespaces must
-        // be complete - the planner can aim at either, and a missing row is
-        // the per-block "mobs stand still" failure.
-        int const themeBases[2] = { 2000, 12000 };
+        // dead ends exactly the four single bits. Every theme namespace must
+        // be complete - mine 2000, city 12000 and, since Round F, forest
+        // 22000 - because the planner can aim at any of them, and a missing
+        // row is the per-block "mobs stand still" failure. (Today the forest
+        // rows are the mine rows +20000; this sweep stays the gate if they
+        // ever diverge.)
+        int const themeBases[3] = { 2000, 12000, 22000 };
         for (int base : themeBases)
         for (unsigned m = 1; m <= 15; ++m)
         {
