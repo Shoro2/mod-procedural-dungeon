@@ -221,9 +221,10 @@ INSERT INTO `pdungeon_decor_rules`
 -- trunk lying along the wall that a player has to walk around, which is what
 -- makes a forest room feel enclosed without a facade. 1..2 each, so a room
 -- carries two or three trunks and never a fence of them. Both are SCALED
--- DOWN to Blizzard's own type-5 precedent (0.58 / 0.65) so the yawed model
--- fits inside the 8 yd minSpacing rather than overlapping the next wall-foot
--- prop: 8.91 and 7.96 yd long at those sizes. Full arithmetic per row in
+-- DOWN (0.54 / 0.65; Blizzard's type-5 precedent is 0.58 / 0.65) so the yawed
+-- model fits inside ONE 8.33 yd wall-foot cell and two trunks on neighbouring
+-- cells cannot overlap (the 8 yd minSpacing only keeps two draws off the same
+-- cell): 8.30 and 7.96 yd long at those sizes. Full arithmetic per row in
 -- mod_pdungeon_templates_fix.sql.
 (35, 3, 'room',      910087, 'wall_foot', 1, 2,  90,  8),
 (36, 3, 'room',      910088, 'wall_foot', 1, 2,  90,  8),

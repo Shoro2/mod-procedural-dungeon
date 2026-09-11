@@ -504,12 +504,14 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 --             is on local Y, the axis the wall_foot facing lays ALONG the
 --             wall - which is the whole reason this display was chosen over
 --             6826/6940, whose length is on X and would point into the room.
---             At the shipped size 0.58: 1.69 x 8.91 x 1.79 yd, i.e. one
---             8.33 yd cell, inside rule 35's 8 yd minSpacing, and 1.79 yd
---             tall - a real obstacle, not a doormat.
+--             At the shipped size 0.54: 1.57 x 8.30 x 1.67 yd, i.e. INSIDE
+--             one 8.33 yd wall-foot cell (0.58 would be 8.91 yd, 0.58 yd
+--             over the cell - two trunks on neighbouring cells overlapped;
+--             rule 35's 8 yd minSpacing only keeps two draws off the same
+--             cell), and 1.67 yd tall - a real obstacle, not a doormat.
 --         (3) 1 stock row: 190872, type 5 GENERIC at size 0.58 (unnamed) -
---             our exact class AND the size taken here.
-(910087, 5, 8025, 'PD Fallen Tree',       0.58, 0, 0, ''),
+--             our exact class; we take 0.54 for the cell fit above.
+(910087, 5, 8025, 'PD Fallen Tree',       0.54, 0, 0, ''),
 -- 910088: (1) World\Azeroth\RedRidge\PassiveDoodads\Trees\
 --             RedRidgeFallenTree01.mdx
 --         (2) Redridgefallentree01.m2, (-0.388, -6.312, -0.204) to (1.108,
