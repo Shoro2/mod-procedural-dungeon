@@ -134,6 +134,10 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > spends them from there — and the storage's own deposit button will happily take them, so
 > withdraw before buying.
 >
+> **Remnants are currency (Round E / WP12).** The five Remnants sit in the Currency tab of
+> the character sheet, not in the bags: no bag space, and the storage button cannot take
+> them any more. Old stacks in your bags move over by themselves the next time you log in.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
