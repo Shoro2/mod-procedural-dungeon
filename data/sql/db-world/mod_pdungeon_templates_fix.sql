@@ -83,13 +83,16 @@
 --
 -- The DELETE below names every entry individually rather than a BETWEEN
 -- range: this file's rows are not contiguous (910048-910049, 910069,
--- 910087-910099 are unused gaps in the reserved block - SIXTEEN ids), and an
+-- 910095-910099 are unused gaps in the reserved block - EIGHT ids), and an
 -- explicit list can never claim a gap id some later addition might use for
 -- something else. Same discipline as mod_pdungeon_prop_displays.sql. (910067
 -- and 910068 were two of those gaps until Round C / C8 took them for the
 -- finale below; 910077-910086 were ten more until Round F / F1 took them for
--- the mine props. The sixteen that remain are the forest's budget - F2's
--- design asks for about ten of them.)
+-- the mine props, and 910087-910094 eight more until Round F / F2 took them
+-- for the forest. EIGHT ids are left in the whole 910000-910099 reservation,
+-- which is the floor F2 was told to hold: a fourth theme needs either a
+-- smaller prop set than the mine's ten or a new id block registered in
+-- share-public 06-custom-ids.md.)
 --
 -- The real fix - narrowing mod_pdungeon_templates.sql's range delete to
 -- 910000-910033 - is recorded in the global queue
@@ -197,6 +200,38 @@
 -- reason there are three rows - a mine wall with three identical crystals is
 -- three copies, and with three heights it is a formation. Do not "normalise"
 -- their sizes.
+--
+-- Forest props (910087-910094, Round F / F2): the theme-3 dressing - two
+-- fallen trees as the wall blockers spec D7 asks for, two paddock fences, a
+-- woodland campfire for the boss room, a night elf lantern, a stump and a
+-- mushroom cluster. Placed by the theme-3 rules in
+-- mod_pdungeon_decor_forest.sql and by nothing else; a theme-1 or theme-2 run
+-- never sees them. All eight are type 5 GENERIC, all eight went through the
+-- same three-way check recorded per row below - (1) the DBC model path, (2)
+-- the GameObjectModels.dtree bounding box in yards, (3) the count of stock
+-- `gameobject_template` rows on that displayId - and all eight passed all
+-- three. As with the mine, the DBC's own GeoBox columns read all zero on all
+-- eight, so the dtree bbox is what settles `size`.
+--
+-- TWO OF THE EIGHT ARE NOT SIZE 1.0, and that is the difference from the mine
+-- block. 910087/910088 are fallen TRUNKS whose length lies on the model's
+-- local Y axis, which the wall_foot facing turns ALONG the wall; at size 1.0
+-- they measure 15.37 and 12.24 yd, i.e. almost two 8.33 yd cells, so two
+-- trunks drawn by the same rule would overlap despite its 8 yd minSpacing.
+-- Blizzard's own single type-5 row for each display already scales them
+-- (0.58 and 0.65), which lands them at 8.91 and 7.96 yd - one cell, inside
+-- the spacing - so this file takes the stock size rather than inventing one.
+-- Do not "normalise" these two to 1.0 either: the scale is load-bearing.
+--
+-- WHAT IS NOT HERE, and why, so nobody adds it back by eye: 192
+-- ElwynnCampfire (the obvious campfire, 720 stock rows) and EVERY Elwynn /
+-- Duskwood / SilverPine bush, thorn bush and the Elwynn mushroom have NO
+-- `GameObjectModels.dtree` entry at all - no collision model, so a player
+-- walks straight through them. Precedent is not collision. 6826 DeadTreeLog02
+-- and 6940 ZangarLog01 do have a dtree and are still out: both carry their
+-- length (32.81 and 16.04 yd) on local X, the axis a wall_foot prop points
+-- away from the wall, so they would lie across the room rather than along it.
+-- Full list and measurements in mod_pdungeon_decor_forest.sql's header.
 -- ----------------------------------------------------------------------------
 
 DELETE FROM `gameobject_template` WHERE `entry` IN (
@@ -209,7 +244,8 @@ DELETE FROM `gameobject_template` WHERE `entry` IN (
     910067, 910068,
     910070, 910071, 910072, 910073, 910074, 910075, 910076,
     910077, 910078, 910079, 910080, 910081, 910082, 910083, 910084,
-    910085, 910086
+    910085, 910086,
+    910087, 910088, 910089, 910090, 910091, 910092, 910093, 910094
 );
 INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`, `Data0`, `Data1`, `ScriptName`) VALUES
 -- the loop-room / pocket cache (Round C / C3: lock 57 so the client's
@@ -447,7 +483,125 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 --             190767 'Inconspicuous Mine Car' (type 10, 0.65). Ours is type 5
 --             GENERIC, so unlike 192058 it is never clickable and satisfies
 --             nobody's objective - the same argument the clutter ids make.
-(910086, 5, 7997, 'PD Ore Cart',          1.0, 0, 0, '');
+(910086, 5, 7997, 'PD Ore Cart',          1.0, 0, 0, ''),
+-- ----------------------------------------------------------------------------
+-- Round F / F2: the forest props (theme 3 only - see the header). Same three
+-- numbers per row: (1) DBC model path, (2) dtree bbox, (3) stock rows on that
+-- displayId. Measured on this box 2026-09-11 against
+-- GameObjectDisplayInfo.dbc (WDBC, 3792 records, 19 fields, recordSize 76)
+-- and GameObjectModels.dtree (VMAP_4.8, 2324 records).
+--
+-- forest: the wall blockers. A trunk lying along a wall is what makes a room
+-- read as a clearing in a wood rather than a box with tree textures, and
+-- being a type 5 GENERIC it actually stops the player, which the kit's MDDF
+-- foliage never can. Two rows because two trunks - one thick and mossy, one
+-- thin and bare - are two silhouettes.
+--
+-- 910087: (1) World\Azeroth\Duskwood\PassiveDoodads\Trees\
+--             DuskWoodFallenTree.mdx
+--         (2) Duskwoodfallentree.m2, (-1.106, -8.167, -0.739) to (1.805,
+--             7.198, 2.340) = 2.91 x 15.37 x 3.08 yd at size 1.0. The 15.37
+--             is on local Y, the axis the wall_foot facing lays ALONG the
+--             wall - which is the whole reason this display was chosen over
+--             6826/6940, whose length is on X and would point into the room.
+--             At the shipped size 0.58: 1.69 x 8.91 x 1.79 yd, i.e. one
+--             8.33 yd cell, inside rule 35's 8 yd minSpacing, and 1.79 yd
+--             tall - a real obstacle, not a doormat.
+--         (3) 1 stock row: 190872, type 5 GENERIC at size 0.58 (unnamed) -
+--             our exact class AND the size taken here.
+(910087, 5, 8025, 'PD Fallen Tree',       0.58, 0, 0, ''),
+-- 910088: (1) World\Azeroth\RedRidge\PassiveDoodads\Trees\
+--             RedRidgeFallenTree01.mdx
+--         (2) Redridgefallentree01.m2, (-0.388, -6.312, -0.204) to (1.108,
+--             5.929, 1.412) = 1.50 x 12.24 x 1.62 yd at 1.0; at the shipped
+--             0.65: 0.98 x 7.96 x 1.05 yd - the thinner, lower trunk, and
+--             again one cell long.
+--         (3) 1 stock row: 190890, type 5 GENERIC at size 0.65 (unnamed).
+(910088, 5, 8028, 'PD Fallen Tree',       0.65, 0, 0, ''),
+-- forest: the paddock fences. Feather-weight dressing (decor rules 38/39/44),
+-- never the theme - a wood that has been logged and fenced once.
+-- 910089: (1) World\Azeroth\Elwynn\PassiveDoodads\ElwynnFences\
+--             ElwynnWoodFence01.mdx
+--         (2) Elwynnwoodfence01.m2, (-4.157, -0.142, -0.564) to (0.137,
+--             0.131, 1.798) = 4.29 x 0.27 x 2.36 yd. Its length is on local
+--             X, so at a wall foot it juts about half a cell OUT from the
+--             wall - which is what a broken rail does, and at 0.27 yd thick
+--             it blocks nothing a player cannot walk around.
+--         (3) 1 stock row: 211062 'Elwynn Fence', type 5 at size 1.0 - our
+--             exact class and size.
+-- 910090: (1) ...\ElwynnFenceSimple.mdx
+--         (2) Elwynnfencesimple.m2, (-0.137, -0.149, 0.528) to (0.161, 3.046,
+--             2.286) = 0.30 x 3.20 x 1.76 yd - length on local Y, so this one
+--             lies flat ALONG the wall. It is the only forest prop thin
+--             enough for a corridor wall foot, which is why decor rule 44 is
+--             the only corridor wall-foot rule the theme ships.
+--         (3) 1 stock row: 211063 'Elwynn Fence', type 5 at size 1.0.
+--         Both stock rows are literally named 'Elwynn Fence' on these two
+--         displays; ours are named for what they look like instead.
+(910089, 5, 6151, 'PD Wood Fence',        1.0, 0, 0, ''),
+(910090, 5, 6150, 'PD Fence Rail',        1.0, 0, 0, ''),
+-- forest: the boss room's fire.
+-- 910091: (1) World\Azeroth\Karazahn\PassiveDoodads\Bonfire\
+--             KarazahnBonFire01.mdx
+--         (2) Karazahnbonfire01.m2, (-2.309, -2.405, -0.074) to (2.108,
+--             2.473, 3.609) = 4.42 x 4.88 x 3.68 yd. Roughly HALF the
+--             footprint of 910021 'PD Brazier' (display 8191, 10.72 x 13.15 x
+--             6.65 yd at size 1.0), which is the yardstick this file already
+--             uses - and it has to sit in a CORNER cell rather than at a wall
+--             foot, so the smaller footprint is the point. 4.88 yd on an
+--             8.33 yd cell leaves the corner walkable past it.
+--         (3) 2 stock rows at type 5 size 1.0 - 180434 'Bonfire' and 202926
+--             'Celebration Bonfire' - plus 31 more at type 8 SPELL_FOCUS
+--             (Blizzard's cooking fires). The type-5-at-1.0 pair is the
+--             precedent taken; ours is type 5 for the blocking reason the
+--             clutter paragraph gives, so it is never clickable and cooks
+--             nobody's dinner.
+--         4611 OgreCampfire01 (27 rows, all type 8) was measured too and not
+--         shipped: 10.69 x 8.47 yd is wider than the cell it would stand in.
+(910091, 5, 6411, 'PD Forest Campfire',   1.0, 0, 0, ''),
+-- forest: the lantern post - the theme's own light, standing beside the
+-- shipped torch 910020 rather than replacing it (decor rule 1 measures 1.93
+-- per room with this loaded, against 2.00 without).
+-- 910092: (1) World\Generic\NightElf\Passive Doodads\Lanterns\
+--             NightelfLantern01.mdx
+--         (2) Nightelflantern01.m2, (-0.637, -0.695, -0.147) to (0.736,
+--             0.695, 1.916) = 1.37 x 1.39 x 2.06 yd - chest height, a sixth
+--             of a cell wide, and a different silhouette from the torch.
+--         (3) 1 stock row: 19595 'Gatekeeper''s Hold' at size 1.0 (type 3).
+--             The thinnest precedent of the eight, but a real
+--             gameobject_template row - the same standard 910085
+--             'PD Wheelbarrow' was accepted on, and unlike 910066 it is a
+--             GameObject rather than terrain dressing. 4094
+--             FreestandingTorch01 has four type-5 rows and was passed over
+--             for exactly the reason this row exists: the module already
+--             ships a torch.
+(910092, 5,  438, 'PD Forest Lantern',    1.0, 0, 0, ''),
+-- forest: what a wood leaves on its floor. Two ids, not the mine's six - a
+-- dig site has crates, carts and kegs, a wood has stumps and fungus, and a
+-- third stump would be a name rather than a silhouette.
+-- 910093: (1) World\Lordaeron\AeriePeaks\PassiveDoodads\Trees\
+--             AeriePeaksStump01.mdx
+--         (2) Aeriepeaksstump01.m2, (-1.894, -1.900, -0.693) to (1.726,
+--             1.688, 2.695) = 3.62 x 3.59 x 3.39 yd - a cut trunk you step
+--             around, under half a cell in every axis.
+--         (3) 3 stock rows: 180056 'Mysterious Tree Stump' (type 2, 1.29),
+--             211052 'Tree Stump' (type 2, 1.0 - the size taken), 211051
+--             (type 27).
+(910093, 5, 6158, 'PD Tree Stump',        1.0, 0, 0, ''),
+-- 910094: (1) World\Kalimdor\Felwood\PassiveDoodads\FelwoodMushrooms\
+--             FelwoodMushroom02.mdx
+--         (2) Felwoodmushroom02.m2, (-0.420, -1.207, -0.092) to (0.971,
+--             1.317, 1.641) = 1.39 x 2.52 x 1.73 yd - a knee-high cluster,
+--             the smallest forest prop and the only one a player really can
+--             miss on a dark floor.
+--         (3) 5 stock rows, all type 3: 126049/128293 'Magenta Cap Clusters'
+--             and 181680 'Drycap Mushroom' / 152094 'Hyacinth Mushroom' /
+--             192556 'Cave Mushroom'. Sizes 0.75 and 1.0; 1.0 taken because
+--             at 0.75 it is a yard across.
+--         This is the ONLY mushroom in 3.3.5's temperate set with a collision
+--         model - 155 ElwynnMushroom01 and every Bush_Mushroom tradeskill
+--         node have no dtree entry at all.
+(910094, 5, 2090, 'PD Forest Mushrooms',  1.0, 0, 0, '');
 
 -- Chest data beyond the INSERT's column list: Data3 = consumable (one loot per spawn),
 -- Data2 = restock 0. Without Data3 the cache refilled every tick (Round C research 1.3).

@@ -1,0 +1,273 @@
+-- ----------------------------------------------------------------------------
+-- mod-procedural-dungeon: FOREST decor rules (world database), Round F / F2
+--
+-- The second themed `pdungeon_decor_rules` set, and it follows
+-- mod_pdungeon_decor_mine.sql exactly. Rules 1-14 are "any look" because a
+-- torch, a crate and a bone pile read correctly under every theme the kit
+-- ships; these thirteen are the opposite case - fallen trees, paddock fences,
+-- a woodland campfire, a night elf lantern, stumps and mushrooms belong to
+-- the wood and would be absurd in a mine shaft.
+--
+-- The planner's filter is one line (src/generator/PDv2DecorPlan.cpp, both
+-- BuildDecorPlan and BuildCritterPlan): a rule is skipped when
+-- `rule.theme != 0 && rule.theme != plan.config.theme`. So these rules are
+-- ADDITIVE on a theme-3 run - the shipped theme-0 rules still fire beside
+-- them - and they are invisible on every other theme.
+--
+-- Every `goEntry` below resolves to a gameobject_template row shipped by
+-- mod_pdungeon_templates_fix.sql (910087-910094, with the three-way display
+-- check written into each row). Do NOT move those templates into this file:
+-- mod_pdungeon_templates_fix.sql is the only file sorting after
+-- mod_pdungeon_templates.sql's wide `DELETE ... BETWEEN 910000 AND 910099`,
+-- so it is the only place a 9100xx template can survive a re-apply. Full
+-- mechanism in that file's header. (This file sorts BEFORE it - 'd' < 't' -
+-- which costs nothing: there is no foreign key, and the engine reads both
+-- tables at startup.)
+--
+-- Rule ids start at 34, after the highest id any shipped file owns (33), so
+-- mod_pdungeon_decor.sql's `DELETE ... BETWEEN 1 AND 3`,
+-- mod_pdungeon_decor_clutter.sql's `BETWEEN 4 AND 14` and
+-- mod_pdungeon_decor_mine.sql's explicit 15-33 list can never touch them;
+-- this file's own DELETE names its thirteen ids and nothing else in return.
+--
+-- No CREATE TABLE block here, matching mod_pdungeon_decor_clutter.sql and
+-- mod_pdungeon_decor_mine.sql: '.' is 0x2E and '_' is 0x5F, so
+-- mod_pdungeon_decor.sql sorts before all three of us under the updater's
+-- plain filename compare (UpdateFetcher.cpp:521-524) and has already created
+-- `pdungeon_decor_rules`.
+--
+-- ----------------------------------------------------------------------------
+-- COLLISION IS THE ADMISSION TEST, AND IT THREW MOST OF THE FOREST OUT
+--
+-- A PDv2 decor prop is a type 5 GENERIC GameObject because that is the only
+-- GameObject class measured to block a player on map 760. A display with no
+-- `GameObjectModels.dtree` entry has NO collision model at all: the object
+-- renders and the player walks straight through it. That is a bug, not a
+-- decoration, so every candidate was looked up in
+-- C:\wowstuff\dcore\Data\vmaps\GameObjectModels.dtree (2324 records) before
+-- it was allowed near this file. What failed, measured 2026-09-11:
+--
+--   192 ElwynnCampfire                     NO DTREE  (the obvious campfire,
+--                                                     and it has 720 stock
+--                                                     gameobject_template
+--                                                     rows - precedent is not
+--                                                     collision)
+--   280/281/282/283/284 ElwynnBush01..09   NO DTREE
+--   301/361 DuskwoodThornBush01/02         NO DTREE
+--   28 BerryBush01, 119 SilverPineBush01   NO DTREE
+--   155 ElwynnMushroom01                   NO DTREE
+--   every Bush_* tradeskill node           NO DTREE
+--
+-- So the forest ships NO bushes and NO undergrowth: in 3.3.5 that whole
+-- family is billboard foliage with nothing behind it. The kit's own MDDF
+-- doodads (script 48) are where leafy filler belongs - they never collide
+-- either, which is right on a wall band and wrong on a floor.
+--
+-- 6826 DeadTreeLog02 HAS a dtree and is still not here: 32.81 x 7.93 x 8.39
+-- yd, i.e. nearly four cells long on its LOCAL X axis - the axis a wall_foot
+-- prop points AWAY from the wall - so it would lie across the room instead of
+-- along the wall, and it has zero stock gameobject_template rows. 6940
+-- ZangarLog01 (16.04 yd on the same axis, and an Outland mushroom-swamp log)
+-- fails the same way. The two fallen trees below carry their length on local
+-- Y, which the wall_foot facing lays ALONG the wall, which is the whole
+-- reason they were picked.
+--
+-- ----------------------------------------------------------------------------
+-- HOW THE PLANNER SPENDS A BLOCK, because every number below follows from it
+--
+-- Per block the planner collects three INDEPENDENT candidate pools from the
+-- walk mask - wall feet, corners, open floor - and then walks the matching
+-- rules IN ASCENDING ID ORDER. For each rule it draws `want` uniformly from
+-- [minPerBlock, maxPerBlock], computes
+--     share = ceil(poolAtStartOfBlock * weight / totalWeightOfThatKind)
+-- and places `min(want, share)` candidates, REMOVING each drawn candidate
+-- from the pool whether it is used or rejected. Two consequences this file
+-- is built around:
+--   * weight is a SHARE OF THAT KIND's cells, so a corner rule only ever
+--     competes with corner rules; and
+--   * a high rule id draws from what the lower ids left. Ordering is not
+--     cosmetic here.
+--
+-- Candidate pools. The theme-3 kit does not exist yet - K2 builds it into
+-- `t1b-v40` - so these are the THEME 2 (city) masks, because F2 puts the
+-- forest on the city geometry (spec D7: "Tier b on the city geometry ...
+-- layout version unchanged, same masks"). The theme-1 numbers are given
+-- beside them as the other end of the bracket; the budget below was run
+-- against BOTH and the two answers agree to within 1 %.
+--
+--   role                wall_foot                corner              scatter
+--                       th2        (th1)         th2      (th1)      th2         (th1)
+--   room                 9..20(15.4) 9..16(13.4)  4 (4.0)  4..6(4.7)  2..13(6.8)  2..13(8.5)
+--   room_boss           16   (16.0) 14..16(15.0)  4 (4.0)  4..6(5.0) 10..13(11.1) same
+--   room_entrance       16   (16.0) 14..16(15.0)  4 (4.0)  4..6(5.0) 10..13(11.1) same
+--   corridor_straight    7..8 (7.5)  same         0..2(1.0) same      0..2 (1.0)  same
+--   corridor_corner      6..7 (6.8)  same         0..1(0.2) same      0..1 (0.2)  same
+--   corridor_t           9..10(9.5)  same         0   (0.0) same      0..1 (0.5)  same
+--   corridor_cross      12   (12.0)  same         0   (0.0) same      1    (1.0)  same
+--   corridor_dead_end    4    (4.0)  same         0..1(0.5) same      0    (0.0)  same
+--
+-- `roleFilter` is a PREFIX match, so 'room' also matches room_boss and
+-- room_entrance and 'corridor' matches all five corridor variants - the same
+-- semantics mod_pdungeon_decor.sql documents.
+--
+-- minSpacingYd follows the shipped convention exactly: 8 for wall feet and
+-- corners (one cell, 8.33 yd, rounded down) and 12 for scatter (one and a
+-- half cells). The check is per rule, not across rules - which is also why
+-- the two fallen trees were SCALED to fit inside it; see the note below.
+--
+-- ----------------------------------------------------------------------------
+-- WHY THE CAMPFIRE TAKES THE FIRST NEW ID, AND WHY IT NEVER GOES MISSING
+--
+-- Rule 34 is the boss-room campfire, for the reason the mine's header gives
+-- about its brazier: rules draw in ascending id order out of one shared,
+-- consumed pool, and a rule that finds an empty pool places nothing however
+-- high its minPerBlock is. A boss room's CORNER pool is exactly 4 cells on
+-- the city masks. At id 34, behind the shipped corner rules 10 and 11 (share
+-- 1 each at the new total weight), the campfire lands **1.000 times per boss
+-- room** - measured over 40 000 boss rooms, i.e. it is never missing. Moved
+-- to the end of the file it would draw from what rules 40 and 41 left and
+-- start failing.
+--
+-- It is a CORNER rule and not a wall_foot one, and that is what saves the
+-- shipped boss-room brazier: corner weights compete only with corner weights,
+-- so rule 2 (910021 PD Brazier, wall_foot, boss rooms) measures 1.496 with
+-- the forest loaded against 1.500 without it - unmoved. The mine, whose
+-- crystals are wall-foot rules, cut that same brazier from 1.50 to 1.00.
+--
+-- ----------------------------------------------------------------------------
+-- WHAT THIS DOES TO THE SHIPPED RULES (measured, 40 000 blocks per figure,
+-- props actually placed per block, city = theme 2 masks with rules 1-14 only,
+-- forest = theme 2 masks with rules 1-14 + 34-46)
+--
+--   rule                              city    forest
+--   1  torch, room wall foot          2.00    1.93     <- D4: the torches stay
+--   1  torch, boss wall foot          2.00    2.01
+--   2  PD Brazier, boss wall foot     1.50    1.50     <- untouched, see above
+--   4/5 barrel + crate, room          1.00    0.78
+--   4/5 barrel + crate, boss room     1.00    0.66
+--   6/7/8 shelf/bench/table, room     0.50    0.50     <- untouched
+--   10/11 crate stacks, room corner   0.99    0.67
+--   13 rubble, room scatter           1.28    1.27     <- untouched
+--   14 skeletons, boss scatter        1.99    2.00     <- untouched
+--   3  torch, corridor wall foot      0.50    0.50     <- untouched
+--   9  plague barrel, corridor        0.50    0.50     <- untouched
+--
+-- Only two shipped rules move at all. The crate/barrel pair loses a fifth of
+-- its wall feet and the corner crate stacks a third - the same trade the mine
+-- made, and in a forest a stack of city crates in the corner is exactly the
+-- prop that should thin out. Everything else, torches included, is inside
+-- measurement noise.
+--
+-- ----------------------------------------------------------------------------
+-- *** BUDGET: FITS UNDER PD_DECOR_MAX_SPOTS = 450 WITH 30 % TO SPARE ***
+--
+-- `PD_DECOR_MAX_SPOTS` (src/generator/PDv2DecorPlan.h:93) is 450 since F1, and
+-- the cut is taken at the END in plan order - so an overflowing layout loses
+-- the dressing of its LAST blocks, which is where the boss room usually sits.
+-- This rule set never reaches it.
+--
+-- Measured by replaying BuildDecorPlan's placement (pools, the share formula,
+-- pool consumption on every draw used or rejected, the 3.0 yd anchor
+-- clearance and per-rule minSpacing), 8 000 layouts per row, over the real
+-- `pdungeon_chunk_meta` masks and anchors. The replay was CALIBRATED against
+-- the two figures Round F / F1 published in mod_pdungeon_decor_mine.sql
+-- before it was trusted - same method, same three layout sizes:
+--
+--   layout                     city F1 says    this replay    mine F1 says   this replay
+--    5 rooms +  8 corridors     37..73 (55)    39..82 (60)    77..130 (104)  82..140 (110)
+--   10 rooms + 15 corridors     79..139(106)   82..140(111)  160..241 (201) 162..247 (208)
+--   15 rooms + 20 corridors    120..189(155)  125..196(159)  238..346 (294) 247..367 (303)
+--
+-- - minima within 2-9 props, means 3-6 % high (the replay draws its corridor
+-- role mix from a fixed distribution rather than from a real spine, which is
+-- the only free parameter left in it). It over-states, which is the safe
+-- direction for a budget. The forest, same method:
+--
+--   layout                     theme-2 (city) masks   theme-1 (mine) masks
+--    5 rooms +  8 corridors      77..122 (100.6)        74..122  (99.4)
+--   10 rooms + 15 corridors     156..224 (186.5)       149..218 (186.4)
+--   15 rooms + 20 corridors     230..311 (269.1)       228..313 (269.8)
+--
+-- 0 of 8 000 layouts crossed 450 at any size on either mask set, and the
+-- worst layout seen anywhere was 313 props - 70 % of the ceiling. The forest
+-- is deliberately LIGHTER than the mine (269 against 303 at the cap) because
+-- its wall props are big: two fallen trees and a lantern at 1.5/1.5/1.4 per
+-- room replace six mine rules that averaged 1.8 each.
+--
+-- The deployed default is `ProceduralDungeon.V2.Rooms = 5`, so ordinary runs
+-- sit around 100 props; `GameRoomsCap` allows 15 from dlvl 12 up, which is
+-- the 269/313 row above.
+--
+-- ONE THING THIS CANNOT PROVE: the theme-3 walk masks do not exist yet (K2
+-- writes them into kit `t1b-v40`). The two mask sets above bracket what K2
+-- can produce on the same 8x8 block geometry, and they agree, but the real
+-- numbers must be re-read from a theme-3 kit before anyone calls this
+-- measured rather than bracketed.
+-- ----------------------------------------------------------------------------
+
+-- Idempotent re-apply: delete this file's own thirteen ids, then insert.
+-- Never DROP and never a BETWEEN range - an operator who added rules of their
+-- own keeps them, and so do the thirty-three rules this file does not own.
+DELETE FROM `pdungeon_decor_rules` WHERE `id` IN (
+    34, 35, 36, 37, 38, 39, 40, 41, 42, 43,
+    44, 45, 46
+);
+INSERT INTO `pdungeon_decor_rules`
+    (`id`,`theme`,`roleFilter`,`goEntry`,`placement`,`minPerBlock`,`maxPerBlock`,`weight`,`minSpacingYd`) VALUES
+-- The boss room's fire, first in the file for the ordering reason above, and
+-- exactly one per boss room: a camp has one fire. Measured 1.000/boss room.
+(34, 3, 'room_boss', 910091, 'corner',    1, 1, 120,  8),
+-- Wall feet: the two fallen trees. These are the blockers spec D7 names - a
+-- trunk lying along the wall that a player has to walk around, which is what
+-- makes a forest room feel enclosed without a facade. 1..2 each, so a room
+-- carries two or three trunks and never a fence of them. Both are SCALED
+-- DOWN to Blizzard's own type-5 precedent (0.58 / 0.65) so the yawed model
+-- fits inside the 8 yd minSpacing rather than overlapping the next wall-foot
+-- prop: 8.91 and 7.96 yd long at those sizes. Full arithmetic per row in
+-- mod_pdungeon_templates_fix.sql.
+(35, 3, 'room',      910087, 'wall_foot', 1, 2,  90,  8),
+(36, 3, 'room',      910088, 'wall_foot', 1, 2,  90,  8),
+-- The lantern post: the forest's OWN light, beside the shipped torch rather
+-- than instead of it (rule 1 keeps 1.93 per room - see the table above). A
+-- night elf lantern is 2.06 yd tall and reads at range, which the mine's
+-- crystals did for the mine.
+(37, 3, 'room',      910092, 'wall_foot', 1, 2,  70,  8),
+-- Fences, deliberately at FEATHER weight (20, the same figure the mine's
+-- clutter uses): a paddock rail against the wall is a grace note, not the
+-- theme. 0..1 each means roughly four rooms in ten show one, measured 0.415
+-- and 0.400 per room. 910089 carries its 4.29 yd on local X, so it juts half
+-- a cell out from the wall like a broken rail; 910090 carries its 3.20 yd on
+-- local Y and lies flat along it. Two ids for two silhouettes.
+(38, 3, 'room',      910089, 'wall_foot', 0, 1,  20,  8),
+(39, 3, 'room',      910090, 'wall_foot', 0, 1,  20,  8),
+-- Corners: a stump and a mushroom cluster wedged into an angle, 0..1 each.
+-- The corner pool is only 4 cells on the city masks and the shipped crate
+-- stacks (10/11) draw first, so these land in roughly one room in two -
+-- occasional by design, not a second ring.
+(40, 3, 'room',      910093, 'corner',    0, 1,  60,  8),
+(41, 3, 'room',      910094, 'corner',    0, 1,  60,  8),
+-- Scatter, rooms: the same two on open floor, 0..2 each. Only TWO scatter
+-- ids against the mine's six, because the mine had six distinct pieces of
+-- industrial clutter and the forest's floor litter is stumps and fungus; a
+-- third identical stump would be a name, not a silhouette. Weight 20 for the
+-- reason the mine's header gives - at 60 the shipped rubble rule 13 would be
+-- capped, and at 20 it stays uncapped (1.28 -> 1.27, measured).
+(42, 3, 'room',      910093, 'scatter',   0, 2,  20, 12),
+(43, 3, 'room',      910094, 'scatter',   0, 2,  20, 12),
+-- Corridors. NO fallen tree here, deliberately: a corridor lane is 16.67 yd
+-- wide, its wall-foot cells are the ones flanking the socket track, and a
+-- 9 yd trunk lying in one of them narrows the one line every player and every
+-- patrol has to walk. `PDv2InstanceScript::BuildPropCells` makes a prop a
+-- COST for the patrol planner rather than a wall, so it would not break a
+-- beat - it would just make every corridor tighter for no gain. The corridor
+-- gets the flat rail instead (0.30 x 3.20 x 1.76 yd, lies along the wall) and
+-- floor litter.
+(44, 3, 'corridor',  910090, 'wall_foot', 0, 1,  25,  8),
+-- Scatter, corridors: a corridor has at most ONE open cell clear of its
+-- anchors, so at most one of these two ever fires and the first rule that
+-- wants that cell takes it. Measured over the shipped corridor mix: 0.125 for
+-- the mushrooms, 0.061 for the stump. The order is the choice of what a
+-- forest path shows, and fungus on a damp trail beats a stump in the middle
+-- of it.
+(45, 3, 'corridor',  910094, 'scatter',   0, 1,  20, 12),
+(46, 3, 'corridor',  910093, 'scatter',   0, 1,  20, 12);
