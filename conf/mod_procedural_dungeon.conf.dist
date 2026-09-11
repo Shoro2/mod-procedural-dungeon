@@ -520,6 +520,28 @@ ProceduralDungeon.V2.Loot.BonusRollPct = 15
 #
 #                     0 is refused (it is not an item and every grant would
 #                     fail silently). Retire a tier with its ChancePct below.
+#
+#                     WP12 (2026-09-11): THESE FIVE ARE CURRENCY TOKENS. They
+#                     live in the character sheet's Currency tab, not in the
+#                     bags: mod_pdungeon_currency.sql gives them class 10 and
+#                     BagFamily 8192, so the core stores every grant in the 32
+#                     hidden currency slots. Three consequences an operator
+#                     should know -
+#                       * they cost no bag space, and T1 drops from every mob;
+#                       * neither mod-loot-filter nor the Endless Storage can
+#                         take them any more. Both deposit predicates only
+#                         accept classes 9 / 0+5 / 7 / 3, which is why the
+#                         Remnants USED to slip into the storage and become
+#                         unspendable; V2.Loot.MatsToStorage's by-entry guard
+#                         below is now belt AND braces;
+#                       * the Forgotten Talents tree is unaffected - it pays
+#                         with HasItemCount / DestroyItemCount and the core
+#                         counts the currency slots alongside the bags.
+#                     Remnants a character earned BEFORE this change stay in
+#                     the bags until that character's next login, where the
+#                     module moves them across once and says so in the log.
+#                     Point a tier at an item whose template is NOT a currency
+#                     token and that tier simply behaves the old way.
 #        Default:     920105 / 920106 / 920107 / 920108 / 920109 - the rows
 #                     mod_pdungeon_currency.sql creates
 #

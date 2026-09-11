@@ -17,12 +17,16 @@
 
 #include "PDClientLink.h"
 
+#include "Bag.h"
 #include "Chat.h"
 #include "Config.h"
 #include "DBCStructure.h"
 #include "DatabaseEnv.h"
 #include "GameTime.h"
+#include "Item.h"
+#include "ItemTemplate.h"
 #include "Log.h"
+#include "ObjectMgr.h"
 #include "Opcodes.h"
 #include "PDDefines.h"
 #include "PDv2InstanceScript.h"
@@ -34,6 +38,7 @@
 #include "WorldSession.h"
 
 #include <cstdlib>
+#include <vector>
 
 namespace PDungeon
 {
@@ -310,6 +315,160 @@ namespace PDungeon
     }
 }
 
+namespace
+{
+    // WP12 (2026-09-11): the five Remnants became CURRENCY TOKENS
+    // (mod_pdungeon_currency.sql - class 10, BagFamily 8192). New grants land
+    // in the hidden currency slots by themselves, because Player::CanStoreItem
+    // routes every IsCurrencyToken() item into
+    // CURRENCYTOKEN_SLOT_START..CURRENCYTOKEN_SLOT_END before it ever looks at
+    // a bag (PlayerStorage.cpp:1462-1464), and Player::AddItem goes through
+    // that same CanStoreNewItem (Player.cpp:15805-15825).
+    //
+    // A stack that PRE-DATES the change does NOT move on its own, and this is
+    // the whole reason this function exists. _LoadInventory re-seats a
+    // backpack item with CanStoreItem(INVENTORY_SLOT_BAG_0, slot, ...) - an
+    // EXACT slot, not a search (PlayerStorage.cpp:5943-5947) - and an item
+    // inside a bag with CanStoreItem(bagSlot, slot, ...)
+    // (:5983-5987). CanStoreItem_InSpecificSlot only ever refuses the reverse
+    // case, a NON-token aimed at a token slot (:936-937); it has no rule that
+    // keeps a token out of a bag, and ItemCanGoIntoBag says yes for any
+    // ITEM_SUBCLASS_CONTAINER (Item.cpp:182-188). So the old stack loads back
+    // into the same bag slot with EQUIP_ERR_OK: not relocated, not mailed,
+    // just sitting there, still eating a bag slot and still eligible for the
+    // Endless Storage's deposit button.
+    //
+    // Collect-all, then destroy-all, then ONE AddItem per entry - in that
+    // order, on purpose. Destroying one stack and re-adding it immediately
+    // would let CanStoreItem's merge pass over the bags
+    // (PlayerStorage.cpp:1364) fold the count into a SECOND old stack that is
+    // still lying in another bag, which both leaves it in the bags and makes
+    // the count we remembered for that second stack wrong.
+    //
+    // The guard is the template, not the conf: with the SQL unapplied
+    // IsCurrencyToken() is false for all five and this function does nothing.
+    // That also covers the case where the SQL IS applied but the
+    // currencytypes_dbc rows are missing, since ObjectMgr::LoadItemTemplates
+    // strips the BagFamily bit again in that case (ObjectMgr.cpp:3820-3828).
+    void RelocateCurrencyTokens(Player* player)
+    {
+        PDungeon::PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        uint32 movedEntries = 0;
+        uint32 movedTotal = 0;
+
+        for (uint32 const entry : cfg.lootCurrencyItem)
+        {
+            if (!entry)
+            {
+                continue;
+            }
+
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
+            if (!proto || !proto->IsCurrencyToken())
+            {
+                continue;
+            }
+
+            std::vector<uint16> found;
+            uint32 total = 0;
+
+            // Positions rather than Item*, because every one of them is
+            // destroyed before the first of them is read again.
+            auto note = [&](uint8 bag, uint8 slot)
+            {
+                Item* item = player->GetItemByPos(bag, slot);
+                if (!item || item->GetEntry() != entry)
+                {
+                    return;
+                }
+                found.push_back(static_cast<uint16>(bag) << 8 | slot);
+                total += item->GetCount();
+            };
+
+            // Backpack and bank main slots. The token slots themselves are
+            // deliberately not walked - an item already there is where it
+            // belongs - and neither is the keyring, which only accepts
+            // BAG_FAMILY_MASK_KEYS.
+            for (uint8 slot = INVENTORY_SLOT_ITEM_START;
+                 slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            {
+                note(INVENTORY_SLOT_BAG_0, slot);
+            }
+            for (uint8 slot = BANK_SLOT_ITEM_START;
+                 slot < BANK_SLOT_ITEM_END; ++slot)
+            {
+                note(INVENTORY_SLOT_BAG_0, slot);
+            }
+
+            // Equipped bags and bank bags. GetBagByPos answers for both ranges
+            // and nullptr for an empty slot (PlayerStorage.cpp:460-467).
+            for (uint8 bag = INVENTORY_SLOT_BAG_START;
+                 bag < INVENTORY_SLOT_BAG_END; ++bag)
+            {
+                if (Bag* container = player->GetBagByPos(bag))
+                {
+                    for (uint32 slot = 0; slot < container->GetBagSize(); ++slot)
+                    {
+                        note(bag, static_cast<uint8>(slot));
+                    }
+                }
+            }
+            for (uint8 bag = BANK_SLOT_BAG_START; bag < BANK_SLOT_BAG_END; ++bag)
+            {
+                if (Bag* container = player->GetBagByPos(bag))
+                {
+                    for (uint32 slot = 0; slot < container->GetBagSize(); ++slot)
+                    {
+                        note(bag, static_cast<uint8>(slot));
+                    }
+                }
+            }
+
+            if (found.empty() || !total)
+            {
+                continue;
+            }
+
+            for (uint16 const pos : found)
+            {
+                player->DestroyItem(static_cast<uint8>(pos >> 8),
+                                    static_cast<uint8>(pos & 0xFF), true);
+            }
+
+            if (!player->AddItem(entry, total))
+            {
+                // Only reachable with all 32 token slots already full of OTHER
+                // currencies - this entry's own stacks were just freed, and
+                // AddItem splits across as many slots as the stack size needs.
+                // Loud rather than silent: the count is gone and an operator
+                // has to hand it back.
+                LOG_ERROR(PDungeon::PD_LOG,
+                          "PDv2 currency: LOST {} x item {} while relocating "
+                          "{} into the currency slots - no room. Restore by "
+                          "hand (.additem {} {}).",
+                          total, entry, player->GetName(), entry, total);
+                continue;
+            }
+
+            ++movedEntries;
+            movedTotal += total;
+        }
+
+        if (movedEntries)
+        {
+            // Once per character, ever - not PDv2Debug()-gated, because this
+            // is a one-off data migration and its absence from the log is the
+            // only evidence that a character never carried a bagged Remnant.
+            LOG_INFO(PDungeon::PD_LOG,
+                     "PDv2 currency: moved {} Remnants across {} tiers out of "
+                     "{}'s bags into the currency slots (one-time migration to "
+                     "the Round-E currency tokens)",
+                     movedTotal, movedEntries, player->GetName());
+        }
+    }
+}
+
 // The two hooks that make the link work without a core patch: addon whispers
 // come through OnPlayerBeforeSendChatMessage (it fires for LANG_ADDON,
 // ChatHandler.cpp:364), and the entry gate rides OnPlayerCanEnterMap
@@ -375,6 +534,11 @@ public:
         // beat this load would size the dungeon off stale defaults.
         sPDv2Mgr->LoadAccountState(accountId);
         sPDv2Mgr->LoadPlanFromDB(accountId);
+        // One-time per character: Remnants earned before WP12 are still in the
+        // bags, and nothing in the core moves them. Safe here - this hook runs
+        // at CharacterHandler.cpp:1113, long after _LoadInventory and after the
+        // player is in the world, so AddItem's SendNewItem reaches the client.
+        RelocateCurrencyTokens(player);
     }
 
     void OnPlayerBeforeSendChatMessage(Player* player, uint32& type, uint32& lang,
