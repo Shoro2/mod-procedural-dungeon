@@ -81,7 +81,7 @@ Same shape and discipline as F1's Task 3 (`mod_pdungeon_packs_mine.sql`, `mod_pd
 `.superpowers/sdd/f1-task-3-report.md`).
 - `mod_pdungeon_packs_forest.sql`: packs 12 **Wailing Caverns** (Deviate / Druids of the Fang: e.g. 3636, 3637, 3638, 3654,
   3669 Lord Cobrahn, 3670 Lord Pythas, 3671 Lady Anacondra, 3673 Lord Serpentis, 3674 Skum, 3653 Kresh, 5775 Verdan), 13
-  **Maraudon** (Razorfen? no — Maraudon: Theradrim / Noxxion / Landslide / Rotgrip / Celebras / Princess Theradras family; choose
+  **Maraudon** (Theradrim / Noxxion / Landslide / Rotgrip / Celebras / Princess Theradras family; choose
   10–12 members), 14 **Razorfen** (Kraul/Downs quilboar: 4416–4442 family, bosses Charlga Razorflank 4421, Agathelos 4422,
   Aggem Thorncurse 4424, Overlord Ramtusk 4420, Tuten'kash 7355, Amnennar 7358). Rules: `theme 3`, `level 80/80`, `unlock_dlvl 0`,
   `enabled 1`, weights 100, roles 0/1/2 with casterSpellId on role 1 only (the shipped `69211`/`60015` law); every entry checked
