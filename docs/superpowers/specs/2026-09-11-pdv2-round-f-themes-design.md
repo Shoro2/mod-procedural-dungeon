@@ -1,7 +1,7 @@
 # PDv2 Round F — more themes: finish the Mine, then the Forest — Design
 
 **Status 2026-09-11: operator picked "erst Mine fertigstellen, dann Wald" after the ranked feasibility table (recons
-`.superpowers/sdd/roundf-recon-a.md` / `roundf-recon-b.md`). F1 (Mine) planned; F2 (Forest) planned after F1's T2.**
+`.superpowers/sdd/roundf-recon-a.md` / `roundf-recon-b.md`). F1 (Mine) BUILT + STAGED 2026-09-11 on the workbench (worldserver `e5118ffea825`, branch `claude/pdv2-round-f-63ac9a2a`, T2 = `tools/pd_testlauf_runde32.md` section 1); F2 (Forest) planned after F1's T2.**
 
 ## 1. What we measured
 
