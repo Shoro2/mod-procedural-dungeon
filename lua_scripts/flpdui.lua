@@ -119,14 +119,15 @@ local function ToNumbers(fields, count)
 end
 
 -- How many numeric fields the C payload carries before its free-text tail. The
--- server only ever APPENDS to that list and this number moves in lockstep: 26
--- since the stat profile (25) and its unlock flag (26) went on the wire ahead of
--- the tail. A worldserver from before them sends 24, its verdict text lands in
--- fields 25/26, ToNumbers refuses it and the payload is dropped WHOLE - the
--- panel keeps asking and reads "..." rather than showing a profile nobody sent.
--- That is the intended failure and not a compatibility bug: this addon and the
--- worldserver that speaks to it are deployed together.
-local CFG_FIELDS = 26
+-- server only ever APPENDS to that list and this number moves in lockstep: 28
+-- since the chosen theme (27) and the highest theme the loaded kit can build
+-- (28) went on the wire ahead of the tail, behind the stat profile (25) and its
+-- unlock flag (26). A worldserver from before the theme pair sends 26, its
+-- verdict text lands in fields 27/28, ToNumbers refuses it and the payload is
+-- dropped WHOLE - the panel keeps asking and reads "..." rather than showing a
+-- theme nobody sent. That is the intended failure and not a compatibility bug:
+-- this addon and the worldserver that speaks to it are deployed together.
+local CFG_FIELDS = 28
 
 local function ParseCfg(body)
     local f = SplitHead(body, CFG_FIELDS)
@@ -150,6 +151,13 @@ local function ParseCfg(body)
         -- - the server refuses `SET statprofile` on its own side while the
         -- talent is missing, exactly as it does for the band row.
         statProfile = f[25], statUnlocked = f[26],
+        -- The account's theme for the NEXT generation (0 = follow the server's
+        -- own V2.Theme) and the highest theme id the loaded kit can build. Both
+        -- are the server's word: this panel knows neither which themes exist
+        -- nor what the conf default is, it only moves the knob between 0 and
+        -- the ceiling it was handed - which is how a kit that learns a new
+        -- theme widens this row without a new addon.
+        cfgTheme = f[27], themeMax = f[28],
         verdictText = f.tail,
     }
 
@@ -161,6 +169,12 @@ local function ParseCfg(body)
        c.casterMin > c.casterMax or c.bandLo > c.bandHi then
         return nil
     end
+    -- The theme slider's LOW bound does not travel, because it is the wire
+    -- contract itself: 0 ("follow the server's V2.Theme") is always a legal
+    -- choice, so a themeMax under it is the same "lo > hi" the line above
+    -- refuses. A server with exactly one theme sends 0 and gets a one-stop
+    -- slider reading "Standard", which is the honest picture of it.
+    if c.themeMax < 0 then return nil end
     return c
 end
 
@@ -265,7 +279,17 @@ end
 -- ============================================================================
 
 local PANEL_W = 420
-local PANEL_H = 364            -- +20 current-depths (2026-08-07), +14 affixes
+-- +20 current-depths (2026-08-07), +14 affixes, +64 the theme row (2026-09-11).
+-- The theme row is NOT optional - every account has a theme and the server
+-- sends the pair in every C - so its height belongs to the base panel instead
+-- of to one of LayoutPanel's conditional terms. The 64 is summed, not
+-- eyeballed, the way the profile row's is: 26 of gap from the difficulty
+-- slider down to it + 17 of slider (OptionsSliderTemplate's own height) + 11
+-- of gap to its hint line + 10 of hint line. Everything below keeps the 26 it
+-- always had to the casters slider, so every row under the new one moves down
+-- by exactly these 64 and no combination of the three optional rows needs its
+-- own number.
+local PANEL_H = 428
 local BAND_ROW_H = 52           -- what the hidden band row would add back
 -- What the hidden stat-profile row would add back, summed rather than guessed:
 -- 26 of gap to the slider + 17 of slider (OptionsSliderTemplate's own height)
@@ -348,8 +372,24 @@ local function RenderBand(v)
     return string.format("%d-%d", v, v + cfg.bandStep - 1)
 end
 
--- The stat profile is the one slider whose value is a WORD. 0..3 travels on the
--- wire and lives in the account column because that is what the SET verb and the
+-- The theme's value is a WORD too, and it is the one label in this panel the
+-- server does not send: the list lives on the CLIENT, indexed by the very id
+-- the wire carries, and themeMax says how far it may be read (spec D8). That
+-- is not the forbidden copy of a server-owned value - the names are art, not
+-- rules, and no decision hangs on them - but the ids underneath them are the
+-- contract, so a theme this table has no word for still prints its NUMBER:
+-- hiding a choice the server would accept is worse than showing it unnamed, and
+-- "..." would claim the server had said nothing when it had.
+local THEME_NAMES = { [0] = "Standard", [1] = "Mine", [2] = "Stadt", [3] = "Wald" }
+local function RenderTheme(v)
+    local name = THEME_NAMES[v]
+    if name then return name end
+    if type(v) ~= "number" then return "..." end
+    return string.format("%d", v)
+end
+
+-- The stat profile's value is a WORD as well. 0..3 travels on the wire and
+-- lives in the account column because that is what the SET verb and the
 -- engine's PD_STAT_PROFILE_* take; the player never sees the number. A value the
 -- server clamps to that range can only arrive outside it if the two sides have
 -- stopped agreeing, and then this reads "..." like every other widget that has
@@ -396,7 +436,26 @@ end
 -- decision (01 §8), so its step travels on the wire like every other bound.
 local roomsSlider = MakeSlider("FLPDRoomsSlider", "Rooms", RenderRooms, "rooms", sep1, -20)
 local diffSlider = MakeSlider("FLPDDiffSlider", "Difficulty", RenderDiff, "diff", roomsSlider, -26)
-local casterSlider = MakeSlider("FLPDCasterSlider", "Casters", RenderCaster, "caster", diffSlider, -26)
+-- The look is picked before the numbers, so the theme row sits directly under
+-- the difficulty slider and above the casters one. Unlike the two rows below
+-- it, it is ALWAYS up: there is no flag to hide it behind, every account has a
+-- theme and the server sends the pair in every C - which is why it costs no
+-- branch in LayoutPanel and its height simply belongs to PANEL_H.
+local themeSlider = MakeSlider("FLPDThemeSlider", "Theme", RenderTheme, "theme",
+                               diffSlider, -26)
+
+-- What the row does, said once under it the way the stat-profile row says it: a
+-- theme takes effect on the NEXT Generate and leaves the depths the account
+-- already holds exactly as they were rolled (the server freezes the theme into
+-- the stored layout). No SetWidth on purpose - an unwrapped FontString is one
+-- line tall, which is the line PANEL_H's 64 pays for - and the copy is kept
+-- short enough that it can never run past the panel border, which Panel would
+-- not clip.
+local themeHint = Panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+themeHint:SetPoint("TOP", themeSlider, "BOTTOM", 0, -11)
+themeHint:SetText("|cffaaaaaaApplies to the next Generate|r")
+
+local casterSlider = MakeSlider("FLPDCasterSlider", "Casters", RenderCaster, "caster", themeHint, -26)
 -- The stat-profile row sits between the casters slider and the band row, in the
 -- order the two optional rows were added. Both anchors passed here are the
 -- "neither optional row is up" case: from here on LayoutPanel owns where the
@@ -578,8 +637,15 @@ local function ApplyCfg(c)
 
     ApplySlider(roomsSlider, c.rooms, c.roomsMin, c.roomsMax, 1)
     ApplySlider(diffSlider, c.diff, c.diffMin, c.diffMax, c.diffStep)
+    -- 0 is the one bound this slider does not read off the wire, because it is
+    -- the wire contract itself: "follow the server's own V2.Theme" is always an
+    -- allowed choice. The ceiling IS the server's - themeMax is the highest
+    -- theme the loaded kit can build - so a kit that learns a forest raises
+    -- this row on its own, and a panel that outlives its server never offers a
+    -- theme that worldserver would refuse.
+    ApplySlider(themeSlider, c.cfgTheme, 0, c.themeMax, 1)
     ApplySlider(casterSlider, c.caster, c.casterMin, c.casterMax, 1)
-    -- The only slider whose bounds do NOT arrive on the wire, and the exception
+    -- The only slider whose bounds BOTH stay off the wire, and the exception
     -- proves the rule: 0..3 is the wire contract itself - the four values the
     -- SET verb accepts and the four names the addon can render - not a tuning
     -- number the server may move under us. A fifth profile is a new payload and
