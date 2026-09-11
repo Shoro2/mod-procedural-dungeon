@@ -173,7 +173,7 @@ local function ParseCfg(body)
     -- contract itself: 0 ("follow the server's V2.Theme") is always a legal
     -- choice, so a themeMax under it is the same "lo > hi" the line above
     -- refuses. A server with exactly one theme sends 0 and gets a one-stop
-    -- slider reading "Standard", which is the honest picture of it.
+    -- slider reading "Default", which is the honest picture of it.
     if c.themeMax < 0 then return nil end
     return c
 end
@@ -380,7 +380,7 @@ end
 -- contract, so a theme this table has no word for still prints its NUMBER:
 -- hiding a choice the server would accept is worse than showing it unnamed, and
 -- "..." would claim the server had said nothing when it had.
-local THEME_NAMES = { [0] = "Standard", [1] = "Mine", [2] = "Stadt", [3] = "Wald" }
+local THEME_NAMES = { [0] = "Default", [1] = "Mine", [2] = "City", [3] = "Forest" }
 local function RenderTheme(v)
     local name = THEME_NAMES[v]
     if name then return name end
