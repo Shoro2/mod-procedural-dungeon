@@ -288,6 +288,35 @@ namespace
 
     std::map<int, KitChunk> g_kit;
 
+    // Round F / K2: how many theme namespaces the staged kit actually ships,
+    // read off the chunk ids themselves. The id scheme is themeBase +
+    // alt*1000 + role*100 + mask with themeBase 2000 / 12000 / 22000, so
+    // id / 10000 is the theme index minus one - the same arithmetic
+    // ThemeChunkIdBase and script 48's THEME_BASES agree on.
+    //
+    // It exists because the theme count is the ONE factor in this file's
+    // inventory sweep that moves every time a look is added (Phase 4 shipped
+    // 2, K2 ships 3, the conf window reserves 9), while the factors that
+    // state the CONTRACT - 15 socket masks, AltCountFor's alt count - do not.
+    int KitThemeCount()
+    {
+        unsigned seen = 0;
+        for (auto const& kv : g_kit)
+        {
+            int const idx = kv.first / 10000;
+            if (idx >= 0 && idx < 32)
+            {
+                seen |= 1u << idx;
+            }
+        }
+        int n = 0;
+        for (int b = 0; b < 32; ++b)
+        {
+            n += (seen >> b) & 1u;
+        }
+        return n;
+    }
+
     bool LoadKitMeta(char const* path)
     {
         FILE* fh = std::fopen(path, "rb");
@@ -843,7 +872,24 @@ namespace
     // counts moved" message, never by reasoning about the value. `rejected` is
     // the size of the defect the Round C fix removes: pairs the shipped
     // Bresenham sampler approved and the supercover test does not.
-    char const* const PD_SUPERCOVER_PAIRS_PIN = "291480,9604;";
+    //
+    // Round F / K2 (2026-09-11): 291480,9604 -> 440120,13408. This sweep runs
+    // over EVERY kit walk mask, so a kit that gains a theme moves it by
+    // construction - the pin's domain grew, nothing about themes 1 and 2
+    // changed. Measured rather than argued, by running this same harness
+    // against the kit SQL cut down to each theme subset in turn:
+    //
+    //     theme 1 only  (122 rows)  ->  148640,3804
+    //     themes 1+2    (244 rows)  ->  PIN HELD at 291480,9604
+    //     themes 1+2+3  (366 rows)  ->  440120,13408
+    //
+    // 291480 + 148640 = 440120 and 9604 + 3804 = 13408 exactly, i.e. the
+    // forest added theme 1's own contribution a second time. It does, and this
+    // is the structural fact behind the whole theme: the forest is theme 1's
+    // GEOMETRY under different art (no pad ring, blob alt-1 rooms), and all
+    // 122 of its chunk-meta rows are byte-identical to their theme-1 twin
+    // (id - 20000) in walkMask, patrolClear, patrolDu and patrolDv.
+    char const* const PD_SUPERCOVER_PAIRS_PIN = "440120,13408;";
 
     // Over EVERY kit walk mask and every ordered pair of its walkable cells:
     //   (1) whatever the supercover test approves, the sampled reference approves too
@@ -2489,15 +2535,24 @@ namespace
 
         // The mask-15 room chunk is what a shared host renders as, so its
         // existence in the kit is a precondition of the whole design call, not
-        // a detail of one layout. Stated here over both themes and every alt
+        // a detail of one layout. Stated here over every theme and every alt
         // rather than only where a sweep happens to produce one.
+        //
+        // Round F / K2: theme 3 (forest, base 22000) joins the loop now that
+        // its 122 chunks are in the kit SQL. F3-B reserved that namespace in
+        // the engine while the kit still had none, so the loop was left at
+        // 1..2 then - a theme with no chunk meta would have failed this for a
+        // reason that was not a bug. The bases are spelled out rather than
+        // taken from ThemeChunkIdBase for the same reason
+        // RunThemeThreeNamespaceChecks re-derives its ids: this file states
+        // the contract independently of the code under test.
         if (!g_masks.empty())
         {
-            for (int theme = 1; theme <= 2; ++theme)
+            for (int theme = 1; theme <= 3; ++theme)
             {
                 for (int alt = 0; alt < AltCountFor(BlockRole::Room); ++alt)
                 {
-                    int const base = (theme == 1) ? 2000 : 12000;
+                    int const base = (theme == 1) ? 2000 : (theme == 2) ? 12000 : 22000;
                     int const id = base + alt * 1000 + 15;
                     std::snprintf(msg, sizeof(msg),
                                   "theme %d alt %d: the four-socket room chunk %d has no walk "
@@ -7142,13 +7197,20 @@ namespace
             }
         }
         Check(roomChunks > 0, "no room chunk in kit_meta.json", 0);
-        // Completeness of the sweep, not a sample of it: 15 masks in each of
-        // the two theme namespaces, times the alts that role ships. This is
-        // the check that goes red if the kit ever stops shipping the third
-        // Room look while AltCountFor still promises it.
+        // Completeness of the sweep, not a sample of it: 15 masks in each
+        // theme namespace, times the alts that role ships. This is the check
+        // that goes red if the kit ever stops shipping the third Room look
+        // while AltCountFor still promises it.
+        //
+        // Round F / K2: the theme factor was the literal 2 and is now
+        // KitThemeCount(), because it is the one factor here that moves when
+        // a look is added - and it moved, from 2 to 3, the moment the forest
+        // entered the kit SQL. The other two factors stay literal, which is
+        // where this check's teeth are.
         for (int r = 0; r <= 2; ++r)
         {
-            int const want = AltCountFor(static_cast<BlockRole>(r)) * 15 * 2;
+            int const want = AltCountFor(static_cast<BlockRole>(r)) * 15
+                           * KitThemeCount();
             char msg[160];
             std::snprintf(msg, sizeof(msg),
                           "the spawn-point sweep covered %d chunks of room role %d, "
@@ -7397,8 +7459,26 @@ namespace
     // against, so 8 cells of chunks 13001-13014 changed clearance. The walk masks
     // did NOT move (8410 walkable cells both sides), which is why the no-layer
     // string - a property of the masks alone - is untouched.
-    char const* const PD_PATROL_CLEAR_PIN_NOLAYER = "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:8410:;";
-    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:353:73:635:59:6953:;";
+    // Round F / K2 (2026-09-11): both strings move, and for the same reason as
+    // PD_SUPERCOVER_PAIRS_PIN - the histogram is swept over every chunk the
+    // kit ships and the kit gained a third theme's 122. The delta is exactly
+    // the forest's 4190 walkable cells, all in bucket 15, and NOT ONE other
+    // bucket moved:
+    //
+    //     theme 1 (mine)   4190 walkable cells, 0:...:0:4190
+    //     theme 2 (city)   4220 walkable cells, 0:45:2:0:16:7:187:5:34:15:26:353:73:635:59:2763
+    //     theme 3 (forest) 4190 walkable cells, 0:...:0:4190
+    //     themes 1+2       = the previous pin, 0:45:2:...:59:6953
+    //     themes 1+2+3     = this pin,         0:45:2:...:59:11143
+    //
+    // A theme with no MODF row gets clearance 15 on every walkable cell,
+    // because patrol_clear_grids derives the layer from WMO ground boxes
+    // alone - which is what THEME1_WMO = {} and THEME3_WMO = {} buy, and why
+    // the mine's rock bodies and the forest's tree line cost no pin of their
+    // own. The no-layer string moves by the same 4190: it is a property of the
+    // masks, and there are 122 more of them.
+    char const* const PD_PATROL_CLEAR_PIN_NOLAYER = "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:12600:;";
+    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:353:73:635:59:11143:;";
 
     // The histogram itself, over g_masks and g_patrol rather than over a built
     // grid: this is a statement about the KIT, and a grid only ever holds the
