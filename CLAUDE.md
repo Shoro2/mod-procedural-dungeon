@@ -56,5 +56,17 @@ doc.
   `fl-stream-client`. After changing `EmitManifest`, feed a real manifest
   through the oracle — `pdblock --manifest <seed> <file>` then
   `python 49_pd_compose_blocks.py --manifest <file>` — or the three will drift.
+- **The kit chain is `48 → 51 → 52 → 59 → 49`** (workspace scripts; 48 also
+  regenerates `mod_pdungeon_chunk_meta.sql`, so kit and SQL always move
+  together). `59_kit_seat_check.py` is the seat-rule gate on the wall BAND
+  bodies the mine and the forest wear: it re-reads every band MDDF row out of
+  the staged ADT bytes and proves, per body and without importing anything from
+  48, that its front face sits on the wall-foot line, its base is sunk at least
+  half a yard below it, its yawed box stays inside 16 yd of the foot, its scale
+  is a native 1024, and neither it nor its origin stands on a WALK cell — a rock
+  one yard out is a rock floating in a room, and nothing else in the chain would
+  notice. It runs after 52 (the holes are the last write to the kit) and before
+  49 (a kit that fails this must not be composed), takes about a second, and
+  exits 1 on any failure.
 - AC code style, `-Werror`-clean; run `apps/codestyle/codestyle-cpp.py` from
   the module root before committing.
