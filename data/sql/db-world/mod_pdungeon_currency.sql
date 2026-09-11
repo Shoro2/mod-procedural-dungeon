@@ -96,9 +96,9 @@
 -- Item.dbc - ObjectMgr::LoadItemTemplates skips the whole enforceDBCAttributes
 -- block on `if (!dbcitem) continue;` (ObjectMgr.cpp:3488-3491).
 --
--- THE currencytypes_dbc ROWS BELOW ARE NOT OPTIONAL. Without them the
--- BagFamily bit is silently REMOVED at startup and this file does nothing at
--- all: ObjectMgr::LoadItemTemplates walks the BagFamily bits and, for the
+-- A CurrencyTypes RECORD PER ITEM IS NOT OPTIONAL. Without one the BagFamily
+-- bit is silently REMOVED at startup and this file does nothing at all:
+-- ObjectMgr::LoadItemTemplates walks the BagFamily bits and, for the
 -- currency bit, demands a CurrencyTypes.dbc record for the item -
 --
 --     if (BAG_FAMILY_MASK_CURRENCY_TOKENS & mask)
@@ -108,21 +108,60 @@
 -- (ObjectMgr.cpp:3820-3828). The store is the DBC FILE plus this world table:
 -- DBCStores.cpp:295 loads "CurrencyTypes.dbc" with the db table
 -- "currencytypes_dbc", and LoadDBC reads the file first and merges the table
--- over it (DBCStores.cpp:222+240, DBCDatabaseLoader.cpp:37-133), so the 43 file
--- records survive and these five are added. The order is safe: LoadDBCStores is
--- World.cpp:380 and LoadItemTemplates is World.cpp:525.
+-- over it (DBCStores.cpp:222+240, DBCDatabaseLoader.cpp:37-133). The order is
+-- safe: LoadDBCStores is World.cpp:380 and LoadItemTemplates is World.cpp:525.
+--
+-- SHIPPED STATE (2026-09-11): THE FILE ALREADY CARRIES THESE FIVE. The
+-- workspace generator C:\wowstuff\ForgottenLand2.0\scripts\
+-- 29_build_w19_currency_dbc.py was re-run, and the rebuilt CurrencyTypes.dbc
+-- (789 bytes, WDBC, 48 records of 16 bytes = ID / ItemID / CategoryID /
+-- BitIndex, md5 55220aad4bab60a2dc60befaa64728b7) is byte-identical in all
+-- three places -
+--   C:\wowstuff\dcore\Data\dbc\CurrencyTypes.dbc          (server, read at boot)
+--   C:\wowstuff\ForgottenLand2.0\output\DBFilesClient\    (client staging)
+--   C:\wowstuff\ForgottenLand2.0\dist\dbc\                (client patch source)
+-- Its rows 361-365 are THE SAME FIVE RECORDS as the INSERT below, field for
+-- field, and patch-9.MPQ was rebuilt from the staging copy and deployed to
+-- C:\wowstuff\FL2-Client\Data\, so the client draws the Currency tab entries
+-- from its own patched copy. Nothing about the DBC half is owed any more.
+--
+-- WHICH HALF ACTUALLY SATISFIES THE SERVER: the FILE record does. The rows
+-- below are the checked-in, fresh-clone copy of the same five, and they are NOT
+-- an equivalent substitute on this core version - see the index-table
+-- invariant below.
 --
 -- BitIndex is a bit number in the 64-bit PLAYER_FIELD_KNOWN_CURRENCIES, set as
 -- `1 << (BitIndex - 1)` by Player::AddKnownCurrency (Player.cpp:14358-14362)
 -- whenever a token is stored into a currency slot (PlayerStorage.cpp:2721-2722).
--- Measured on this realm's CurrencyTypes.dbc (43 records, already FL-patched):
--- bit indices 1..46 are in use except 4, 6 and 26, so 47-51 are the first five
--- free ones above the high-water mark and stay well inside the 64-bit field.
--- Row ids 361-365 follow the file's highest id, 360.
--- The id order MUST follow the ItemID order: DBCDatabaseLoader::Load sizes its
--- index table from the FIRST row of `ORDER BY ID DESC` but indexes by ItemID
--- (DBCDatabaseLoader.cpp:38-64), so a high id with a low ItemID would size the
--- table too small. 361->920105 .. 365->920109 rises with both.
+-- Measured over the 48 records: bit indices 1..51 are in use except 4, 6 and
+-- 26, i.e. 47-51 are these five and they stay well inside the 64-bit field.
+-- Row ids 361-365 follow 360, the highest id the file had before them.
+--
+-- THE INDEX-TABLE INVARIANT (measured, and it is not "ids must follow ItemIDs"):
+-- the two loaders key the store DIFFERENTLY.
+--   * The FILE loader indexes by the format's index field, which for
+--     CurrencyTypesfmt "xnxi" (DBCfmt.h:44) is field 1 = ItemID. It sizes the
+--     index table to max(ItemID) + 1 over ALL file records and writes each
+--     record at indexTable[ItemID] (DBCFileLoader.cpp:199-215, :231). That is
+--     what makes sCurrencyTypesStore.LookupEntry(itemTemplate.ItemId) succeed.
+--     Today the sizing record is file row ID 354 / ItemID 920930 (Dust of
+--     Fallen Souls), so the table is 920931 entries wide.
+--   * The DB merge keys on the table's FIRST COLUMN, `ID` - not on ItemID.
+--     DBCDatabaseLoader::_sqlIndexPos is a hard-wired 0: the constructor
+--     computes the format's index position into a local and drops it
+--     (DBCDatabaseLoader.cpp:24-35), so Load() takes fields[0] both for the
+--     sizing (max(fileRecords, highest `ID` + 1), from the first row of
+--     `ORDER BY ID DESC`) and for the write, indexTable[ID]
+--     (:56, :74, :122-125).
+-- Consequences, both of which hold today:
+--   a) a row that exists ONLY here is reachable as LookupEntry(ID) and never as
+--      LookupEntry(ItemID), so it does NOT satisfy the ObjectMgr check above.
+--      A NEW currency item therefore needs a FILE record; adding it here alone
+--      would leave the BagFamily bit stripped at startup.
+--   b) the merge is only harmless while no file record carries an ItemID equal
+--      to one of these row IDs, because such a record would be silently
+--      overwritten by the merged row. Measured: the file's lowest ItemID is
+--      8000 and the row IDs here are 361-365, so nothing collides.
 --
 -- CategoryID 46 is "Forgotten Dungeon" in the realm's already-patched
 -- CurrencyCategory.dbc (11 records: 1 Miscellaneous, 2 Player vs. Player,
@@ -133,17 +172,16 @@
 -- it - so reusing an existing category is what keeps this change to ONE
 -- client-side DBC instead of two.
 --
--- CLIENT HALF, STILL OWED (not done here, this task deploys nothing): the
--- Currency TAB is drawn by the client from the client's OWN CurrencyTypes.dbc,
--- so the five records below must also be added to the client patch before the
--- tab lists them. Today the three copies are byte-identical (md5
--- 3dbeeea4183ba2bc84a0e7df39fd2ac3, 43 records) -
---   C:\wowstuff\dcore\Data\dbc\CurrencyTypes.dbc          (server, read at boot)
---   C:\wowstuff\ForgottenLand2.0\output\DBFilesClient\    (client staging)
---   C:\wowstuff\ForgottenLand2.0\dist\dbc\                (client patch)
--- and the generator is the workspace's scripts\29_build_w19_currency_dbc.py.
--- Everything in THIS file works without that patch - no bag space, not
--- storable, talents still payable - only the tab stays empty until it ships.
+-- CLIENT HALF, DONE (see SHIPPED STATE above): the Currency TAB is drawn by the
+-- client from the client's OWN CurrencyTypes.dbc, so the five had to reach the
+-- client patch before the tab could list them - that is what the patch-9
+-- rebuild delivers. Everything ELSE in this file never depended on it: no bag
+-- space, not storable and talents payable all follow from the server-side
+-- template plus the server's own DBC copy.
+--
+-- A fresh host still needs the DBC file deployed next to the SQL; that is a
+-- client-patch + server-DBC job in its own right (scripts 35/36/39/40 style)
+-- and it carries its own migration-ledger entry.
 -- ----------------------------------------------------------------------------
 
 DELETE FROM `item_template` WHERE `entry` BETWEEN 920105 AND 920109;
@@ -169,8 +207,12 @@ INSERT INTO `item_template`
     (920109, 10, 0, 'Eternal Remnant',   55241, 5, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 1000, 1, 2, 0,
      'Currency of the Forgotten Depths. Spent in the Forgotten Talents tree.');
 
--- The CurrencyTypes records that make the BagFamily bit stick (see above).
--- Entry-exact on both sides, so nothing else in the table or the DBC is touched.
+-- The same five CurrencyTypes records the shipped CurrencyTypes.dbc carries as
+-- its rows 361-365 (see above) - the checked-in copy of them, and the record of
+-- which ids, categories and bit indices this module claimed. The BagFamily bit
+-- is made to stick by the FILE record, not by this merge, because the merge
+-- keys on `ID` rather than `ItemID` (the invariant above).
+-- Entry-exact on both sides, so nothing else in the table is touched.
 DELETE FROM `currencytypes_dbc` WHERE `ItemID` BETWEEN 920105 AND 920109;
 DELETE FROM `currencytypes_dbc` WHERE `ID` BETWEEN 361 AND 365;
 

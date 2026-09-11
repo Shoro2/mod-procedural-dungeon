@@ -338,18 +338,29 @@ namespace
     // just sitting there, still eating a bag slot and still eligible for the
     // Endless Storage's deposit button.
     //
-    // Collect-all, then destroy-all, then ONE AddItem per entry - in that
-    // order, on purpose. Destroying one stack and re-adding it immediately
-    // would let CanStoreItem's merge pass over the bags
-    // (PlayerStorage.cpp:1364) fold the count into a SECOND old stack that is
-    // still lying in another bag, which both leaves it in the bags and makes
-    // the count we remembered for that second stack wrong.
+    // Collect-all, then CHECK THE TOKEN SLOTS, then destroy-all, then ONE
+    // store per entry - in that order, on purpose. Destroying one stack and
+    // re-adding it immediately would let CanStoreItem's merge pass over the
+    // bags (PlayerStorage.cpp:1364) fold the count into a SECOND old stack
+    // that is still lying in another bag, which both leaves it in the bags and
+    // makes the count we remembered for that second stack wrong.
+    //
+    // Nothing is destroyed before the currency slots are known to hold the
+    // whole count. The obvious CanStoreNewItem(NULL_BAG, NULL_SLOT, ...) is
+    // NOT usable as that pre-flight: run while the old stacks are still there,
+    // its merge pass over the backpack (PlayerStorage.cpp:1382) and over the
+    // bags (:1400-1435) hands the whole count to exactly the stacks we are
+    // about to destroy, and _StoreItem then re-creates that count in the
+    // freed bag slot (:2691-2720) - a migration that logs success and moves
+    // nothing. So the room is counted over the token slots by hand first, and
+    // the core query runs afterwards, when the bags are already clean.
     //
     // The guard is the template, not the conf: with the SQL unapplied
     // IsCurrencyToken() is false for all five and this function does nothing.
-    // That also covers the case where the SQL IS applied but the
-    // currencytypes_dbc rows are missing, since ObjectMgr::LoadItemTemplates
-    // strips the BagFamily bit again in that case (ObjectMgr.cpp:3820-3828).
+    // That also covers the case where the SQL IS applied but this realm's
+    // CurrencyTypes.dbc has no record for the entry, since
+    // ObjectMgr::LoadItemTemplates strips the BagFamily bit again in that case
+    // (ObjectMgr.cpp:3820-3828).
     void RelocateCurrencyTokens(Player* player)
     {
         PDungeon::PDv2Config const& cfg = sPDv2Mgr->GetConfig();
@@ -430,26 +441,84 @@ namespace
                 continue;
             }
 
+            // PRE-FLIGHT, before a single stack is destroyed: how much of
+            // this entry the 32 currency slots can still take, counted exactly
+            // the way CanStoreItem_InInventorySlots(CURRENCYTOKEN_SLOT_START,
+            // CURRENCYTOKEN_SLOT_END, ...) counts it
+            // (PlayerStorage.cpp:1058-1106) - an empty slot takes a full
+            // stack, a slot already holding this entry takes the rest of its
+            // stack (Item::CanBeMergedPartlyWith, Item.cpp:867-882, is the
+            // same predicate the core uses there and it guarantees
+            // GetCount() < GetMaxStackSize(), so the subtraction cannot wrap).
+            // uint64 because 32 x GetMaxStackSize() overflows uint32 for an
+            // infinite-stack token.
+            uint32 const maxStack = proto->GetMaxStackSize();
+            uint64 room = 0;
+            for (uint8 slot = CURRENCYTOKEN_SLOT_START;
+                 slot < CURRENCYTOKEN_SLOT_END && room < total; ++slot)
+            {
+                Item* held = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+                if (!held)
+                {
+                    room += maxStack;
+                }
+                else if (held->CanBeMergedPartlyWith(proto) == EQUIP_ERR_OK)
+                {
+                    room += maxStack - held->GetCount();
+                }
+            }
+
+            if (room < total)
+            {
+                // Only reachable with the token slots already full of OTHER
+                // currencies. The stacks stay exactly where they are - losing
+                // them to a migration would be far worse than leaving them in
+                // the bags - and the next login retries.
+                LOG_ERROR(PDungeon::PD_LOG,
+                          "PDv2 currency: {} x item {} STAY in {}'s bags - the "
+                          "32 currency slots have room for {} only. Nothing "
+                          "was destroyed; free a currency slot and the next "
+                          "login moves them.",
+                          total, entry, player->GetName(), room);
+                continue;
+            }
+
             for (uint16 const pos : found)
             {
                 player->DestroyItem(static_cast<uint8>(pos >> 8),
                                     static_cast<uint8>(pos & 0xFF), true);
             }
 
-            if (!player->AddItem(entry, total))
+            // No stack of this entry is left in a bag now, so the NULL_BAG /
+            // NULL_SLOT query can only land in the token slots: its merge pass
+            // finds token stacks alone and its free-slot search takes the
+            // IsCurrencyToken() branch (PlayerStorage.cpp:1462-1464) before it
+            // ever looks at a bag. CanStoreNewItem + StoreNewItem rather than
+            // Player::AddItem because this pair is all-or-nothing, while
+            // AddItem trims the count to whatever fits and still reports
+            // success (Player.cpp:15805-15825). SendNewItem is what AddItem
+            // does on the way out, kept so the client reacts as before.
+            ItemPosCountVec dest;
+            InventoryResult err =
+                player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry, total);
+            Item* stored = err == EQUIP_ERR_OK
+                               ? player->StoreNewItem(dest, entry, true)
+                               : nullptr;
+            if (!stored)
             {
-                // Only reachable with all 32 token slots already full of OTHER
-                // currencies - this entry's own stacks were just freed, and
-                // AddItem splits across as many slots as the stack size needs.
+                // Unreachable unless the pre-flight and the core disagree.
                 // Loud rather than silent: the count is gone and an operator
                 // has to hand it back.
                 LOG_ERROR(PDungeon::PD_LOG,
                           "PDv2 currency: LOST {} x item {} while relocating "
-                          "{} into the currency slots - no room. Restore by "
+                          "{} into the currency slots (err {}). Restore by "
                           "hand (.additem {} {}).",
-                          total, entry, player->GetName(), entry, total);
+                          total, entry, player->GetName(),
+                          static_cast<uint32>(err), entry, total);
                 continue;
             }
+
+            player->SendNewItem(stored, total, true, false);
 
             ++movedEntries;
             movedTotal += total;
