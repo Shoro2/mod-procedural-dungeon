@@ -106,6 +106,66 @@ namespace PDungeon
         return eligible;
     }
 
+    std::vector<int> SelectThemePacks(std::vector<ThemePackInfo> const& packs, int theme,
+                                      bool exclusive)
+    {
+        // Does the run's own look have anything to offer? Asked FIRST and over
+        // the whole list, because the answer decides what every test after it
+        // means - one usable themed pack takes the run, and none at all hands
+        // it back to theme 0 without the themed rows ever being looked at
+        // again. The `theme != 0` guard is the degenerate case: theme 0 is not
+        // a look, it is the absence of one, so it can never be its own theme.
+        bool themedUsable = false;
+        if (theme != 0)
+        {
+            for (ThemePackInfo const& p : packs)
+            {
+                if (p.theme == theme && p.usableTrash)
+                {
+                    themedUsable = true;
+                    break;
+                }
+            }
+        }
+
+        std::vector<int> chosen;
+        chosen.reserve(packs.size());
+        for (ThemePackInfo const& p : packs)
+        {
+            bool keep = false;
+            if (exclusive && themedUsable)
+            {
+                // The themed run: the theme-0 packs are OUT, including the
+                // ones that would have fitted. That is the whole point of the
+                // key - a mine full of Defias miners stops reading as a mine
+                // the moment the city's ghouls stand beside them.
+                keep = p.theme == theme;
+            }
+            else if (exclusive)
+            {
+                // A look nobody has written creatures for yet. It falls back
+                // to the theme-0 packs rather than to nothing: a theme ships
+                // its art long before its rosters, and an empty dungeon reads
+                // as a broken server rather than as missing content.
+                keep = p.theme == 0;
+            }
+            else
+            {
+                // ThemeExclusive off: the themed packs merely JOIN the pool.
+                // That is the pre-F1 shape of the loader's own
+                // "theme IN (0, X)" filter, decided per PLAN now instead of
+                // once per server config.
+                keep = p.theme == 0 || p.theme == theme;
+            }
+
+            if (keep)
+            {
+                chosen.push_back(p.packId);
+            }
+        }
+        return chosen;
+    }
+
     bool PDv2SelectSpawns(uint32_t seed, SpawnSelectInputs const& in,
                           PackPools const& pools, std::vector<SpawnPick>& out,
                           PackMember const** outBossStandIn)

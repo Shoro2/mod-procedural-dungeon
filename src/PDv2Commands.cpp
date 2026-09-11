@@ -113,15 +113,24 @@ private:
             return true;
         }
 
-        // The theme argument is the GM TEST path - it overrides V2.Theme for
-        // this one generation and is then frozen into the account row like any
-        // other gen input. Refuse an id the planner has no kit namespace for,
-        // or the refusal would surface later as "generation failed".
+        // The theme argument is the GM TEST path - it overrides V2.Theme (and
+        // the account's own cfg_theme) for this one generation and is then
+        // frozen into the account row like any other gen input. Refuse an id
+        // the planner has no kit namespace for, or the refusal would surface
+        // later as "generation failed".
+        //
+        // Round F / F1: asked of the KIT rather than of a literal 1-or-2 list.
+        // The themes are a property of the chunk meta the kit shipped
+        // (PDv2Mgr::HasTheme), the panel's slider is already bounded by the
+        // same fact, and a hand-written list here was one more place a third
+        // theme would have had to be remembered in.
         int const themeOverride = static_cast<int>(themeArg.value_or(0));
-        if (themeOverride != 0 && themeOverride != 1 && themeOverride != 2)
+        if (themeOverride != 0 && !sPDv2Mgr->HasTheme(themeOverride))
         {
-            handler->PSendSysMessage("pdungeon v2: theme {} is unknown (1 = mine, "
-                                     "2 = city).", themeOverride);
+            handler->PSendSysMessage("pdungeon v2: theme {} is unknown - this kit carries "
+                                     "1..{} (1 = mine, 2 = city; 0 or no argument follows "
+                                     "the server config).",
+                                     themeOverride, sPDv2Mgr->ThemeMax());
             return true;
         }
 

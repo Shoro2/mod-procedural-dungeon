@@ -70,7 +70,15 @@ public:
             // Same startup-only rule as the walk masks above: the packs are
             // read-only after this point, which is what lets map threads draw
             // spawns from them without a lock.
-            sPDv2PackMgr->LoadFromDB(sPDv2Mgr->GetConfig().theme);
+            //
+            // Round F / F1: no theme argument any more - every enabled pack of
+            // every look is loaded and the theme filter runs per RUN, because
+            // the look is a per-account choice now (cfg_theme) and not one
+            // server-wide setting. AFTER LoadChunkMeta on purpose, and not
+            // merely by habit: the pack loader's coverage report asks which
+            // themes the KIT ships (PDv2Mgr::ThemeMax), and the chunk-meta
+            // walk above is what establishes that.
+            sPDv2PackMgr->LoadFromDB();
 
             // Round E / L1, and the same startup-only rule once more: the
             // loot pools are read-only after this point, which is what lets

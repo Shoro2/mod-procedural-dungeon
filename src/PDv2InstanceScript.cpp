@@ -2487,6 +2487,12 @@ namespace PDungeon
         inputs.affixPct = cfg.affixPct;
         inputs.casterPct = account.cfgCasterPct;
         inputs.bandMin = account.cfgBandMin;
+        // Round F / F1 (spec D2): which packs this dungeon may draw from. The
+        // PLAN's theme and never the account's current knob or the server
+        // config - the look is frozen into the layout at generation, so a
+        // player who re-skins the panel mid-evening does not change what is
+        // standing in the dungeon they already own.
+        inputs.theme = plan.config.theme;
         // No creature-type cap any more: every trash slot draws from the whole
         // unlocked pool (PDv2PackMgr.h says why). dlvl still decides which
         // packs are unlocked, which is the variety lever that remains.
@@ -3871,6 +3877,10 @@ namespace PDungeon
             in.affixPct = cfg.affixPct;
             in.bandMin = account.cfgBandMin;
             in.unlockedDlvl = static_cast<int>(account.dlvl);
+            // Round F / F1: the same pool the rooms draw from, for the same
+            // reason every other input here is copied from the room draw - a
+            // corridor sentry belongs to the dungeon it patrols.
+            in.theme = plan.config.theme;
 
             std::vector<RoomSpawns> out;
             uint32 const seed = plan.effectiveSeed ^ PD_PATROL_SEED_MIX ^
@@ -4068,6 +4078,10 @@ namespace PDungeon
             in.affixPct = cfg.affixPct;
             in.bandMin = account.cfgBandMin;
             in.unlockedDlvl = static_cast<int>(account.dlvl);
+            // Round F / F1: the plan's look, like the room draw above - an
+            // ambush is this dungeon's trash lying in wait, not a second
+            // dungeon's.
+            in.theme = plan.config.theme;
 
             std::vector<RoomSpawns> out;
             uint32 const seed = plan.effectiveSeed ^ PD_AMBUSH_SEED_MIX ^
@@ -4791,6 +4805,9 @@ namespace PDungeon
             in.affixPct = cfg.affixPct;
             in.bandMin = account.cfgBandMin;
             in.unlockedDlvl = static_cast<int>(account.dlvl);
+            // Round F / F1: the plan's look once more - the wave the pilgrim
+            // is holding out against is what lives in this dungeon.
+            in.theme = plan.config.theme;
 
             std::vector<RoomSpawns> out;
             uint32 const seed = plan.effectiveSeed ^ PD_EVENT_SEED_MIX ^

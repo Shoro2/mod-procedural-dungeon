@@ -77,6 +77,14 @@ namespace PDungeon
         uint8_t levelMin = 1;
         uint8_t levelMax = 80;
         uint8_t unlockDlvl = 0;
+        // Round F / F1 (spec D2): the look this pack was authored for, 0 =
+        // any. KEPT now rather than filtered away at load: the manager holds
+        // every enabled pack of every theme and the pool is assembled per RUN,
+        // from the theme frozen into that run's plan. Before F1 this column
+        // only ever appeared in the loader's WHERE clause, against the server
+        // config, which made a per-account theme impossible - the pool was
+        // decided once per restart.
+        uint8_t theme = 0;
         std::vector<PackMember> members;
     };
 
@@ -107,12 +115,18 @@ namespace PDungeon
     public:
         static PDv2PackMgr* instance();
 
-        // Reads both pack tables for `theme`, and the affix table beside them.
-        // Members whose creature_template row is missing are dropped loudly
-        // rather than spawned into a "creature does not exist" error later -
-        // packs reference entries this module does not own, so a foreign
-        // environment WILL be missing some.
-        void LoadFromDB(int theme);
+        // Reads both pack tables - EVERY enabled pack, of every theme - and
+        // the affix table beside them. Members whose creature_template row is
+        // missing are dropped loudly rather than spawned into a "creature does
+        // not exist" error later - packs reference entries this module does
+        // not own, so a foreign environment WILL be missing some.
+        //
+        // Round F / F1 (spec D2): no theme parameter any more. It used to take
+        // the server's V2.Theme and load "theme IN (0, X)", which froze the
+        // pool to one look per RESTART; with the theme a per-account choice
+        // (cfg_theme) the filter has to run per RUN instead, and it does -
+        // SelectSpawns narrows the loaded packs to the plan's own theme.
+        void LoadFromDB();
 
         size_t PackCount() const { return _packs.size(); }
         bool Empty() const { return _packs.empty(); }
@@ -153,6 +167,17 @@ namespace PDungeon
         // Returns false when no pack survives the pool filter, which is the
         // caller's cue to fall back to its placeholder creature.
         //
+        // THE POOL IS PER THEME (Round F / F1, spec D2). `in.theme` is the
+        // look the run's plan was generated with, and the packs it may draw
+        // from are chosen by SelectThemePacks (generator/PDv2PackDraw.cpp,
+        // where the rule is harness-pinned): with
+        // V2.Packs.ThemeExclusive on - the default - a theme that has at least
+        // one pack able to fill a trash slot in this run's band draws from
+        // ITS packs alone, and any other theme falls back to the theme-0
+        // packs, which is the pool every run used before F1. With the key off
+        // the themed packs merely join the theme-0 ones. The band/unlock
+        // filter below runs inside whichever set that leaves.
+        //
         // EVERY ROOM DRAWS ONE PACK (Task 13) and its trash slots prefer that
         // pack's members for their role, falling back to the merged, band-
         // filtered, unlocked pool per SLOT - never per room - only when the
@@ -187,6 +212,17 @@ namespace PDungeon
     private:
         void LoadAffixesFromDB();
         void LoadMemberSpellsFromDB();
+        // Round F / F1. "theme 0: 8, theme 1: 3" for the boot line: with the
+        // pool no longer scoped to one look at load time, the one number an
+        // operator used to read off that line ("packs for theme X") no longer
+        // exists, and the per-theme split is what replaces it.
+        std::string DescribePacksPerTheme() const;
+        // Says, per theme the KIT can build, whether that look draws its own
+        // creatures or borrows the theme-0 packs - and shouts when it would
+        // get neither. The old single "enabled but none usable for theme {}"
+        // error could only ever speak about the configured theme, which is
+        // exactly the assumption F1 removes.
+        void ReportThemeCoverage() const;
         // Says out loud, at startup, which range members will fight without a
         // filler. Deliberately here rather than in the AI: the check wants to
         // fire once per template per boot, and doing that from a map thread
@@ -198,11 +234,15 @@ namespace PDungeon
         std::unordered_map<uint32_t, std::vector<MemberSpell>> _memberSpells;
         size_t _memberSpellRows = 0;
 
-        // Packs with at least one non-boss member for the WHOLE THEME,
-        // ascending by id - independent of any run's level band or unlock
-        // level. This is the CANDIDATE list only, computed once here because
-        // the theme-wide shape never changes between one restart and the
-        // next; it is not what SelectSpawns hands the draw. A pack can sit
+        // Packs with at least one non-boss member, EVERY theme, ascending by
+        // id - independent of any run's level band, unlock level or look.
+        // This is the CANDIDATE list only, computed once here because the
+        // table-wide shape never changes between one restart and the next; it
+        // is not what SelectSpawns hands the draw. Since Round F / F1 the
+        // per-run narrowing includes the theme: a pack of another look drops
+        // out of meleeByPack/casterByPack, and FilterEligibleTrashPacks then
+        // drops it from this list too, with no theme test of its own. A pack
+        // can sit
         // here and still have nothing left to fill a trash slot with once a
         // run's band/unlock filter runs, so SelectSpawns re-derives
         // PackPools::trashPackIds from THIS list filtered against that run's

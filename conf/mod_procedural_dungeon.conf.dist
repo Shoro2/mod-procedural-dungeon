@@ -332,11 +332,40 @@ ProceduralDungeon.V2.Branches = 2
 #                     whatever this says (masks for ALL themes stay loaded),
 #                     and `.pdungeon v2 gen [seed] [theme]` overrides it for
 #                     one GM test generation.
+#                     Since Round F / F1 this is the FALLBACK, not the last
+#                     word: the gen panel carries a theme row, and an account
+#                     that picked a look there (pdungeon_account.cfg_theme,
+#                     0 = follow this key) generates with it instead. The
+#                     slider offers exactly the themes the kit's chunk meta
+#                     carries, so a value here that the kit does not have is
+#                     still an error and still refuses to generate.
 #        Default:     2 - the city is the standard look the UI presents;
-#                     the mine stays reachable with `gen [seed] 1`.
+#                     the mine stays reachable with `gen [seed] 1` or by
+#                     picking it on the panel.
 #
 
 ProceduralDungeon.V2.Theme = 2
+
+#
+#    ProceduralDungeon.V2.Packs.ThemeExclusive
+#        Description: Round F / F1: does a run draw ONLY from the creature
+#                     packs authored for its own theme (pdungeon_packs.theme)?
+#                     1 = yes, and a theme with at least one usable pack of
+#                     its own spawns nothing else - a mine full of Defias
+#                     miners stays a mine. 0 = the themed packs merely join
+#                     the theme-0 pool, i.e. variety over coherence.
+#                     A theme with no pack of its own falls back to the
+#                     theme-0 packs either way, so a look whose art has
+#                     shipped before its roster still gets a dungeon (the
+#                     boot log says which themes are in that state).
+#                     Read live: `.reload config` retunes the next instance
+#                     to build. It is NOT a layout input - it changes which
+#                     creatures a stored seed spawns, exactly as adding a
+#                     pack does, and nobody's layout rerolls.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.Packs.ThemeExclusive = 1
 
 #
 #    ProceduralDungeon.V2.RequiredDllVersion

@@ -85,6 +85,11 @@ namespace PDungeon
             "ProceduralDungeon.V2.Branches", 2)));
 
         _config.theme = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.Theme", 1);
+        // Round F / F1 (spec D2). Read live like every other run knob, so an
+        // operator can merge the themed packs into one pool and back without a
+        // restart; the next instance to build draws under whatever it says.
+        _config.packsThemeExclusive = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Packs.ThemeExclusive", true);
         _config.manifestPath = sConfigMgr->GetOption<std::string>(
             "ProceduralDungeon.V2.ManifestPath", "");
 
@@ -451,12 +456,20 @@ namespace PDungeon
 
         // gen_loop_pct carries V2.DetourChance since B0b; gen_event_pct carries
         // V2.Event.ChancePct since Round E / WP5
+        //
+        // Round F / F1: `theme` and `cfg_theme` are BOTH on this statement and
+        // they are not the same fact. `theme` is a layout column - the look
+        // this plan was generated with, frozen, and updated on every reroll -
+        // while `cfg_theme` is the knob that will shape the NEXT one and rides
+        // the INSERT half only, like every other cfg_*. Where the knob says 0
+        // the two deliberately differ: the layout records the conf's theme, the
+        // knob keeps saying "follow the conf".
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
             "gen_loop_pct, gen_branches, gen_event_pct, cfg_rooms, cfg_difficulty, "
-            "cfg_caster_pct, cfg_mob_level_min, cfg_stat_profile, cfg_packs) "
-            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
+            "cfg_caster_pct, cfg_mob_level_min, cfg_stat_profile, cfg_theme, cfg_packs) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE theme = VALUES(theme), "
             "layout_seed = VALUES(layout_seed), layout_version = VALUES(layout_version), "
             "gen_rooms = VALUES(gen_rooms), gen_boss_rooms = VALUES(gen_boss_rooms), "
@@ -466,7 +479,7 @@ namespace PDungeon
             accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
             cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.detourChancePct, cfg.branches,
             cfg.eventChancePct, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
-            state.cfgBandMin, uint32(state.cfgStatProfile), packs);
+            state.cfgBandMin, uint32(state.cfgStatProfile), uint32(state.cfgTheme), packs);
     }
 
     void PDv2Mgr::LoadAccountState(uint32_t accountId)
@@ -482,7 +495,8 @@ namespace PDungeon
         PDv2AccountState state;
         QueryResult result = CharacterDatabase.Query(
             "SELECT dlvl, dxp, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
-            "cfg_packs, diff_cap, cfg_stat_profile FROM pdungeon_account WHERE accountId = {}",
+            "cfg_packs, diff_cap, cfg_stat_profile, cfg_theme "
+            "FROM pdungeon_account WHERE accountId = {}",
             accountId);
         if (result)
         {
@@ -503,6 +517,10 @@ namespace PDungeon
             // above: the tail of this SELECT is where a new column goes, and
             // renumbering the seven reads above it buys nothing.
             state.cfgStatProfile = fields[8].Get<uint8>();
+            // Round F / F1, appended for the third time for the same reason as
+            // diff_cap and cfg_stat_profile above: the tail of this SELECT is
+            // where a new column goes.
+            state.cfgTheme = fields[9].Get<uint8>();
             state.loaded = true;
         }
 
@@ -539,6 +557,21 @@ namespace PDungeon
         // all refunded it simply never bites (PDv2LootMgr::StatProfileFor) -
         // storing it is not the same as honouring it.
         state.cfgStatProfile = GameClampStatProfile(state.cfgStatProfile);
+        // Round F / F1. Same treatment, and the one clamp on this list that
+        // asks the DATA rather than a constant: the legal themes are whatever
+        // the kit's chunk meta carries, so a row that names a theme this
+        // server has no art for - a kit rolled back, a hand-edited column, a
+        // characters DB moved to a box with an older kit - falls back to 0
+        // ("follow the conf") instead of generating into a namespace the block
+        // planner would refuse.
+        //
+        // LoadChunkMeta runs at startup and this at login, so the themes are
+        // known by the time any row is read. On a server whose chunk meta
+        // failed to load entirely, every choice reads as unknown and every
+        // account falls back to the conf - which is the right answer for a
+        // module that cannot build a dungeon at all in that state, and is said
+        // out loud by the ERROR LoadChunkMeta already logs.
+        state.cfgTheme = ClampThemeChoice(state.cfgTheme);
 
         std::lock_guard<std::mutex> guard(_lock);
         _accounts[accountId] = state;
@@ -573,8 +606,30 @@ namespace PDungeon
         // band row has - so that every future caller of SetAccountCfg cannot
         // accidentally become a way around the node.
         state.cfgStatProfile = GameClampStatProfile(cfg.cfgStatProfile);
+        // Round F / F1, and the same division of labour as the profile above:
+        // the UI link REFUSES an unknown theme with a debug line before it
+        // gets here (a player who picks a look that does not exist deserves to
+        // be told, not silently given another one), while this clamp is the
+        // backstop every other caller gets - `.pdungeon v2 set`, a future
+        // command, a state copied from somewhere else.
+        state.cfgTheme = ClampThemeChoice(cfg.cfgTheme);
         state.cfgPacks = cfg.cfgPacks;
         state.loaded = true;
+    }
+
+    uint8_t PDv2Mgr::ClampThemeChoice(int wanted) const
+    {
+        // 0 is always legal and means "follow ProceduralDungeon.V2.Theme" -
+        // the answer for an account that never touched the panel row, and the
+        // one value that cannot go stale when a kit changes.
+        if (wanted == 0 || !HasTheme(wanted))
+        {
+            return 0;
+        }
+        // HasTheme has already proved the id is one of the handful the chunk
+        // meta carries, so the narrowing cast cannot wrap - that check IS the
+        // range check, which is why there is no second bound spelled out here.
+        return static_cast<uint8_t>(wanted);
     }
 
     void PDv2Mgr::SaveAccountCfg(uint32_t accountId)
@@ -590,14 +645,15 @@ namespace PDungeon
         // change must never touch progression or the stored layout.
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, cfg_rooms, cfg_difficulty, "
-            "cfg_caster_pct, cfg_mob_level_min, cfg_stat_profile, cfg_packs) "
-            "VALUES ({}, {}, {}, {}, {}, {}, '{}') "
+            "cfg_caster_pct, cfg_mob_level_min, cfg_stat_profile, cfg_theme, cfg_packs) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE cfg_rooms = VALUES(cfg_rooms), "
             "cfg_difficulty = VALUES(cfg_difficulty), cfg_caster_pct = VALUES(cfg_caster_pct), "
             "cfg_mob_level_min = VALUES(cfg_mob_level_min), "
-            "cfg_stat_profile = VALUES(cfg_stat_profile), cfg_packs = VALUES(cfg_packs)",
+            "cfg_stat_profile = VALUES(cfg_stat_profile), cfg_theme = VALUES(cfg_theme), "
+            "cfg_packs = VALUES(cfg_packs)",
             accountId, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
-            state.cfgBandMin, uint32(state.cfgStatProfile), packs);
+            state.cfgBandMin, uint32(state.cfgStatProfile), uint32(state.cfgTheme), packs);
     }
 
     int PDv2Mgr::RaiseDiffCap(uint32_t accountId, int wanted)
@@ -833,6 +889,7 @@ namespace PDungeon
         _chunkAnchors.clear();
         _chunkRoomAnchors.clear();
         _chunkProps.clear();
+        _chunkThemes.clear();
 
         // Highest kit version wins per chunk id: rows are read in ascending
         // kitVersion order and later ones overwrite.
@@ -893,9 +950,30 @@ namespace PDungeon
             Field* fields = result->Fetch();
             int const chunkId = static_cast<int>(fields[0].Get<uint32>());
             std::string const rle = fields[2].Get<std::string>();
-            if (static_cast<int>(fields[4].Get<uint8>()) == _config.theme)
+            int const rowTheme = static_cast<int>(fields[4].Get<uint8>());
+            if (rowTheme == _config.theme)
             {
                 ++configThemeRows;
+            }
+
+            // Round F / F1. The themes the panel may offer are exactly the
+            // ones the kit shipped, and this row is the only place that fact
+            // exists. Collected BEFORE the mask is decoded on purpose: a
+            // malformed walkMask costs one chunk, not a whole theme, and a
+            // theme that lost its last chunk is the kit problem the
+            // configThemeRows error below already reports.
+            //
+            // Sorted-insert into a two-element vector rather than a set: the
+            // cost is nothing at 244 rows and ThemeMax is then just the back().
+            //
+            // `themeSlot` and not `slot`: the walk mask below already owns
+            // that name in this loop, and MSVC rejects the second one outright
+            // (C2373) rather than merely shadowing it.
+            auto const themeSlot =
+                std::lower_bound(_chunkThemes.begin(), _chunkThemes.end(), rowTheme);
+            if (themeSlot == _chunkThemes.end() || *themeSlot != rowTheme)
+            {
+                _chunkThemes.insert(themeSlot, rowTheme);
             }
 
             std::vector<uint8_t> mask;
@@ -1007,11 +1085,25 @@ namespace PDungeon
             }
         } while (result->NextRow());
 
+        // Round F / F1: the themes on the line, because they are now what the
+        // gen panel's theme slider is bounded by - an operator who wonders why
+        // the row offers one look and not two reads the answer here.
+        std::string themeList;
+        for (int t : _chunkThemes)
+        {
+            if (!themeList.empty())
+            {
+                themeList += ", ";
+            }
+            themeList += std::to_string(t);
+        }
+
         LOG_INFO(PD_LOG, "PDv2: loaded {} walk mask(s) from pdungeon_chunk_meta "
                          "across all themes ({} for configured theme {}, {} malformed), "
-                         "{} with a patrol clearance layer",
+                         "{} with a patrol clearance layer; themes present: {} (max {})",
                  uint32(_walkMasks.size()), configThemeRows, _config.theme, bad,
-                 uint32(_chunkPatrol.size()));
+                 uint32(_chunkPatrol.size()), themeList.empty() ? "-" : themeList.c_str(),
+                 ThemeMax());
         if (!hasPatrolLayer)
         {
             // Not an error: the module works without it, patrols simply walk
@@ -1027,6 +1119,20 @@ namespace PDungeon
                               "theme or V2.Theme points at one it has",
                       _config.theme);
         }
+    }
+
+    int PDv2Mgr::ThemeMax() const
+    {
+        // _chunkThemes is ascending by construction, so the highest id is the
+        // last one. 0 before LoadChunkMeta has run, which the panel reads as
+        // "no choice to offer" - the honest answer for a server that cannot
+        // build a dungeon at all.
+        return _chunkThemes.empty() ? 0 : _chunkThemes.back();
+    }
+
+    bool PDv2Mgr::HasTheme(int theme) const
+    {
+        return std::binary_search(_chunkThemes.begin(), _chunkThemes.end(), theme);
     }
 
     uint8_t const* PDv2Mgr::WalkMaskFor(int chunkId) const

@@ -21,9 +21,16 @@
 #include "Field.h"
 #include "Log.h"
 #include "PDDefines.h"
+// Round F / F1: for the CONFIG (V2.Packs.ThemeExclusive) and for the themes
+// the kit ships (ThemeMax). Both are read-only here - the pack manager asks
+// what the look of a run is allowed to mean, it never sets it.
+#include "PDv2Mgr.h"
 #include "QueryResult.h"
 #include "generator/PDv2GameMath.h"
 #include "generator/PDv2PackDraw.h"
+
+#include <algorithm>
+#include <string>
 
 namespace PDungeon
 {
@@ -33,6 +40,22 @@ namespace PDungeon
         // levels [bandMin, bandMin + 4]. Derived rather than restated so the
         // band cannot mean two different things in two files.
         int const BAND_WIDTH = PD_GAME_BAND_STEP - 1;
+
+        // Round F / F1. Can this pack fill a TRASH slot at all - i.e. does it
+        // hold a member that is not a boss? The theme rule and the boot-time
+        // coverage report both ask it, and a pack with nothing but a boss is
+        // the one shape that can claim a room and then leave it empty.
+        bool HasTrashMember(Pack const& pack)
+        {
+            for (PackMember const& m : pack.members)
+            {
+                if (m.role != PACK_ROLE_BOSS)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
 
         // Groups a flat, already band-filtered role pool by the packId each
         // member carries, in the pool's own order - what PackPools::meleeOf/
@@ -71,7 +94,7 @@ namespace PDungeon
         return &mgr;
     }
 
-    void PDv2PackMgr::LoadFromDB(int theme)
+    void PDv2PackMgr::LoadFromDB()
     {
         _packs.clear();
 
@@ -89,37 +112,31 @@ namespace PDungeon
         // members point at entries this module does not own, so on any
         // environment without the imported stock some of them simply are not
         // there. ct.entry comes back NULL for those and they are dropped.
+        // Round F / F1 (spec D2): NO theme in the WHERE clause any more, and
+        // p.theme travels out with the row instead. The filter used to be
+        // "theme IN (0, <server config>)", which decided the pool once per
+        // restart - a per-account look (cfg_theme) cannot be served from a
+        // pool frozen that early, so the theme test moved to SelectSpawns,
+        // where the RUN's own theme is known. theme 0 still means "usable
+        // under any look"; see the column comment in mod_pdungeon_packs.sql.
         QueryResult result = WorldDatabase.Query(
             "SELECT p.id, p.name, p.level_min, p.level_max, p.unlock_dlvl, "
-            "m.entry, m.role, m.casterSpellId, m.weight, ct.entry "
+            "m.entry, m.role, m.casterSpellId, m.weight, ct.entry, p.theme "
             "FROM pdungeon_packs p "
             "LEFT JOIN pdungeon_pack_members m ON m.packId = p.id "
             "LEFT JOIN creature_template ct ON ct.entry = m.entry "
-            // theme 0 = usable under ANY look; see the column comment in
-            // mod_pdungeon_packs.sql. Scoping every pack to one theme meant a
-            // new look shipped with nothing but the placeholder creature.
-            "WHERE p.enabled = 1 AND p.theme IN (0, {}) "
-            "ORDER BY p.id, m.entry", theme);
+            "WHERE p.enabled = 1 "
+            "ORDER BY p.id, m.entry");
         if (!result)
         {
-            // Say which of the two it actually is. The old message asserted
-            // the SQL had not been applied, which was wrong the first time it
-            // fired: the file was applied, it simply held no row for the
-            // theme that had just become the default.
-            QueryResult any = WorldDatabase.Query(
-                "SELECT COUNT(*), COALESCE(GROUP_CONCAT(DISTINCT theme), '-') "
-                "FROM pdungeon_packs WHERE enabled = 1");
-            uint32 const enabled = any ? (*any)[0].Get<uint32>() : 0;
-            std::string const themes = any ? (*any)[1].Get<std::string>() : "-";
-            if (enabled)
-                LOG_ERROR(PD_LOG, "PDv2: pdungeon_packs holds {} enabled pack(s) but "
-                                  "none usable for theme {} (they carry theme(s) {}; "
-                                  "0 means any) - spawns fall back to the placeholder "
-                                  "creature", enabled, theme, themes);
-            else
-                LOG_ERROR(PD_LOG, "PDv2: pdungeon_packs has no enabled rows at all - "
-                                  "mod_pdungeon_packs.sql was not applied, and spawns "
-                                  "fall back to the placeholder creature");
+            // One cause left, and it is now the only one this query can have:
+            // with the theme filter gone, an empty result means there is no
+            // enabled pack at ALL. The "enabled but none for theme X" half of
+            // this message moved to the per-theme report at the end of this
+            // function, where the data to say it properly exists.
+            LOG_ERROR(PD_LOG, "PDv2: pdungeon_packs has no enabled rows at all - "
+                              "mod_pdungeon_packs.sql was not applied, and spawns "
+                              "fall back to the placeholder creature");
             return;
         }
 
@@ -137,6 +154,10 @@ namespace PDungeon
                 pack.levelMin = fields[2].Get<uint8>();
                 pack.levelMax = fields[3].Get<uint8>();
                 pack.unlockDlvl = fields[4].Get<uint8>();
+                // Round F / F1: appended to the SELECT rather than slotted in
+                // beside unlock_dlvl, so none of the positional reads below it
+                // - the member half, which is the fiddly one - had to move.
+                pack.theme = fields[10].Get<uint8>();
                 _packs.push_back(pack);
             }
 
@@ -217,16 +238,114 @@ namespace PDungeon
         }
 
         LOG_INFO(PD_LOG, "PDv2: loaded {} pack(s), {} member(s) ({} caster, {} boss, "
-                         "{} dropped as missing) for theme {}",
-                 uint32(_packs.size()), members, casters, bosses, missing, theme);
+                         "{} dropped as missing) across all themes - {}",
+                 uint32(_packs.size()), members, casters, bosses, missing,
+                 DescribePacksPerTheme());
 
         if (!bosses)
         {
-            LOG_WARN(PD_LOG, "PDv2: no role-2 (boss) pack member exists for theme {} - "
-                             "boss rooms will be filled with a trash stand-in", theme);
+            LOG_WARN(PD_LOG, "PDv2: no role-2 (boss) pack member exists in ANY pack - "
+                             "boss rooms will be filled with a trash stand-in");
         }
 
+        ReportThemeCoverage();
         ReportFillerlessCasters();
+    }
+
+    std::string PDv2PackMgr::DescribePacksPerTheme() const
+    {
+        // A linear scan over a handful of packs, and deliberately not a map:
+        // the themes are single digits, the list has to come out ASCENDING for
+        // a log line a human reads, and _packs is already ordered by id.
+        std::vector<int> themes;
+        for (Pack const& p : _packs)
+        {
+            int const theme = static_cast<int>(p.theme);
+            auto const slot = std::lower_bound(themes.begin(), themes.end(), theme);
+            if (slot == themes.end() || *slot != theme)
+            {
+                themes.insert(slot, theme);
+            }
+        }
+
+        std::string out;
+        for (int theme : themes)
+        {
+            uint32 count = 0;
+            for (Pack const& p : _packs)
+            {
+                if (static_cast<int>(p.theme) == theme)
+                {
+                    ++count;
+                }
+            }
+            if (!out.empty())
+            {
+                out += ", ";
+            }
+            out += "theme " + std::to_string(theme) + ": " + std::to_string(count);
+        }
+        return out.empty() ? std::string("no packs") : out;
+    }
+
+    void PDv2PackMgr::ReportThemeCoverage() const
+    {
+        // Is there anything to fall back TO? The theme-0 packs are what every
+        // run drew from before F1 and what a look with no rosters of its own
+        // still draws from, so their absence is what turns a missing roster
+        // from a content gap into a broken dungeon.
+        bool anyTheme0 = false;
+        for (Pack const& p : _packs)
+        {
+            if (p.theme == 0 && HasTrashMember(p))
+            {
+                anyTheme0 = true;
+                break;
+            }
+        }
+
+        // 1..ThemeMax and not "every theme the packs mention": the question is
+        // what a PLAYER can pick, and that is bounded by the art the kit
+        // shipped (the same number the panel's theme slider is bounded by).
+        // A pack authored for a theme this kit has no chunks for can never be
+        // drawn at all, which is a data fault of its own and not this line's.
+        int const themeMax = sPDv2Mgr->ThemeMax();
+        for (int theme = 1; theme <= themeMax; ++theme)
+        {
+            if (!sPDv2Mgr->HasTheme(theme))
+            {
+                continue;               // a gap in the kit's ids, not a theme
+            }
+
+            bool own = false;
+            for (Pack const& p : _packs)
+            {
+                if (static_cast<int>(p.theme) == theme && HasTrashMember(p))
+                {
+                    own = true;
+                    break;
+                }
+            }
+
+            if (own)
+            {
+                continue;
+            }
+            if (anyTheme0)
+            {
+                // INFO and not a warning: this is the normal state of a theme
+                // whose art has shipped and whose roster has not, and it is
+                // exactly what every theme looked like before F1.
+                LOG_INFO(PD_LOG, "PDv2: theme {} has no pack of its own - runs generated "
+                                 "with it draw the theme-0 packs", theme);
+            }
+            else
+            {
+                LOG_ERROR(PD_LOG, "PDv2: theme {} has no pack of its own AND there is no "
+                                  "theme-0 pack to fall back to - runs generated with it "
+                                  "spawn the placeholder creature", theme);
+            }
+        }
     }
 
     void PDv2PackMgr::LoadMemberSpellsFromDB()
@@ -434,20 +553,67 @@ namespace PDungeon
         int const bandLo = in.bandMin;
         int const bandHi = in.bandMin + BAND_WIDTH;
 
+        // Round F / F1 (spec D2). Read live off the conf, like every other run
+        // knob: the key decides what the next instance to build draws, and an
+        // operator who flips it mid-evening does not have to restart.
+        bool const themeExclusive = sPDv2Mgr->GetConfig().packsThemeExclusive;
+
+        // Does this pack survive the run's band and unlock filter? Pulled out
+        // of the pool walk because the THEME rule has to ask the very same
+        // question one step earlier - "is there a themed pack that could
+        // really fill a room" is meaningless against a pack this run cannot
+        // use - and two copies of the test would be two chances to drift.
+        auto passesRunFilter = [&](Pack const& p, bool applyBand)
+        {
+            if (static_cast<int>(p.unlockDlvl) > in.unlockedDlvl)
+            {
+                return false;
+            }
+            if (applyBand &&
+                (static_cast<int>(p.levelMax) < bandLo || static_cast<int>(p.levelMin) > bandHi))
+            {
+                return false;
+            }
+            return true;
+        };
+
         std::vector<PackMember const*> trash;
         std::vector<PackMember const*> bosses;
         auto fillPool = [&](bool applyBand)
         {
             trash.clear();
             bosses.clear();
+
+            // THE THEME GATE, and it runs per PASS rather than once: the band
+            // fallback below re-fills the pool with the band dropped, and
+            // whether a themed pack "can fill a room" has to be answered
+            // against the same filter the pass itself applies. A themed pack
+            // that only the band excluded must be able to claim the run on the
+            // second pass, and must NOT claim it on the first.
+            std::vector<ThemePackInfo> infos;
+            infos.reserve(_packs.size());
             for (Pack const& p : _packs)
             {
-                if (static_cast<int>(p.unlockDlvl) > in.unlockedDlvl)
+                ThemePackInfo info;
+                info.packId = static_cast<int>(p.id);
+                info.theme = static_cast<int>(p.theme);
+                info.usableTrash = passesRunFilter(p, applyBand) && HasTrashMember(p);
+                infos.push_back(info);
+            }
+            std::vector<int> const candidates =
+                SelectThemePacks(infos, in.theme, themeExclusive);
+
+            for (Pack const& p : _packs)
+            {
+                // A linear find over single-digit many ids - the same
+                // reasoning PackPools::meleeOf is built on, and the reason
+                // nothing here reaches for a hash container.
+                if (std::find(candidates.begin(), candidates.end(),
+                              static_cast<int>(p.id)) == candidates.end())
                 {
-                    continue;
+                    continue;           // another look's pack
                 }
-                if (applyBand &&
-                    (static_cast<int>(p.levelMax) < bandLo || static_cast<int>(p.levelMin) > bandHi))
+                if (!passesRunFilter(p, applyBand))
                 {
                     continue;
                 }

@@ -6167,6 +6167,272 @@ namespace
         }
     }
 
+    // --- Round F / F1: packs per theme (spec D2) ---------------------------
+    //
+    // The rule lives in SelectThemePacks (generator/PDv2PackDraw.cpp) and is
+    // applied by PDv2PackMgr::SelectSpawns, which includes DatabaseEnv.h and
+    // can never link in here - the same split, and for the same reason, as
+    // FilterEligibleTrashPacks above. So this section does what that file
+    // does: it asks SelectThemePacks which packs a run of theme N may use,
+    // builds the pools out of exactly those packs the way the manager builds
+    // them, and then checks the DRAW that comes out - which is the half a
+    // player would notice.
+    //
+    // Every OTHER fixture in this file leaves SpawnSelectInputs::theme at its
+    // default 0 and therefore describes a theme-0 run, which is precisely the
+    // pool they always described - that is why no pin in this file moved for
+    // F1. The theme-0 case below states it as a check of its own rather than
+    // leaving it to be inferred from the other pins staying green.
+    struct ThemedFixturePack
+    {
+        int packId = 0;
+        int theme = 0;
+        std::vector<PackMember> members;
+    };
+
+    // Two theme-0 packs (the pool every run had before F1) and one theme-1
+    // pack. The entries are real: 84264.. are the stock trash the other
+    // fixtures here use, and pack 3 is the Mine roster of spec D3 - Defias
+    // miners 657/634, the caster 1732 and Mr. Smite 646 - so a failure names
+    // creatures a reader of the plan recognises.
+    std::vector<ThemedFixturePack> ThemedFixturePacks()
+    {
+        std::vector<ThemedFixturePack> packs;
+
+        ThemedFixturePack p1;
+        p1.packId = 1;
+        p1.theme = 0;
+        p1.members = { {1, 84264}, {1, 84265},
+                       {1, 84263, PACK_ROLE_CASTER, 47809},
+                       {1, 84288, PACK_ROLE_BOSS} };
+        packs.push_back(p1);
+
+        ThemedFixturePack p2;
+        p2.packId = 2;
+        p2.theme = 0;
+        p2.members = { {2, 84267}, {2, 84269},
+                       {2, 84276, PACK_ROLE_CASTER, 47857},
+                       {2, 84289, PACK_ROLE_BOSS} };
+        packs.push_back(p2);
+
+        ThemedFixturePack p3;
+        p3.packId = 3;
+        p3.theme = 1;
+        p3.members = { {3, 657}, {3, 634},
+                       {3, 1732, PACK_ROLE_CASTER, 47809},
+                       {3, 646, PACK_ROLE_BOSS} };
+        packs.push_back(p3);
+
+        return packs;
+    }
+
+    // What PDv2PackMgr::SelectSpawns hands SelectThemePacks: one info per
+    // loaded pack, `usableTrash` answered against the run's band and unlock
+    // filter. This fixture has no band or unlock to fail, so usableTrash is
+    // exactly "holds a non-boss member" - the question the manager's own
+    // HasTrashMember asks.
+    std::vector<ThemePackInfo> ThemedFixtureInfos(std::vector<ThemedFixturePack> const& packs)
+    {
+        std::vector<ThemePackInfo> infos;
+        for (ThemedFixturePack const& p : packs)
+        {
+            ThemePackInfo info;
+            info.packId = p.packId;
+            info.theme = p.theme;
+            info.usableTrash = false;
+            for (PackMember const& m : p.members)
+            {
+                if (m.role != PACK_ROLE_BOSS)
+                {
+                    info.usableTrash = true;
+                    break;
+                }
+            }
+            infos.push_back(info);
+        }
+        return infos;
+    }
+
+    // The pools a run of `theme` ends up with, built from the surviving packs
+    // exactly as PDv2PackMgr::SelectSpawns builds them: role split in loader
+    // order, `trash` the melee/caster interleave, the two per-pack groups, and
+    // trashPackIds through FilterEligibleTrashPacks.
+    PackPools ThemedPoolsFor(std::vector<ThemedFixturePack> const& packs,
+                             std::vector<int> const& candidates)
+    {
+        PackPools pools;
+        for (ThemedFixturePack const& p : packs)
+        {
+            if (std::find(candidates.begin(), candidates.end(), p.packId) == candidates.end())
+            {
+                continue;
+            }
+            for (PackMember const& m : p.members)
+            {
+                if (m.role == PACK_ROLE_BOSS)
+                {
+                    pools.boss.push_back(m);
+                    continue;
+                }
+                pools.trash.push_back(m);
+                (m.role == PACK_ROLE_CASTER ? pools.caster : pools.melee).push_back(m);
+            }
+        }
+
+        for (ThemedFixturePack const& p : packs)
+        {
+            if (std::find(candidates.begin(), candidates.end(), p.packId) == candidates.end())
+            {
+                continue;
+            }
+            PackPools::PackGroup melee{ p.packId, {} };
+            PackPools::PackGroup caster{ p.packId, {} };
+            for (PackMember const& m : p.members)
+            {
+                if (m.role == PACK_ROLE_MELEE)
+                {
+                    melee.members.push_back(m);
+                }
+                else if (m.role == PACK_ROLE_CASTER)
+                {
+                    caster.members.push_back(m);
+                }
+            }
+            if (!melee.members.empty())
+            {
+                pools.meleeByPack.push_back(melee);
+            }
+            if (!caster.members.empty())
+            {
+                pools.casterByPack.push_back(caster);
+            }
+        }
+
+        pools.trashPackIds = FilterEligibleTrashPacks(candidates, pools);
+        return pools;
+    }
+
+    // Which pack an entry belongs to, or 0. Deliberately NOT SpawnPick::packId:
+    // that field records the pack a ROOM was themed to, so a run whose every
+    // slot fell back to the merged pool would still "cohere" by it. The entry
+    // is where the creature actually came from, which is the question a theme
+    // rule has to answer.
+    int ThemedPackOfEntry(std::vector<ThemedFixturePack> const& packs, uint32_t entry)
+    {
+        for (ThemedFixturePack const& p : packs)
+        {
+            for (PackMember const& m : p.members)
+            {
+                if (m.entry == entry)
+                {
+                    return p.packId;
+                }
+            }
+        }
+        return 0;
+    }
+
+    // One themed run, end to end: the rule picks the packs, the draw fills the
+    // rooms, and every creature that comes out has to belong to one of the
+    // packs the rule allowed. `sawPacks` collects what was really drawn, so a
+    // caller can also insist that a pack it EXPECTED to see was not merely
+    // permitted but used.
+    void CheckThemedDraw(std::vector<ThemedFixturePack> const& packs, int theme, bool exclusive,
+                         std::vector<int> const& wantCandidates, uint32_t seed,
+                         std::vector<int>& sawPacks)
+    {
+        std::vector<int> const candidates =
+            SelectThemePacks(ThemedFixtureInfos(packs), theme, exclusive);
+        Check(candidates == wantCandidates,
+              "SelectThemePacks chose the wrong packs for this theme", seed);
+        if (candidates.empty())
+        {
+            return;                     // nothing to draw from; the check above said so
+        }
+
+        PackPools const pools = ThemedPoolsFor(packs, candidates);
+
+        SpawnSelectInputs in;
+        in.rooms = { {0, false}, {1, false}, {2, false}, {3, true} };
+        in.spawnsPerRoom = 5;
+        in.bossRoomAdds = 2;
+        in.casterPct = 40;
+        in.bandMin = 76;
+        in.affixPct = 40;
+        in.theme = theme;
+
+        std::vector<SpawnPick> flat;
+        if (!PDv2SelectSpawns(seed, in, pools, flat))
+        {
+            Check(false, "the themed draw refused to select", seed);
+            return;
+        }
+        Check(!flat.empty(), "the themed draw came back empty", seed);
+
+        for (SpawnPick const& pick : flat)
+        {
+            int const owner = ThemedPackOfEntry(packs, pick.entry);
+            Check(std::find(candidates.begin(), candidates.end(), owner) != candidates.end(),
+                  "a themed run drew a creature from a pack its theme excludes", seed);
+            if (std::find(sawPacks.begin(), sawPacks.end(), owner) == sawPacks.end())
+            {
+                sawPacks.push_back(owner);
+            }
+        }
+    }
+
+    void RunThemedPackChecks(int seeds)
+    {
+        std::vector<ThemedFixturePack> const packs = ThemedFixturePacks();
+
+        // A boss-only themed pack: the one shape that could claim a run and
+        // then leave every room empty. It must NOT count as usable, so a
+        // theme-2 run still falls back to the theme-0 packs and nothing of
+        // pack 4's ever spawns.
+        std::vector<ThemedFixturePack> withBossOnly = packs;
+        ThemedFixturePack bossOnly;
+        bossOnly.packId = 4;
+        bossOnly.theme = 2;
+        bossOnly.members = { {4, 8923, PACK_ROLE_BOSS} };
+        withBossOnly.push_back(bossOnly);
+
+        std::vector<int> sawThemed;
+        std::vector<int> sawTheme0;
+        std::vector<int> sawMerged;
+        std::vector<int> sawZero;
+        std::vector<int> sawBossOnly;
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 17u;
+
+            // The mine draws the mine's pack and nothing else.
+            CheckThemedDraw(packs, /*theme*/ 1, /*exclusive*/ true, { 3 }, seed, sawThemed);
+            // A theme with no pack of its own falls back to the theme-0 pool -
+            // today's set, and the reason a new look can ship its art first.
+            CheckThemedDraw(packs, 2, true, { 1, 2 }, seed, sawTheme0);
+            // ThemeExclusive off: the themed pack merely joins the pool.
+            CheckThemedDraw(packs, 1, false, { 1, 2, 3 }, seed, sawMerged);
+            // Theme 0 is not a look, it is the absence of one: the same pool
+            // in both modes, and the same pool every pre-F1 fixture describes.
+            CheckThemedDraw(packs, 0, true, { 1, 2 }, seed, sawZero);
+            CheckThemedDraw(packs, 0, false, { 1, 2 }, seed, sawZero);
+            // The boss-only themed pack cannot claim its theme.
+            CheckThemedDraw(withBossOnly, 2, true, { 1, 2 }, seed, sawBossOnly);
+        }
+
+        // Non-vacuity, and it is not decoration: a fixture or a rule change
+        // that quietly stopped drawing the themed pack would leave every
+        // "drew only from allowed packs" check above trivially true.
+        Check(std::find(sawThemed.begin(), sawThemed.end(), 3) != sawThemed.end(),
+              "no themed run ever drew the theme-1 pack - the themed draw is vacuous", 0);
+        Check(std::find(sawMerged.begin(), sawMerged.end(), 3) != sawMerged.end(),
+              "ThemeExclusive = 0 never drew the themed pack in the whole sample", 0);
+        Check(sawMerged.size() > 1,
+              "ThemeExclusive = 0 drew from one pack only - the merged pool is not merged", 0);
+        Check(std::find(sawBossOnly.begin(), sawBossOnly.end(), 4) == sawBossOnly.end(),
+              "a boss-only themed pack was drawn from - it can fill no room", 0);
+    }
+
     // --- Round C / C6: a boss appears at most once per run -----------------
     //
     // The evidence this check exists for is a real run, not a hypothesis: the
@@ -7799,6 +8065,13 @@ namespace
             bool const ok = CheckEligibleTrashPackFilter(why);
             Check(ok, why.empty() ? "eligible trash pack filter failed" : why.c_str(), 0);
         }
+        // Round F / F1. SelectThemePacks itself is pure and would be answered
+        // by one seed, but the DRAW half beside it is not: whether the merged
+        // pool really reaches the themed pack is a statement about a sample.
+        // Same tenth-of-the-batch size as the checks above it, for the same
+        // reason - the properties are per run, so the sample only decides how
+        // much of the draw space gets walked.
+        RunThemedPackChecks(count / 10 + 1);
         {
             // Round C / C6. Same tenth-of-the-batch reasoning as the theme
             // checks: no-repeat is a property of ONE run's boss rooms, so the
