@@ -145,6 +145,14 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > (Defias, Stonevault, Dark Iron) and is lit by glowing crystal formations, with braziers in
 > boss rooms and mining clutter in rooms and corridors. The forest is next (F2).
 >
+> **Round F, second wave.** The theme choice is a dropdown under the caster row. The mine's
+> walls are dressed with rock bodies and timbering; the **forest** (theme 3) is the third look:
+> mossy cliffs and tree lines by turns, pine-needle and grass floors, Wailing Caverns / Maraudon /
+> Razorfen packs, fallen trees and fences as blockers, campfires in boss rooms. Every theme has
+> its own light, ambience and music (the mine is a dark blue cave, the forest a green day, the
+> city unchanged) and its own zone name. Kit **t1b-v40** with a DBC patch and the streaming
+> DLL ship together.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works
