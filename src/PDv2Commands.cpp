@@ -124,12 +124,18 @@ private:
         // (PDv2Mgr::HasTheme), the panel's slider is already bounded by the
         // same fact, and a hand-written list here was one more place a third
         // theme would have had to be remembered in.
+        //
+        // Round F / F3-B is exactly that third theme, and it needed no code
+        // change here at all - only the NAMES below, which are prose for a GM
+        // and not a gate. Theme 3 becomes generatable on the day the kit ships
+        // forest chunk meta (22000+) and not one commit earlier, which is the
+        // whole point of asking the kit.
         int const themeOverride = static_cast<int>(themeArg.value_or(0));
         if (themeOverride != 0 && !sPDv2Mgr->HasTheme(themeOverride))
         {
             handler->PSendSysMessage("pdungeon v2: theme {} is unknown - this kit carries "
-                                     "1..{} (1 = mine, 2 = city; 0 or no argument follows "
-                                     "the server config).",
+                                     "1..{} (1 = mine, 2 = city, 3 = forest; 0 or no "
+                                     "argument follows the server config).",
                                      themeOverride, sPDv2Mgr->ThemeMax());
             return true;
         }

@@ -368,6 +368,41 @@ ProceduralDungeon.V2.Theme = 2
 ProceduralDungeon.V2.Packs.ThemeExclusive = 1
 
 #
+#    ProceduralDungeon.V2.Theme<N>.LightId       (N = 1 .. 9)
+#        Description: Round F / F3-B: the MOOD of a theme. The Light.dbc ROW
+#                     id a run generated with theme N overrides its zone
+#                     light with, sent once per instance build as
+#                     SMSG_OVERRIDE_LIGHT (Map::SetZoneOverrideLight). It is
+#                     a per-MAP runtime override, not DBC data the server
+#                     reads: it lives on the instance, dies with it, and two
+#                     dungeons of different themes are lit differently at the
+#                     same minute on the same realm.
+#                     0 = no override at all: that theme keeps whatever light
+#                     the map already has, which is what every unset slot
+#                     means and what this module did before F3-B.
+#                     A Light ROW and NOT a LightParams id - the stock
+#                     overrides (LIGHT_SNOWSTORM 2490, the Malygos 1822-1825
+#                     family) are Light rows too.
+#                     The rows below are the ones workspace script 47 writes
+#                     in task F3-A: Light 2864 (mine, LightParams 919, built
+#                     from Ahn'kahet donor 811) and Light 2865 (forest,
+#                     LightParams 920, from Scarlet Monastery donor 513),
+#                     both positioned OFF-FIELD so the map default stays
+#                     Light 2863. Until that client patch is deployed the
+#                     client has no such row and the override is a no-op on
+#                     its side; the server sends it either way.
+#                     Read live: `.reload config` retunes the NEXT instance
+#                     to build. It is NOT a layout input - nobody's stored
+#                     plan rerolls because a theme got a new mood. The boot
+#                     log prints one line naming every theme that has one.
+#        Default:     0 for every theme that is not listed below
+#
+
+ProceduralDungeon.V2.Theme1.LightId = 2864
+ProceduralDungeon.V2.Theme2.LightId = 0
+ProceduralDungeon.V2.Theme3.LightId = 2865
+
+#
 #    ProceduralDungeon.V2.RequiredDllVersion
 #        Description: Minimum FLStream.dll bridge version the entry gate
 #                     accepts. A client below it (or with no DLL at all) is

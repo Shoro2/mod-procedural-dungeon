@@ -3778,6 +3778,83 @@ namespace
         }
     }
 
+    // Round F / F3-B: the theme-3 (forest) chunk-id namespace, engine side.
+    //
+    // Deliberately stops where the parity check above goes on: no walk grid,
+    // because the shipped kit has no theme-3 chunks to build one from (task K2
+    // makes them, and the engine has to reserve the namespace first so the kit
+    // and the composer oracle have something to agree with). What it does state
+    // is the whole of F3-B.1:
+    //
+    //   * theme 3 GENERATES at all. GenerateBlockPlan runs ValidateBlockPlan on
+    //     every attempt, and an unknown theme fails it on the first block with
+    //     "no kit namespace for it" - so before this wave this loop returned
+    //     false for every seed and maxTries. A pass here is the validator
+    //     accepting 3, measured rather than asserted.
+    //   * the ids are 22000-based, re-derived from the documented formula
+    //     (themeBase + alt*1000 + role*100 + mask) rather than read off the
+    //     planner, which is the same stance the event-pocket check takes.
+    //   * the LAYOUT did not move: same seed, same blocks as theme 1, ids
+    //     offset by exactly 20000. A theme is art and a namespace, never a
+    //     draw - that is what keeps every PD_*_PIN in this file (all captured
+    //     at theme 0/1) out of reach of a new look.
+    void RunThemeThreeNamespaceChecks(int seeds)
+    {
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            BlockCfg cfgMine = MakeCfg(seed, 6);
+            BlockCfg cfgForest = cfgMine;
+            cfgForest.theme = 3;
+
+            BlockPlan mine;
+            BlockPlan forest;
+            if (!GenerateBlockPlan(cfgMine, &mine))
+            {
+                Check(false, "theme 1 failed to generate", seed);
+                continue;
+            }
+            if (!GenerateBlockPlan(cfgForest, &forest))
+            {
+                Check(false, "theme 3 does not generate - the validator has no kit "
+                             "namespace for it", seed);
+                continue;
+            }
+            Check(mine.blocks.size() == forest.blocks.size(),
+                  "theme 3 laid out a different block count", seed);
+            if (mine.blocks.size() != forest.blocks.size())
+            {
+                continue;
+            }
+            bool same = true;
+            bool ids = true;
+            for (size_t k = 0; k < mine.blocks.size(); ++k)
+            {
+                PlacedBlock const& a = mine.blocks[k];
+                PlacedBlock const& b = forest.blocks[k];
+                if (a.bx != b.bx || a.by != b.by || a.role != b.role ||
+                    a.socketMask != b.socketMask || a.alt != b.alt ||
+                    a.chainIndex != b.chainIndex || a.branchOf != b.branchOf ||
+                    a.detourOf != b.detourOf ||
+                    b.chunkId - a.chunkId != 20000)
+                {
+                    same = false;
+                }
+                int const wantChunk = 22000 + b.alt * 1000
+                                    + static_cast<int>(b.role) * 100
+                                    + static_cast<int>(b.socketMask);
+                if (b.chunkId != wantChunk)
+                {
+                    ids = false;
+                }
+            }
+            Check(same, "theme 3 is not the same layout with ids moved by the "
+                        "namespace distance", seed);
+            Check(ids, "a theme-3 chunk id is not 22000 + alt*1000 + role*100 + mask",
+                  seed);
+        }
+    }
+
     // --- Round B: the spine (spec 2026-09-02 §7.1) --------------------------
     //
     // Re-derived from the plan's blocks and sockets, never from the planner's
@@ -8055,6 +8132,10 @@ namespace
         Check(sawDetour, "no seed in the sample produced a loop room - the detour draw is dead code", 0);
         RunPhase2Checks(count / 10 + 1);
         RunThemeParityChecks(count / 10 + 1);
+        // Round F / F3-B, same tenth-of-the-batch size as the parity check it
+        // extends: the property is per layout, so the sample only decides how
+        // many role/mask/alt combinations get their id re-derived.
+        RunThemeThreeNamespaceChecks(count / 10 + 1);
         // Same tenth-of-the-batch reasoning: one pack per room is structural
         // too, and a real seed only ever gets a handful of rooms per run.
         RunPackThemeChecks(count / 10 + 1);

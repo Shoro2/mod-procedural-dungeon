@@ -2382,6 +2382,67 @@ namespace PDungeon
         // uint32 on the account row and 255 is far past any cap a conf can set.
         _run.dlvl = static_cast<uint8>(std::clamp(dlvl, 0, 255));
 
+        // Round F / F3-B (plan task F3-B.3, recon D 2b): the run's MOOD, and
+        // the one statement of it - frozen with the rest of the run, from the
+        // PLAN's theme, for the same reason every other line above uses the
+        // plan: the look belongs to the layout the player owns and not to
+        // whatever the gen panel says right now.
+        //
+        // The theme's light is a Light.dbc ROW id read live off the conf
+        // (V2.Theme<N>.LightId, 0 = leave the map alone, which is every theme
+        // until an operator sets a key) and pushed to the map's zone as
+        // SMSG_OVERRIDE_LIGHT. Map::SetZoneOverrideLight keeps it in the Map's
+        // own _zoneDynamicInfo (AC Map.cpp:3241-3252), which is per instance
+        // and dies with the map - so a mine and a city are lit differently at
+        // the same minute on the same realm, and NO server-side dbc row has to
+        // describe map 760 for that to work.
+        //
+        // Sent ONCE per build, and that is not a hole for late joiners. The
+        // stored override is re-sent by Map::SendZoneDynamicInfo
+        // (Map.cpp:3135-3153), which Player::UpdateZone calls unconditionally
+        // for anyone whose zone HAS an AreaTable row (PlayerUpdates.cpp:
+        // 1288-1295; ours is areatable_dbc 5100, shipped in
+        // mod_pdungeon_map760.sql), and a cross-map teleport always runs
+        // UpdateZone on arrival (MovementHandler.cpp:264-267). The player who
+        // triggered this build is covered by the immediate broadcast instead:
+        // InstanceMap::AddPlayerToMap adds them to the map BEFORE it calls the
+        // instance script (Map.cpp:2067, then :2070), so Map::SendZoneMessage
+        // already sees them. No OnPlayerEnter hook of our own is needed.
+        //
+        // The zone is the map's LINKED zone off the MapEntry and never a
+        // literal: map 760 carries no gridmap, so every position on it falls
+        // back to linked_zone (Map.cpp:1281) and that is the only zone a
+        // player in here can be in. It reads 5100 today; F3-C gives the CLIENT
+        // a per-theme area id, and this has to keep naming whatever the SERVER
+        // side really is rather than a number copied out of a sibling task.
+        if (uint32 const themeLight = sPDv2Mgr->ThemeLightId(plan.config.theme))
+        {
+            MapEntry const* mapEntry = instance->GetEntry();
+            uint32 const zoneId = mapEntry ? mapEntry->linked_zone : 0;
+            if (zoneId)
+            {
+                // No fade: the player is arriving, there is nothing to fade
+                // FROM, and a fade would start the run in the wrong light.
+                instance->SetZoneOverrideLight(zoneId, themeLight, 0ms);
+                LOG_INFO(PD_LOG, "PDv2: instance {} theme {} overrides zone {} "
+                                 "light with Light.dbc row {}",
+                         instance->GetInstanceId(), plan.config.theme, zoneId,
+                         themeLight);
+            }
+            else
+            {
+                // A dungeon map with no linked zone is a broken map_dbc row and
+                // not a state to work around: SendZoneMessage would match no
+                // player and _zoneDynamicInfo[0] would collect an entry that is
+                // never read again.
+                LOG_WARN(PD_LOG, "PDv2: instance {} map {} has no linked zone - "
+                                 "theme {} keeps the map default light instead "
+                                 "of Light.dbc row {}",
+                         instance->GetInstanceId(), instance->GetId(),
+                         plan.config.theme, themeLight);
+            }
+        }
+
         // Rooms only, in plan order. A corridor is 8.3 yd wide, so anything
         // standing in one would be shoulder to shoulder with the walls; the
         // entrance stays empty so an arriving player is not already in combat.

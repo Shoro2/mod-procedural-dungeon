@@ -90,6 +90,26 @@ namespace PDungeon
         // restart; the next instance to build draws under whatever it says.
         _config.packsThemeExclusive = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Packs.ThemeExclusive", true);
+
+        // Round F / F3-B (recon D 2b): the mood per theme. One key per theme
+        // slot, 0 = no override, which is what every slot reads on a server
+        // that never sets one. The window is fixed (PD_THEME_LIGHT_MAX) rather
+        // than taken from the kit, because this runs before LoadChunkMeta and
+        // a config reader cannot know yet which themes exist; asking for a
+        // theme the kit does not ship costs one unset key and nothing else.
+        //
+        // NOT validated against light_dbc here: the DBC stores are loaded
+        // after the first config read, so a lookup at this point would call
+        // every row missing on startup and only ever succeed on `.reload
+        // config` - the same reason V2.Finale.TeleName is resolved per click.
+        // A row the CLIENT does not have is a client-side no-op anyway.
+        for (int theme = 1; theme <= PD_THEME_LIGHT_MAX; ++theme)
+        {
+            std::string const key = "ProceduralDungeon.V2.Theme" +
+                                    std::to_string(theme) + ".LightId";
+            _config.themeLightId[static_cast<size_t>(theme - 1)] =
+                sConfigMgr->GetOption<uint32>(key, 0u);
+        }
         _config.manifestPath = sConfigMgr->GetOption<std::string>(
             "ProceduralDungeon.V2.ManifestPath", "");
 
@@ -355,6 +375,33 @@ namespace PDungeon
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
                  _config.rooms, _config.bossRooms, _config.fieldBlocks,
                  _config.originBX, _config.originBY, _config.branches, _config.detourChancePct);
+        // Round F / F3-B. One line, and only for the themes that really carry
+        // an override, because the interesting statement is the short one: a
+        // server with no per-theme mood says so in four words, and one that
+        // has them can be read off against the Light rows script 47 wrote.
+        // Printed by LoadConfig rather than by a startup-only loader, so it is
+        // a boot line that a `.reload config` repeats - which is exactly what
+        // an operator retuning the key wants to see.
+        if (_config.enabled)
+        {
+            std::string lights;
+            for (int theme = 1; theme <= PD_THEME_LIGHT_MAX; ++theme)
+            {
+                uint32_t const lightId = _config.themeLightId[static_cast<size_t>(theme - 1)];
+                if (!lightId)
+                {
+                    continue;
+                }
+                if (!lights.empty())
+                {
+                    lights += ", ";
+                }
+                lights += "theme " + std::to_string(theme) + " -> light " +
+                          std::to_string(lightId);
+            }
+            LOG_INFO(PD_LOG, "PDv2: zone light override per theme: {}",
+                     lights.empty() ? std::string("none configured") : lights);
+        }
         if (_config.enabled && _config.manifestPath.empty())
         {
             LOG_WARN(PD_LOG, "PDv2: ProceduralDungeon.V2.ManifestPath is empty - `.pdungeon v2 gen` "
@@ -1133,6 +1180,18 @@ namespace PDungeon
     bool PDv2Mgr::HasTheme(int theme) const
     {
         return std::binary_search(_chunkThemes.begin(), _chunkThemes.end(), theme);
+    }
+
+    uint32_t PDv2Mgr::ThemeLightId(int theme) const
+    {
+        // The range test IS the contract (see the declaration): theme 0 means
+        // "follow the conf" on the account row and never reaches a plan, and a
+        // theme beyond the conf window simply has no key to read.
+        if (theme < 1 || theme > PD_THEME_LIGHT_MAX)
+        {
+            return 0;
+        }
+        return _config.themeLightId[static_cast<size_t>(theme - 1)];
     }
 
     uint8_t const* PDv2Mgr::WalkMaskFor(int chunkId) const

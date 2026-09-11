@@ -53,6 +53,15 @@ class Player;
 //     where the floor is (`GroundZ -100000`); only the client does.
 namespace PDungeon
 {
+    // Round F / F3-B. How many per-theme light slots the conf carries:
+    // ProceduralDungeon.V2.Theme1.LightId .. Theme9.LightId. A FIXED window
+    // and deliberately not ThemeMax(): the keys are read in LoadConfig, which
+    // runs long before LoadChunkMeta has told anyone which themes the kit
+    // ships, so a config reader has nothing else to size itself by. Nine
+    // matches the AreaTable block PDv2 reserved for itself (5101-5109), i.e.
+    // the most themes this dungeon can ever name.
+    int const PD_THEME_LIGHT_MAX = 9;
+
     struct PDv2Config
     {
         bool        enabled = false;
@@ -82,6 +91,19 @@ namespace PDungeon
         // rerolling anybody's stored plan. It does move WHICH creatures a
         // stored seed spawns, exactly as adding a pack does.
         bool        packsThemeExclusive = true;
+        // Round F / F3-B (recon D 2b). The Light.dbc ROW id a run of theme N
+        // overrides its zone with, indexed theme-1: themeLightId[0] is
+        // V2.Theme1.LightId. 0 = no override, and 0 is the default for every
+        // slot - a server whose client patch does not carry the rows behaves
+        // exactly as it did before this key existed.
+        //
+        // A Light ROW and not a LightParams id: that is what
+        // Map::SetZoneOverrideLight sends and what SMSG_OVERRIDE_LIGHT means
+        // (AC Map.cpp:3241-3252; the stock overrides LIGHT_SNOWSTORM 2490 etc.
+        // are Light rows too). Read live at the instance build, so it is an
+        // operator lever and never a layout input - nobody's stored plan
+        // rerolls because the mine got a new mood.
+        std::array<uint32_t, PD_THEME_LIGHT_MAX> themeLightId{};
         std::string manifestPath;        // where `v2 gen` writes the manifest
 
         // 01 §8 gameplay knobs.
@@ -619,6 +641,16 @@ namespace PDungeon
         // masks and read-only afterwards, exactly like WalkMaskFor.
         int ThemeMax() const;
         bool HasTheme(int theme) const;
+
+        // Round F / F3-B. The Light.dbc row a run of `theme` overrides the
+        // zone light with, or 0 for "leave the map's own light alone" - which
+        // is the answer for an unconfigured theme AND for any id outside the
+        // conf's 1..PD_THEME_LIGHT_MAX window, so a caller never has to range
+        // check before asking. Straight off the live config, exactly like
+        // GetConfig(): `.reload config` retunes the NEXT instance to build and
+        // touches nothing already standing, because the override is sent once
+        // per build and then lives on the Map.
+        uint32_t ThemeLightId(int theme) const;
 
         // The 8x8 walk mask for a kit chunk, or nullptr for an unknown id -
         // the shape BuildWalkGrid's WalkMaskProvider wants.

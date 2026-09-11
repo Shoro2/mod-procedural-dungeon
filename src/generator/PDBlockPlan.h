@@ -140,6 +140,11 @@ namespace PDungeon
         int eventChancePct = 0;
         int originBX = 256;         // global block coord of the field origin
         int originBY = 256;
+        // The kit's chunk-id NAMESPACE and the art that comes with it:
+        // 1 mine (base 2000), 2 city (12000), 3 forest (22000, Round F).
+        // ThemeChunkIdBase in the .cpp is the one table; ValidateBlockPlan
+        // refuses a plan whose theme is not in it, so an unknown look can
+        // never reach the client as a chunk id nothing composes.
         int theme = 1;
         int maxTries = 12;          // seed+n retries before giving up
         int maxDeadEnds = 2;        // stub corridors attached after the loops

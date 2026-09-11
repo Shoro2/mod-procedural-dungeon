@@ -33,6 +33,14 @@ namespace PDungeon
         int const CHUNK_ID_BASE = 2000;         // theme 1 (mine)
         int const CHUNK_ID_BASE_CITY = 12000;   // theme 2 (city) - kit scheme
                                                 // themeBase + alt*1000 + role*100 + mask
+        // Round F / F3-B. Theme 3 (forest). The namespace is reserved by the
+        // ENGINE before the kit ships it, deliberately: K2 builds the forest
+        // chunks into 22000+, the composer oracle mirrors the same table, and
+        // the three have to agree about the base before a single chunk exists.
+        // Until that kit is staged PDv2Mgr::HasTheme(3) is false and nothing
+        // can generate with it - this only states what the id WILL be and what
+        // ValidateBlockPlan accepts once it does.
+        int const CHUNK_ID_BASE_FOREST = 22000; // theme 3 (forest)
         int const BLOCKS_PER_TILE = 8;
         int const MAX_BLOCK_COORD = 64 * BLOCKS_PER_TILE;   // 512
         int const MIN_ROOM_GAP = 2;                         // Manhattan, so a corridor always fits
@@ -133,6 +141,7 @@ namespace PDungeon
             {
                 case 1:  return CHUNK_ID_BASE;
                 case 2:  return CHUNK_ID_BASE_CITY;
+                case 3:  return CHUNK_ID_BASE_FOREST;
                 default: return 0;
             }
         }
