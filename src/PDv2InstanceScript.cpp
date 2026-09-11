@@ -22,29 +22,47 @@
 #include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "InstanceScript.h"
+#include "Item.h"
 #include "Log.h"
 #include "LootMgr.h"
+#include "Mail.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "PDDefines.h"
 #include "PDv2Affixes.h"
 #include "PDv2CreatureAI.h"
+#include "PDv2LootMgr.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
+#include "PDv2TaggedAura.h"
 #include "PDv2UILink.h"
 #include "Player.h"
 #include "Position.h"
+#include "SpellAuraEffects.h"
 #include "SpellMgr.h"
 #include "StringFormat.h"
 #include "TemporarySummon.h"
 #include "Timer.h"
 #include "WorldSession.h"
 
+// Round E / WP5. Paragon integration is OPTIONAL: mod-paragon owns
+// ParagonUtils.h, and in the full server build every module's src/ is on the
+// include path (modules/CMakeLists.txt), so the header and IncreaseParagonXP
+// are there and a won event pays XP. A module-only CI build has no
+// mod-paragon, so both the include and the call are guarded and this file
+// still compiles standalone - the same shape fl-underground-dungeon uses.
+#if __has_include("ParagonUtils.h")
+#include "ParagonUtils.h"
+#define PDV2_HAS_PARAGON 1
+#endif
+
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <set>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -169,6 +187,22 @@ namespace PDungeon
             { -2.0f, -4.0f }
         };
 
+        // Round E / WP5: the threat an arriving event attacker is handed on
+        // the host. AttackStart alone only picks the FIRST victim; this is the
+        // standing entry on the mob's threat list that decides who it goes for
+        // NEXT - so a wave mob whose target dies, vanishes or gets out of
+        // reach turns back to the pilgrim instead of finding an empty list and
+        // dropping combat. A full evade is a different thing and takes the
+        // list with it (CreatureAI::_EnterEvadeMode -> CombatStop ->
+        // EndAllPvECombat); PDv2MobAI's proximity aggro is what re-engages
+        // then, which is the same recovery every other mob on this map has.
+        //
+        // 1000 is far above the few points a first swing generates and far
+        // below what a player produces in a second of real threat, so a party
+        // that fights for him still takes the wave off him - which is the
+        // whole mechanic.
+        float const EVENT_WAVE_HOST_THREAT = 1000.0f;
+
         // Where a Lil' Bro's two children land relative to the corpse. That
         // module's own offsets, mirrored (DungeonChallengeScripts.cpp:877-878);
         // the second child takes the negatives.
@@ -192,6 +226,29 @@ namespace PDungeon
             { 920103,  4 },     // Forgotten Core
             { 920104,  1 }      // Forgotten Relic
         };
+
+        // Round E / L2. How many of the five conf currency tiers a KILL may
+        // pay: T1..T3, indices 0..2. T4 and T5 share the same arrays because
+        // the roll is one formula, but they belong to Chromie's cache (Task 7)
+        // and are deliberately out of reach here - a trash mob paying the
+        // run's closing tier would leave the finale with nothing to give.
+        int const LOOT_CURRENCY_MOB_TIERS = 3;
+
+        // The gear pool a run boss pays from, at every dlvl. Named here rather
+        // than in PDv2LootMgr.h because the pools are DATA (the header says
+        // so): the engine knows only which name each source asks for, and
+        // pointing the boss at another pool is one string, not a redesign.
+        // Chests and the final cache switch pool with dlvl (V2.Loot.IccDlvl);
+        // the boss does not, because RAID_HC is already the top of the ladder
+        // a five-man boss is worth.
+        std::string_view const LOOT_POOL_BOSS = "RAID_HC";
+
+        // The sender and the subject of the bags-are-full letter. Chromie is
+        // the module's own NPC and the one the player already met at the
+        // entrance, so a letter from her is the dungeon writing rather than an
+        // unattributed system mail.
+        char const* const LOOT_MAIL_SUBJECT = "The Forgotten Depths";
+        char const* const LOOT_MAIL_BODY = "Your bags were full.";
 
         // Round C / C8, the finale's clock. Four seconds is long enough to
         // read a line of chat and short enough that nobody walks off before
@@ -248,6 +305,54 @@ namespace PDungeon
             "Take what the Depths owe you - you have earned every bit of it.",
             "When you are ready, step through. Azealia is waiting."
         };
+
+        // WP6's TaggedAuraAmount stood here, file-local, and said so at
+        // length. Round E / WP9 moved it to PDv2TaggedAura.h unchanged: the
+        // loot path asks the same question of a SECOND tag, from two other
+        // translation units, and two copies of "what has this player
+        // unlocked" inside one module is how the answer starts differing by
+        // call site. The header carries the whole FT contract with it.
+
+        // Round E / WP10. "May this item live in the Endless Storage?"
+        //
+        // A COPY of mod-loot-filter's IsStorageEligible
+        // (mod-loot-filter/src/LootFilter.cpp:377-386), on purpose and not an
+        // include: the two modules do not otherwise know each other, and a
+        // shared header between them would buy a build dependency for four
+        // lines - the same trade PDv2TaggedAura.h states for
+        // mod-paragon-itemgen's copy of TaggedAuraAmount.
+        //
+        // The copy that MATTERS is a third one, the storage's own Lua
+        // (lua_scripts/Storage/endless_storage_server.lua:88-99), because that
+        // is what decides whether a deposited item can be listed and taken out
+        // again. An item this predicate accepts and that one rejects would be
+        // deposited into a row nobody can reach. All three say the same thing
+        // today - recipes; food and drink that stacks; trade goods or gems
+        // that stack - and this comment is where a fourth copy gets caught.
+        bool StorageEligible(ItemTemplate const* proto)
+        {
+            if (!proto)
+            {
+                return false;
+            }
+            if (proto->Class == ITEM_CLASS_RECIPE)
+            {
+                return true;
+            }
+            if (proto->Class == ITEM_CLASS_CONSUMABLE &&
+                proto->SubClass == ITEM_SUBCLASS_FOOD &&
+                proto->GetMaxStackSize() > 1)
+            {
+                return true;
+            }
+            if ((proto->Class == ITEM_CLASS_TRADE_GOODS ||
+                 proto->Class == ITEM_CLASS_GEM) &&
+                proto->GetMaxStackSize() > 1)
+            {
+                return true;
+            }
+            return false;
+        }
     }
 
     PDv2InstanceScript::PDv2InstanceScript(InstanceMap* map) : InstanceScript(map)
@@ -345,6 +450,13 @@ namespace PDungeon
             // rebuilt with the run"). A rebuild re-arms every one of them,
             // which is the whole difference between a trap and a one-off.
             _ambushes.clear();
+            // Round E / WP5, and for the same reason: the pilgrim and every
+            // attacker still standing went with _spawnedGuids in DespawnAll
+            // and the won event's cache with _decorGuids, so what is left
+            // here is only the run's memory that a pocket was already played.
+            // A rebuild re-stages every event, which is what makes a re-entry
+            // a new dungeon rather than a spent one.
+            _events.clear();
             // Round C / C8. Chromie, her cache and the portal went with
             // _spawnedGuids and _decorGuids in DespawnAll above; this is the
             // state machine that was walking them, and it has to go too. Note
@@ -409,6 +521,13 @@ namespace PDungeon
             // it belongs at the end of the same guard as everything else the
             // rebuild tears down.
             SpawnAmbushPlan(*plan);
+            // Round E / WP5, and genuinely last: the pilgrim is a summon, so
+            // it belongs after everything that reads the walk grid rather than
+            // adds to it, and its rim points are vetoed against the grid
+            // SpawnBarriers has already cut. Nothing else in the build depends
+            // on it - the event pocket was skipped by the room pass, plans no
+            // trash, moves no counter and carries no barrier denominator.
+            SpawnEventRooms(*plan);
             _spawned = true;
             _spawnedSeed = plan->effectiveSeed;
         }
@@ -486,14 +605,22 @@ namespace PDungeon
         // Spawn telemetry. Written at INFO during the 2026-08-10 invisible-
         // attacker hunt, where it settled the case in one session: the only
         // unselectable spawn was Swarming Shadows (38163), forty of them.
-        // Kept at DEBUG because the next hunt will want it again - flip
-        // Logger.module to 6 and every spawn names itself.
-        LOG_DEBUG(PD_LOG, "PDv2: instance {} spawn: entry {} '{}' faction {} "
-                          "selectable {} visible-model {}",
-                  instance->GetInstanceId(), creature->GetEntry(),
-                  creature->GetName(), creature->GetFaction(),
-                  creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) ? "no" : "yes",
-                  creature->GetDisplayId());
+        // The next hunt will want it again - and since Round E / R3 it takes
+        // V2.Debug rather than a logger level, so the operator turns on one
+        // key instead of learning what Logger.module 6 means.
+        //
+        // ONE LINE PER CREATURE, which is a hundred-odd of them per run: the
+        // gate is what keeps this out of a host's log, and INFO under the gate
+        // is what makes it visible the moment the key is on.
+        if (PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} spawn: entry {} '{}' faction {} "
+                             "selectable {} visible-model {}",
+                     instance->GetInstanceId(), creature->GetEntry(),
+                     creature->GetName(), creature->GetFaction(),
+                     creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) ? "no" : "yes",
+                     creature->GetDisplayId());
+        }
 
         if (!creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
         {
@@ -632,16 +759,340 @@ namespace PDungeon
             }
         }
 
-        // AddItem sends the standard received-item line, and says so itself
-        // when the bags are full - nothing to add in that case.
-        if (!player->AddItem(entry, 1))
+        // Round E / WP10: the bonus rares are materials like any other, so they
+        // take the material funnel - Endless Storage first, bags and then a
+        // letter from Chromie after. This replaces a bare AddItem whose failure
+        // dropped the roll on the floor without a word; the mail fallback it
+        // inherits is strictly the better answer to full bags.
+        GrantMaterial(player, entry, 1);
+
+        // Said whatever the funnel did with it, because this line marks the
+        // ROLL and not the delivery: a bonus rare is rare, and a player who
+        // reads "Stored [Primal Might] x1" alone cannot tell that the dungeon
+        // just paid something it usually does not.
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
+        ChatHandler(player->GetSession()).PSendSysMessage(
+            "Bonus: {}", proto ? proto->Name1 : std::string("?"));
+    }
+
+    void PDv2InstanceScript::ForEachRunPlayer(Map* map,
+                                              std::function<void(Player*)> const& fn)
+    {
+        if (!map)
         {
             return;
         }
 
-        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry);
-        ChatHandler(player->GetSession()).PSendSysMessage(
-            "Bonus: {}", proto ? proto->Name1 : std::string("?"));
+        // The same walk, and the same null-session skip, FinishRun makes: a
+        // player whose session has gone is on the list for a few more ticks
+        // and can be handed nothing - AddItem would work and the mail would
+        // not, and neither would ever be seen.
+        Map::PlayerList const& players = map->GetPlayers();
+        for (Map::PlayerList::const_iterator it = players.begin();
+             it != players.end(); ++it)
+        {
+            Player* player = it->GetSource();
+            if (!player || !player->GetSession())
+            {
+                continue;
+            }
+            fn(player);
+        }
+    }
+
+    void PDv2InstanceScript::GrantItem(Player* player, uint32 item, uint32 count) const
+    {
+        if (!player || !item || !count)
+        {
+            return;
+        }
+
+        // LOAD-BEARING, and not a defensive formality: Item::CreateItem below
+        // calls ABORT() when the template is unknown (Item.cpp:1120), so an
+        // item id that only exists in the conf - a typo in
+        // V2.Loot.Currency.Tier2.Item, a pool regenerated against a world DB
+        // this realm does not have - would take the worldserver down the first
+        // time somebody's bags were full. Player::AddItem answers that case
+        // with a plain false, which is why the crash is only reachable through
+        // the fallback and only through this one lookup.
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item);
+        if (!proto)
+        {
+            return;
+        }
+
+        // AddItem already sends the client's own "You receive item" line, so a
+        // grant that lands needs nothing said about it.
+        if (player->AddItem(item, count))
+        {
+            return;
+        }
+
+        // Bags full. The drop is NOT dropped: it goes to the mailbox, the way
+        // fl-underground-dungeon has always handled the same moment
+        // (UndergroundUtils.h:127), from the NPC the player already knows.
+        MailDraft draft(LOOT_MAIL_SUBJECT, LOOT_MAIL_BODY);
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        if (Item* mailItem = Item::CreateItem(item, count, player))
+        {
+            // Saved INSIDE the transaction that sends the mail, which is what
+            // every core caller does (cs_send.cpp:129): the item row has to
+            // exist before the mail row points at it, or a crash between the
+            // two leaves a letter holding an item that was never written.
+            mailItem->SaveToDB(trans);
+            draft.AddItem(mailItem);
+        }
+        draft.SendMailTo(trans, MailReceiver(player),
+                         MailSender(MAIL_CREATURE, NPC_CHROMIE));
+        CharacterDatabase.CommitTransaction(trans);
+
+        // The one line the funnel says out loud. Guarded rather than assumed:
+        // every caller today comes through ForEachRunPlayer, which has already
+        // skipped a sessionless player, but the mail above works without a
+        // session and this does not.
+        if (WorldSession* session = player->GetSession())
+        {
+            ChatHandler(session).PSendSysMessage(
+                "Your bags are full - {} was mailed to you.", proto->Name1);
+        }
+    }
+
+    void PDv2InstanceScript::GrantMaterial(Player* player, uint32 item,
+                                           uint32 count) const
+    {
+        if (!player || !item || !count)
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        // THE CURRENCY GUARD, and it is not theoretical. The five Remnants are
+        // trade goods with a stack, so StorageEligible says yes to every one of
+        // them - and mod-forgotten-talents counts them in the BAGS, so a
+        // Remnant in the storage is a Remnant nobody can spend. RollCurrency
+        // deliberately calls GrantItem and never this, which makes this loop
+        // dead code today; it is here because the call site somebody adds next
+        // is the one that will not remember, and five integer compares on a
+        // kill are not a cost worth arguing about. The ids come from the conf
+        // for the reason PDv2Mgr.h gives - the module names no item id
+        // anywhere - so a regenerated currency SQL moves the guard with it.
+        bool isCurrency = false;
+        for (uint32 const currency : cfg.lootCurrencyItem)
+        {
+            if (currency == item)
+            {
+                isCurrency = true;
+                break;
+            }
+        }
+
+        if (cfg.lootMatsToStorage && !isCurrency)
+        {
+            // The same lookup GrantItem makes and for the same reason: a conf
+            // or pool id that does not exist must not reach Item::CreateItem,
+            // and here it must not reach the INSERT either - the storage rows
+            // carry the item's class and subclass, which only the template
+            // knows.
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item);
+            if (proto && StorageEligible(proto))
+            {
+                // mod-loot-filter's DepositToStorage (LootFilter.cpp:389-398)
+                // verbatim, down to the ON DUPLICATE KEY: the table's primary
+                // key is (character_id, item_entry), so a second stack of the
+                // same material adds instead of failing, and the storage's Lua
+                // reads the row without knowing who wrote it.
+                //
+                // Fire-and-forget Execute, not Query: this runs on the kill
+                // path once per player per kill, the row is not read back, and
+                // an async write is what every other module doing this uses.
+                CharacterDatabase.Execute(
+                    "INSERT INTO custom_endless_storage "
+                    "(character_id, item_entry, item_class, item_subclass, amount) "
+                    "VALUES ({}, {}, {}, {}, {}) "
+                    "ON DUPLICATE KEY UPDATE amount = amount + {}",
+                    player->GetGUID().GetCounter(), item,
+                    uint32(proto->Class), uint32(proto->SubClass), count, count);
+
+                // The storage swallows the client's own "You receive item"
+                // line - nothing ever entered the bags - so this is the only
+                // thing that tells the player the kill paid. Same shape as
+                // mod-loot-filter's, with our own tag, so a player running both
+                // reads one sentence and not two dialects.
+                if (WorldSession* session = player->GetSession())
+                {
+                    ChatHandler(session).PSendSysMessage(
+                        "|cff888888[Depths]|r Stored [{}] x{} in Storage.",
+                        proto->Name1, count);
+                }
+                return;
+            }
+        }
+
+        // Everything else - the feature off, the table missing, a currency, an
+        // item the storage would not show - is the funnel this module already
+        // had: bags, then a letter from Chromie.
+        GrantItem(player, item, count);
+    }
+
+    void PDv2InstanceScript::RollCurrency(Creature* creature,
+                                          PDv2MobData const& /*tag*/)
+    {
+        if (!creature)
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        for (int tier = 0; tier < LOOT_CURRENCY_MOB_TIERS; ++tier)
+        {
+            uint32 const item = cfg.lootCurrencyItem[tier];
+            if (!item)
+            {
+                // 0 is how an operator turns one tier off, and the conf is
+                // read live, so it is a per-kill question and not a load-time
+                // one.
+                continue;
+            }
+
+            // The conf's own difficulty gate. The three mob tiers ship at 1,
+            // the bottom of the dial, which is the same as ungated - but the
+            // key is documented as "the run difficulty a tier needs before it
+            // drops at all", and an operator who raises T3's would otherwise
+            // find that it did nothing. The dial is the run's FROZEN one, like
+            // every other gameplay read in this file.
+            if (cfg.lootCurrencyMinDiff[tier] > static_cast<int>(_run.difficulty))
+            {
+                continue;
+            }
+
+            int const chanceBp = GameChanceBp(cfg.lootCurrencyChancePct[tier],
+                                              static_cast<int>(_run.roomFactorX100));
+            if (chanceBp <= 0)
+            {
+                continue;
+            }
+
+            // PERSONAL, per player and per tier (D6). Five people in a dungeon
+            // are five independent rolls of the same chance, not one drop for
+            // five people to argue about - and the roll is urand, never
+            // PDRandom, for the reason RollBonusLoot spells out above.
+            ForEachRunPlayer(creature->GetMap(),
+                             [this, item, chanceBp](Player* player)
+            {
+                if (static_cast<int>(urand(1, PD_GAME_CHANCE_BP_MAX)) <= chanceBp)
+                {
+                    GrantItem(player, item, 1);
+                }
+            });
+        }
+    }
+
+    void PDv2InstanceScript::RollMaterials(Creature* creature,
+                                           PDv2MobData const& /*tag*/)
+    {
+        if (!creature)
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        // The band's TOP, not the count: the run's frozen dlvl decides how
+        // large a stack this dungeon can pay, and the stack itself is rolled
+        // inside it per player. One computation for the whole kill, because
+        // nothing in it is per player.
+        int const maxCount = GameMatsMaxCount(static_cast<int>(_run.dlvl),
+                                              cfg.dlvlCap,
+                                              cfg.lootMatsMaxPerMobAtCap);
+
+        // Same funnel and the same recipients as the currency above, and the
+        // chance roll is INSIDE the walk on purpose: D6 makes materials a
+        // personal roll, so each player either gets their own stack or does
+        // not. Rolling once for the kill would have made it one shared drop
+        // wearing a per-player payout, which is invisible at the shipped 100 %
+        // and wrong at every other value.
+        ForEachRunPlayer(creature->GetMap(),
+                         [this, &cfg, maxCount](Player* player)
+        {
+            if (static_cast<int>(urand(1, 100)) > cfg.lootMatsChancePct)
+            {
+                return;
+            }
+
+            // ONE item id per player per kill, with the count as its stack: a
+            // player who is owed four materials is owed four of SOMETHING, and
+            // four separate draws would fill a bag with singles instead.
+            uint32 const item = sPDv2LootMgr->RollMaterial();
+            if (!item)
+            {
+                return;
+            }
+
+            // Round E / WP10: GrantMaterial and not GrantItem, so the stack
+            // goes to the Endless Storage where the player has one. This is the
+            // hot path the operator was looking at - a run pays materials on
+            // every tagged kill, for every player on the map, and 16 bag slots
+            // are gone by the third room. GrantMaterial says its own line when
+            // it deposits, which is why nothing is printed here.
+            GrantMaterial(player, item, urand(1, static_cast<uint32>(maxCount)));
+        });
+    }
+
+    void PDv2InstanceScript::InjectBossGear(Creature* creature, Unit* killer)
+    {
+        if (!creature)
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+        // D9: the whole part of Items x lootMult always drops, the fraction is
+        // the percent chance of one more. The engine rolls the dice the
+        // engine-free formula deliberately does not (PDv2GameMath.h says why).
+        int const count = GameScaledCount(cfg.lootBossItems,
+                                          static_cast<int>(_run.lootMultX100),
+                                          static_cast<int>(urand(1, 100)));
+        if (count <= 0)
+        {
+            return;
+        }
+
+        // The class filter's looter, and nothing more: a pet or a totem landed
+        // the blow as often as its owner did, so the credit follows the same
+        // walk RollBonusLoot takes. Who may actually take the item out of the
+        // corpse is the group's loot rules, which we do not touch - and a
+        // killer we cannot resolve to a player simply rolls unfiltered.
+        Player* looter = killer ? killer->GetCharmerOrOwnerPlayerOrPlayerItself()
+                                : nullptr;
+
+        // Round E / WP9, once per corpse rather than once per item, and a
+        // looter we could not resolve above answers Off here - so a boss that
+        // died to a void zone rolls exactly what it rolled before this
+        // existed, unfiltered on both counts.
+        uint8_t const profile = PDv2LootMgr::StatProfileFor(looter);
+
+        for (int i = 0; i < count; ++i)
+        {
+            uint32 const item =
+                sPDv2LootMgr->RollGear(LOOT_POOL_BOSS, looter, profile);
+            if (!item)
+            {
+                // An empty or unloaded pool. Nothing to add, and nothing to
+                // say either - PDv2LootMgr::Describe is where an operator sees
+                // that a pool is at 0 rows.
+                continue;
+            }
+
+            // chance 100, no quest flag, group 0, exactly one: a row that is
+            // certain by construction, because the roll already happened above
+            // and the loot table is only being used to carry the result into
+            // the window the player is about to open.
+            creature->loot.AddItem(
+                LootStoreItem(item, 0, 100.0f, false, LOOT_MODE_DEFAULT, 0, 1, 1));
+        }
     }
 
     void PDv2InstanceScript::OnMobDied(Creature* creature, Unit* killer)
@@ -708,7 +1159,24 @@ namespace PDungeon
             {
                 if (--_roomAlive[tag->roomIndex] == 0)
                 {
-                    ++_run.roomsCleared;
+                    // Every emptied room, boss halls included: this is what
+                    // the panel's cleared-room map is resent on, and that map
+                    // paints the halls (PDv2InstanceScript.h, RoomsEmptied-
+                    // Count).
+                    ++_run.roomsEmptied;
+
+                    // Round E / R2: the numerator has to count the same rooms
+                    // the denominator does, and roomsTotal is the ORDINARY
+                    // count since the dial started meaning ordinary rooms. A
+                    // boss hall is reported by bossKilled/bossTotal on the same
+                    // HUD line; counting it here as well would push the room
+                    // pair past its own total on the last pull of the run.
+                    // _roomAlive is only stepped for a room that HAD a pack, so
+                    // the bounds check above already proved the index is live.
+                    if (!_roomIsBoss[tag->roomIndex])
+                    {
+                        ++_run.roomsCleared;
+                    }
                 }
             }
 
@@ -730,7 +1198,10 @@ namespace PDungeon
 
         // 01 §8: the FL mats drop ON TOP of whatever the creature's own loot
         // table gives, which is what makes the dungeon a way to farm existing
-        // content rather than a replacement for it.
+        // content rather than a replacement for it. Round E / WP8 narrowed
+        // "whatever it gives" to the GOLD by default - the items are dropped
+        // unless V2.Loot.NativeItems says otherwise, and the block below it
+        // says why.
         //
         // A Lil' Bro child pays nothing, native table included - one carrier is
         // seven corpses (1 -> 2 -> 4), and seven loot tables plus seven bonus
@@ -747,8 +1218,109 @@ namespace PDungeon
         else
         {
             RollBonusLoot(killer);
+
+            // Round E / L2-L4, the kill funnel. Everything a dead dungeon mob
+            // is worth beyond its own table, in the one place a reader can see
+            // all of it: currency and materials into the bags of every player
+            // on the map, gear into the corpse when the mob was the room's
+            // boss. Split children are excluded by the branch above, which is
+            // the same reason they pay no native loot either.
+            PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+
+            // D7. An extra mob - a WP5 event wave, a WP6 respawn copy - pays
+            // currency only when the operator says so, because it can be
+            // farmed in place and currency is progression. Materials it always
+            // pays, which is why only this half is gated.
+            if (!tag->isExtra || cfg.lootExtraMobsDropCurrency)
+            {
+                RollCurrency(creature, *tag);
+            }
+            RollMaterials(creature, *tag);
+
+            // WP8, operator finding 4 of Runde 31: "the Shadowfang mobs keep
+            // their stock loot". They do, and that is the bug - the packs are
+            // drawn from STOCK creature_template entries (SFK 2529/3853-3859,
+            // Scholomance 10471-11551, Ahn'kahet, Twilight), so a PDv2 corpse
+            // hands out those dungeons' loot tables: their greens, their
+            // quest-chain drops, their vendor trash. None of it is FL content
+            // and none of it is what a PDv2 kill is supposed to be worth - the
+            // currency and the materials go straight to the bags above, and a
+            // room boss carries the injected gear below. So the item half of
+            // the native table goes, and BEFORE InjectBossGear: this clear
+            // would otherwise wipe the very gear the next lines add.
+            //
+            // The GOLD is kept ON PURPOSE, and it is the whole reason the loot
+            // is not simply emptied: Unit::Kill filled this loot at
+            // Unit.cpp:14083-14092 - FillLoot for the items, generateMoneyLoot
+            // for the coins - and nothing has opened the corpse yet, so the
+            // money is sitting there ready. Money is not content: it does not
+            // belong to Shadowfang, it is what any mob of level 80 is worth,
+            // and taking it away would make every kill in the dungeon a net
+            // repair-bill loss. SetLootMode(0) would have killed both halves
+            // at once, which is exactly why it is not the tool here.
+            if (!cfg.lootNativeItems)
+            {
+                uint32 const gold = creature->loot.gold;
+                creature->loot.clear();
+                creature->loot.gold = gold;
+            }
+
+            // isRunBoss, NOT the creature's entry: the boss slot of a room is
+            // whatever PDv2PackMgr put in it, trash stand-in included, and the
+            // tag is the only thing that knows the room is done with it. The
+            // same flag the completion counter above reads.
+            if (tag->isRunBoss)
+            {
+                InjectBossGear(creature, killer);
+            }
         }
 
+        // An empty corpse must not sparkle. Unit::Kill set UNIT_DYNFLAG_LOOTABLE
+        // a few lines before JustDied (Unit.cpp:14221-14227) on a loot that was
+        // still full, so a mob that dropped no gold and whose items were just
+        // dropped would keep the golden shimmer and hand every player an empty
+        // loot window. The Lil' Bro branch above clears the flag for the same
+        // reason; this is the same statement made once for every other path
+        // through the funnel, and Loot::empty() is what decides - it counts the
+        // GOLD as well (LootMgr.h:367), so a corpse that still carries coins
+        // stays lootable exactly as it should.
+        if (creature->loot.empty())
+        {
+            creature->RemoveDynamicFlag(UNIT_DYNFLAG_LOOTABLE);
+        }
+
+        // Round E / WP6 / D7: the respawn echoes, and they come after the whole
+        // funnel above for the same reason the boss gear comes before the
+        // finale - the kill has to be FINISHED, scored and looted and its
+        // corpse complete, before that corpse is allowed to raise anything.
+        //
+        // The guard list, in order: the operator has the mechanic on
+        // (V2.Respawn.Enable); this was an ordinary LAYOUT mob, because a
+        // patrol, an ambush or an event attacker is risk on the road and
+        // echoing one would turn a corridor into a treadmill; it was not the
+        // room's boss, whose hall the run has already been credited for and
+        // whose second corpse would read as a second boss; it was not a Lil'
+        // Bro child, not an echo itself and not any other extra, or one corpse
+        // would breed for ever; and the finale is not staged yet, because
+        // nothing new may walk in over Chromie's three lines.
+        //
+        // AND NO COUNTER MOVES HERE - the whole difference to SplitOnDeath,
+        // which raises _run.total and _roomAlive on purpose. A split child IS
+        // the planned mob, still owed to the run; an echo is a reward paid for
+        // a kill that is already scored, so adding it to the total would push
+        // the denominator up on every single pull and leave a HUD that can
+        // never reach its own number. The copies carry countsForRun = false
+        // and PD_ROOM_NONE, so OnMobDied will never score them either - both
+        // halves have to agree or the arithmetic drifts apart.
+        if (sPDv2Mgr->GetConfig().respawnEnable && tag->countsForRun && !tag->isRunBoss
+            && !tag->splitDepth && !tag->isRespawnCopy && !tag->isExtra && !_run.complete)
+        {
+            SpawnRespawnCopies(creature, *tag, killer);
+        }
+
+        // AFTER the injection, and that order is the point: FinishRun stages
+        // the finale, and the corpse the player is about to loot has to be
+        // complete before Chromie starts talking over it.
         if (!_run.complete && _run.bossTotal > 0 && _run.bossKilled >= _run.bossTotal)
         {
             FinishRun();
@@ -764,11 +1336,47 @@ namespace PDungeon
         // that was walked: the room count is what dlvl bought, and the boss is
         // what proves the run. Difficulty pays nothing on purpose (the formula
         // has no difficulty argument, and PDv2GameMath.h says why).
-        PDv2RunReward const reward = sPDv2Mgr->GrantRunReward(_accountId, _run.roomsTotal);
+        //
+        // What was BUILT is the ordinary rooms PLUS the boss halls, and that
+        // sum is exactly the number the pre-R2 roomsTotal carried by itself.
+        // Round E / R2 narrowed roomsTotal to the ORDINARY rooms - the dial's
+        // own number - so the boss halls are added back HERE; without them the
+        // payout would silently drop by bossRooms at every dial, and a rename
+        // of one counter would have retuned the reward curve. bossTotal counts
+        // one boss per boss room (PDv2PackMgr.h's contract, pinned at the spawn
+        // site), so the sum is the old total and a run pays the dxp it always
+        // did.
+        PDv2RunReward const reward = sPDv2Mgr->GrantRunReward(
+            _accountId, static_cast<int>(_run.roomsTotal) + _run.bossTotal);
 
         // The HUD's completion toast rides the same grant the chat lines below
         // announce, and fires exactly once because FinishRun does.
         sPDv2UILink->SendEnd(instance, reward);
+
+        // Round E / R1 (spec D15). The difficulty cap moves HERE and nowhere
+        // else on the gameplay path: finishing a run at dial D unlocks
+        // D + unlock, and the unlock is the smaller death value when the run
+        // cost anybody a death and the larger clean value when it did not.
+        //
+        // Measured against `_run.difficulty` - the dial FROZEN at spawn - and
+        // never against the account's live cfg_difficulty or its current cap.
+        // Against the live setting, a player who lowered the dial mid-run
+        // would be paid for a run they did not play; against the cap, farming
+        // easy runs at a high cap would inch the cap upwards for ever, which
+        // is the loop PDv2Mgr.h refuses from the other end.
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        int const unlock = _run.deaths ? cfg.capDeathUnlock : cfg.capCleanUnlock;
+        int const capBefore = sPDv2Mgr->GetAccountState(_accountId).diffCap;
+        int const capNow = sPDv2Mgr->RaiseDiffCap(_accountId,
+                                                  int(_run.difficulty) + unlock);
+
+        // STRICTLY greater, which is the whole reason `capBefore` is read at
+        // all: RaiseDiffCap is a ratchet and answers the cap in force whether
+        // or not it moved, so the return value alone cannot tell an unlock
+        // from a no-op. Announcing "difficulty 40 unlocked" to a party that
+        // has been capped at 40 for a week is exactly the kind of noise a
+        // raid warning must never carry.
+        bool const capRose = capNow > capBefore;
 
         Map::PlayerList const& players = instance->GetPlayers();
         for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
@@ -790,6 +1398,22 @@ namespace PDungeon
                 handler.PSendSysMessage("Your dungeon level is now {} - a deeper layout and "
                                         "more of the depths are open.", reward.newDlvl);
             }
+
+            if (capRose)
+            {
+                // The finale's raid-warning voice rather than another sys
+                // message: the N kind reaches chat AND the warning frame, and
+                // of everything this completion says, the ceiling on the NEXT
+                // run is the one line worth the frame.
+                sPDv2UILink->SendNotice(player, Acore::StringFormat(
+                    "Difficulty {} unlocked ({} death(s)).", capNow,
+                    uint32(_run.deaths)));
+                // ...and the panel behind it, because `c.diffMax` is what
+                // bounds the slider (flpdui.lua). Without this push the player
+                // is told about a ceiling their own dial still refuses to
+                // reach, until whatever happens to send the next C payload.
+                sPDv2UILink->SendCfg(player);
+            }
         }
 
         // History is written on COMPLETION only, so an abandoned run leaves no
@@ -802,19 +1426,23 @@ namespace PDungeon
         // different scale (mod_pdungeon_runs_difficulty.sql says why the column
         // survives). loot_mult_x100 stays, because the loot multiplier really
         // is a x100 quantity.
+        // Round E / R1 adds `deaths`: the row already records the difficulty
+        // the run was PLAYED at, and the death count is what turns that pair
+        // into the cap decision this run made - without it the history cannot
+        // say why one clear at 40 unlocked 45 and the next unlocked 43.
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_runs (seed, map_id, instance_id, leader_guid, account_id, "
-            "dlvl, difficulty, loot_mult_x100, rooms_cleared, result, completed_at) "
-            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, 1, NOW())",
+            "dlvl, difficulty, loot_mult_x100, rooms_cleared, deaths, result, completed_at) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, 1, NOW())",
             _spawnedSeed, instance->GetId(), instance->GetInstanceId(), _leaderGuid,
             _accountId, reward.newDlvl, uint32(_run.difficulty), _run.lootMultX100,
-            _run.roomsCleared);
+            _run.roomsCleared, uint32(_run.deaths));
 
         LOG_INFO(PD_LOG, "PDv2: account {} completed instance {} (seed {}): {}/{} rooms, "
-                         "{} kill(s), +{} dxp -> dlvl {}", _accountId,
-                 instance->GetInstanceId(), _spawnedSeed, uint32(_run.roomsCleared),
-                 uint32(_run.roomsTotal), uint32(_run.killed), reward.dxpGained,
-                 reward.newDlvl);
+                         "{} kill(s), {} death(s), +{} dxp -> dlvl {}, cap {} -> {}",
+                 _accountId, instance->GetInstanceId(), _spawnedSeed,
+                 uint32(_run.roomsCleared), uint32(_run.roomsTotal), uint32(_run.killed),
+                 uint32(_run.deaths), reward.dxpGained, reward.newDlvl, capBefore, capNow);
 
         // Nobody is teleported out. The dungeon stays walkable after its last
         // boss because farming it is the point (01 §8) - the way out is the way
@@ -1217,9 +1845,69 @@ namespace PDungeon
                   uint32(_grid.WalkableCount()));
     }
 
+    float PDv2InstanceScript::FacingTowardDoorway(BlockPlan const& plan,
+                                                  PlacedBlock const& block,
+                                                  float fromX, float fromY) const
+    {
+        unsigned bit = 0;
+        if (block.isEvent)
+        {
+            // A pocket is a dead end, so its ONE socket is the way in and the
+            // way out. The popcount test is what says "one", and a mask with
+            // two bits on an event block would mean the planner changed under
+            // this function - in which case guessing is worse than declining.
+            if (block.socketMask && (block.socketMask & (block.socketMask - 1u)) == 0)
+            {
+                bit = block.socketMask;
+            }
+        }
+        else if (block.chainIndex >= 1)
+        {
+            // The SAME walk SpawnBarriers seals and ValidateBlockPlan proved,
+            // so the doorway the boss looks at is the doorway the party's own
+            // portcullis stands in. Chain 0 is the entrance and answers 0.
+            bit = SpineRunInto(plan, block.chainIndex, nullptr);
+        }
+
+        if (bit != SOCKET_N && bit != SOCKET_E && bit != SOCKET_S && bit != SOCKET_W)
+        {
+            // The contract check SpawnBarriers makes for the same reason:
+            // LaneCellsForSocket reads anything that is not one of the four as
+            // SOCKET_E, and a boss staring at the wrong wall is worse than one
+            // staring due north, which is what 0 keeps.
+            return 0.0f;
+        }
+
+        int cells[2][2] = { { 0, 0 }, { 0, 0 } };
+        LaneCellsForSocket(bit, cells);
+
+        // The midpoint of the doorway's two lane cells, i.e. the centre of the
+        // gap rather than one of its jambs. (row, col) -> global cell
+        // (x = col, y = row) is the one translation the planner's table leaves
+        // to an engine - the same one SpawnBarriers' laneCells makes.
+        double mx = 0.0, my = 0.0;
+        for (int i = 0; i < 2; ++i)
+        {
+            double wx = 0.0, wy = 0.0;
+            CellCentreToWorld(block.bx * PD_CELLS_PER_BLOCK + cells[i][1],
+                              block.by * PD_CELLS_PER_BLOCK + cells[i][0], wx, wy);
+            mx += wx * 0.5;
+            my += wy * 0.5;
+        }
+
+        // 2D, like every other geometry question this module asks: the dungeon
+        // is one floor plane, and a Z term would only measure the height of a
+        // jump. GetAngle already answers in [0, 2 PI); the normalise is the
+        // house shape for "this is an orientation" (the finale cache's facing
+        // is built the same way).
+        Position const from(fromX, fromY, 0.0f, 0.0f);
+        return Position::NormalizeOrientation(
+            from.GetAngle(static_cast<float>(mx), static_cast<float>(my)));
+    }
+
     Creature* PDv2InstanceScript::SpawnTaggedMob(uint32 entry, PDv2MobData const& proto,
                                                  float x, float y, float z,
-                                                 uint32 baseHealthOverride)
+                                                 uint32 baseHealthOverride, float orientation)
     {
         // Exactly ON the floor plane. This used to add 0.5 yd "so a creature is
         // not spawned inside the floor", and the offset was a PERMANENT hover:
@@ -1229,13 +1917,20 @@ namespace PDungeon
         // home position - operator report 2026-08-06. Round D / D3 removed the
         // gravity flag that made the same mistake a second time; the floor
         // plane this function is handed is the only Z a summon ever gets.
-        Creature* c = instance->SummonCreature(entry, Position(x, y, z, 0.0f));
+        //
+        // The facing is the caller's (Round E / WP8) and defaults to the 0.0f
+        // every spawn used before, so a mob nobody has an opinion about still
+        // looks due north.
+        Creature* c = instance->SummonCreature(entry, Position(x, y, z, orientation));
         if (!c)
         {
             return nullptr;
         }
 
-        c->SetHomePosition(x, y, z, 0.0f);
+        // ...and the SAME angle into the home position, because an evade snaps
+        // a creature back to it: a boss turned to face his doorway only at the
+        // summon would forget it the first time a party pulled him and ran.
+        c->SetHomePosition(x, y, z, orientation);
 
         // NOTHING THIS DUNGEON SUMMONS PAYS KILL REPUTATION. A policy of the
         // module, not a patch for one pack: PDv2 fills its rooms from arbitrary
@@ -1342,6 +2037,15 @@ namespace PDungeon
         tag->patrolGoalCellY = proto.patrolGoalCellY;
         tag->patrolLeader = proto.patrolLeader;
         tag->patrolRank = proto.patrolRank;
+        // Round E / D7: set by TickEvents on an event-wave attacker and by
+        // SpawnRespawnCopies on an echo, read by the currency gate in
+        // OnMobDied.
+        tag->isExtra = proto.isExtra;
+        // Round E / WP6: set by SpawnRespawnCopies, read by its own guard in
+        // OnMobDied so an echo cannot echo. Copied here for the reason 1f66c74
+        // paid for with isExtra - EVERY field a proto can carry is copied in
+        // this block, or the spawner's intent is silently thrown away.
+        tag->isRespawnCopy = proto.isRespawnCopy;
 
         // Before the affixes, never after: a Lil' Bro child is a TENTH of its
         // parent that a Big Boy bit then grows by half again, and reversing
@@ -1512,9 +2216,147 @@ namespace PDungeon
         }
         MarkRunDirty();
 
-        LOG_DEBUG(PD_LOG, "PDv2: instance {} Lil' Bro depth {} split into {} - run total {}",
-                  instance->GetInstanceId(), uint32(proto.splitDepth), uint32(born),
-                  uint32(_run.total));
+        // One line per SPLIT, so one per kill of a splitting mob and one more
+        // per kill of every child - the fastest way there is to fill a log
+        // with a mechanic working exactly as designed (Round E / R3).
+        if (PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} Lil' Bro depth {} split into {} - run total {}",
+                     instance->GetInstanceId(), uint32(proto.splitDepth), uint32(born),
+                     uint32(_run.total));
+        }
+    }
+
+    void PDv2InstanceScript::SpawnRespawnCopies(Creature* corpse, PDv2MobData const& tag,
+                                                Unit* killer)
+    {
+        // The talent belongs to a PLAYER, so a kill by a pet, a guardian or a
+        // totem has to be walked back to its owner - the same walk-back
+        // RollBonusLoot and InjectBossGear do, for the same reason. A kill by
+        // nobody at all (a void zone, a fall, a despawn the AI reports as a
+        // death) owes nothing and leaves here.
+        Player* player = killer ? killer->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
+        if (!player)
+        {
+            return;
+        }
+
+        // The node's RANK is the count - that is the whole talent - and the
+        // conf ceiling is the operator's last word on it (PDv2Mgr.h says why
+        // both exist). A player without the node reads 0 here, which is the
+        // common case and the cheapest one: one walk of the dummy-aura list.
+        uint32 const copies = std::min(TaggedAuraAmount(player, PD_TALENT_TAG_RESPAWN),
+                                       sPDv2Mgr->GetConfig().respawnMaxCopies);
+        if (!copies)
+        {
+            return;
+        }
+
+        // What an echo INHERITS is what it looks and fights like; what it does
+        // not inherit is the run's arithmetic. Field by field rather than a
+        // copy of `tag`, so a field added to PDv2MobData has to be decided on
+        // here instead of arriving by accident.
+        PDv2MobData proto;
+        proto.role = tag.role;
+        proto.casterSpellId = tag.casterSpellId;
+
+        // The affixes come along, exactly as they do for a Lil' Bro child: the
+        // echo is the same creature the player just fought, and one that shed
+        // its affixes would be a different, easier fight wearing its face.
+        proto.affixMask = tag.affixMask;
+
+        // In no room and in no counter. The room this mob was planned for has
+        // already been credited for it, and PD_ROOM_NONE is the value every
+        // `roomIndex < _roomAlive.size()` guard in this file rejects on its own
+        // - the tag's 0 default would have decremented room 0 instead.
+        proto.roomIndex = PD_ROOM_NONE;
+        proto.countsForRun = false;
+
+        // Never a boss, whatever the corpse was. The call site's guard already
+        // keeps a boss out; this says it a second time at the place where it
+        // would matter if that guard were ever loosened, because a second
+        // killable boss is a run that can be finished twice.
+        proto.isRunBoss = false;
+
+        // D7, both halves at once. isExtra is what pays the materials and puts
+        // the currency behind V2.Loot.Currency.ExtraMobsDropCurrency;
+        // isRespawnCopy is what stops the echo from echoing. splitDepth is
+        // left at 0 DELIBERATELY rather than inherited: a Lil' Bro echo may
+        // still split, and its children pay nothing exactly as they do today.
+        //
+        // The patrol block and the Damage Reduce cache keep the struct's own
+        // defaults - an echo is born in combat and walks no beat, and the
+        // cache is per-creature runtime state no proto ever carries.
+        proto.isExtra = true;
+        proto.isRespawnCopy = true;
+        proto.splitDepth = 0;
+
+        WalkGrid const* grid = GetWalkGrid();
+        float const floorZ = sPDv2Mgr->GetConfig().floorZ;
+
+        uint32 born = 0;
+        for (uint32 i = 0; i < copies; ++i)
+        {
+            // SplitOnDeath's offsets and SplitOnDeath's veto, because this is
+            // the same problem: two creatures out of one corpse, far enough
+            // apart to be two bodies and close enough to read as the corpse
+            // getting back up. Past the second they stack on the pair, which
+            // no shipped rank reaches - the conf ceiling is what an operator
+            // would have to raise to get there.
+            float const sign = (i == 0) ? 1.0f : -1.0f;
+            float cx = corpse->GetPositionX() + sign * LIL_BRO_OFFSET_X_YD;
+            float cy = corpse->GetPositionY() + sign * LIL_BRO_OFFSET_Y_YD;
+
+            // A mob can die standing at a platform edge, and 2 yd past that
+            // edge is the void - where a gravity-less echo would hover for
+            // ever, unreachable and permanently in combat with the player who
+            // earned it. The walk grid is the only thing on this server that
+            // knows where floor is (pd/02 §7), so it decides; the corpse's own
+            // feet are the fallback, because the corpse is provably on floor.
+            if (grid)
+            {
+                int gcx = 0, gcy = 0;
+                WorldToCell(cx, cy, gcx, gcy);
+                GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+                if (!grid->At(cell.x, cell.y))
+                {
+                    cx = corpse->GetPositionX();
+                    cy = corpse->GetPositionY();
+                }
+            }
+
+            // Z from the config, never from the corpse: the floor plane is
+            // where every other spawn on this map stands, and a mob that was
+            // knocked upward before it died must not hand its echo a hover.
+            // No baseHealthOverride either - an echo is the mob at full size,
+            // which is exactly what makes the node worth its place at the far
+            // end of the tree.
+            Creature* echo = SpawnTaggedMob(corpse->GetEntry(), proto, cx, cy, floorZ);
+            if (!echo)
+            {
+                continue;
+            }
+            ++born;
+
+            // Straight at the player who earned it, and not at whatever the
+            // corpse was last fighting: the talent is that player's, the echo
+            // is that player's consequence, and a corpse has usually lost its
+            // victim by the time JustDied runs anyway.
+            if (CreatureAI* ai = echo->AI())
+            {
+                ai->AttackStart(player);
+            }
+        }
+
+        // One line per echoing kill, gated like every other R3 diagnostic - the
+        // one an operator arms for a single pull when somebody reports too many
+        // echoes or none at all. No MarkRunDirty(): nothing the HUD shows moved.
+        if (born && PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2: instance {} respawn echo x{} (of {} owed) of entry {} for {}",
+                     instance->GetInstanceId(), born, copies, corpse->GetEntry(),
+                     player->GetName());
+        }
     }
 
     void PDv2InstanceScript::SpawnFromPlan(BlockPlan const& plan)
@@ -1532,6 +2374,13 @@ namespace PDungeon
         _run.difficulty = static_cast<uint8>(GameClampDiff(account.cfgDifficulty));
         _run.lootMultX100 = static_cast<uint16>(
             GameLootMultX100(account.cfgDifficulty, account.cfgCasterPct));
+        // Round E / L3. The material band's ceiling is the ACCOUNT's dungeon
+        // level, and it is frozen here with the rest of them: finishing this
+        // run grants dxp and can level the account on the way out, and a mob
+        // killed before that must not pay a different band than the one killed
+        // after it. Clamped into the byte the run state carries - dlvl is a
+        // uint32 on the account row and 255 is far past any cap a conf can set.
+        _run.dlvl = static_cast<uint8>(std::clamp(dlvl, 0, 255));
 
         // Rooms only, in plan order. A corridor is 8.3 yd wide, so anything
         // standing in one would be shoulder to shoulder with the walls; the
@@ -1554,6 +2403,19 @@ namespace PDungeon
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.roomId < 0 || b.role == BlockRole::RoomEntrance)
+            {
+                continue;
+            }
+
+            // Round E / WP5. An event pocket is a Room with a roomId and
+            // would otherwise be filled like any other, which would be wrong
+            // four times over: it would draw a pack, take a dense roomIndex,
+            // count toward roomsTotal on the HUD and add its trash to its
+            // segment's barrier denominator - so the party would be asked to
+            // clear an optional side room before the gate to the boss opened.
+            // The pocket's whole content is the pilgrim and the wave he
+            // brings, both of which SpawnEventRooms puts there.
+            if (b.isEvent)
             {
                 continue;
             }
@@ -1667,7 +2529,37 @@ namespace PDungeon
         }
 
         _roomAlive.assign(roomBlocks.size(), 0);
-        _run.roomsTotal = static_cast<uint8>(roomBlocks.size());
+        // Round E / R2 (spec D13). ORDINARY rooms, not every room the dungeon
+        // built: the boss halls have their own counter on the HUD line
+        // (bossKilled/bossTotal), and counting them twice is exactly what made
+        // the panel say "14 rooms" while the HUD said "0/15 rooms". `rooms` on
+        // the dial is now the ordinary count, the entrance and the boss halls
+        // come on top of it, and this is the number that has to agree with it.
+        // roomBlocks still holds every room - _roomAlive, the spawn slices and
+        // every roomIndex are keyed by that list and must stay complete.
+        _run.roomsTotal = static_cast<uint8>(
+            std::count(_roomIsBoss.begin(), _roomIsBoss.end(), false));
+
+        // Round E / D8. The room factor, frozen beside the loot multiplier and
+        // for the same reason - every currency roll of every kill is scaled by
+        // it, and the dial must not move under a run that is being walked.
+        //
+        // ORDINARY rooms, read straight off _run.roomsTotal: since Round E /
+        // R2 that field IS the ordinary count (assigned above from
+        // _roomIsBoss), which is exactly what the factor asks for - how much
+        // TRASH the run is worth walking, D8's point being that a one-room run
+        // must not pay what a ten-room run pays. One source of truth: when the
+        // two were counted separately they could drift apart silently.
+        // The factor is stored UNSIGNED, so the one thing that has to happen
+        // on the way in is the floor GameRoomFactorX100 deliberately does not
+        // apply (its header says why): a negative RoomsBonusPctPerRoom is not
+        // a legal conf value, but a negative product cast into a uint16 would
+        // come out enormous and GameChanceBp would then clamp every tier to a
+        // certainty - a typo that pays MORE is the wrong way to fail.
+        _run.roomFactorX100 = static_cast<uint16>(
+            std::max(0, GameRoomFactorX100(static_cast<int>(_run.roomsTotal),
+                                           cfg.lootRoomsBaseline,
+                                           cfg.lootRoomsBonusPctPerRoom)));
 
         // The affix set for THIS run's difficulty, resolved once: it is the
         // same list for every affixed mob in the dungeon (that is how
@@ -1850,7 +2742,28 @@ namespace PDungeon
                 // quietly take away (PDv2Affixes.h).
                 proto.affixMask = picks[i].affixed ? _runAffixMask : uint16(0);
 
-                if (SpawnTaggedMob(picks[i].entry, proto, x, y, z))
+                // Round E / WP8, operator finding 6: the BOSS looks at the door
+                // his party will come through, and nobody else does. Trash is a
+                // pack standing around a room and reads as one from any angle;
+                // a boss with his back to the entrance reads as a bug, because
+                // he is the one creature the room is arranged around. Measured
+                // from his OWN anchor - the arena centre, after the veto has
+                // had its say - so the angle describes where he actually ends
+                // up rather than where the kit planned to put him.
+                float orientation = 0.0f;
+                if (proto.isRunBoss)
+                {
+                    orientation = FacingTowardDoorway(plan, b, x, y);
+                    if (PDv2Debug())
+                    {
+                        LOG_INFO(PD_LOG, "PDv2: instance {} boss of room {} (block {}, {}, "
+                                         "chain {}) faces {:.3f} rad toward its doorway",
+                                 instance->GetInstanceId(), uint32(r), b.bx, b.by,
+                                 b.chainIndex, orientation);
+                    }
+                }
+
+                if (SpawnTaggedMob(picks[i].entry, proto, x, y, z, 0, orientation))
                 {
                     if (proto.isRunBoss)
                     {
@@ -2069,6 +2982,90 @@ namespace PDungeon
         // clamp that segment's gate line would read past 100 %.
         pct = planned ? std::min<uint32>(100, killed * 100 / planned) : 100;
         return true;
+    }
+
+    int PDv2InstanceScript::RoomIndexAt(float x, float y) const
+    {
+        // Non-negative first, exactly as TickAmbushes checks it: global cells
+        // are non-negative inside the field and integer division truncates
+        // TOWARDS ZERO, so a position outside it would divide to a block it is
+        // not in - and here that would name somebody else's room.
+        int gcx = 0, gcy = 0;
+        WorldToCell(x, y, gcx, gcy);
+        if (gcx < 0 || gcy < 0)
+        {
+            return -1;
+        }
+
+        int const bx = gcx / PD_CELLS_PER_BLOCK;
+        int const by = gcy / PD_CELLS_PER_BLOCK;
+        for (size_t r = 0; r < _roomBX.size() && r < _roomBY.size(); ++r)
+        {
+            if (_roomBX[r] == bx && _roomBY[r] == by)
+            {
+                return static_cast<int>(r);
+            }
+        }
+        return -1;
+    }
+
+    bool PDv2InstanceScript::GateFieldsFor(Player const* player, uint32& planned,
+                                           uint32& killed, uint32& pct, bool& open) const
+    {
+        // Zeroed up front the way NextClosedBarrier zeroes its three, and for
+        // the same reason: a caller that ignores the answer still puts the
+        // wire's own "no gate" on the wire.
+        planned = 0;
+        killed = 0;
+        pct = 0;
+        open = false;
+
+        int const room = player ? RoomIndexAt(player->GetPositionX(),
+                                              player->GetPositionY())
+                                : -1;
+
+        // A boss hall is skipped ON PURPOSE and not as a bound check: its pack
+        // stands BEHIND the barrier and is deliberately out of the segment's
+        // denominator (design 2026-09-03 §B3.1, the single-boss-segment
+        // softlock), so the honest answer for a player standing in one is the
+        // run's next gate rather than a number that pretends their kills there
+        // count towards anything.
+        if (room >= 0 && static_cast<size_t>(room) < _roomSegment.size() &&
+            static_cast<size_t>(room) < _roomIsBoss.size() && !_roomIsBoss[room])
+        {
+            int const segment = _roomSegment[room];
+            if (segment >= 1 && static_cast<size_t>(segment) < _segmentPlanned.size())
+            {
+                size_t const seg = static_cast<size_t>(segment);
+                planned = _segmentPlanned[seg];
+                killed = seg < _segmentKilled.size() ? _segmentKilled[seg] : 0;
+                // The same clamp NextClosedBarrier carries, and the same
+                // argument: a Lil' Bro split makes more corpses than the frozen
+                // denominator planned, so the raw ratio can run past 100 %.
+                pct = planned ? std::min<uint32>(100, killed * 100 / planned) : 100;
+
+                // "Open" includes "never had one". SpawnBarriers skips a
+                // segment whose entry run it cannot name (a boss on the
+                // entrance, a fork), and a segment nothing seals is a segment
+                // the party may walk out of - which is what the HUD has to say.
+                open = true;
+                for (Barrier const& barrier : _barriers)
+                {
+                    if (barrier.segment == segment)
+                    {
+                        open = barrier.open;
+                        break;
+                    }
+                }
+                return true;
+            }
+        }
+
+        // Not in a room this can answer for: a corridor, a boss hall, an event
+        // pocket, the entrance's segment 0. The run's next sealed gate is the
+        // useful thing to show there, and it is sealed by definition - `open`
+        // stays false.
+        return NextClosedBarrier(planned, killed, pct);
     }
 
     void PDv2InstanceScript::ClearedRoomBlocks(std::vector<std::pair<int, int>>& out) const
@@ -2377,6 +3374,20 @@ namespace PDungeon
         uint32 loops = 0;
         for (PlacedBlock const& b : plan.blocks)
         {
+            // Round E / WP5. An event pocket is a dead-END room but not a
+            // dead-end STUB and not a loop, so the two tests below already
+            // miss it (role Room, detourOf -1 - both proved by
+            // ValidateBlockPlan's "an event pocket carries the wrong role or
+            // fields"). Stated as its own line anyway, because the free cache
+            // and the event's own won-cache would then stand in one small
+            // room and the reward for holding the line would be the reward
+            // for walking in - and a later planner change that gave an event
+            // pocket either field would open exactly that hole silently.
+            if (b.isEvent)
+            {
+                continue;
+            }
+
             // Exclusive by construction: the planner validates that a loop
             // room is a Room block (PDBlockPlan.cpp, "a loop room carries the
             // wrong role or fields"), never a corridor.
@@ -3307,8 +4318,35 @@ namespace PDungeon
         // one second is the whole window the release veto in PDClientLink
         // exists to cover.
         _pendingRespawn[unit->GetGUID()] = getMSTime();
-        LOG_DEBUG(PD_LOG, "PDv2: {} died in instance {} - respawn on the next tick",
-                  unit->GetName(), instance->GetInstanceId());
+
+        // Round E / R1. The cap's only input from the run floor, counted HERE
+        // rather than in RespawnPending, because this hook is the one place a
+        // death is certain. The next tick's respawn can be pre-empted by a
+        // logout, a GM resurrection or the player leaving the map, and none of
+        // those un-kills anybody. Every death of every player counts - the
+        // party shares one run, and it is the run that is being graded.
+        //
+        // Scoped to the run by SpawnFromPlan's `_run = PDv2RunState()`, which
+        // is what keeps a fall into the void on a not-yet-built map out of the
+        // next run's tally.
+        //
+        // Saturating, never wrapping (PDv2RunState::deaths says why 256 deaths
+        // reading as a clean clear would be the expensive kind of bug).
+        if (_run.deaths < 255)
+        {
+            ++_run.deaths;
+        }
+        MarkRunDirty();
+
+        // One line per player DEATH, and a wipe-heavy run has plenty (Round E
+        // / R3). The tally itself is not diagnostics - it is graded by R1 and
+        // reported by FinishRun's INFO, which stays ungated.
+        if (PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2: {} died in instance {} ({} death(s) this run) - "
+                             "respawn on the next tick",
+                     unit->GetName(), instance->GetInstanceId(), uint32(_run.deaths));
+        }
     }
 
     void PDv2InstanceScript::RespawnPending()
@@ -3419,8 +4457,15 @@ namespace PDungeon
             player->TeleportTo(instance->GetId(), _entranceX, _entranceY, _entranceZ + 2.0f, 0.0f);
             ChatHandler(player->GetSession()).SendSysMessage(
                 "You fell off the dungeon and were returned to the entrance.");
-            LOG_DEBUG(PD_LOG, "PDv2: returned {} to the entrance from Z {}",
-                      player->GetName(), player->GetPositionZ());
+            // Per TICK per faller, in the worst case: a player who keeps
+            // sliding off the same ledge is caught again every pass of
+            // CatchFallers, so this one is gated by V2.Debug (Round E / R3)
+            // and the player's own chat line is the ungated evidence.
+            if (PDv2Debug())
+            {
+                LOG_INFO(PD_LOG, "PDv2: returned {} to the entrance from Z {}",
+                         player->GetName(), player->GetPositionZ());
+            }
         }
     }
 
@@ -3492,6 +4537,15 @@ namespace PDungeon
                 _run.elapsedSec = GetMSTimeDiffToNow(_run.startedMs) / 1000;
             }
 
+            // Round E / WP5, and BEFORE the push below rather than beside the
+            // finale: the event's countdown and the host's health bar are HUD
+            // fields, so the second in which the clock moves has to be the
+            // second the frame carries. Ticking after the push would show
+            // every player a value that was already one second stale, and the
+            // last tick of a won event would push "1 second left" and only
+            // then win it. Inert on every run whose layout has no event.
+            TickEvents();
+
             // The HUD's whole pull side, after the clock so the frame carries
             // the second it was sent in. The link decides whether anything is
             // worth saying; a still dungeon costs nothing on the wire.
@@ -3515,5 +4569,687 @@ namespace PDungeon
             _ambushTimer = 0;
             TickAmbushes();
         }
+    }
+
+    // ----------------------------------------------------------------------
+    // Round E / WP5: event rooms ("Hold the line").
+    //
+    // The optional dead-end pocket the planner seats off a boss segment holds
+    // one creature, NPC_EVENT_HOST. A player talks to him, a clock starts,
+    // one attacker walks in every few seconds, and the party wins by keeping
+    // him alive until the clock runs out.
+    //
+    // Everything below splits along one line: SpawnEventRooms DECIDES (at
+    // build time, on a seeded stream) and the tick EXECUTES. The wave, where
+    // each of its members walks in and where the reward will stand are all
+    // fixed the moment the dungeon is populated, so the same layout always
+    // fights the same fight and the second a player is busy being attacked
+    // costs the server nothing it could have paid minutes earlier. It is the
+    // same division SpawnAmbushPlan/FireAmbush already draw.
+    //
+    // Nothing here rolls anything of its own - no urand, no PDRandom. The one
+    // draw is SelectSpawns on the event stream, which is the layout seed
+    // mixed with PD_EVENT_SEED_MIX and the segment.
+    // ----------------------------------------------------------------------
+
+    void PDv2InstanceScript::SpawnEventRooms(BlockPlan const& plan)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        PDv2AccountState const account = sPDv2Mgr->GetAccountState(_accountId);
+
+        // How many attackers one defence sends in: the whole duration divided
+        // by the gap between them, i.e. twelve on the defaults (60 / 5). The
+        // last one therefore walks in at 55 s and the clock runs out five
+        // seconds later, which is what makes the final stretch a fight rather
+        // than a wait. Guarded against a zero gap because both numbers are
+        // live conf values and a division is not a place to trust a clamp.
+        // ...and never below one: SpawnEverySec >= DurationSec is legal on
+        // both keys on its own, and the truncation would leave a defence
+        // with no attackers at all - an unloseable free chest.
+        int const waveSize = cfg.eventSpawnEverySec > 0
+                             ? std::max(1, cfg.eventDurationSec / cfg.eventSpawnEverySec)
+                             : 0;
+
+        double const mid = PD_BLOCK_SIZE_YD / 2.0;
+        WalkGrid const* grid = GetWalkGrid();
+
+        // The veto the room pass, the patrol spawn and the finale spots all
+        // take, for the reason they all take it: an anchor is a kit constant
+        // while the walk grid is what this instance actually composed, and
+        // gravity is off on this map - so anything seated off the floor
+        // hovers over the void for ever. Here it matters most for the HOST:
+        // a pilgrim in the void could not be reached by the wave that is
+        // supposed to kill him, and the event would be unlosable.
+        auto vetoSpot = [this, grid](float& x, float& y, char const* what)
+        {
+            if (!grid)
+            {
+                return;
+            }
+
+            int gcx = 0, gcy = 0;
+            WorldToCell(x, y, gcx, gcy);
+            GridPoint const cell = grid->LocalFromGlobalCell(gcx, gcy);
+            if (grid->At(cell.x, cell.y))
+            {
+                return;
+            }
+
+            GridPoint snapped;
+            if (!NearestWalkable(*grid, cell.x, cell.y, SPAWN_FALLBACK_SNAP_CELLS,
+                                 snapped))
+            {
+                LOG_WARN(PD_LOG, "PDv2: instance {} event {} stands on a void cell and "
+                                 "found no floor within {} cell(s) - it stays where it was",
+                         instance->GetInstanceId(), what, SPAWN_FALLBACK_SNAP_CELLS);
+                return;
+            }
+
+            int scx = 0, scy = 0;
+            grid->GlobalFromLocalCell(snapped, scx, scy);
+            double wx = 0.0, wy = 0.0;
+            CellCentreToWorld(scx, scy, wx, wy);
+            x = static_cast<float>(wx);
+            y = static_cast<float>(wy);
+        };
+
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (!b.isEvent)
+            {
+                continue;
+            }
+
+            EventRoom event;
+            event.bx = b.bx;
+            event.by = b.by;
+            // A pocket's segment is its HOST's segment (SegmentOf reads
+            // branchOf for exactly this case), which is what puts one event
+            // per boss segment on its own draw.
+            event.segment = SegmentOf(plan, b);
+
+            float centreX = 0.0f, centreY = 0.0f, centreZ = 0.0f;
+            sPDv2Mgr->BlockToWorld(b.bx, b.by, mid, mid, centreX, centreY, centreZ);
+            // One block, one floor plane: BlockToWorld's Z is a property of
+            // the block, so the host, the wave and the cache all stand on it.
+            event.z = centreZ;
+
+            RoomAnchors const* anchors = sPDv2Mgr->RoomAnchorsFor(b.chunkId);
+
+            // The host on the ENTRY anchor - the cell every walk into the
+            // room arrives on, so a player who enters is already looking at
+            // him and the wave that follows them in has the whole room to
+            // cross. The block centre is the fallback for a chunk that
+            // publishes no anchors; it is walkable in every room variant the
+            // kit ships.
+            float hostX = centreX;
+            float hostY = centreY;
+            if (anchors && anchors->hasEntry)
+            {
+                float unusedZ = 0.0f;
+                sPDv2Mgr->BlockToWorld(b.bx, b.by, anchors->entry.u,
+                                       anchors->entry.v, hostX, hostY, unusedZ);
+            }
+            vetoSpot(hostX, hostY, "host");
+
+            // Round E / WP8, operator finding 6: he FACES the doorway, i.e. the
+            // party he is waiting for, and computed here because this is the
+            // one pass that holds the PlacedBlock the doorway belongs to. An
+            // event pocket is a dead end, so its single socket is that doorway;
+            // FacingTowardDoorway answers 0 - the old due-north summon - for
+            // anything it cannot read, which is a plain look and never a wrong
+            // one.
+            //
+            // Stored on the EventRoom because the CHEST inherits it: WP8's won
+            // event leaves the reward on his square, turned the way he was, and
+            // deriving the same angle a second time in CloseEvent is how the
+            // two would eventually disagree. The kit's chest anchor that used
+            // to be decided here is gone with the same change - the reward has
+            // no spot of its own to choose any more.
+            event.hostX = hostX;
+            event.hostY = hostY;
+            event.hostO = FacingTowardDoorway(plan, b, hostX, hostY);
+            if (PDv2Debug())
+            {
+                LOG_INFO(PD_LOG, "PDv2: instance {} event host in block ({}, {}) faces "
+                                 "{:.3f} rad toward its doorway",
+                         instance->GetInstanceId(), b.bx, b.by, event.hostO);
+            }
+
+            // The rim: the room's own six spawn anchors, FARTHEST FROM THE
+            // BLOCK CENTRE FIRST. The distance is taken in the block's own
+            // (u, v) frame, before the veto can nudge a point by a cell or
+            // two, so the order is a property of the kit rather than of this
+            // instance's walk grid - the same chunk always sends its wave in
+            // through the same door.
+            //
+            // Farthest first is the whole point: the outermost pair are the
+            // caster anchors (12.0 yd against the melee ring's 11.31), so the
+            // first attackers walk the longest way in and the party standing
+            // at the host has the most time to meet them.
+            //
+            // stable_sort and not sort: two anchors at the same radius keep
+            // the kit's own order, and "the same seed fights the same fight"
+            // must not turn on an implementation's choice of pivot.
+            struct RimAnchor
+            {
+                double d2 = 0.0;
+                float  x = 0.0f;
+                float  y = 0.0f;
+            };
+            std::vector<RimAnchor> ring;
+            if (anchors)
+            {
+                for (SpawnAnchor const& anchor : anchors->spawns)
+                {
+                    RimAnchor point;
+                    double const du = anchor.u - mid;
+                    double const dv = anchor.v - mid;
+                    point.d2 = du * du + dv * dv;
+                    float unusedZ = 0.0f;
+                    sPDv2Mgr->BlockToWorld(b.bx, b.by, anchor.u, anchor.v,
+                                           point.x, point.y, unusedZ);
+                    vetoSpot(point.x, point.y, "rim");
+                    ring.push_back(point);
+                }
+            }
+            std::stable_sort(ring.begin(), ring.end(),
+                             [](RimAnchor const& lhs, RimAnchor const& rhs)
+                             {
+                                 return lhs.d2 > rhs.d2;
+                             });
+            for (RimAnchor const& point : ring)
+            {
+                event.rim.emplace_back(point.x, point.y);
+            }
+            if (event.rim.empty())
+            {
+                // A chunk with no anchors at all. The wave then walks in on
+                // the host's own square, which is a worse fight and not a
+                // broken one - and TickEvents' modulo needs a non-empty rim.
+                event.rim.emplace_back(centreX, centreY);
+                LOG_WARN(PD_LOG, "PDv2: instance {} chunk {} publishes no spawn anchors - "
+                                 "its event wave arrives on the block centre",
+                         instance->GetInstanceId(), b.chunkId);
+            }
+
+            // ONE synthetic room's worth of trash on the EVENT stream, drawn
+            // here and stored. Same inputs the ambush uses, with two on
+            // purpose: casterPct is the event's own key (a wave has to CLOSE
+            // on the host, not shoot him from the doorway) and affixPct is
+            // copied for the SHAPE of the stream only - the draw rolls
+            // `affixed` per pick either way, and proto.affixMask staying 0 in
+            // the tick is what says an event mob wears no affix.
+            SpawnSelectInputs in;
+            RoomRequest room;
+            room.roomIndex = 0;
+            room.isBoss = false;
+            in.rooms.push_back(room);
+            in.spawnsPerRoom = waveSize;
+            in.bossRoomAdds = 0;
+            in.casterPct = cfg.eventCasterPct;
+            in.affixPct = cfg.affixPct;
+            in.bandMin = account.cfgBandMin;
+            in.unlockedDlvl = static_cast<int>(account.dlvl);
+
+            std::vector<RoomSpawns> out;
+            uint32 const seed = plan.effectiveSeed ^ PD_EVENT_SEED_MIX ^
+                                (static_cast<uint32>(event.segment) * PD_SEGMENT_SEED_STEP);
+            if (sPDv2PackMgr->SelectSpawns(seed, in, out) && !out.empty() &&
+                !out[0].picks.empty())
+            {
+                event.picks = out[0].picks;
+            }
+            else if (waveSize > 0)
+            {
+                // The same degradation the room draw and the ambush take when
+                // the pack SQL was never applied: placeholder mammoths rather
+                // than a defence with nothing to defend against, which would
+                // be an unloseable free chest.
+                event.picks.assign(static_cast<size_t>(waveSize),
+                                   SpawnPick{ PLACEHOLDER_CREATURE, PACK_ROLE_MELEE, 0 });
+            }
+
+            Creature* host = instance->SummonCreature(
+                NPC_EVENT_HOST, Position(hostX, hostY, event.z, event.hostO));
+            if (!host)
+            {
+                // No host, no event - and deliberately no EventRoom either, so
+                // every entry in _events has a live GUID and EventStateFor
+                // cannot answer for a creature that was never born.
+                LOG_ERROR(PD_LOG, "PDv2: instance {} failed to summon the event host "
+                                  "(missing creature_template {}?) - block ({}, {}) "
+                                  "stays empty",
+                          instance->GetInstanceId(), uint32(NPC_EVENT_HOST), b.bx, b.by);
+                continue;
+            }
+
+            // The facing goes into the home position too, the same rule
+            // SpawnTaggedMob follows: he never moves, but a home orientation
+            // that disagreed with the summon would turn him the moment
+            // anything resets him.
+            host->SetHomePosition(hostX, hostY, event.z, event.hostO);
+            // The module's blanket policy, and it applies to him too: nothing
+            // this dungeon summons pays kill reputation (SpawnTaggedMob states
+            // the case in full). He is meant to be killable, so unlike Chromie
+            // the flag is not academic here.
+            host->SetReputationRewardDisabled(true);
+            // _spawnedGuids, not _decorGuids: he is a creature, and that is
+            // the list DespawnAll walks with DespawnOrUnsummon - so a rebuild
+            // takes him down with the run he belongs to.
+            _spawnedGuids.push_back(host->GetGUID());
+
+            // NO SetDungeonHealth HERE, and the absence is deliberate.
+            //
+            // The design asks that the host scale like the mobs do, i.e. by
+            // the run's difficulty factor 100 + difficulty *
+            // V2.Diff.HealthPctPerLevel percent. He already does: the summon
+            // above went through PDv2Scaling exactly like every trash mob -
+            // IsDungeonCreature is true for him (map 760, no critter type, no
+            // player owner), so OnBeforeCreatureSelectLevel set him to
+            // PD_MOB_LEVEL and OnCreatureSelectLevel then applied that very
+            // multiplier inside SummonCreature (PDv2Scaling.cpp:232-263, and
+            // SpawnTaggedMob's affix comment says the same thing about the
+            // ordering). Re-applying it here would SQUARE it and hand a
+            // difficulty-10 party a host with several times the intended bar.
+            //
+            // What tunes the fight is therefore the template
+            // (mod_pdungeon_event.sql: rank 1 elite, HealthModifier 50,
+            // RegenHealth 0), which is where a retune belongs.
+            //
+            // Nothing touches his npcflag here either: the template already
+            // carries UNIT_NPC_FLAG_GOSSIP, which is what makes him clickable
+            // in the first place, and StartEvent is what takes it away.
+
+            event.host = host->GetGUID();
+
+            LOG_INFO(PD_LOG, "PDv2: instance {} staged an event in block ({}, {}) chunk {} "
+                             "- segment {}, host at ({:.1f}, {:.1f}, {:.1f}) with {} hp, "
+                             "{} attacker(s) on {} rim point(s)",
+                     instance->GetInstanceId(), b.bx, b.by, b.chunkId, event.segment,
+                     hostX, hostY, event.z, host->GetMaxHealth(),
+                     uint32(event.picks.size()), uint32(event.rim.size()));
+
+            _events.push_back(std::move(event));
+        }
+    }
+
+    PDv2InstanceScript::EventRoom* PDv2InstanceScript::EventFor(ObjectGuid host)
+    {
+        if (host.IsEmpty())
+        {
+            return nullptr;
+        }
+        for (EventRoom& event : _events)
+        {
+            if (event.host == host)
+            {
+                return &event;
+            }
+        }
+        return nullptr;
+    }
+
+    bool PDv2InstanceScript::StartEvent(Creature* host, Player* starter)
+    {
+        if (!host)
+        {
+            return false;
+        }
+
+        EventRoom* event = EventFor(host->GetGUID());
+        // Idle and ONLY Idle. A running event must not have its clock reset
+        // by a second click, and a finished one must never go back to
+        // Running - the gossip already refuses both by offering the item only
+        // on Idle, but the gossip is a menu a client sends and this is the
+        // server's own answer to it.
+        if (!event || event->state != EventState::Idle)
+        {
+            return false;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        uint32 const now = getMSTime();
+
+        event->state = EventState::Running;
+        event->deadlineMs = now + static_cast<uint32>(cfg.eventDurationSec) * 1000;
+        // Now, not one interval from now: the first attacker walks in on the
+        // very next tick, so the fight starts when the player says it does
+        // rather than five silent seconds later.
+        event->nextSpawnMs = now;
+        event->nextPick = 0;
+
+        // No second offer while he is busy being defended, and never put back
+        // (Round E / WP8): a won event now despawns him and leaves his chest
+        // instead, a lost one leaves him dead, so the flag has nothing left to
+        // return to either way.
+        host->RemoveNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+
+        std::string const notice = Acore::StringFormat(
+            "Hold the line! {} seconds.", cfg.eventDurationSec);
+        ForEachRunPlayer(instance, [&notice](Player* player)
+        {
+            sPDv2UILink->SendNotice(player, notice);
+        });
+
+        MarkRunDirty();
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} started the event in block ({}, {}) - "
+                         "{} s, {} attacker(s) every {} s, started by {}",
+                 instance->GetInstanceId(), event->bx, event->by,
+                 cfg.eventDurationSec, uint32(event->picks.size()),
+                 cfg.eventSpawnEverySec, starter ? starter->GetName() : "nobody");
+        return true;
+    }
+
+    void PDv2InstanceScript::TickEvents()
+    {
+        if (_events.empty())
+        {
+            return;
+        }
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        uint32 const now = getMSTime();
+
+        for (EventRoom& event : _events)
+        {
+            // The steady state of every event on almost every tick: one that
+            // nobody has started yet, and one whose closing beat already ran.
+            if (event.state == EventState::Idle || event.closed)
+            {
+                continue;
+            }
+
+            // Not Running and not closed means OnEventHostDied moved it to
+            // Lost from inside the host's death, where despawning anything is
+            // forbidden, and left the closing to this pass.
+            if (event.state != EventState::Running)
+            {
+                CloseEvent(event);
+                continue;
+            }
+
+            Creature* host = instance->GetCreature(event.host);
+            if (!host || !host->IsAlive())
+            {
+                // He died between two ticks, or something took him off the
+                // map entirely. The same loss either way - "the pilgrim is no
+                // longer standing" is the whole losing condition.
+                event.state = EventState::Lost;
+                CloseEvent(event);
+                continue;
+            }
+
+            // Wrap-safe, exactly as TickFinale reads its own deadline:
+            // getMSTime() is a uint32 of milliseconds that wraps every 49.7
+            // days, and a plain `>=` across that wrap would park the event
+            // for another 49 of them.
+            if (static_cast<int32>(now - event.deadlineMs) >= 0)
+            {
+                event.state = EventState::Won;
+                CloseEvent(event);
+                continue;
+            }
+
+            if (static_cast<int32>(now - event.nextSpawnMs) < 0 ||
+                event.nextPick >= event.picks.size())
+            {
+                continue;
+            }
+
+            SpawnPick const& pick = event.picks[event.nextPick];
+
+            PDv2MobData proto;
+            proto.role = pick.role;
+            proto.casterSpellId = pick.casterSpellId;
+            // In no room, in no counter and never in the layout at all. The
+            // first two are what an ambush and a patrol already carry - an
+            // event attacker must not move a room's kill count or a barrier's
+            // numerator - and isExtra is the third, which is what keeps a
+            // wave that can be farmed for ever off the currency faucet while
+            // still dropping materials (PDv2MobData::isExtra says why).
+            proto.roomIndex = PD_ROOM_NONE;
+            proto.countsForRun = false;
+            proto.isExtra = true;
+            // affixMask stays 0: the draw rolled the flag, the design gives
+            // an event wave no affix, and 0 is what says so.
+
+            // Round-robin over the rim, so twelve attackers arriving through
+            // six doors come in pairs from opposite sides rather than all
+            // through one. The rim is never empty (SpawnEventRooms falls back
+            // to the block centre), so the modulo is safe.
+            std::pair<float, float> const& spot =
+                event.rim[event.nextPick % event.rim.size()];
+
+            if (Creature* mob = SpawnTaggedMob(pick.entry, proto, spot.first,
+                                               spot.second, event.z))
+            {
+                event.wave.push_back(mob->GetGUID());
+
+                // Straight at the pilgrim. His faction (1727, friendGroup 7 /
+                // enemyGroup 8) already makes him a valid enemy of every pack
+                // faction this dungeon spawns, so this only decides who the
+                // mob walks to FIRST.
+                if (CreatureAI* ai = mob->AI())
+                {
+                    ai->AttackStart(host);
+                }
+                // ...and the standing threat entry behind it, which is what
+                // decides who the mob turns to when its current victim is
+                // gone (EVENT_WAVE_HOST_THREAT says how much and why).
+                mob->GetThreatMgr().AddThreat(host, EVENT_WAVE_HOST_THREAT);
+            }
+
+            // Advanced whether or not the summon worked: a failed spawn costs
+            // the party one attacker, it must not stall the queue and hand
+            // them a silent, empty minute instead.
+            event.nextSpawnMs += static_cast<uint32>(cfg.eventSpawnEverySec) * 1000;
+            ++event.nextPick;
+        }
+    }
+
+    void PDv2InstanceScript::CloseEvent(EventRoom& event)
+    {
+        // EXACTLY ONCE. Two callers can reach a finished event - the tick
+        // that ended it, and the tick after a death that ended it from
+        // outside - and paying the reward twice is the failure this flag
+        // exists to make impossible.
+        if (event.closed)
+        {
+            return;
+        }
+        event.closed = true;
+
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        bool const won = event.state == EventState::Won;
+
+        // The wave leaves with the fight. Only the LIVE ones: a corpse is
+        // somebody's loot until they walk over to it, and mats drop from an
+        // extra mob always (PDv2MobData::isExtra). They are all in
+        // _spawnedGuids as well, so anything still standing at a rebuild goes
+        // with the run regardless.
+        uint32 dismissed = 0;
+        for (ObjectGuid const& guid : event.wave)
+        {
+            Creature* mob = instance->GetCreature(guid);
+            if (!mob || !mob->IsAlive())
+            {
+                continue;
+            }
+            mob->DespawnOrUnsummon();
+            ++dismissed;
+        }
+        event.wave.clear();
+
+        // A notice and not a chat line, for the reason the finale's portal is
+        // one: the addon paints these as raid warnings, and the end of a
+        // sixty-second defence is exactly the beat that must not scroll past.
+        char const* const line = won
+            ? "The pilgrim lives! Hold the line - won."
+            : "The pilgrim has fallen. The line is lost.";
+        ForEachRunPlayer(instance, [line](Player* player)
+        {
+            sPDv2UILink->SendNotice(player, line);
+        });
+
+        uint32 xp = 0;
+        if (won)
+        {
+            // Round E / WP8, operator finding 8: "when the event is won a small
+            // chest spawns where the NPC stood and the NPC despawns". His own
+            // square, his own facing, and then he leaves - the pilgrim is
+            // rescued, so a rescued pilgrim standing about for the rest of the
+            // run with an empty menu was the thing that read wrong. The reward
+            // is GO_EVENT_CHEST and not GO_CHEST: a small Chest01 rather than
+            // the dungeon's big TreasureChest01, which is what makes it read as
+            // his parting gift instead of as another dead-end cache. The LOOT
+            // is a dead-end cache's, and PDv2ChestLoot says so at the dispatch.
+            //
+            // The angle is his, straight off the EventRoom - unlike the finale
+            // cache, which turns display 259 by a measured quarter turn, this
+            // model needs no offset, so nothing is added to it here.
+            //
+            // Order matters only in one direction: the chest is summoned FIRST
+            // and the host dismissed after, so a failed summon still leaves
+            // somebody standing rather than an empty room and no reward.
+            if (GameObject* cache = instance->SummonGameObject(
+                    GO_EVENT_CHEST, event.hostX, event.hostY, event.z,
+                    event.hostO, 0.0f, 0.0f, 0.0f, 0.0f, 0))
+            {
+                _decorGuids.push_back(cache->GetGUID());
+            }
+            else
+            {
+                LOG_ERROR(PD_LOG, "PDv2: instance {} won an event but failed to summon its "
+                                  "cache (missing gameobject_template {}?)",
+                          instance->GetInstanceId(), uint32(GO_EVENT_CHEST));
+            }
+
+            // Scaled by the run's own loot multiplier, which is the number
+            // every other reward in this dungeon is already measured in - so
+            // a harder run pays more for the same minute of defence. uint64
+            // through the multiply: 1000 * 255 fits an uint32 comfortably,
+            // but the conf key is a uint32 and a wide product costs nothing.
+            xp = static_cast<uint32>(static_cast<uint64>(cfg.eventParagonXp) *
+                                     static_cast<uint64>(_run.lootMultX100) / 100);
+
+            // Everybody who is standing in the dungeon, not only whoever
+            // clicked: holding a line is what the whole party did.
+#ifdef PDV2_HAS_PARAGON
+            ForEachRunPlayer(instance, [xp](Player* player)
+            {
+                IncreaseParagonXP(player, xp);
+                ChatHandler(player->GetSession()).PSendSysMessage(
+                    "[Hold the line] +{} Paragon XP.", xp);
+            });
+#else
+            // No mod-paragon in this build, so nothing was paid - and the log
+            // line below must not claim that anything was.
+            xp = 0;
+#endif
+
+            // ...and he goes. His gossip flag used to be handed back here so a
+            // won event still had a menu to open onto; WP8 took that away
+            // instead, because the menu was empty (PDv2EventNPC's Idle-only
+            // offer) and a rescued man who never leaves is the thing the
+            // operator called out. DespawnOrUnsummon and not Delete: he is a
+            // creature and that is this module's teardown for one, the same
+            // call DespawnAll would make on his GUID at the rebuild - which is
+            // why his entry may stay in _spawnedGuids, where a second despawn
+            // of a creature that is already gone is a lookup that finds
+            // nothing.
+            if (Creature* host = instance->GetCreature(event.host))
+            {
+                host->DespawnOrUnsummon();
+            }
+        }
+
+        // The HUD's countdown and the host's health bar both come off this
+        // state, so the frame that follows has to be sent.
+        MarkRunDirty();
+
+        LOG_INFO(PD_LOG, "PDv2: instance {} {} the event in block ({}, {}) - "
+                         "{} attacker(s) sent in, {} dismissed, {} paragon XP",
+                 instance->GetInstanceId(), won ? "won" : "lost", event.bx,
+                 event.by, uint32(event.nextPick), dismissed, xp);
+    }
+
+    void PDv2InstanceScript::OnEventHostDied(Creature* host)
+    {
+        if (!host)
+        {
+            return;
+        }
+
+        EventRoom* event = EventFor(host->GetGUID());
+        if (!event || event->state != EventState::Running)
+        {
+            return;
+        }
+
+        // RECORDED, not acted on. This runs inside Unit::setDeathState, so it
+        // may not despawn the wave that killed him - the next TickEvents pass
+        // sees a state that is neither Running nor closed and does the whole
+        // closing beat there, at most one second later.
+        //
+        // Doing it here rather than leaving the death entirely to the tick's
+        // own !IsAlive() test is what makes the LOSS instant: the gossip and
+        // the HUD read this state, and a pilgrim lying dead under a menu that
+        // still says "Hold the line with me!" is a second of nonsense.
+        event->state = EventState::Lost;
+        MarkRunDirty();
+    }
+
+    PDv2InstanceScript::EventState
+    PDv2InstanceScript::EventStateFor(ObjectGuid host) const
+    {
+        if (host.IsEmpty())
+        {
+            return EventState::Idle;
+        }
+        for (EventRoom const& event : _events)
+        {
+            if (event.host == host)
+            {
+                return event.state;
+            }
+        }
+        // Total by design: any creature, at any time, in any run - including
+        // one whose layout has no event at all - answers Idle. That is what
+        // makes the gossip's call safe without a second gate.
+        return EventState::Idle;
+    }
+
+    bool PDv2InstanceScript::EventHudFields(uint32& secLeft, uint32& npcPct) const
+    {
+        uint32 const now = getMSTime();
+        for (EventRoom const& event : _events)
+        {
+            if (event.state != EventState::Running)
+            {
+                continue;
+            }
+
+            Creature* host = instance->GetCreature(event.host);
+            if (!host)
+            {
+                // He is gone and the next tick will call it lost. Reporting
+                // nothing for that one second is better than a bar read off
+                // a creature that is not there.
+                continue;
+            }
+
+            // Ceiling, so a defence with 200 ms left still reads "1" and the
+            // countdown only shows 0 once it is actually over. Wrap-safe like
+            // every other read of this deadline.
+            int32 const leftMs = static_cast<int32>(event.deadlineMs - now);
+            secLeft = leftMs > 0 ? static_cast<uint32>((leftMs + 999) / 1000) : 0u;
+            // Truncated on purpose, the way a health bar is read everywhere
+            // else: 99.6 % is not yet full and must not print as 100.
+            npcPct = static_cast<uint32>(host->GetHealthPct());
+            return true;
+        }
+        return false;
     }
 }

@@ -25,6 +25,7 @@
 #include "PDv2InstanceScript.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
+#include "PDv2TaggedAura.h"
 #include "Player.h"
 #include "Random.h"
 #include "ScriptMgr.h"
@@ -201,9 +202,21 @@ namespace PDungeon
         }
 
         // One letter per block, because the client only ever colours by it.
-        char RoleChar(BlockRole role)
+        //
+        // Round E / WP5: `V` is an EVENT room and is asked BEFORE the role,
+        // because an event pocket's role is plain `Room` - it is a pocket in
+        // every geometric respect (PDBlockPlan.h). Reading the role alone
+        // would paint it exactly like the trash pocket next to it, and the
+        // one thing the map owes the player about that room is that it is
+        // not one. The letter travels; the colour stays the client's.
+        char RoleChar(PlacedBlock const& block)
         {
-            switch (role)
+            if (block.isEvent)
+            {
+                return 'V';
+            }
+
+            switch (block.role)
             {
                 case BlockRole::RoomEntrance: return 'E';
                 case BlockRole::RoomBoss:     return 'B';
@@ -388,6 +401,12 @@ namespace PDungeon
         // be larger than today's band allows (its gen inputs are frozen by
         // design), and the first in-game test proved a panel that shows only
         // the next roll's bounds reads as a bug when the live dungeon differs.
+        //
+        // Round E / R2: curRooms counts ORDINARY rooms - the entrance and the
+        // boss halls are both out of it, because curBoss reports the halls on
+        // the same line and the pair has to read like the two dials above it.
+        // Counting the halls in both places is what made "rooms 14" on the
+        // slider and "0/15 rooms" on the HUD describe one dungeon.
         int curRooms = 0, curBoss = 0;
         if (auto const plan = sPDv2Mgr->GetPlan(accountId))
         {
@@ -397,11 +416,12 @@ namespace PDungeon
                 {
                     continue;
                 }
-                ++curRooms;
                 if (b.role == BlockRole::RoomBoss)
                 {
                     ++curBoss;
+                    continue;
                 }
+                ++curRooms;
             }
         }
 
@@ -441,7 +461,18 @@ namespace PDungeon
             << ' ' << GameRoomsCap(dlvl)
             << ' ' << account.cfgDifficulty
             << ' ' << PD_GAME_DIFF_MIN
-            << ' ' << PD_GAME_DIFF_MAX
+            // Round E / R1 (spec D15). The `diffMax` field is the ACCOUNT's
+            // earned cap, not the dial's absolute ceiling: the slider bounds
+            // itself at c.diffMax (flpdui.lua), so this is where a cap the
+            // player has not earned yet stops being offered. PD_GAME_DIFF_MAX
+            // is still the ceiling the cap itself is clamped to (GameClampDiff
+            // in RaiseDiffCap), so a maxed account sends exactly what this
+            // line used to send unconditionally.
+            //
+            // The server does NOT rely on this bound: SetAccountCfg re-clamps
+            // whatever the panel asks for against the same cap, because a wire
+            // field is a hint to a client and never a permission.
+            << ' ' << account.diffCap
             << ' ' << PD_GAME_DIFF_STEP
             << ' ' << account.cfgCasterPct
             << ' ' << PD_GAME_CASTER_PCT_MIN
@@ -461,6 +492,26 @@ namespace PDungeon
             // Lua that disagreed with the server for months.
             << ' ' << sPDv2PackMgr->AffixCountForDifficulty(account.cfgDifficulty)
             << ' ' << static_cast<int>(verdict)
+            // Round E / WP9, fields 25 and 26, and APPENDED - before the
+            // free-text tail below, which has to stay last because the addon
+            // reads the tail as "everything after the numbers". The rule
+            // (PDv2UILink.h): fields are only ever added at the end, so an
+            // older panel drops these two and draws a true, if older, picture.
+            //
+            // The profile the account chose, and whether the character in
+            // front of us has earned the right to choose it. The unlock is a
+            // live aura read and NOT a stored flag: it costs one walk of this
+            // player's dummy auras per panel refresh, and it is right the
+            // moment a node is bought or refunded.
+            //
+            // static_cast<int> is not decoration - cfgStatProfile is a uint8_t
+            // and an ostream would write it as a CHARACTER.
+            //
+            // Like diffMax above, both are a HINT and never a permission: the
+            // SET handler asks the same aura again before it lets the value
+            // through, because a panel is a thing an untrusted client runs.
+            << ' ' << static_cast<int>(account.cfgStatProfile)
+            << ' ' << (TaggedAuraAmount(player, PD_TALENT_TAG_STATFILTER) ? 1 : 0)
             << ' ' << Sanitize(LinkState::Describe(verdict));
 
         SendAddonWhisper(player, PREFIX_UI_DOWN, out.str());
@@ -502,7 +553,7 @@ namespace PDungeon
             // connections that did not exist - adjacency on the map is not
             // adjacency in the dungeon, only a shared open socket is (operator
             // report, first in-game test 2026-08-07).
-            out << (b.bx - minBX) << ',' << (b.by - minBY) << ',' << RoleChar(b.role)
+            out << (b.bx - minBX) << ',' << (b.by - minBY) << ',' << RoleChar(b)
                 << ',' << b.socketMask << ';';
         }
 
@@ -555,14 +606,16 @@ namespace PDungeon
         // second for the rest of the run. One error line per room clear is the
         // honest cost of a layout that outgrew the wire.
         //
-        // The pair is {run generation, cleared-room count}. Only the second
+        // The pair is {run generation, emptied-room count}. Only the second
         // half moves during a run; the first is what makes a REBUILD - same
         // instance, new run, count back to 0 - a change the tick can see
-        // (_clearedSent says why the count alone cannot).
+        // (_clearedSent says why the count alone cannot). The EMPTIED count,
+        // not the HUD's cleared one: `cleared` above carries the boss halls
+        // and the HUD counter no longer does (Round E / R2).
         {
             std::lock_guard<std::mutex> guard(_lock);
             _clearedSent[player->GetGUID()] =
-                script ? std::make_pair(script->RunGeneration(), script->RoomsClearedCount())
+                script ? std::make_pair(script->RunGeneration(), script->RoomsEmptiedCount())
                        : std::make_pair(uint32_t(0), uint32_t(0));
         }
 
@@ -632,16 +685,53 @@ namespace PDungeon
 
         int const state = run.complete ? 2 : (run.started ? 1 : 0);
 
-        // Round C / C7: the next sealed gate, appended AFTER `state` so an
-        // addon that predates this field set simply drops the tail (there is
-        // no null script to worry about here - SendRunTick returned above
-        // without one). NextClosedBarrier zeroes all three when nothing is
-        // sealed, and three zeros is exactly the wire's "no gate", so its
-        // answer carries no information this payload needs.
+        // Round C / C7: the gate, appended AFTER `state` so an addon that
+        // predates this field set simply drops the tail (there is no null
+        // script to worry about here - SendRunTick returned above without one).
+        // All three are zeroed when there is no gate to report, and three zeros
+        // is exactly the wire's "no gate".
+        //
+        // This is the tail-append RULE, not a one-off: every later field set
+        // goes on the END of the payload in its own group, and the addon
+        // reads the groups it knows and drops the rest (ParseRun in
+        // flpdui.lua). Round E / WP5 adds the second group below.
+        //
+        // Round E / WP8 changed WHICH gate: GateFieldsFor answers for the
+        // segment THIS PLAYER is standing in, so the line keeps describing the
+        // rooms they are clearing after its barrier has opened instead of
+        // jumping to the next segment's 0/n (operator finding 5). That is also
+        // why it is called per player rather than once per tick - two members
+        // of a party in different segments now get different numbers, which is
+        // the whole point. NextClosedBarrier stays for its other callers, and
+        // is still the answer for a player who is not in a room.
         uint32 segPlanned = 0;
         uint32 segKilled = 0;
         uint32 segPct = 0;
-        script->NextClosedBarrier(segPlanned, segKilled, segPct);
+        bool segOpen = false;
+        script->GateFieldsFor(player, segPlanned, segKilled, segPct, segOpen);
+
+        // Round E / WP5: the running event's clock and its host's health, the
+        // second appended group. Zeroes mean "no event is running" - which is
+        // also what an addon that predates this group reads, because it never
+        // looks past segPct.
+        //
+        // The bool is dropped on purpose: EventHudFields leaves BOTH outputs
+        // untouched when it answers false (PDv2InstanceScript.h), so the
+        // zeros above are already the right answer and there is no second way
+        // to spell "no event" on this wire.
+        uint32 eventSecLeft = 0;
+        uint32 eventNpcPct = 0;
+        script->EventHudFields(eventSecLeft, eventNpcPct);
+
+        // Round E / WP8: the gate's open state, the THIRD appended group and a
+        // single field - behind the event pair, not beside the three gate
+        // numbers it belongs to, because the rule is append-only and a field
+        // inserted in the middle would silently re-number everything after it
+        // for every client that has not been redeployed. 0 is what a 15-field
+        // server's silence means and what an addon that predates this field
+        // assumes anyway: the barrier of the segment on the line is sealed,
+        // which is the only state the gate line could ever show before.
+        uint32 const segOpenField = segOpen ? 1u : 0u;
 
         std::ostringstream out;
         out << "R " << run.elapsedSec
@@ -656,7 +746,10 @@ namespace PDungeon
             << ' ' << state
             << ' ' << segPlanned
             << ' ' << segKilled
-            << ' ' << segPct;
+            << ' ' << segPct
+            << ' ' << eventSecLeft
+            << ' ' << eventNpcPct
+            << ' ' << segOpenField;
 
         SendAddonWhisper(player, PREFIX_UI_DOWN, out.str());
     }
@@ -715,7 +808,7 @@ namespace PDungeon
         // only when a room falls, so neither can move between two players of
         // the same tick.
         std::pair<uint32_t, uint32_t> const clearedKey(script->RunGeneration(),
-                                                       script->RoomsClearedCount());
+                                                       script->RoomsEmptiedCount());
 
         Map::PlayerList const& players = script->instance->GetPlayers();
         for (Map::PlayerList::const_iterator it = players.begin(); it != players.end(); ++it)
@@ -763,18 +856,30 @@ namespace PDungeon
             }
 
             // The whole point of HELLO: one round trip restores everything a
-            // relog or a /reload lost. Outside the dungeon that is the panel;
-            // inside it is also the map and the run frame, which is the gap
-            // the dungeon-challenge HUD never closed.
+            // relog or a /reload lost. Outside the dungeon that is the panel
+            // and the layout it previews; inside it is also the run frame,
+            // which is the gap the dungeon-challenge HUD never closed.
+            //
+            // The map is no longer sent only on the dungeon map (Round E / R4):
+            // the gen panel draws its layout preview from the same M and K
+            // payloads the HUD does, so an account with a STORED plan that
+            // opens /pd anywhere else must receive them too - otherwise the
+            // preview stays empty until the player presses Generate. Doing it
+            // unconditionally costs nothing when there is no plan: both send
+            // nothing at all in that case, which is the same silence the map
+            // gate used to produce.
             SendCfg(player);
+            SendMap(player);
+            // Round C / C7, and immediately after the map it colours: a
+            // player who walked in halfway through someone else's run has
+            // no other way to learn which rooms are already empty, and the
+            // tick alone would only ever tell them about the NEXT clear.
+            // ScriptFor is nullptr outside the dungeon, and that is the
+            // answer rather than a shortcut - no run means no cleared rooms,
+            // which is exactly the uncoloured layout the preview wants.
+            SendCleared(player, ScriptFor(player));
             if (player->GetMapId() == sPDv2Mgr->GetConfig().mapId)
             {
-                SendMap(player);
-                // Round C / C7, and immediately after the map it colours: a
-                // player who walked in halfway through someone else's run has
-                // no other way to learn which rooms are already empty, and the
-                // tick alone would only ever tell them about the NEXT clear.
-                SendCleared(player, ScriptFor(player));
                 SendRunTick(player);
             }
             return;
@@ -786,8 +891,17 @@ namespace PDungeon
             size_t const split = rest.find(' ');
             if (split == std::string::npos)
             {
-                LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent a SET with no value ('{}')",
-                          accountId, body);
+                // Round E / R3, and the same for the five sibling lines below:
+                // what arrives here is CLIENT traffic, so its volume is not
+                // this module's to bound - a stuck addon, an old panel or a
+                // hostile one can send a malformed verb every frame. Behind
+                // V2.Debug, where somebody debugging a panel turns one key on
+                // and reads them at INFO.
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 UI: account {} sent a SET with no value ('{}')",
+                             accountId, body);
+                }
                 return;
             }
 
@@ -795,8 +909,11 @@ namespace PDungeon
             int value = 0;
             if (!ParseInt(rest.substr(split + 1), value))
             {
-                LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent a SET with a bad value ('{}')",
-                          accountId, body);
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 UI: account {} sent a SET with a bad value ('{}')",
+                             accountId, body);
+                }
                 return;
             }
 
@@ -823,16 +940,48 @@ namespace PDungeon
                 // panel may move, and a hostile one is still just a panel.
                 if (BandRowLocked())
                 {
-                    LOG_DEBUG(PD_LOG, "PDv2 UI: account {} tried to set the locked mob "
-                                      "level band", accountId);
+                    if (PDv2Debug())
+                    {
+                        LOG_INFO(PD_LOG, "PDv2 UI: account {} tried to set the locked mob "
+                                         "level band", accountId);
+                    }
                     return;
                 }
                 wanted.cfgBandMin = value;
             }
+            else if (key == "statprofile")
+            {
+                // Round E / WP9, and the band branch above is the pattern
+                // exactly: a setting the panel is not allowed to show is a
+                // setting no panel may move. The difference is only where the
+                // permission comes from - a server constant there, the
+                // player's own Forgotten Talents node here. Asked ONCE, right
+                // here, and never again inside SetAccountCfg: that function
+                // clamps, it does not authorise.
+                if (!TaggedAuraAmount(player, PD_TALENT_TAG_STATFILTER))
+                {
+                    if (PDv2Debug())
+                    {
+                        LOG_INFO(PD_LOG, "PDv2 UI: account {} tried to set the stat profile "
+                                         "without owning Discerning Eye", accountId);
+                    }
+                    return;
+                }
+                // Clamped HERE as well as in SetAccountCfg, unlike its three
+                // int siblings: the field is a uint8_t, so a wire value of
+                // 5000 would WRAP on the way into `wanted` and reach the clamp
+                // as something else entirely. The clamp downstream is still
+                // the one that matters - this is only what keeps the trip
+                // through the struct honest.
+                wanted.cfgStatProfile = GameClampStatProfile(value);
+            }
             else
             {
-                LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent an unknown SET key ('{}')",
-                          accountId, key);
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 UI: account {} sent an unknown SET key ('{}')",
+                             accountId, key);
+                }
                 return;
             }
 
@@ -912,8 +1061,11 @@ namespace PDungeon
             int on = 0;
             if (!ParseInt(body.substr(4), on))
             {
-                LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent a bad HUD toggle ('{}')",
-                          accountId, body);
+                if (PDv2Debug())
+                {
+                    LOG_INFO(PD_LOG, "PDv2 UI: account {} sent a bad HUD toggle ('{}')",
+                             accountId, body);
+                }
                 return;
             }
 
@@ -922,7 +1074,10 @@ namespace PDungeon
             return;
         }
 
-        LOG_DEBUG(PD_LOG, "PDv2 UI: account {} sent an unknown verb ('{}')", accountId, body);
+        if (PDv2Debug())
+        {
+            LOG_INFO(PD_LOG, "PDv2 UI: account {} sent an unknown verb ('{}')", accountId, body);
+        }
     }
 
     std::string PDv2UILink::DebugLine(uint32_t accountId)

@@ -48,8 +48,26 @@ namespace PDungeon
         // the last boss dies and torn down with the run. Rows live in
         // mod_pdungeon_templates_fix.sql; the cache's loot (910068) is in
         // mod_pdungeon_chromie.sql.
-        GO_AZEALIA_PORTAL = 910067, // C8: type 10, click teleports to Azealia
-        GO_REWARD_CHEST   = 910068  // C8: "Chromie's Cache", lock 57
+        //
+        // The Azealia in the NAME is C8's and stays: it is the registered
+        // ScriptName in gameobject_template, so renaming it would be an SQL
+        // change and a client cache bump for nothing. Since Round E / WP10 the
+        // destination is whatever game_tele row V2.Finale.TeleName picks
+        // (default `flcapital`), and Azealia is only the fallback.
+        GO_AZEALIA_PORTAL = 910067, // C8: type 10, click teleports the clicker
+        GO_REWARD_CHEST   = 910068, // C8: "Chromie's Cache", lock 57
+        // Round E / WP8 (2026-09-10): the small chest a WON event room leaves
+        // on the pilgrim's own square when he walks away. A THIRD chest entry
+        // and not a second spawn of GO_CHEST, because the operator asked for a
+        // reward that reads as the small one (display 10 Chest01 against 259
+        // TreasureChest01) - and PDv2ChestLoot keys its injection on the ENTRY,
+        // so a distinct look has to be a distinct id. 910034 is the first free
+        // id of the reserved 910034-910039 gap; its template row lives in
+        // mod_pdungeon_templates_fix.sql - the only module file that sorts
+        // after mod_pdungeon_templates.sql's wide DELETE of 910000-910099 -
+        // and its loot rows in mod_pdungeon_event.sql, the same split 910068
+        // already has with mod_pdungeon_chromie.sql.
+        GO_EVENT_CHEST    = 910034
     };
 
     enum PDCreatureEntries : uint32
@@ -64,7 +82,16 @@ namespace PDungeon
         // AND 910549 never reaches her; her row lives in its own file,
         // mod_pdungeon_chromie.sql. No ScriptName - PDv2InstanceScript's
         // _finale holds her GUID and speaks her lines.
-        NPC_CHROMIE      = 910550
+        NPC_CHROMIE      = 910550,
+        // Round E / WP5: the event room's host, the "Weary Pilgrim" a party
+        // defends while waves walk in. Second entry of the 910550-910599
+        // sub-block; his row lives in its own file, mod_pdungeon_event.sql,
+        // for the same reason hers does. ScriptName 'npc_pdungeon_event'
+        // (src/PDv2EventNPC.cpp) supplies both his gossip and his AI, and
+        // PDv2CreatureAIBinder yields on this entry so he can never be handed
+        // PDv2MobAI - unlike Chromie he is attackable, so that AI's proximity
+        // aggro would make him hunt players.
+        NPC_EVENT_HOST   = 910551
     };
 
     enum PDSpells : uint32
@@ -103,6 +130,37 @@ namespace PDungeon
     // script rejects it on its own; the tag's 0 default would have decremented
     // room 0 instead.
     uint32 const PD_ROOM_NONE = 0xFFFFFFFFu;
+
+    // Round E / WP6. The EffectMiscValue of the Forgotten Talents "Restless
+    // Echoes" node's passive dummy aura - and the WHOLE contract between the
+    // two modules. Deliberately a TAG and not a spell id: mod-forgotten-talents
+    // synthesises the spell records for its extension nodes and its id map is
+    // sticky rather than frozen, so an id written down over here would be a
+    // promise the other module never made. What it does promise is this
+    // number in EffectMiscValue_1 and the rank's value in the aura's amount.
+    //
+    // Nothing in this module includes an FT header for it - the reader is
+    // PDv2TaggedAura.h, ten lines of our own - and the tag band 76001-76004 is
+    // registered in share-public 06-custom-ids.md.
+    //
+    // int32 rather than the uint32 above because AuraEffect::GetMiscValue()
+    // is signed and this constant exists to be compared against it.
+    int32 const PD_TALENT_TAG_RESPAWN = 76001;
+
+    // Round E / WP9, the same contract for the "Discerning Eye" node: owning
+    // it UNLOCKS the stat-profile row in the /pd panel and makes the account's
+    // chosen profile bite on every gear roll of the run. One rank, so the
+    // amount is only ever 0 or 1 and the whole question is "does he own it".
+    //
+    // The unlock is a per-CHARACTER aura and the profile it unlocks is a
+    // per-ACCOUNT column, which is deliberate rather than an oversight: every
+    // other knob on this panel is per account, so the CHOICE is shared, while
+    // each character has to buy its own way to make it.
+    //
+    // 76002 and 76003 are Forgotten Talents' own (the two nodes
+    // mod-paragon-itemgen reads), which is why this one is 76004 and not the
+    // next number after 76001.
+    int32 const PD_TALENT_TAG_STATFILTER = 76004;
 
     char const* const PD_LOG = "module.pdungeon";
 }

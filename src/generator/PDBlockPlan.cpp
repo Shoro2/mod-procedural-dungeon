@@ -615,6 +615,111 @@ namespace PDungeon
             return true;
         }
 
+        // --- Round E / WP5 event pockets ------------------------------------
+        //
+        // One optional dead-end room per BOSS SEGMENT, hung off an ordinary
+        // spine room of that segment with exactly the machinery above: the
+        // same kind of host, the same single StepCandidates step, the same
+        // CommitRoute. Geometrically an event pocket IS a pocket; the only
+        // differences are bookkeeping ones:
+        //
+        //   * it is ADDITIONAL to the pocket budget (PocketCountFor is not
+        //     consulted), the way a B0b loop room is additional;
+        //   * it is seated AFTER the depth-first search has succeeded, not
+        //     inside it, so a segment that cannot fit one is DROPPED rather
+        //     than unwinding a spine that is already good. An event room is a
+        //     bonus; refusing a whole layout over one would trade a working
+        //     dungeon for a nicety;
+        //   * the coin is drawn for EVERY segment, in order, before its
+        //     geometry is looked at, so the stream shape depends on the
+        //     segment count alone and never on how the field happened to fill
+        //     up. (At 0 and at 100 PDRandom::Chance draws nothing at all, so
+        //     the 0 % default leaves every pre-WP5 stream untouched, and the
+        //     harness's 100 % sweep leaves the coin out of the picture.)
+        //
+        // `hostedEvent` tracks the EVENT pockets this pass seats, and nothing
+        // else. Design call 2026-09-10 (WP5 Task 1 report §6, option 2): an
+        // event pocket MAY share its host with an ordinary pocket. A room
+        // chunk has four sockets - chain in, chain out, pocket, event - so a
+        // spine room carrying both is an ordinary mask-15 room chunk, which
+        // the kit ships for both themes. The rule that survives is the one
+        // the engine cares about: two EVENTS never share a host, so a
+        // segment's scripted encounter always stands alone in its own dead
+        // end. Ordinary pockets keep their own one-per-host rule inside
+        // PlacePockets; this pass simply stops reading it.
+        //
+        // What the change buys: at 5 rooms / 1 boss the old host set was
+        // whatever single ordinary spine room the two pockets had left over,
+        // which is where the measured 19.6 % geometric drop rate came from.
+        // Every ordinary spine room of the segment is a candidate again.
+        //
+        // `hostedEvent` is belt and braces and says so: the host set below is
+        // already filtered to segment k, and the segments partition the chain,
+        // so no index can be drawn twice by construction. It is kept because
+        // "two events never share a host" is a RULE of the design - one that
+        // ValidateBlockPlan states from the outside - and a rule inferred from
+        // a partition somewhere else is one a later loop change can lose
+        // silently.
+        void PlaceEventPockets(PDRandom& rng, std::vector<int> const& bosses, int chancePct,
+                               Field& f, std::vector<Pocket>& out, int& dropped)
+        {
+            int const chainLen = static_cast<int>(f.chain.size());
+            std::vector<bool> hostedEvent(static_cast<size_t>(chainLen), false);
+            for (size_t k = 1; k <= bosses.size(); ++k)
+            {
+                if (!rng.Chance(chancePct))
+                {
+                    continue;
+                }
+                // PlacePockets' host set - chain 1..L-2, never a boss, with a
+                // free cell to step into - narrowed to segment k, and closed
+                // only against the events THIS pass has already seated.
+                // Enumerated in chain order so a draw index means the same on
+                // every compiler.
+                std::vector<int> hosts;
+                for (int i = 1; i < chainLen - 1; ++i)
+                {
+                    if (SegmentIndexOf(bosses, i) != static_cast<int>(k))
+                    {
+                        continue;
+                    }
+                    if (IsBossIndex(bosses, i) || hostedEvent[static_cast<size_t>(i)])
+                    {
+                        continue;
+                    }
+                    if (StepCandidates(f, f.chain[static_cast<size_t>(i)], nullptr).empty())
+                    {
+                        continue;
+                    }
+                    hosts.push_back(i);
+                }
+                if (hosts.empty())
+                {
+                    // No free host, or no free cell to step into from any of
+                    // them. Counted, never retried: the alternative is a
+                    // backtrack that would move the whole spine for a bonus
+                    // room.
+                    ++dropped;
+                    continue;
+                }
+                int const host = hosts[static_cast<size_t>(
+                    rng.UniformInt(0, static_cast<int>(hosts.size()) - 1))];
+                Cell const from = f.chain[static_cast<size_t>(host)];
+                std::vector<StepCandidate> const cands = StepCandidates(f, from, nullptr);
+                StepCandidate const cand = cands[static_cast<size_t>(
+                    rng.UniformInt(0, static_cast<int>(cands.size()) - 1))];
+                CommitRoute(f, from, cand.cell, ChooseXFirst(rng, cand.orders));
+                f.occ[f.Index(cand.cell)] = 1;
+                f.rooms.push_back(cand.cell);
+                hostedEvent[static_cast<size_t>(host)] = true;
+
+                Pocket event;
+                event.cell = cand.cell;
+                event.host = host;
+                out.push_back(event);
+            }
+        }
+
         // What the search is for: the spine length, the pockets that must
         // fit around it, the boss positions the pocket hosts avoid, and which
         // boss segments drew a loop room.
@@ -885,7 +990,11 @@ namespace PDungeon
 
     int PocketCountFor(int rooms, int bossRooms, int branches)
     {
-        int const total = std::max(2, rooms + bossRooms);
+        // Round E / R2: `rooms` counts ORDINARY rooms, so the entrance is the
+        // "+ 1" here and in the builder below - the two must stay identical or
+        // the pocket budget would be taken against a different chain than the
+        // one that gets built (PDBlockPlan.h states the arithmetic once).
+        int const total = std::max(2, rooms + bossRooms + 1);
         int const bosses = bossRooms > 0 ? bossRooms : 1;
         int pockets = std::max(0, branches);
         pockets = std::min(pockets, total / 3);
@@ -912,10 +1021,30 @@ namespace PDungeon
         return len;
     }
 
+    int EventPocketCount(BlockPlan const& plan)
+    {
+        int n = 0;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (b.isEvent)
+            {
+                ++n;
+            }
+        }
+        return n;
+    }
+
     int SegmentOf(BlockPlan const& plan, PlacedBlock const& block)
     {
         // Spine room: its own index. Pocket: its host's. Loop room (B0b): the
         // spine room its run leads INTO, which may be that segment's boss.
+        //
+        // Round E / WP5 needs NO clause here and that is deliberate: an event
+        // pocket carries `branchOf` exactly like an ordinary pocket, so the
+        // second arm below already answers its host's segment - which is by
+        // construction the segment its coin was drawn for, because the host
+        // set is filtered by segment. Adding an `isEvent` arm would only be a
+        // second way to say the same thing, and a second way to get it wrong.
         int const idx = block.chainIndex >= 0 ? block.chainIndex
                       : block.branchOf >= 0   ? block.branchOf
                                               : block.detourOf;
@@ -1223,9 +1352,14 @@ namespace PDungeon
         int pocketCount = 0;
         for (PlacedBlock const& b : plan.blocks)
         {
-            if (b.roomId < 0 || b.chainIndex >= 0 || b.detourOf >= 0)
+            if (b.roomId < 0 || b.chainIndex >= 0 || b.detourOf >= 0 || b.isEvent)
             {
-                continue;   // corridor, spine room, or a B0b loop room (checked below)
+                // Corridor, spine room, a B0b loop room, or a Round E / WP5
+                // event pocket - all checked below. The event pocket is the
+                // one that has to be named here: it carries `branchOf` like
+                // any pocket, so without this clause it would count against
+                // the pocket BUDGET, which it is explicitly not part of.
+                continue;
             }
             if (b.branchOf < 0)
             {
@@ -1250,6 +1384,60 @@ namespace PDungeon
         if (pocketCount != PocketCountFor(plan.config.rooms, plan.config.bossRooms, plan.config.branches))
         {
             return fail("pocket count does not match the config");
+        }
+
+        // Round E / WP5: event pockets, on their own budget. They are pockets
+        // geometrically - the physics rule further down walks their corridors
+        // exactly like a pocket's, and the boss-cut flood reads their
+        // branchOf exactly like a pocket's - so everything stated here is
+        // about the ONE thing that differs: how many there may be, and where
+        // they may hang.
+        //
+        //   * at most one per boss segment, so never more than bossRooms;
+        //   * exactly one socket. The event host stands in a sealed dead end,
+        //     and a chest stub opening a second doorway would put the player
+        //     past it without meeting it. The stub pass in GenerateBlockPlan
+        //     skips event cells for this reason and this rule is the proof;
+        //   * ONE EVENT PER HOST - and only that. Design call 2026-09-10 (WP5
+        //     Task 1 report §6, option 2): an event pocket may hang off a
+        //     spine room that already hosts an ordinary pocket, because a room
+        //     chunk has four sockets and chain in + chain out + pocket + event
+        //     is exactly four. So there is deliberately NO test against
+        //     `hosted` here; the ordinary pockets keep their own one-per-host
+        //     rule in the loop above, and `hostedEvent` keeps the events'.
+        //     What the design refuses is two SCRIPTED encounters sharing one
+        //     junction, which is what a player would actually notice.
+        int const eventCount = EventPocketCount(plan);
+        std::vector<bool> hostedEvent(static_cast<size_t>(chainLen), false);
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            if (!b.isEvent)
+            {
+                continue;
+            }
+            if (b.roomId < 0 || b.role != BlockRole::Room ||
+                b.chainIndex >= 0 || b.detourOf >= 0)
+            {
+                return fail("an event pocket carries the wrong role or fields");
+            }
+            if (PopCount(b.socketMask) != 1)
+            {
+                return fail("an event pocket does not have exactly one socket");
+            }
+            if (b.branchOf < 1 || b.branchOf >= chainLen - 1 ||
+                plan.blocks[static_cast<size_t>(chainBlock[static_cast<size_t>(b.branchOf)])].role != BlockRole::Room)
+            {
+                return fail("an event pocket hangs off the entrance, a boss or nothing");
+            }
+            if (hostedEvent[static_cast<size_t>(b.branchOf)])
+            {
+                return fail("two event pockets on one host");
+            }
+            hostedEvent[static_cast<size_t>(b.branchOf)] = true;
+        }
+        if (eventCount > wantBosses)
+        {
+            return fail("more event pockets than boss segments");
         }
 
         // Every open socket must be answered by the neighbour. A dangling
@@ -1504,6 +1692,12 @@ namespace PDungeon
         // 3. Pocket physics: the rooms a pocket's corridors actually reach are
         //    exactly its declared host (once). Stub runs are ignored; anything
         //    else is a corridor the plan does not admit to.
+        //
+        //    Round E / WP5 event pockets are IN this rule, deliberately: they
+        //    are laid with the same CommitRoute off the same kind of host, so
+        //    the strongest statement about them is the one that already holds
+        //    for pockets. An `isEvent` clause here would exempt exactly the
+        //    rooms the engine is about to put a scripted encounter in.
         for (size_t i = 0; i < plan.blocks.size(); ++i)
         {
             PlacedBlock const& b = plan.blocks[i];
@@ -1547,14 +1741,20 @@ namespace PDungeon
         // 4. Chain length: the spine holds the whole room budget minus the
         //    pockets. Without this a 3-room chain with the bosses at the
         //    formula positions for L = 3 validates against a 4-room config.
-        if (chainLen != std::max(2, plan.config.rooms + plan.config.bossRooms) - pocketCount)
+        //    The budget is rooms + bossRooms + 1 since Round E / R2 - the
+        //    trailing 1 is the entrance, which is a chain cell like any other.
+        if (chainLen != std::max(2, plan.config.rooms + plan.config.bossRooms + 1) - pocketCount)
         {
             return fail("chain length does not match the room budget");
         }
 
         // 5. Room count: loop rooms are ADDITIONAL to the budget (design
         //    2026-09-03 §0.4), so the total is the budget plus however many
-        //    segments got one. Rules 4 and 5 together pin all three kinds.
+        //    segments got one. Round E / WP5 event pockets are additional in
+        //    exactly the same sense, so they are added the same way - and
+        //    because both are bounded by the segment count above, a planner
+        //    that leaked rooms could not hide behind either term. Rules 4 and
+        //    5 together pin all four kinds.
         int roomCount = 0;
         for (PlacedBlock const& b : plan.blocks)
         {
@@ -1563,9 +1763,10 @@ namespace PDungeon
                 ++roomCount;
             }
         }
-        if (roomCount != std::max(2, plan.config.rooms + plan.config.bossRooms) + loopCount)
+        if (roomCount != std::max(2, plan.config.rooms + plan.config.bossRooms + 1) +
+                         loopCount + eventCount)
         {
-            return fail("room count does not match the budget plus the loop rooms");
+            return fail("room count does not match the budget plus the loop and event rooms");
         }
 
         // Connectivity: every block must be reachable from the entrance through
@@ -1639,7 +1840,10 @@ namespace PDungeon
         }
 
         // Round B (spec 2026-09-02): the budget is arithmetic, not a draw.
-        int const total = std::max(2, cfg.rooms + cfg.bossRooms);
+        // Round E / R2 (spec D13): + 1 for the entrance, which is chain 0 and
+        // is no longer taken out of the ordinary rooms the dial asked for.
+        // PocketCountFor computes the SAME total - keep the two in step.
+        int const total = std::max(2, cfg.rooms + cfg.bossRooms + 1);
         int const bosses = cfg.bossRooms > 0 ? cfg.bossRooms : 1;
         int const pocketsWanted = PocketCountFor(cfg.rooms, cfg.bossRooms, cfg.branches);
         int const chainLen = total - pocketsWanted;
@@ -1668,10 +1872,22 @@ namespace PDungeon
         //      search: per pocket a host index, a candidate index and the
         //      axis coin (if both). Pockets that do not fit unwind the search,
         //      and the draws simply continue from wherever it lands
-        //   5. dead-end stubs: count, then one index per stub (a placed stub
+        //   5. Round E / WP5, once the search has SUCCEEDED and outside it:
+        //      per boss segment k = 1..N, in order, Chance(eventChancePct)
+        //      (nothing at 0/100) and, on a hit, a host index, a candidate
+        //      index and the axis coin (if both). A segment with no free host
+        //      draws neither and is counted in BlockPlan::eventsDropped - it
+        //      never unwinds anything, which is what keeps the spine above
+        //      this line independent of the event pass
+        //   6. dead-end stubs: count, then one index per stub (a placed stub
         //      is never a host, since Round B)
-        //   6. visual alternates, one per multi-alt block, last (unchanged)
+        //   7. visual alternates, one per multi-alt block, last (unchanged)
         // Nothing else draws. Theme moves no draw.
+        //
+        // Item 5 is additive at the default: eventChancePct is 0, Chance
+        // draws nothing there, and no event pocket is seated - so every seed
+        // stored before WP5 lays out exactly the blocks it always did, and
+        // the harness's manifest and chain pins hold without re-capture.
         //
         // Three properties of PDRandom the items above lean on (PDRandom.h:41-68):
         //   - a single candidate costs NO draw. UniformInt(lo, hi) returns lo
@@ -1722,6 +1938,16 @@ namespace PDungeon
                 continue;       // no spine with seated pockets within the budget - next seed
             }
 
+            // Round E / WP5, draw-order item 5. Outside the search on
+            // purpose: the spine and its pockets are already final here, so a
+            // segment that cannot fit an event room loses only the event
+            // room. At the 0 % default this consumes no draw and seats
+            // nothing.
+            std::vector<Pocket> events;
+            int eventsDropped = 0;
+            PlaceEventPockets(rng, bossIdx, cfg.eventChancePct, field,
+                              events, eventsDropped);
+
             // Hand over to the ordered (y, x) map the rest of the pipeline has
             // always worked on: the stub pass, the depth BFS and the
             // materialisation all iterate it, which is what keeps the block
@@ -1731,6 +1957,7 @@ namespace PDungeon
             std::map<Cell, int> chainOf;        // cell -> chain index, spine only
             std::map<Cell, size_t> pocketOf;    // cell -> index into `pockets`
             std::map<Cell, int> loopOf;         // cell -> chain index the loop's run leads into
+            std::map<Cell, size_t> eventOf;     // cell -> index into `events` (Round E / WP5)
             for (int y = 0; y < field.size; ++y)
             {
                 for (int x = 0; x < field.size; ++x)
@@ -1762,6 +1989,16 @@ namespace PDungeon
                     chainLen + static_cast<int>(pockets.size()) + static_cast<int>(p);
                 loopOf[field.loops[p].first] = field.loops[p].second;
             }
+            // Event pockets take the room ids LAST, for the same reason: a
+            // segment drawing one must not renumber any room that would have
+            // existed without it.
+            for (size_t p = 0; p < events.size(); ++p)
+            {
+                roomOf[events[p].cell] = chainLen + static_cast<int>(pockets.size()) +
+                                         static_cast<int>(field.loops.size()) +
+                                         static_cast<int>(p);
+                eventOf[events[p].cell] = p;
+            }
 
             // Dead-end stubs, AFTER every routing draw: the whole layout up to
             // here consumes exactly the draws it consumed before, so the stub
@@ -1791,6 +2028,18 @@ namespace PDungeon
                         if (stubs.find(kv.first) != stubs.end())
                         {
                             continue;   // one block per stub, never a chain
+                        }
+                        // Round E / WP5: an event pocket keeps EXACTLY one
+                        // socket - the engine's event host stands in a sealed
+                        // dead end, and the validator states it as a rule -
+                        // so the stub pass may not open a second doorway in
+                        // one. Every other cell, chest stubs on ordinary
+                        // pockets and loop rooms included, is still fair
+                        // game. `events` is empty at the 0 % default, so this
+                        // test costs nothing and changes no pre-WP5 stream.
+                        if (eventOf.find(kv.first) != eventOf.end())
+                        {
+                            continue;
                         }
                         for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
                         {
@@ -1880,6 +2129,7 @@ namespace PDungeon
                     b.roomId = rit->second;
                     auto cit = chainOf.find(c);
                     auto lit = loopOf.find(c);
+                    auto eit = eventOf.find(c);
                     if (cit != chainOf.end())
                     {
                         b.chainIndex = cit->second;
@@ -1891,6 +2141,17 @@ namespace PDungeon
                     {
                         b.role = BlockRole::Room;
                         b.detourOf = lit->second;
+                    }
+                    else if (eit != eventOf.end())
+                    {
+                        // Round E / WP5. Same fields as a pocket - a plain
+                        // Room hanging off `branchOf` - plus the one flag
+                        // that says which kind of hanger it is. Nothing about
+                        // the geometry differs, so nothing else may.
+                        Pocket const& event = events[eit->second];
+                        b.role = BlockRole::Room;
+                        b.branchOf = event.host;
+                        b.isEvent = true;
                     }
                     else
                     {
@@ -1931,6 +2192,12 @@ namespace PDungeon
                 }
                 plan.blocks.push_back(b);
             }
+            // A statistic, not a field of the layout: it says how many event
+            // rooms this attempt WANTED and could not place, so the harness
+            // can tell "the coin never came up" from "the field was full".
+            // Not on the wire, not in the DB, and re-derived on every
+            // regeneration like the plan itself.
+            plan.eventsDropped = eventsDropped;
 
             std::string error;
             if (!ValidateBlockPlan(plan, &error))

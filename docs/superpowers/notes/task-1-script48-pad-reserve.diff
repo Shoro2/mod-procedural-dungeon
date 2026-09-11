@@ -1,0 +1,101 @@
+--- scripts/48_gen_t1_blockkit.py.pre_roundE_20260910	2026-09-10 15:44:23.349070200 +0200
++++ scripts/48_gen_t1_blockkit.py	2026-09-10 15:58:07.703907500 +0200
+@@ -100,7 +100,7 @@
+ # --------------------------------------------------------------------------- #
+ # Kit identity
+ # --------------------------------------------------------------------------- #
+-KIT_VERSION = 26
++KIT_VERSION = 27
+ THEME = 1                                    # the demo/default theme (49 reads it)
+ THEME_NAME = "floating_platforms_blocks"
+ SOCKET_STANDARD = "FLPD-SOCKET-2"
+@@ -1161,16 +1161,60 @@
+ # MCNK) is the only ceiling and the bake gate below measures it.
+ PLACE_K_D = 12                               # doodad slots per block position
+ PLACE_K_W = 24                               # wmo slots per block position
+-# Of those 24, how many a plaza pad may spend on its own ring of houses. Two per
+-# face is what a 33 yd pad side seats; the other 16 go to the block's four outer
+-# sides, four each. Reserving rather than enlarging the table is deliberate -
+-# PLACE_K_W is the fixed MODF row count the composer copies with a fixed-size
+-# memcpy, so it is a file-format constant, not a budget dial.
++# Of those 24, how many a plaza pad may spend on its own RING of houses. Two
++# per face is what a 33 yd pad side seats; the other 16 go to the block's four
++# outer sides, four each. Reserving rather than enlarging the table is
++# deliberate - PLACE_K_W is the fixed MODF row count the composer copies with a
++# fixed-size memcpy, so it is a file-format constant, not a budget dial.
++#
++# Round E / K1 (2026-09-10): this number describes the 33 yd BOSS pad, and
++# Round B/B2 deleted it - footprint_cells() now returns a pad for the theme-2
++# alt-1 ROOM alone, 2x2 cells = 16.7 yd, below PAD_MIN_SPAN_YD. That pad takes
++# add_pad_facades()'s small-pad branch, which spends exactly ONE row on a single
++# centred house, so reserving 8 starved the room's own walls: per_side dropped
++# from (24-1)//4 = 5 to (24-8)//4 = 4 and the alt-1 rooms shipped 19/21.2/24
++# wmoPlacements against 21/23.2/24 for every other family (105_frontage_audit:
++# all 81 bare street yards of the operator layout sat on 13005/13006/13010).
++# The reserve is therefore computed per pad by pad_facade_reserve() below; the
++# constant is kept at 8 for the ring pad, should one come back.
+ PAD_FACADE_SLOTS = 8
+ # The smallest pad worth ringing with houses, and the deepest model allowed on
+ # one: two houses standing back to back on opposite faces must leave the centre
+ # open, or the pad becomes a solid lump of masonry with the fountain inside it.
+ PAD_MIN_SPAN_YD = 25.0
++
++
++def pad_span_yd(fp):
++    """The pad's edge-to-edge span in yards, or 0.0 when there is no pad.
++
++    THE expression add_pad_facades() measures its own span with (v1 - v0 over
++    the pad's columns) - one function so the reserve decided at the call site
++    and the branch actually taken inside can never drift apart. Written in the
++    two-step v0/v1 form on purpose: (cs[-1] + 1 - cs[0]) * CELL_SIDE_YD is the
++    same value in algebra and a different float on the real 2x2 pad
++    (16.6666665625 against 16.666666562499998), and span feeds an inequality
++    and the offsets of the ring branch.
++    """
++    if not fp:
++        return 0.0
++    cs = sorted({c for _, c in fp})
++    v0, v1 = cs[0] * CELL_SIDE_YD, (cs[-1] + 1) * CELL_SIDE_YD
++    return v1 - v0
++
++
++def pad_facade_reserve(fp):
++    """WMO slots add_facades() must leave for the pad, by the pad's own size.
++
++    A ring pad (>= PAD_MIN_SPAN_YD) seats up to PAD_FACADE_SLOTS houses; the
++    small pad below that threshold gets exactly one centred building out of
++    add_pad_facades()'s small-pad branch, so it costs one slot, not eight. No
++    pad at all costs nothing.
++    """
++    if not fp:
++        return 0
++    return PAD_FACADE_SLOTS if pad_span_yd(fp) >= PAD_MIN_SPAN_YD else 1
++
++
+ MCRF_CAP = 32                                # ref slots per MCNK (d first, then w)
+ BLOCK_SLOTS_PER_TILE = BLOCKS_PER_TILE * BLOCKS_PER_TILE   # 64
+ MDDF_ENTRIES = 1 + BLOCK_SLOTS_PER_TILE * PLACE_K_D        # 385
+@@ -2441,7 +2485,7 @@
+                  (SOCK_N, 180.0, u1, mid_v),   # south
+                  (SOCK_E, 90.0, v0, mid_u),    # west
+                  (SOCK_W, 270.0, v1, mid_u))   # east
+-        span = (v1 - v0) if fp else 0.0
++        span = pad_span_yd(fp)               # == (v1 - v0), bit for bit
+         # A pad is only worth building on if two houses fit back to back
+         # WITHOUT meeting in the middle. The small 2x2 pad of an ordinary ring
+         # room is 16.7 yd across and the shallowest model in the kit is 14.0,
+@@ -2838,8 +2882,13 @@
+         # Ring rooms: the pad carries the fountain (a SERVER GameObject -
+         # MDDF doodads never collide), house rows line the free walls.
+         pad = footprint_cells(2, ridx, alt)
++        # The pad's share of the 24 WMO slots is what the pad's own SIZE costs
++        # (pad_facade_reserve): 8 for a ring pad, 1 for the 16.7 yd pad that is
++        # the only one left, which add_pad_facades covers with one centred
++        # house. Round E / K1 - the flat 8 spent seven slots on nothing and cut
++        # the room's walls from 5 houses per side to 4.
+         add_facades(ROOM_WALK[0], ROOM_WALK[1], ROOM_CLEAR,
+-                    reserve=(PAD_FACADE_SLOTS if pad else 0)
++                    reserve=pad_facade_reserve(pad)
+                             + (CORNER_FACADE_SLOTS if CORNER_BUDGET_MODE == "reserve" else 0))
+         # v36: the fountain is the PAD's centrepiece, not the room's. With
+         # the entrance and boss pads gone an ungated call would leave a

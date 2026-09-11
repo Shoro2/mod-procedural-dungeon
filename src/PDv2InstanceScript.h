@@ -28,6 +28,7 @@
 #include "generator/PDv2WalkGrid.h"
 
 #include <cstdint>
+#include <functional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -83,6 +84,30 @@ namespace PDungeon
         // run counter and no barrier - risk on the road, not progress.
         bool   countsForRun = true;
 
+        // Round E / D7. This creature was never in the LAYOUT: a WP5 event
+        // wave, or a WP6 respawn copy of a pack the player already cleared.
+        // Separate from `countsForRun`, which answers a different question - a
+        // patrol IS in the layout and moves no counter, an event mob is not in
+        // the layout at all - so the two are set independently.
+        //
+        // What it changes is the kill funnel, and only half of it: materials
+        // drop from an extra mob ALWAYS, because mats are a crafting input and
+        // farming one in place is the point of it, while currency needs
+        // V2.Loot.ExtraMobs.DropCurrency, because currency is progression and a
+        // mob that comes back for ever would make it a faucet.
+        bool   isExtra = false;
+
+        // Round E / WP6. Born from a kill by a player carrying the Forgotten
+        // Talents respawn node (PD_TALENT_TAG_RESPAWN). It always comes with
+        // `isExtra`, and it is a SECOND flag rather than a reading of that one
+        // because it answers the question isExtra cannot: an echo must never
+        // echo. Without it the first kill of a run would be the last one that
+        // ever ended - every copy would owe two more copies, for ever, and the
+        // guard in OnMobDied has nothing else to test (`splitDepth` cannot
+        // carry it: a split child pays NO loot at all, and D7 wants an echo to
+        // pay materials).
+        bool   isRespawnCopy = false;
+
         // B4: this creature walks a beat out of combat. Since Round D / D2 the
         // beat is ONE CORRIDOR - both of its ends are doorway lane cells of
         // that corridor run, in GLOBAL grid cells, and the patrol never enters
@@ -114,12 +139,47 @@ namespace PDungeon
         bool   dmgReduceActive = false;
     };
 
+    // Round E / L4. The chest half of the tag above, on its OWN DataMap
+    // key: a GameObject and a Creature never share an object, but they do
+    // share the DataMap's type-per-key contract, and one key holding two
+    // unrelated structs is a bad cast waiting for whoever copies an idiom
+    // across next.
+    char const* const PD_CHEST_DATA_KEY = "mod-procedural-dungeon-chest";
+
+    // What a PDv2 cache has already had done to it. The injection hook
+    // (PDv2ChestLoot.cpp) fires on EVERY loot-state change of every
+    // gameobject on the realm, so both halves of a cache's life need a flag
+    // of their own.
+    //
+    // Unlike PDv2MobData this one IS taken with GetDefault - a flag has to
+    // be created on first sight to be set at all - which is exactly why the
+    // whole map/entry/run gate runs BEFORE it: GetDefault on an ungated
+    // hook would allocate an entry on every gameobject on the server.
+    struct PDv2ChestData : public DataMap::Base
+    {
+        // "This chest has already been paid out": a chest that reaches
+        // GO_ACTIVATED twice must not roll a second set of gear into the
+        // same window.
+        bool injected = false;
+
+        // Round E / WP10. "This chest has already been despawned." A second
+        // flag rather than a reuse of `injected`, because the two answer
+        // different questions at different moments - `injected` is set when
+        // the window is FILLED (GO_ACTIVATED), `spent` when it is EMPTIED
+        // (GO_JUST_DEACTIVATED) - and a cache is routinely the first without
+        // ever being the second: a run can end with a chest nobody opened,
+        // and a window closed with items left in it stays ACTIVATED.
+        // PDv2ChestLoot.cpp's DespawnSpentCache is the only writer and
+        // carries the whole argument.
+        bool spent = false;
+    };
+
     // What a player is doing right now, in the form the UI wants to read it.
     //
-    // difficulty and lootMultX100 are FROZEN into this at spawn time and every
-    // gameplay hook reads them from here, never from the live account row: a
-    // settings change in the middle of a run must not retune the mobs already
-    // standing in the dungeon.
+    // difficulty, lootMultX100, roomFactorX100 and dlvl are FROZEN into this at
+    // spawn time and every gameplay hook reads them from here, never from the
+    // live account row: a settings change in the middle of a run must not
+    // retune the mobs already standing in the dungeon.
     struct PDv2RunState
     {
         uint32 startedMs = 0;
@@ -130,12 +190,51 @@ namespace PDungeon
         uint8  bossTotal = 0;
         uint8  roomsCleared = 0;
         uint8  roomsTotal = 0;
+        // Round E / R2. Rooms emptied by kills INCLUDING the boss halls, which
+        // the pair above deliberately leaves out (roomsTotal is the ordinary
+        // count the dial names, so its numerator has to be one too). Nothing
+        // on the wire reads this - it exists because the panel's cleared-room
+        // map does paint boss halls, so "the K set moved" is a different
+        // question from "the HUD's room pair moved" and needs its own answer.
+        uint8  roomsEmptied = 0;
         // The 1..100 dial, frozen at spawn. 0 rather than the dial's floor is
         // the deliberate "no run bound yet" value: the scaling hooks read it as
         // "multiply by nothing", and SpawnFromPlan overwrites it before the
         // first SummonCreature, so no creature can ever be built from it.
         uint8  difficulty = 0;
         uint16 lootMultX100 = 100;
+        // Round E / D8, x100 like every other multiplier in this module. The
+        // run's ORDINARY room count against V2.Loot.Currency.RoomsBaseline, as
+        // GameRoomFactorX100 works it out, frozen at spawn beside the loot
+        // multiplier and for the same reason: every currency roll of every
+        // kill is scaled by it, so a `.pdungeon v2 set` between two pulls must
+        // not move the price of the second one.
+        //
+        // 100 - "full price" - is the no-run-bound-yet value rather than 0,
+        // because a run whose spawn never happened should pay the ordinary
+        // rate and not silently pay nothing.
+        uint16 roomFactorX100 = 100;
+        // Round E / L3. The ACCOUNT's dungeon level at spawn, which is the top
+        // of the per-mob material band (GameMatsMaxCount). Frozen like the
+        // dial: a dlvl gained by finishing THIS run must not retune the mobs
+        // that are still standing in it.
+        uint8  dlvl = 0;
+        // Round E / R1 (spec D15). How many PLAYER deaths this run has cost so
+        // far - NOT frozen like the four fields above, because it is the only
+        // one of them the run itself produces rather than consumes.
+        //
+        // One number for the whole party rather than one per player: what
+        // FinishRun asks of it is a yes/no ("did anybody die?"), which decides
+        // between V2.Cap.CleanUnlock and V2.Cap.DeathUnlock. A per-player
+        // tally would make the unlock depend on WHOSE run it is, and a run has
+        // exactly one account behind it.
+        //
+        // uint8 and SATURATING at 255 (OnUnitDeath), never wrapping: the wrap
+        // is the whole risk here, because 256 deaths rolling back to 0 would
+        // turn the worst run in the module's history into a clean clear and
+        // pay it the larger unlock. The history column is TINYINT UNSIGNED to
+        // match, and 255 vs 300 is a distinction nothing downstream draws.
+        uint8  deaths = 0;
         bool   complete = false;
         bool   started = false;
     };
@@ -284,6 +383,32 @@ namespace PDungeon
         // with it - it opens on sight (the single-boss-segment case).
         bool NextClosedBarrier(uint32& planned, uint32& killed, uint32& pct) const;
 
+        // Round E / WP8. The gate line as ONE PLAYER should read it: the
+        // segment they are standing in, and whether its portcullis is already
+        // up. This is finding 5 of Runde 31 - "the boss-gate line does not
+        // update" - and it was never a plumbing bug. NextClosedBarrier answers
+        // "the lowest still-sealed gate of the run", so the moment a barrier
+        // opens the line jumps to the NEXT segment's 0/n and sits there while
+        // the party is still clearing the segment it is standing in. Nothing
+        // moved because nothing in that segment was being counted any more.
+        //
+        // So the question changes rather than the counting (recon risk 6: what
+        // COUNTS must not move, or the B3 softlock guard breaks). The room the
+        // player stands in names the segment, that segment's own frozen
+        // denominator and live numerator are the numbers, and `open` says which
+        // of the two sentences the HUD writes - "Gate open n/n" while a cleared
+        // segment is finished, "Gate n/m (p %)" while its wall still stands.
+        //
+        // Falls back to NextClosedBarrier whenever the player is not in a room
+        // this can answer for - a corridor, a boss hall (its pack stands behind
+        // the barrier and is deliberately out of the denominator), an event
+        // pocket, or segment 0 - so a player walking between rooms sees the
+        // run's next gate rather than a blank line. `open` is false on that path:
+        // a gate that NextClosedBarrier names is by definition still sealed.
+        // planned == 0 means "no gate" on the wire, exactly as before.
+        bool GateFieldsFor(Player const* player, uint32& planned, uint32& killed,
+                           uint32& pct, bool& open) const;
+
         // Round C / C7. The block coordinates of every room whose pack is
         // dead, in the PLAN's own frame - the UI link shifts them into the map
         // payload's frame with the same origin it shifts the M payload's
@@ -291,11 +416,18 @@ namespace PDungeon
         // tick, which is also what it looks like to a player standing in it.
         void ClearedRoomBlocks(std::vector<std::pair<int, int>>& out) const;
 
-        // The run's cleared-room counter, as the wire's change detector: the
+        // The run's emptied-room counter, as the wire's change detector: the
         // K message is a complete set, so "resend it when this moved" is all
         // the link needs to keep every client's map honest without a delta
         // protocol it could silently fall out of step with.
-        uint32 RoomsClearedCount() const { return _run.roomsCleared; }
+        //
+        // roomsEmptied and NOT roomsCleared (Round E / R2): the HUD counter
+        // stopped counting boss halls when the dial started meaning ordinary
+        // rooms, but ClearedRoomBlocks still hands the panel every emptied
+        // room, boss halls included. Keyed on the HUD counter, the hall a
+        // party just finished would stay grey until some ordinary room fell
+        // after it.
+        uint32 RoomsEmptiedCount() const { return _run.roomsEmptied; }
 
         // ...and the OTHER half of that change detector. The counter above
         // only counts rooms emptied by kills, so it cannot tell a rebuild
@@ -306,6 +438,61 @@ namespace PDungeon
         // (C7 Task 1 review, minor 2). Starts at 1, so a record written with
         // no script at all - {0, 0} - can never look like a real one.
         uint32 RunGeneration() const { return _runGeneration; }
+
+        // ------------------------------------------------------------------
+        // Round E / WP5: event rooms ("Hold the line")
+        //
+        // The three entry points the event host NPC (creature 910551,
+        // src/PDv2EventNPC.cpp) needs. They live here and not on the script
+        // because the event is a property of the RUN - its waves are drawn
+        // from this run's packs, its clock rides this class's 1 Hz tick and
+        // its reward is paid into this run's state - while the creature is
+        // only the thing a player clicks and the waves hit.
+        //
+        // WP5 Task 3 declares them with the minimal bodies below (in the
+        // .cpp) so the NPC links and behaves inertly: a click closes the
+        // menu and nothing happens, a death is ignored. WP5 Task 4 replaces
+        // those bodies with the state machine and keeps these signatures.
+        // ------------------------------------------------------------------
+
+        // Where one event stands. `Idle` is also the answer for a host this
+        // run has never heard of, which is what makes EventStateFor safe to
+        // call from a gossip hello on any creature at any time.
+        enum class EventState : uint8
+        {
+            Idle,
+            Running,
+            Won,
+            Lost
+        };
+
+        // A player accepted the host's offer. Returns whether an event was
+        // actually armed - false while the stub stands, and later false for
+        // a host that is already running, already finished, or has no room.
+        bool StartEvent(Creature* host, Player* starter);
+
+        // The host was killed. Called from EventHostAI::JustDied, i.e. from
+        // inside the death itself, so it must never teleport or despawn
+        // anything - it only records the loss for the tick to act on.
+        void OnEventHostDied(Creature* host);
+
+        // The state of the event staged around `host`, by GUID. Const and
+        // total: an unknown GUID answers Idle.
+        EventState EventStateFor(ObjectGuid host) const;
+
+        // The HUD's read of the event, taken from the FIRST event that is
+        // Running: how many whole seconds are left on its clock, and how much
+        // of the host's health bar is still there (0..100). False - with both
+        // outputs untouched - when nothing is running, which is what tells
+        // the UI link to leave the two fields off the wire (WP5 Task 5).
+        //
+        // A run can carry one event per boss segment, so several may exist;
+        // only one can sensibly be running, because they are dead-end rooms
+        // off different segments and the party stands in one of them. "The
+        // first Running one" is therefore a rule that never has to arbitrate,
+        // and is stated rather than computed so a second one cannot silently
+        // change what the HUD shows halfway through a fight.
+        bool EventHudFields(uint32& secLeft, uint32& npcPct) const;
 
     private:
         void SpawnFromPlan(BlockPlan const& plan);
@@ -456,6 +643,79 @@ namespace PDungeon
         // only what the arm log prints.
         void FireAmbush(Ambush& ambush, Player* player);
 
+        // Round E / WP5. One event pocket, standing or spent.
+        //
+        // Everything the fight needs is decided at BUILD time and stored
+        // here - the host, the twelve attackers, where each of them walks in
+        // and where the reward will stand - for the same two reasons the
+        // ambush stores its wave: the draw is seeded, so the same layout
+        // fights the same twelve creatures every time it is entered, and the
+        // tick that runs the fight then does nothing it could have done
+        // minutes earlier. What the tick owns is the CLOCK.
+        //
+        // `rim` is the room's own spawn anchors in world x/y, farthest from
+        // the block centre first, so wave 1 walks the longest way to the host
+        // and the party has the most time to meet it. It is never empty:
+        // SpawnEventRooms falls back to the block centre, which is walkable
+        // in every room variant the kit ships.
+        struct EventRoom
+        {
+            int bx = 0;                 // the pocket's block, for the log
+            int by = 0;
+            int segment = 0;            // SegmentOf - which stream it drew on
+            ObjectGuid host;            // NPC_EVENT_HOST, also in _spawnedGuids
+            EventState state = EventState::Idle;
+            // Wrap-safe deadlines, read the way TickFinale reads its own:
+            // signed differences against getMSTime(), never `>=`.
+            uint32 deadlineMs = 0;      // when a Running event is WON
+            uint32 nextSpawnMs = 0;     // when the next attacker walks in
+            std::vector<SpawnPick> picks;   // the whole wave, drawn at build
+            size_t nextPick = 0;        // how much of it has walked in
+            std::vector<ObjectGuid> wave;   // what it put on the map
+            std::vector<std::pair<float, float>> rim;   // world x,y, far first
+            // Round E / WP8: where the HOST was staged and which way he was
+            // turned, kept because the reward inherits both. The kit's chest
+            // anchor these three replaced is gone with the same change - the
+            // won event's chest now stands on the pilgrim's own square, so
+            // there is nothing left for a second anchor to decide (operator
+            // finding 8: "a small chest spawns where the NPC stood and the NPC
+            // despawns"). The facing is stored rather than re-derived in
+            // CloseEvent because SpawnEventRooms is the pass that has the
+            // PlacedBlock in hand, and computing it twice from two different
+            // places is how the host and his chest would come to disagree.
+            float hostX = 0.0f;         // his spot, grid-vetoed
+            float hostY = 0.0f;
+            float hostO = 0.0f;         // FacingTowardDoorway, into the chest too
+            float z = 0.0f;             // the pocket's floor plane
+            // The closing beat - despawn, notice, reward - has already run.
+            // It is a separate flag and not a fourth state because the state
+            // can be moved to Lost from OUTSIDE the tick (OnEventHostDied,
+            // which runs inside the death and may not despawn anything), and
+            // this is what still gets that event exactly one closing pass.
+            bool closed = false;
+        };
+
+        // Build time, after SpawnAmbushPlan: one host per `isEvent` block,
+        // its wave drawn on the event stream, its rim and its chest spot
+        // computed and vetoed against the walk grid. Summons the host and
+        // nothing else - the attackers arrive on the tick, after a player has
+        // actually asked for them.
+        void SpawnEventRooms(BlockPlan const& plan);
+
+        // 1 Hz, BEFORE the HUD push: the event's whole clock. Sends the next
+        // attacker in, wins on the deadline, loses on a dead host, and hands
+        // a finished event to CloseEvent exactly once.
+        void TickEvents();
+
+        // The closing beat of one event, won or lost by `event.state`. Never
+        // called from a death hook - it despawns creatures - and never twice,
+        // which `closed` is what guarantees.
+        void CloseEvent(EventRoom& event);
+
+        // The event staged around `host`, or nullptr. Linear over at most one
+        // entry per boss segment, i.e. at most a handful.
+        EventRoom* EventFor(ObjectGuid host);
+
         // The other half of OnUnitDeath, on the 1 Hz tick where a resurrect
         // is safe: everyone recorded there who is still on this map and still
         // dead comes back alive at full health and WITHOUT resurrection
@@ -472,6 +732,40 @@ namespace PDungeon
         // entrance, which is the normal case for the first half of a run.
         bool CheckpointSpot(float& x, float& y, float& z) const;
 
+        // Round E / WP8. The dense room index a world position stands in, or -1
+        // for anything that is not one of this run's rooms - a corridor, an
+        // event pocket, the entrance, or a point outside the field entirely.
+        //
+        // The test is the BLOCK, the same one TickAmbushes makes and for the
+        // same reason: a room IS its block, so WorldToCell then two integer
+        // divisions answer exactly, with no radius to tune and nothing to break
+        // when the kit's room sizes change. The scan over _roomBX/_roomBY is a
+        // handful of comparisons on a run of at most a few dozen rooms, run
+        // once per player per second - a map keyed on the block pair would buy
+        // nothing measurable and would be a second thing to keep in step with
+        // the vectors SpawnFromPlan fills.
+        int RoomIndexAt(float x, float y) const;
+
+        // Round E / WP8, operator finding 6: "the event NPC and the bosses
+        // should face the entrance". The angle from (fromX, fromY) to the
+        // centre of `block`'s DOORWAY - the two lane cells LaneCellsForSocket
+        // names on the edge a player walks in through, which is the one point
+        // in a room that "the entrance" can mean without a kit constant.
+        //
+        // Which doorway depends on the kind of block, and both readings come
+        // out of the planner rather than out of geometry guessed here: an event
+        // pocket is a dead end, so its single socket IS its door; a chain room
+        // is entered from the spine, so SpineRunInto names the socket the run
+        // from the previous chain room arrives through - the same walk the
+        // barrier of that segment is sealed on, so the boss looks at the wall
+        // the party will come through.
+        //
+        // Returns 0 - the module's old summon orientation, i.e. no change - for
+        // any block this cannot answer for: no socket, more than one on a
+        // pocket, a chain room with no single entry run, an unnamed socket bit.
+        float FacingTowardDoorway(BlockPlan const& plan, PlacedBlock const& block,
+                                  float fromX, float fromY) const;
+
         // Summons ONE dungeon mob: the floor plane, the disabled gravity, the
         // tag copied off `proto`, the run's affix auras and their spawn-time
         // health effects. Every creature this module puts on the map is born
@@ -481,14 +775,34 @@ namespace PDungeon
         // `baseHealthOverride` is written BEFORE the affix multipliers, which
         // is what makes a split child a small copy that a Big Boy bit then
         // grows again - the order that module's own split relies on.
+        //
+        // `orientation` goes into the summon AND into the home position (Round
+        // E / WP8): an evade snaps a creature back to its home orientation, so
+        // a facing written only into the summon would be lost the first time
+        // somebody pulls the boss and runs out of the room. Defaulted to the
+        // 0.0f every spawn used before, so only the callers that have something
+        // to say about a facing - the room bosses - pass anything.
         // Returns nullptr when the summon failed; the caller owns the counters.
         Creature* SpawnTaggedMob(uint32 entry, PDv2MobData const& proto,
                                  float x, float y, float z,
-                                 uint32 baseHealthOverride = 0);
+                                 uint32 baseHealthOverride = 0,
+                                 float orientation = 0.0f);
 
         // Lil' Bro (affix 7). Called from OnMobDied BEFORE the death moves any
         // counter, which is the only ordering that keeps them honest.
         void SplitOnDeath(Creature* parent, PDv2MobData const& parentTag, Unit* killer);
+
+        // Round E / WP6 / D7. The Forgotten Talents respawn node: an ordinary
+        // kill rises again as up to V2.Respawn.MaxCopies echoes. Called from
+        // OnMobDied AFTER the counters and the loot, which is the exact mirror
+        // of SplitOnDeath's ordering above and for the opposite reason - a
+        // split IS the mob the run is still owed, an echo is a reward for a
+        // kill that is already finished, so it must not be part of it.
+        //
+        // Moves NO counter (the call site says why at length). `killer` is
+        // whatever JustDied handed over: a pet, a guardian or nothing at all,
+        // so the owner walk-back and the null case both live inside.
+        void SpawnRespawnCopies(Creature* corpse, PDv2MobData const& tag, Unit* killer);
         void MarkRunDirty() { _runDirty = true; }
 
         // Round B / B3. A segment's kill counter moved: re-decide whether that
@@ -565,6 +879,66 @@ namespace PDungeon
         void VetoFinaleSpot(float& x, float& y, char const* what) const;
 
         void RollBonusLoot(Unit* killer);
+
+        // Round E / L2-L4, the kill funnel. Three sources with three different
+        // shapes, and the shape is the design (D6): currency and materials are
+        // PERSONAL - every player on the map rolls their own dice, so a group
+        // of five is five independent chances and nothing to argue over - while
+        // gear goes into the CORPSE, where the group's own loot rules already
+        // decide who gets it.
+        //
+        // None of them touches PDRandom. The determinism boundary
+        // (RollBonusLoot's comment in the .cpp states it in full) puts layout
+        // and spawn selection on the seeded stream and every loot roll on the
+        // core's urand, because a seed that also decided the drops would turn
+        // farming into a lookup table.
+        //
+        // `tag` is the dead creature's own facts. Neither roll reads it today -
+        // the isExtra gate is applied at the call site, where the whole funnel
+        // is visible in one place - but a per-mob rule (a rarer mob paying
+        // more) has nowhere else to come from, so it is carried rather than
+        // added back later at three call sites.
+        void RollCurrency(Creature* creature, PDv2MobData const& tag);
+        void RollMaterials(Creature* creature, PDv2MobData const& tag);
+
+        // The run boss's gear, added to the corpse loot the core has ALREADY
+        // filled: Unit::Kill generates it (Unit.cpp:14082-14092) and sets the
+        // lootable flag (:14226) well before it calls JustDied (:14238-14241),
+        // which is what reaches this. So the items land in the normal loot
+        // window, under the normal rules, and no second window is invented.
+        // `killer` only picks the class filter's looter; who may loot is the
+        // core's business, not ours.
+        void InjectBossGear(Creature* creature, Unit* killer);
+
+        // One stack into a bag, and a letter from Chromie when there is no room
+        // for it. Player::AddItem already prints the client's "You receive
+        // item" line, so a grant that lands says nothing extra; only the mail
+        // announces itself, because a drop that silently went to the mailbox
+        // reads as a drop that never happened.
+        void GrantItem(Player* player, uint32 item, uint32 count) const;
+
+        // Round E / WP10, operator 2026-09-11: "die beim Mob-Kill geaddeten
+        // Mats gehen noch immer in den Bag und nicht in den Endless Storage.
+        // das soll automatisch passieren". One stack of MATERIAL to a player -
+        // straight into custom_endless_storage where V2.Loot.MatsToStorage is
+        // on and the item is something the storage would show, and through
+        // GrantItem's bags-then-mail funnel in every other case.
+        //
+        // Materials and the bonus mat, never currency. The five Remnants are
+        // trade goods that stack, so they pass the storage predicate on their
+        // own - but the Forgotten Talents tree counts them in the BAGS, so a
+        // Remnant deposited is a Remnant the player cannot spend. RollCurrency
+        // therefore calls GrantItem directly, and this function refuses the
+        // five conf entries besides.
+        void GrantMaterial(Player* player, uint32 item, uint32 count) const;
+
+        // Every player on `map` that still has a session, which is who a
+        // personal roll is made for. Static and taking the map explicitly:
+        // it is a plain walk of GetPlayers() and the callers name the map they
+        // mean (the dead creature's), rather than reaching for `instance`.
+        static void ForEachRunPlayer(Map* map,
+                                     std::function<void(Player*)> const& fn);
+
         void DespawnAll();
         void EnsureWalkGrid(BlockPlan const& plan);
         void CatchFallers();
@@ -631,6 +1005,12 @@ namespace PDungeon
         // that this corridor is spent - and the rebuild, not the firing, is
         // what forgets it. Same shape and same reasoning as _barriers.
         std::vector<Ambush> _ambushes;
+        // Round E / WP5. One entry per event pocket the layout carries, in
+        // plan order. A won or lost event STAYS in here - that is the record
+        // that this pocket is spent, and the record the gossip reads to show
+        // the host's closing line - and the rebuild, not the ending, is what
+        // forgets it. Same shape and same reasoning as _barriers/_ambushes.
+        std::vector<EventRoom> _events;
         // Round C / C8. Inert until the last boss dies and inert again once
         // the portal is up, so the 1 Hz branch pays one bool for it on every
         // other tick of every other run. The rebuild resets it whole, the same

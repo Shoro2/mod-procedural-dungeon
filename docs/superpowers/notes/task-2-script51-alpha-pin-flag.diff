@@ -1,0 +1,301 @@
+--- scripts/51_texture_blockkit.py.pre_roundE_20260910	2026-09-02 16:46:00.478163200 +0200
++++ scripts/51_texture_blockkit.py	2026-09-10 16:21:14.519590300 +0200
+@@ -67,11 +67,15 @@
+     The composed map's own WDT (output\\pd_compose_blocks\\...\\FLPD.wdt) also
+     has MPHD flags 0x0, so 2048-byte 4-bit maps are right for it too.
+ 
+-    One known client quirk rides along: without MCNK flag 0x8000
+-    (do_not_fix_alpha_map) the client treats a 4-bit map as 63x63 and duplicates
+-    the last row and column. Blizzard's own tile does not set that flag either,
+-    and with a CONSTANT alpha the duplication is invisible. A future non-constant
+-    alpha has to account for it - see ALPHA_FIX_NOTE.
++    One client quirk used to ride along, and Round E ends it: without MCNK flag
++    0x8000 (do_not_fix_alpha_map) the client treats a 4-bit map as 63x63 and
++    duplicates the last row and column. Blizzard's own tile does not set that
++    flag - it can afford not to, its alpha is authored per tile with no seam to
++    keep. This kit's alpha is NOT constant (paint_block_alpha), and the
++    duplication made every MCNK edge asymmetric: one side rendered the authored
++    feather, the other a duplicated row of raw class value. This script now sets
++    the flag on every MCNK it writes (MCNK_FLAG_DO_NOT_FIX_ALPHA, retexture_mcnk)
++    so the 64x64 map renders as authored - see ALPHA_FIX_NOTE.
+ 
+ WHAT IT TOUCHES
+     output\\pd_block_kit\\FLStream\\chunks\\t1b\\t1b_*.adt  (in place)
+@@ -149,13 +153,15 @@
+ ALPHA_MAX = 0x0F                             # 4 bits per pixel
+ ALPHA_MID = 0x08
+ 
+-ALPHA_FIX_NOTE = ("MCNK flag 0x8000 (do_not_fix_alpha_map) is NOT set, matching "
+-                  "Blizzard's PVPZone02 data, so the client duplicates the last "
+-                  "alpha row and column. Invisible while the map is constant; a "
+-                  "per-variant alpha must either accept that or set the flag.")
++ALPHA_FIX_NOTE = ("MCNK flag 0x8000 (do_not_fix_alpha_map) IS set on every MCNK "
++                  "since Round E, so the client renders the authored 64x64 map "
++                  "instead of treating it as 63x63 and duplicating the last row "
++                  "and column. That duplication is what forced the old edge pin "
++                  "in paint_block_alpha, and the pin is gone with it.")
+ 
+ # MCNK header fields, payload-relative. pd_adt_lib names the ones it needs; the
+ # rest are spelled out here because this script rewrites them.
++OFS_FLAGS = 0x00                             # MCNK header flags dword
+ OFS_NLAYERS = 0x0C
+ OFS_MCVT = 0x14
+ OFS_MCNR = 0x18
+@@ -169,6 +175,14 @@
+ OFS_MCLQ = 0x60                              # ofsLiquid
+ OFS_SIZE_MCLQ = 0x64
+ 
++# Bit 15 of the MCNK header flags dword: "do not fix the alpha map". CLEAR means
++# the client reads the 64x64 4-bit map as 63x63 and duplicates the last row and
++# column over the 64th; SET means it renders the map exactly as authored. Only
++# this bit is ever touched - retexture_mcnk ORs it into whatever the donor
++# already carried (has_mcsh, impass, liquid bits, ...), so the flags dword is a
++# read-modify-write, never an assignment.
++MCNK_FLAG_DO_NOT_FIX_ALPHA = 0x8000
++
+ # The MCNK sub-chunks, in the FILE order measured on the kit and on Blizzard's
+ # textured tile. (name, offset field, tag as stored on disk, size field or None).
+ SUB_LAYOUT = (
+@@ -186,7 +200,10 @@
+ 
+ # Header words this script is allowed to change. Anything else differing between
+ # the input and the output MCNK header is a bug, and step [6] says so.
+-WRITABLE_HEADER_FIELDS = (OFS_NLAYERS, OFS_MCLY, OFS_MCRF, OFS_MCAL,
++# OFS_FLAGS joined the set in Round E: the ONLY bit this script may set there is
++# MCNK_FLAG_DO_NOT_FIX_ALPHA, which step [6] checks separately and per MCNK
++# (a whole-dword allowance would let any other flag bit through unnoticed).
++WRITABLE_HEADER_FIELDS = (OFS_FLAGS, OFS_NLAYERS, OFS_MCLY, OFS_MCRF, OFS_MCAL,
+                           OFS_SIZE_MCAL, OFS_MCSH, OFS_MCSE, OFS_MCLQ)
+ 
+ SUB_OFFSET_DELTA = 8                         # chunk-start relative, see docstring
+@@ -452,9 +469,10 @@
+ #   VOID cells   -> full rock (holed, never rendered - any value would do)
+ #
+ # Values are functions of BLOCK-GLOBAL pixel coordinates, so the two MCNKs a
+-# wall crosses paint identically at their shared border, and the client's
+-# 63x63 duplication (MCNK flag 0x8000 clear, see ALPHA_FIX_NOTE) duplicates a
+-# pixel INSIDE a constant zone, where it is invisible.
++# wall crosses paint identically at their shared border. Since Round E the
++# client also RENDERS that border as authored: every MCNK carries
++# MCNK_FLAG_DO_NOT_FIX_ALPHA, so there is no 63x63 duplication left to work
++# around (see ALPHA_FIX_NOTE) and no pixel of the 64x64 map is unreachable.
+ # --------------------------------------------------------------------------- #
+ CLASS_WALK_L, CLASS_WALL_L, CLASS_VOID_L = "W", "L", "V"
+ ALPHA_WALL = 15                              # full rock
+@@ -471,9 +489,18 @@
+ # 2..10 band to ALPHA_WALL at the class boundary, which the operator read as
+ # a hard line and "monotonous". FEATHER_TEXELS ramps the walkable side only
+ # (see paint_block_alpha) over this many texels. One texel is 8.3333/16 =
+-# 0.5208 yd, so 4 texels is a 2.08 yd ramp - narrow enough to still read as a
+-# floor, wide enough to remove the step.
+-FEATHER_TEXELS = 4                           # ~2.08 yd ramp
++# 0.5208 yd.
++#
++# Round E widened it 4 -> 6 (2.08 -> 3.13 yd). Task 14 had to keep the ramp
++# narrow because the outermost texel row/column of every MCNK was PINNED to the
++# unramped class value (the client duplicated it), so a wide ramp only made the
++# step at that pin taller. With MCNK_FLAG_DO_NOT_FIX_ALPHA set the pin is gone
++# and the ramp is continuous across an MCNK edge, which is what lets it be wide
++# enough to read as a gradient rather than as a second, softer line. Still
++# narrow relative to the 16-texel (8.33 yd) walk cell: a lane one cell wide
++# keeps 16 - 2*(FEATHER_TEXELS - 1) = 6 unramped texels (3.13 yd) of floor down
++# its middle, so the ramp never meets itself.
++FEATHER_TEXELS = 6                           # ~3.13 yd ramp
+ 
+ 
+ def _is_wall_class(cls):
+@@ -585,19 +612,30 @@
+                 # inner wall face (48:1410-1430) - that is the failure a ramp
+                 # eating into the wall would reproduce.
+                 #
+-                # The outermost pixel row/column of this MCNK is pinned to its
+-                # unramped class value. MCNK flag 0x8000 (do_not_fix_alpha_map)
+-                # is not set on these chunks, so the client DUPLICATES the last
+-                # alpha row and column; a gradient there would show up as a
+-                # 0.52 yd discontinuity every 33.33 yd, and it is also what
+-                # lets two independently authored blocks agree at a join.
+-                # Setting the flag is the cleaner long-term fix - it changes a
+-                # header field the composer and the client DLL have never seen
+-                # set, so it is recorded for later rather than done this round.
+-                on_mcnk_edge = (pr == PIXELS_PER_MCNK - 1 or
+-                                pc == PIXELS_PER_MCNK - 1)
++                # EVERY walkable pixel is ramped, the outermost row/column of
++                # the MCNK included. Until Round E those two lines were PINNED
++                # to the unramped class value, because with MCNK flag 0x8000
++                # (do_not_fix_alpha_map) clear the client reads the map as
++                # 63x63 and duplicates the last row/column - a gradient written
++                # there was rendered twice. The pin was also asymmetric (only
++                # pr/pc == 63, never 0), so across an MCNK edge one side showed
++                # raw mottle and the other the full feather: measured on the
++                # composed operator tile, a rock step of 10 of 15 at every block
++                # boundary (103_floor_seam_audit: mean 2.31, side means 6.0 vs
++                # 7.8, against max 4 / mean 0.10 on an artefact-free edge).
++                # retexture_mcnk now sets the flag on every MCNK, so the client
++                # renders all 64 rows and columns as authored, both sides of an
++                # edge carry the same function of the same block-global
++                # coordinates, and the pin has nothing left to protect.
++                #
++                # 52_punch_kit_holes.py deferred the SAME 0x8000 fix when it
++                # disabled the MCSH wall-band shadow (see its paint_wall_shadow
++                # docstring): re-adding that shadow was to wait for the flag and
++                # for these pinned-ring coordinates to be gone. They are gone
++                # now; the shadow itself stays off, since nothing in this
++                # pipeline can verify a dithered 1-bit gradient offline.
+                 d_wall = _wall_distance(classes, gu, gv)
+-                if d_wall < FEATHER_TEXELS and not on_mcnk_edge:
++                if d_wall < FEATHER_TEXELS:
+                     t = d_wall / float(FEATHER_TEXELS)     # 0 at the wall, 1 far
+                     value = int(round(ALPHA_WALL + (base - ALPHA_WALL) * t))
+                 else:
+@@ -631,8 +669,16 @@
+ 
+ def retexture_mcnk(payload, mcly, mcal, n_layers, index=0):
+     """Rewrite one MCNK payload with the authored MCLY/MCAL. Everything the
+-    geometry lives in - the 128-byte header apart from the offsets that move,
+-    MCVT, MCNR (pad included), MCRF, MCSH, MCLQ, MCSE - is copied verbatim."""
++    geometry lives in - the 128-byte header apart from the offsets that move
++    and the one flag bit below, MCVT, MCNR (pad included), MCRF, MCSH, MCLQ,
++    MCSE - is copied verbatim.
++
++    The flags dword (OFS_FLAGS) gets MCNK_FLAG_DO_NOT_FIX_ALPHA OR-ed in. It is
++    a read-modify-write of the donor's own dword, size-neutrally in place - the
++    idiom 52_punch_kit_holes.py already uses for `holes` (0x3C) and the 0x40
++    low-quality texture map, on the same 128-byte header. The composer moves
++    whole MCNK payloads with a fixed-size memcpy, so a header bit rides along
++    untouched; the DLL suite's byte-identity check is what proves that."""
+     subs = split_mcnk(payload, index)
+     check_size_conventions(payload, subs, index)
+ 
+@@ -649,6 +695,8 @@
+             body += payload[base:base + span]
+ 
+     header = bytearray(payload[:pdl.MCNK_HDR])
++    flags = struct.unpack_from("<I", header, OFS_FLAGS)[0]
++    struct.pack_into("<I", header, OFS_FLAGS, flags | MCNK_FLAG_DO_NOT_FIX_ALPHA)
+     struct.pack_into("<I", header, OFS_NLAYERS, n_layers)
+     for name, field, _tag, _size_field in SUB_LAYOUT:
+         struct.pack_into("<I", header, field, bases[name] + SUB_OFFSET_DELTA)
+@@ -898,6 +946,7 @@
+     geometry_bad = 0
+     verbatim_bad = 0
+     scope_bad = []
++    flags_bad = []
+     for i in range(256):
+         # Two independent comparisons on purpose: the first goes through
+         # pd_adt_lib's own offset resolution (so it also proves the result is
+@@ -926,12 +975,27 @@
+         stray = sorted(touched - set(WRITABLE_HEADER_FIELDS))
+         if stray:
+             scope_bad.append((i, stray))
++        # The flags dword is in WRITABLE_HEADER_FIELDS, so the scope check above
++        # can no longer see a stray bit there. This states the narrower claim
++        # the allowance was granted for, per MCNK and against the INPUT dword:
++        # the result must equal the input with bit 0x8000 OR-ed in - which says
++        # both halves at once, since (b | 0x8000) always carries the bit, so an
++        # MCNK that failed to get it, or that gained or lost any other bit,
++        # fails this one comparison. Written from the constant rather than by
++        # asking retexture_mcnk what it produced.
++        b_flags = struct.unpack_from("<I", before_payloads[i], OFS_FLAGS)[0]
++        a_flags = struct.unpack_from("<I", after_payloads[i], OFS_FLAGS)[0]
++        if a_flags != (b_flags | MCNK_FLAG_DO_NOT_FIX_ALPHA):
++            flags_bad.append((i, b_flags, a_flags))
+     if geometry_bad:
+         fail("MCVT/MCNR changed in %d MCNKs" % geometry_bad)
+     if verbatim_bad:
+         fail("a copied sub-chunk span changed in %d MCNKs" % verbatim_bad)
+     if scope_bad:
+         fail("MCNK header written outside the allowed fields: %r" % scope_bad[:3])
++    if flags_bad:
++        fail("MCNK flags is not input | 0x%04X in %d MCNK(s), e.g. %r"
++             % (MCNK_FLAG_DO_NOT_FIX_ALPHA, len(flags_bad), flags_bad[:3]))
+ 
+     # --- the layers actually landed ---------------------------------------#
+     # Both expectations below are stated from the REQUEST, never by calling the
+@@ -976,9 +1040,18 @@
+                 # ALPHA_STRIPE_CORE]. The new rule:
+                 #
+                 #   A walkable pixel farther than FEATHER_TEXELS texels
+-                #   (Chebyshev) from the nearest wall/void pixel, OR sitting
+-                #   on the outermost pixel row/column of the MCNK (pinned -
+-                #   see paint_block_alpha), obeys the OLD rule unchanged.
++                #   (Chebyshev) from the nearest wall/void pixel obeys the OLD
++                #   rule unchanged.
++                #
++                #   Round E deleted this rule's second half - "OR sitting on
++                #   the outermost pixel row/column of the MCNK". That clause
++                #   mirrored paint_block_alpha's edge pin, and while it stood
++                #   the gate could not tell a correctly ramped edge texel from
++                #   a pinned one: at d=1 it accepted both 13 (the ramp) and 2
++                #   (the raw mottle). With the clause gone the envelope is the
++                #   same everywhere and a pinned edge FAILS the gate - which is
++                #   the point: the MCNK 0x8000 flag makes those texels render,
++                #   so they have to be checked like any other.
+                 #
+                 #   A walkable pixel inside the feather band must lie between
+                 #   the two class values - i.e. between the walkable class's
+@@ -1016,10 +1089,8 @@
+                             if rock != ALPHA_WALL:
+                                 painted_bad += 1
+                         else:
+-                            on_mcnk_edge = (pr == PIXELS_PER_MCNK - 1 or
+-                                            pc == PIXELS_PER_MCNK - 1)
+                             d_wall = _gate_wall_distance(classes, gu, gv)
+-                            if on_mcnk_edge or d_wall >= FEATHER_TEXELS:
++                            if d_wall >= FEATHER_TEXELS:
+                                 lo, hi = ALPHA_MOTTLE[0], ALPHA_STRIPE_CORE
+                             else:
+                                 t = d_wall / float(FEATHER_TEXELS)
+@@ -1258,6 +1329,12 @@
+         len(mcal), len(alpha_values), ALPHA_BYTES)
+     say("    compression      : off - flag 0x%04X is never set, so MCAL stays a "
+         "fixed size", MCLY_FLAG_COMPRESSED)
++    say("    MCNK flags       : |= 0x%04X (do_not_fix_alpha_map) on every MCNK "
++        "of every file; the dword at header 0x%02X is otherwise untouched",
++        MCNK_FLAG_DO_NOT_FIX_ALPHA, OFS_FLAGS)
++    say("    wall feather     : %d texel(s) (%.2f yd) on every walkable texel, "
++        "the outermost MCNK row/column included (no edge pin)",
++        FEATHER_TEXELS, FEATHER_TEXELS * (533.33333 / 16.0 / 64.0))
+     say("    effectId         : layer 1 (floor) -> per role, corridor %d / "
+         "room %d / room_boss %d (Task 17); every other layer stays %d - and "
+         "needs 52's 0x40 write to be visible at all, see build_mcly",
+@@ -1371,6 +1448,9 @@
+                not any("copied sub-chunk span" in p for p in problems))
+     checks.add("MCNK header writes stay in scope",
+                not any("outside the allowed fields" in p for p in problems))
++    checks.add("every MCNK sets do_not_fix_alpha_map (0x%04X), nothing else"
++               % MCNK_FLAG_DO_NOT_FIX_ALPHA,
++               not any("MCNK flags is not input" in p for p in problems))
+     checks.add("MTEX round trips to the requested paths",
+                not any("MTEX" in p for p in problems))
+     checks.add("every MCNK carries the requested layers",
+@@ -1488,6 +1568,15 @@
+         },
+         "alphaEncoding": "uncompressed 4-bit, %d bytes per blended layer" % ALPHA_BYTES,
+         "alphaValues": list(alpha_values),
++        "mcnkFlags": {
++            "set": MCNK_FLAG_DO_NOT_FIX_ALPHA,
++            "name": "do_not_fix_alpha_map",
++            "scope": "OR-ed into the flags dword (MCNK header 0x00) of all 256 "
++                     "MCNKs of every kit file; no other bit is touched",
++            "why": "the client renders the authored 64x64 alpha instead of "
++                   "reading it as 63x63 and duplicating the last row/column, "
++                   "which is what the old edge-row pin worked around",
++        },
+         "alphaPainting": {
+             "scope": "the four block MCNKs of every variant with "
+                      "surfaceClasses; all other MCNKs stay constant",
+@@ -1495,9 +1584,13 @@
+             "stripeCore": ALPHA_STRIPE_CORE,
+             "stripeRim": ALPHA_STRIPE_RIM,
+             "mottle": list(ALPHA_MOTTLE),
++            "featherTexels": FEATHER_TEXELS,
+             "rule": "WALL/VOID cells full rock; corridor tracks and room "
+                     "socket passages carry a worn centre stripe; room floor "
+-                    "is a deterministic coordinate mottle (no RNG)",
++                    "is a deterministic coordinate mottle (no RNG); every "
++                    "walkable texel within FEATHER_TEXELS of a wall/void texel "
++                    "ramps to full rock, the outermost MCNK row/column "
++                    "included (no edge pin since Round E)",
+         },
+         "mcalBytes": ALPHA_BYTES * len(alpha_values),
+         "mcnkPayloadBytes": payload_size,

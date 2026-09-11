@@ -52,6 +52,92 @@ walls, gates, braziers, chests) on an unused, client-known base map.
 > centre pad. Eight conf keys tune the three hazards; every code default equals the shipped
 > `.conf.dist` value, so none has to be set.
 >
+> **Round E (2026-09-10) gives the dungeon its loot.** Every kill pays every player on the map
+> personally: a **Faded Remnant** (white) always, a **Gleaming Remnant** (green) at 5 %, a
+> **Radiant Remnant** (blue) at 1 % — the five Round-E currencies 920105–920109 that the
+> Forgotten Talents tree is bought with — scaled by a **room factor** (a ten-room run pays the
+> listed chance, a one-room run a tenth of it, +1 % per room above ten, so one-room farming
+> does not pay), plus 1..5 random **materials** from every expansion, the count growing with
+> the dungeon level. **Gear** comes from six pools generated out of the world DB by workspace
+> script 106 (`pdungeon_loot_pool`): the Shifting Cache in dead ends and loop rooms holds a
+> WotLK heroic-dungeon or non-ICC normal-raid epic (ICC normal from dungeon level 10), every
+> boss corpse a ToGC / Ruby-Sanctum heroic item, Chromie's Cache an ICC 10/25 item (ICC heroic
+> from dungeon level 10) plus the **Sovereign** (purple, difficulty ≥ 50, 50 %) and **Eternal**
+> (orange, ≥ 75, 10 %) Remnants and the old Azealia-Underground rares (five mounts at
+> 1/10 000, the Expert Emblem, the Exobeast plate, the Mystery Boxes). Finished **tier-set
+> pieces** are in the pools; tier tokens, VoA and PvP gear are not. Gear is filtered to what
+> the looter's class and race can wear, item counts scale with the loot multiplier, and every
+> number is a `ProceduralDungeon.V2.Loot.*` key whose code default equals the shipped
+> `.conf.dist`. All loot rolls use the core's `urand` — the layout is seeded, the loot never is.
+>
+> Round E also **caps the difficulty dial per account**: everyone starts at 1, a completed run
+> unlocks up to its difficulty **+5** without a death and **+3** with one (`V2.Cap.CleanUnlock` /
+> `.DeathUnlock`), account-wide and never lowered by play; the panel's slider follows the cap.
+> The **rooms slider now counts ordinary rooms** — the entrance and the boss rooms come on top —
+> so "14" on the panel is "0/14 rooms" on the HUD (bosses have their own counter; stored layouts
+> reroll once, layout version 4). **`ProceduralDungeon.V2.Debug`** gates every per-creature and
+> per-tick line, so a quiet log is the default. And the gen panel **draws the planned layout**
+> after Generate, the same map the HUD shows once you are inside.
+>
+> Kit **`t1b-v39`** (Round E / WP4) closes the two visual leftovers: the tower room's side walls
+> are lined with houses again (the facade reserve was still sized for a pad ring Round B removed),
+> and the ground texture no longer breaks at chunk edges — every MCNK carries `0x8000`
+> (`do_not_fix_alpha_map`), so the alpha feather is authored edge to edge instead of pinned.
+>
+> **Event rooms (Round E / WP5).** Each boss segment has a `V2.Event.ChancePct` (25 %) chance of
+> an extra dead-end room with its own corridor — purple on the map — where the **Weary Pilgrim**
+> waits. Talk to him and **hold the line** for `V2.Event.DurationSec` (60 s): every
+> `V2.Event.SpawnEverySec` (5 s) one creature of the run's packs (10 % casters) storms in from
+> the room's rim and goes for him; the HUD counts down and shows his health. If he lives, a
+> Shifting Cache appears and everyone on the map earns `V2.Event.ParagonXp` (1 000) × the loot
+> multiplier in Paragon XP; if he falls, the wave vanishes and there is no reward. The wave
+> drops materials but no Remnants (`V2.Loot.Currency.ExtraMobsDropCurrency`), and it never
+> counts toward the run, the gates or the room total. The layout decides where an event room
+> sits (layout version 5), so a stored dungeon rerolls once.
+>
+> **Respawn echoes (Round E / WP6).** The Forgotten Talents node *Restless Echoes* (a legendary node
+> behind the deepest combat milestone, two ranks) makes every ordinary kill in the depths rise again
+> as one or two **echoes** of the same creature — full copies that attack the killer at once. Echoes
+> are rewards, not progress: they count toward no room, gate or run total, drop materials but no
+> Remnants (`V2.Loot.Currency.ExtraMobsDropCurrency`), pay Paragon XP like any kill, and never echo
+> themselves; bosses, event waves and Lil' Bro children never echo either. `V2.Respawn.Enable`
+> switches the feature, `V2.Respawn.MaxCopies` (2) caps the count below whatever the node says. The
+> module reads the talent by its aura tag (`EffectMiscValue` 76001), never by spell id, so the FT
+> content can renumber freely.
+>
+> **After Runde 31 (Round E / WP8).** Dungeon creatures drop **no item loot of their own**
+> any more (`V2.Loot.NativeItems`, default off; gold stays): the packs are stock Shadowfang,
+> Scholomance and Twilight creatures whose tables are not FL content — everything worth
+> having comes from the pools (mats and Remnants into the bags, gear on bosses and in
+> caches). The **mats pool is exactly what the Endless Storage stores** (trade goods and
+> raw gems, stackable; no cut gems). The HUD's gate line describes the segment you stand in
+> and says `Gate open` once its barrier is up; the event row is a bar (time left, NPC
+> health). A won event leaves a small **Pilgrim's Cache** where the pilgrim stood and he
+> departs; he and every boss face the doorway they are entered through. If a chest shows
+> the cursor but does nothing on click, the client's object cache is stale — the server's
+> `ClientCacheVersion` bump refreshes it on the next login.
+>
+> **Stat profile (Round E / WP9).** The talent *Discerning Eye* (end of the treasure branch)
+> adds a **stat profile** slider to the gen panel — Off, Strength, Agility or Caster — and
+> from then on every cache, the final cache and every boss corpse roll only gear that fits
+> it on top of the class fit: an item's primary stat decides (a Strength/Intellect hybrid
+> fits both), trinkets and relics without stats always drop, and a ring with only ratings
+> is judged by what those ratings are for. If a pool runs dry for your class and profile
+> the profile is dropped first, never the class. The choice is per account; the unlock
+> is per character (the talent).
+>
+> **Night fixes (Round E / WP10–WP11).** Every cache disappears once it is looted empty
+> (it used to refill from its template on the next click). The portal after the last boss
+> lands on the `game_tele` row named in `V2.Finale.TeleName` (`flcapital`). Materials from
+> kills and bonus rolls go **straight into the Endless Storage** (`V2.Loot.MatsToStorage`),
+> with a `[Depths] Stored …` line in chat; Remnants stay in the bags because the talent tree
+> spends them from there — and the storage's own deposit button will happily take them, so
+> withdraw before buying.
+>
+> **Remnants are currency (Round E / WP12).** The five Remnants sit in the Currency tab of
+> the character sheet, not in the bags: no bag space, and the storage button cannot take
+> them any more. Old stacks in your bags move over by themselves the next time you log in.
+>
 > The v1 pipeline below still describes the GameObject-assembled prototype.
 
 ## How it works

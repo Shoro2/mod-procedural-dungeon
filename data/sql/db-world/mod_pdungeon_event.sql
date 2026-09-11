@@ -1,0 +1,135 @@
+-- ----------------------------------------------------------------------------
+-- mod-procedural-dungeon: the event room's host NPC (world database)
+-- Round E / WP5 - "Hold the line"
+--
+-- An event pocket (the optional dead-end room the planner seats off a boss
+-- segment, PDBlockPlan::PlacePockets) is staged around ONE creature: the
+-- Weary Pilgrim, creature_template 910551. A player talks to him, he starts a
+-- countdown, waves of the run's own packs walk in, and the party wins by
+-- keeping him alive until the clock runs out. He is therefore the exact
+-- opposite of Chromie: she must never be touched by anything, he must be
+-- attackable by every mob in the dungeon and by nothing else.
+--
+-- Reserved id block: creature_template 910550-910599, the PDv2 sub-block
+-- registered in share-public docs/06-custom-ids.md. 910550 is Chromie
+-- (mod_pdungeon_chromie.sql); 910551 is the second entry authored in it.
+--
+-- WHY A NEW FILE and not a row in mod_pdungeon_templates.sql: the updater
+-- gates every db-world file on its own content hash, so editing that file at
+-- all re-applies it - and its opening
+--   DELETE FROM `gameobject_template` WHERE `entry` BETWEEN 910000 AND 910099
+-- would then wipe the whole 910040-910099 sub-block on any database where
+-- mod_pdungeon_templates_fix.sql (the only file that restores it) is
+-- unchanged and therefore does NOT re-run. That landmine is documented at
+-- length in mod_pdungeon_templates_fix.sql's header, and again in
+-- mod_pdungeon_chromie.sql's; this file exists so the event rooms never arm
+-- it either.
+--
+-- FILENAME ORDER: the updater applies db-world files sorted by name, so
+--   mod_pdungeon_chromie.sql < mod_pdungeon_event.sql < mod_pdungeon_templates.sql
+-- and this file runs BEFORE that file's range DELETEs. That is safe because
+-- none of them reaches these rows: `creature_template` and
+-- `creature_template_model` are deleted there only for 910500-910549, and
+-- 910551 is outside that range. Keep it that way - a creature id inside
+-- 910500-910549 added to this file would be silently deleted again on every
+-- fresh database.
+--
+-- ...and the same trap with a different range is why the event chest's
+-- `gameobject_template` row (910034 'Pilgrim''s Cache', Round E / WP8) is NOT
+-- in this file: mod_pdungeon_templates.sql deletes gameobject_template
+-- 910000-910099 and re-inserts only 910000-910033, so any GO row this file
+-- inserted in that block would be wiped on every fresh database. The template
+-- row therefore lives in mod_pdungeon_templates_fix.sql, the one module file
+-- that sorts after that DELETE (its header carries the full argument); only
+-- the chest's LOOT rows are here, at the bottom, because every
+-- `gameobject_loot_template` DELETE in this module is entry-exact and nothing
+-- can reach Entry 910034. That is the same split 910068 'Chromie''s Cache'
+-- already uses with mod_pdungeon_chromie.sql.
+--
+-- `creature_template` carries no modelid column in this core; the model lives
+-- in `creature_template_model` (the same shape mod_pdungeon_chromie.sql and
+-- mod_pdungeon_templates.sql use).
+-- ----------------------------------------------------------------------------
+
+-- Column list copied verbatim from mod_pdungeon_chromie.sql's insert (which
+-- copied it from mod_pdungeon_templates.sql's 910510); every column the design
+-- does not name keeps that row's value.
+--
+--   faction 1727    - MEASURED in FactionTemplate.dbc, not guessed: faction
+--                     979, flags 0, group 0, friendGroup 7, enemyGroup 8.
+--                     friendGroup 7 covers both player groups, so the host is
+--                     friendly to Alliance and Horde alike and is never a
+--                     valid target for the party. enemyGroup 8 is the monster
+--                     group, and every pack faction this dungeon spawns
+--                     (14, 16, 21, 24, 90, 233, 974, 1885, 2068) sits in
+--                     group 8 with enemy mask 1 - so hostility is MUTUAL and
+--                     an arriving wave attacks him without being told to.
+--                     Rejected alternatives: 1725 (same idea but flags 1) and
+--                     1665 (group 1, carries the PvP flag).
+--   npcflag 1       - UNIT_NPC_FLAG_GOSSIP. He is started by talking to him,
+--                     so unlike Chromie (npcflag 0, spoken through by the
+--                     instance script) he must actually be clickable.
+--   unit_flags 0    - NOT Chromie's 514. That value is
+--                     UNIT_FLAG_NON_ATTACKABLE (0x2) | UNIT_FLAG_IMMUNE_TO_NPC
+--                     (0x200) - note that mod_pdungeon_chromie.sql's own
+--                     comment mislabels 0x200 as IMMUNE_TO_PC; the core's
+--                     UnitDefines.h:265-266 is the authority. Either bit alone
+--                     would break this NPC: NON_ATTACKABLE makes him an
+--                     invalid target for everything, and IMMUNE_TO_NPC is
+--                     precisely the flag that stops creatures from engaging
+--                     him. The whole event is "the mobs try to kill him", so
+--                     he carries no unit flags at all.
+--   rank 1          - elite, so the health modifier below lands on the elite
+--                     base curve and the fight is a real timer.
+--   RegenHealth 0   - the fight is a countdown, not a regen race: damage he
+--                     takes must stay taken between waves.
+--   MovementType 0  - idle. He is staged on one spot by the instance script
+--                     and nothing ever moves him (his AI is a PassiveAI).
+--   AIName ''       - deliberately empty. src/PDv2EventNPC.cpp supplies the AI
+--                     through CreatureScript::GetAI; an AIName here would let
+--                     the core's AI factory win instead.
+--   ScriptName      - 'npc_pdungeon_event', registered by
+--                     AddPDv2EventNPCScripts() in
+--                     src/mod_procedural_dungeon_loader.cpp. A ScriptName no
+--                     C++ script registers is a startup LOG_ERROR
+--                     ("assigned in the database, but has no code",
+--                     ScriptMgr::CheckIfScriptsInDatabaseExist).
+DELETE FROM `creature_template` WHERE `entry` = 910551;
+INSERT INTO `creature_template` (`entry`, `name`, `subname`, `minlevel`, `maxlevel`, `exp`, `faction`, `npcflag`, `speed_walk`, `speed_run`, `detection_range`, `rank`, `DamageModifier`, `BaseAttackTime`, `RangeAttackTime`, `unit_class`, `unit_flags`, `type`, `type_flags`, `mingold`, `maxgold`, `HealthModifier`, `ManaModifier`, `ArmorModifier`, `RegenHealth`, `MovementType`, `AIName`, `ScriptName`) VALUES
+(910551, 'Weary Pilgrim', 'Lost in the Depths', 80, 80, 2, 1727, 1, 1, 1.14286, 20, 1, 1, 2000, 2000, 1, 0, 7, 0, 0, 0, 50, 1, 1, 0, 0, '', 'npc_pdungeon_event');
+
+-- Display 3718 is the stock human male commoner shared by Dalaran's citizens;
+-- source entry 32453 'Dalaran Citizen' (Idx 0), measured read-only against
+-- acore_world. Plain clothes and no weapon, which is what a pilgrim who needs
+-- rescuing should look like next to the dungeon's armoured packs.
+DELETE FROM `creature_template_model` WHERE `CreatureID` = 910551;
+INSERT INTO `creature_template_model` (`CreatureID`, `Idx`, `CreatureDisplayID`, `DisplayScale`, `Probability`, `VerifiedBuild`) VALUES
+(910551, 0, 3718, 1, 1, NULL);
+
+-- ----------------------------------------------------------------------------
+-- Round E / WP8 (2026-09-10): the loot of 910034 'Pilgrim''s Cache', the small
+-- chest a WON event leaves on the host's square when he despawns (operator
+-- finding 8). Its `gameobject_template` row is in
+-- mod_pdungeon_templates_fix.sql - see this file's header for why the two
+-- halves live apart.
+--
+-- The three rows are a VERBATIM copy of 910030's (the loop-room / pocket
+-- cache), read out of the live `gameobject_loot_template` on 2026-09-10, and
+-- that is the design and not a shortcut: a won defence is a POCKET reward, so
+-- it pays what a pocket pays. The gear on top of these three is injected in
+-- C++ - src/PDv2ChestLoot.cpp sends 910034 through InjectShiftingCache, the
+-- same path 910030 takes - and what makes the defence worth more than a walk
+-- into a stub is the Paragon XP CloseEvent pays the whole party, not a fatter
+-- table here.
+--
+-- Nothing in this module can reach Entry 910034 with a range DELETE: every
+-- `gameobject_loot_template` DELETE it ships names one Entry (910030 in
+-- mod_pdungeon_templates.sql and mod_pdungeon_phase2.sql, 910068 in
+-- mod_pdungeon_chromie.sql). The entry-exact DELETE below is what makes this
+-- file idempotent on a re-apply, nothing more.
+-- ----------------------------------------------------------------------------
+DELETE FROM `gameobject_loot_template` WHERE `Entry` = 910034;
+INSERT INTO `gameobject_loot_template` (`Entry`, `Item`, `Reference`, `Chance`, `QuestRequired`, `LootMode`, `GroupId`, `MinCount`, `MaxCount`, `Comment`) VALUES
+(910034, 33470, 0, 100, 0, 1, 0, 3, 5, 'PD event chest - Frostweave Cloth'),
+(910034, 33447, 0, 60, 0, 1, 0, 2, 3, 'PD event chest - Runic Healing Potion'),
+(910034, 43102, 0, 20, 0, 1, 0, 1, 1, 'PD event chest - Frozen Orb');

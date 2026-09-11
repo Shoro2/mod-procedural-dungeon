@@ -65,6 +65,22 @@
 -- survives on both kinds of database, and it is the row to edit from now
 -- on. Do NOT "tidy" this by moving 910030 back to its declaring files.
 --
+-- *** SECOND EXCEPTION: 910034 'Pilgrim''s Cache' (Round E / WP8) ***
+-- Same reasoning, arrived at from the other end. WP8's plan put this row in
+-- mod_pdungeon_event.sql, beside the event host it belongs to and behind an
+-- entry-exact DELETE - which is safe for a `creature_template` id outside
+-- 910500-910549 (that file's whole existing content) and NOT safe for a
+-- `gameobject_template` id inside 910000-910099: mod_pdungeon_event.sql sorts
+-- BEFORE mod_pdungeon_templates.sql, whose wide DELETE would wipe 910034 on
+-- every fresh database and leave nothing behind to restore it, because that
+-- file re-inserts only 910000-910033. That is precisely the landmine the rule
+-- above states ("Any new prop entry in 910000-910099 belongs in this file"),
+-- and it would have been invisible: the live database re-applies the edited
+-- event file and works, a fresh one comes up with a won event that summons
+-- nothing. So the TEMPLATE row lives here and its loot rows stay in
+-- mod_pdungeon_event.sql - the same split 910068 already has with
+-- mod_pdungeon_chromie.sql, and for the same reason.
+--
 -- The DELETE below names every entry individually rather than a BETWEEN
 -- range: this file's rows are not contiguous (910048-910049, 910069,
 -- 910077-910099 are unused gaps in the reserved block), and an explicit list
@@ -150,6 +166,7 @@
 
 DELETE FROM `gameobject_template` WHERE `entry` IN (
     910030,
+    910034,
     910040, 910041, 910042, 910043, 910044, 910045, 910046, 910047,
     910050, 910051, 910052, 910053, 910054, 910055, 910056, 910057,
     910058, 910059,
@@ -171,6 +188,36 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 -- chests in this world DB use, FL's own 800000-800003 included, and what
 -- all 15 stock rows sharing displayId 259 (TreasureChest01) use.
 (910030, 3, 259, 'Shifting Cache', 1, 57, 910030, ''),
+-- 910034 'Pilgrim''s Cache' (Round E / WP8, 2026-09-10): the small chest a WON
+-- event room leaves on the pilgrim's own square when he despawns. Same chest
+-- contract as 910030 - type 3, lock 57, Data1 = its own loot id, Data2/Data3
+-- from the UPDATEs at the end of this file - and deliberately a SEPARATE entry
+-- rather than a second spawn of 910030, because PDv2ChestLoot keys its
+-- injection on the entry and the operator asked for a visibly smaller reward.
+-- groupLootRules (Data15) is left at the column default 0, like every other
+-- chest this module ships.
+--
+-- Its `gameobject_loot_template` rows live in mod_pdungeon_event.sql, beside
+-- the host they belong to - exactly the split 910068 already uses with
+-- mod_pdungeon_chromie.sql, and safe for the same reason: the loot table's
+-- DELETEs in this module are all entry-exact, so only the TEMPLATE half has a
+-- wide range to survive and only the template half has to live here.
+--
+-- displayId 10, checked the three ways this file requires of every id:
+--   1. GameObjectDisplayInfo.dbc 10 = World\Generic\ActiveDoodads\Chest01\
+--      Chest01.mdx (measured 2026-09-10 in C:\wowstuff\dcore\Data\dbc).
+--   2. GameObjectModels.dtree carries Chest01.m2 with a real bounding box,
+--      (-0.39, -0.58, 0.01) to (0.40, 0.58, 0.62) - so it has collision to
+--      stand on rather than existing only in the DBC.
+--   3. Stock precedent: 63 `gameobject_template` rows use displayId 10 at
+--      type 3 (72 at any type) - Blizzard's own small wooden chest, e.g. 32
+--      'Sunken Chest' and 2039 'Hidden Strongbox'.
+-- It is about half the footprint of 259 TreasureChest01 (-0.59/-0.78/0.00 to
+-- 0.59/0.77/1.31), which is the whole point: the dungeon's caches stay the big
+-- ones and the pilgrim's parting gift reads as the small one. No model facing
+-- offset is applied to it anywhere - the quarter turn the finale cache carries
+-- was measured for 259 and says nothing about this model.
+(910034, 3, 10, 'Pilgrim''s Cache', 1, 57, 910034, ''),
 -- kit props
 (910040, 5, 92040, 'PD Fountain', 1, 0, 0, ''),
 (910041, 5, 5073, 'PD Rock Column', 1.7, 0, 0, ''),
@@ -240,12 +287,19 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 -- already use (777000 'To Azealia', 222000/223000 'Return To Azealia').
 -- Those three carry their teleport in Data2 = an `event_scripts` id; this row
 -- deliberately does NOT copy that mechanism. go_pdungeon_azealia_portal
--- (src/PDExitObjects.cpp) teleports in C++ to `game_tele` 20040
--- `flraidazealia` - (727, 13611.1, 13655.7, 9.87548, o 4.7776), the canonical
--- "back to Azealia" spot the nine dungeon exits share - which needs no
--- world-DB script row at all. Nobody is teleported automatically: the click
--- is the player's, so the cache can be looted first (operator decision
--- 2026-09-08).
+-- (src/PDExitObjects.cpp) teleports in C++, which needs no world-DB script row
+-- at all. Nobody is teleported automatically: the click is the player's, so
+-- the cache can be looted first (operator decision 2026-09-08).
+--
+-- Round E / WP10: WHERE it teleports is no longer written in the code either.
+-- The hook resolves a `game_tele` row by NAME at click time, from the conf key
+-- ProceduralDungeon.V2.Finale.TeleName - `flcapital` (id 20042, map 727,
+-- 13356.2 / 12009.1 / -23.39, o 4.50) since the operator asked for the capital
+-- on 2026-09-11. C8's `flraidazealia` (id 20040) survives as the compiled-in
+-- fallback for a name that resolves to nothing. The row's NAME still says
+-- Azealia: it is what the client has cached, so renaming it would cost a
+-- ClientCacheVersion bump, and it is a separate decision from where the portal
+-- goes.
 --
 -- 910068 'Chromie''s Cache': type 3 CHEST, display 259 (TreasureChest01) like
 -- the pocket cache above but at size 2, so the run's reward reads as the
@@ -260,6 +314,8 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 
 -- Chest data beyond the INSERT's column list: Data3 = consumable (one loot per spawn),
 -- Data2 = restock 0. Without Data3 the cache refilled every tick (Round C research 1.3).
--- Same two values for the finale cache 910068: it pays out once per run.
+-- Same two values for the finale cache 910068: it pays out once per run. And the same
+-- again for the event cache 910034 (Round E / WP8) - a won event pays its chest once.
 UPDATE `gameobject_template` SET `Data2` = 0, `Data3` = 1 WHERE `entry` = 910030;
+UPDATE `gameobject_template` SET `Data2` = 0, `Data3` = 1 WHERE `entry` = 910034;
 UPDATE `gameobject_template` SET `Data2` = 0, `Data3` = 1 WHERE `entry` = 910068;

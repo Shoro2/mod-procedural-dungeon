@@ -24,7 +24,13 @@ void AddPDCommandScripts();
 void AddPDv2CommandScripts();
 void AddPDv2MapScripts();
 void AddPDv2CreatureScripts();
+// Round E / WP5. Registers ScriptName 'npc_pdungeon_event' for the event
+// room's host (creature 910551). A ScriptName a creature_template row names
+// but no script registers is a startup LOG_ERROR, so this call and
+// data/sql/db-world/mod_pdungeon_event.sql belong together.
+void AddPDv2EventNPCScripts();
 void AddPDv2ScalingScripts();
+void AddPDv2LootScripts();
 void AddPDClientLinkScripts();
 void AddPDv2UILinkScripts();
 
@@ -41,7 +47,9 @@ void Addmod_procedural_dungeonScripts()
     AddPDv2CommandScripts();
     AddPDv2MapScripts();
     AddPDv2CreatureScripts();
+    AddPDv2EventNPCScripts();
     AddPDv2ScalingScripts();
+    AddPDv2LootScripts();
     AddPDClientLinkScripts();
     AddPDv2UILinkScripts();
 }

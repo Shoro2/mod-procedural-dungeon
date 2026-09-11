@@ -262,7 +262,10 @@ ProceduralDungeon.V2.FloorZ = 50.0
 
 #
 #    ProceduralDungeon.V2.Rooms / .BossRooms
-#        Description: Rooms in a generated layout, before and as boss rooms.
+#        Description: ORDINARY rooms in a generated layout, and boss rooms.
+#                     The entrance and the boss halls come ON TOP of .Rooms:
+#                     5 / 1 builds five ordinary rooms, one boss hall and one
+#                     entrance, and the HUD's room pair counts the five.
 #                     These are now the FALLBACK only: an account that has a
 #                     pdungeon_account row gets 01 §8's rooms (its own cfg_rooms
 #                     clamped into 3 + dlvl, hard cap 15) and boss rooms
@@ -497,6 +500,376 @@ ProceduralDungeon.V2.BossRoomAdds = 2
 ProceduralDungeon.V2.Loot.BonusRollPct = 15
 
 #
+#    ProceduralDungeon.V2.Loot.Currency.Tier1.Item
+#    ProceduralDungeon.V2.Loot.Currency.Tier2.Item
+#    ProceduralDungeon.V2.Loot.Currency.Tier3.Item
+#    ProceduralDungeon.V2.Loot.Currency.Tier4.Item
+#    ProceduralDungeon.V2.Loot.Currency.Tier5.Item
+#        Description: Round E (2026-09-10): the five dungeon currencies, from
+#                     the white Faded Remnant to the orange Eternal Remnant.
+#                     They are what a run pays out in, and what Forgotten
+#                     Talents are bought with.
+#
+#                     These five keys are the ONLY place the module names an
+#                     item id - no PD item id is written anywhere in the code -
+#                     so regenerating mod_pdungeon_currency.sql at different
+#                     entries needs a conf edit and no rebuild. Point
+#                     mod-forgotten-talents' own ForgottenTalents.Currency.*
+#                     keys at the same five ids, or it will take payment in
+#                     something nobody drops.
+#
+#                     0 is refused (it is not an item and every grant would
+#                     fail silently). Retire a tier with its ChancePct below.
+#
+#                     WP12 (2026-09-11): THESE FIVE ARE CURRENCY TOKENS. They
+#                     live in the character sheet's Currency tab, not in the
+#                     bags: mod_pdungeon_currency.sql gives them class 10 and
+#                     BagFamily 8192, so the core stores every grant in the 32
+#                     hidden currency slots. Three consequences an operator
+#                     should know -
+#                       * they cost no bag space, and T1 drops from every mob;
+#                       * neither mod-loot-filter nor the Endless Storage can
+#                         take them any more. Both deposit predicates only
+#                         accept classes 9 / 0+5 / 7 / 3, which is why the
+#                         Remnants USED to slip into the storage and become
+#                         unspendable; V2.Loot.MatsToStorage's by-entry guard
+#                         below is now belt AND braces;
+#                       * the Forgotten Talents tree is unaffected - it pays
+#                         with HasItemCount / DestroyItemCount and the core
+#                         counts the currency slots alongside the bags.
+#                     Remnants a character earned BEFORE this change stay in
+#                     the bags until that character's next login, where the
+#                     module moves them across once and says so in the log.
+#                     Point a tier at an item whose template is NOT a currency
+#                     token and that tier simply behaves the old way.
+#        Default:     920105 / 920106 / 920107 / 920108 / 920109 - the rows
+#                     mod_pdungeon_currency.sql creates
+#
+
+ProceduralDungeon.V2.Loot.Currency.Tier1.Item = 920105
+ProceduralDungeon.V2.Loot.Currency.Tier2.Item = 920106
+ProceduralDungeon.V2.Loot.Currency.Tier3.Item = 920107
+ProceduralDungeon.V2.Loot.Currency.Tier4.Item = 920108
+ProceduralDungeon.V2.Loot.Currency.Tier5.Item = 920109
+
+#
+#    ProceduralDungeon.V2.Loot.Currency.Tier1.ChancePct
+#    ProceduralDungeon.V2.Loot.Currency.Tier2.ChancePct
+#    ProceduralDungeon.V2.Loot.Currency.Tier3.ChancePct
+#    ProceduralDungeon.V2.Loot.Currency.Tier4.ChancePct
+#    ProceduralDungeon.V2.Loot.Currency.Tier5.ChancePct
+#        Description: Round E (2026-09-10): the chance of one unit of that
+#                     tier, in percent, BEFORE the room factor scales it (see
+#                     RoomsBaseline below).
+#
+#                     Tiers 1 to 3 are rolled on every dungeon mob, for every
+#                     player on the map - so nobody loses a drop to somebody
+#                     else's tag, and the steep 100 / 5 / 1 curve is what makes
+#                     the blue one worth the walk. Tiers 4 and 5 come out of
+#                     Chromie's Cache alone, rolled once per looter when the
+#                     cache is opened, and are gated by the two MinDiff keys.
+#
+#                     0 retires that one tier without touching the other four;
+#                     100 is every mob (tiers 1 to 3) or every looter (4, 5).
+#                     Nothing here says how MUCH drops - a hit is one unit, and
+#                     the way to pay more per kill is the room factor or a
+#                     longer dungeon.
+#        Default:     100 / 5 / 1 / 50 / 10
+#
+
+ProceduralDungeon.V2.Loot.Currency.Tier1.ChancePct = 100
+ProceduralDungeon.V2.Loot.Currency.Tier2.ChancePct = 5
+ProceduralDungeon.V2.Loot.Currency.Tier3.ChancePct = 1
+ProceduralDungeon.V2.Loot.Currency.Tier4.ChancePct = 50
+ProceduralDungeon.V2.Loot.Currency.Tier5.ChancePct = 10
+
+#
+#    ProceduralDungeon.V2.Loot.Currency.Tier4.MinDiff
+#    ProceduralDungeon.V2.Loot.Currency.Tier5.MinDiff
+#        Description: Round E (2026-09-10): the run difficulty the two cache
+#                     tiers need before they can drop at all, on the same
+#                     1..100 dial `.pdungeon v2 set difficulty` moves. The
+#                     run's difficulty is frozen when it is generated, so
+#                     raising the dial mid-run does not unlock anything.
+#
+#                     Tiers 1 to 3 have no such key on purpose: they sit at the
+#                     bottom of the dial and every run clears them. These two
+#                     gates are the whole reason to set a hard run up - without
+#                     them the purple and the orange would rain on difficulty 1
+#                     and the dial would only cost the player health bars.
+#
+#                     Clamped into 1..100 like the patrol size gates, and NOT
+#                     against each other: Tier5 at or below Tier4 is a legal
+#                     thing to ask for.
+#        Default:     50 / 75
+#
+
+ProceduralDungeon.V2.Loot.Currency.Tier4.MinDiff = 50
+ProceduralDungeon.V2.Loot.Currency.Tier5.MinDiff = 75
+
+#
+#    ProceduralDungeon.V2.Loot.Currency.RoomsBaseline
+#    ProceduralDungeon.V2.Loot.Currency.RoomsBonusPctPerRoom
+#        Description: Round E (2026-09-10): the room factor, which scales every
+#                     currency chance by the LENGTH of the run. A dungeon of
+#                     RoomsBaseline ordinary rooms pays full price; a shorter
+#                     one pays its plain share (5 of 10 rooms = 50 %); every
+#                     room past the baseline adds RoomsBonusPctPerRoom percent
+#                     on top (15 rooms = 105 %).
+#
+#                     Without it the shortest dungeon would be the most
+#                     profitable one per minute - one room, one boss, reset -
+#                     and nobody would ever build a long one again. The bonus
+#                     above the baseline is deliberately thin: length should be
+#                     worth choosing, not the only thing worth choosing.
+#
+#                     Counted in ORDINARY rooms, the same number the gen panel
+#                     shows, and frozen with the run at spawn. The baseline is
+#                     a room count and 0 is refused - at 0 every run would
+#                     count as full and length would stop paying anything.
+#        Default:     10 / 1
+#
+
+ProceduralDungeon.V2.Loot.Currency.RoomsBaseline = 10
+ProceduralDungeon.V2.Loot.Currency.RoomsBonusPctPerRoom = 1
+
+#
+#    ProceduralDungeon.V2.Loot.Currency.ExtraMobsDropCurrency
+#        Description: Round E (2026-09-10): whether the mobs that were never in
+#                     the layout - event-room waves and the respawn copies -
+#                     pay currency as well.
+#
+#                     Off, because those two are spawned in place and on demand:
+#                     with currency on them the dungeon stops being a run and
+#                     becomes a spot to stand in. Materials they DO always drop
+#                     whatever this key says - mats are a crafting input and are
+#                     supposed to be farmable, currency is progression.
+#        Default:     0 - layout mobs only
+#                     1 - event and respawn mobs pay too
+#
+
+ProceduralDungeon.V2.Loot.Currency.ExtraMobsDropCurrency = 0
+
+#
+#    ProceduralDungeon.V2.Loot.NativeItems
+#        Description: Round E / WP8 (2026-09-10): whether a dungeon mob keeps
+#                     the ITEM half of its own creature_template loot table.
+#
+#                     Off, and what the packs are made of is the reason: PDv2
+#                     fills its rooms with STOCK creature entries - Shadowfang
+#                     Keep, Scholomance, Ahn'kahet, Twilight - so every corpse
+#                     hands out those dungeons' loot, from their greens to
+#                     their quest-chain drops. None of that is FL content and
+#                     none of it is what a kill in here is meant to be worth:
+#                     the currency and the materials go straight into the bags
+#                     of everybody on the map, and a room boss carries the gear
+#                     this module injects (V2.Loot.Boss.Items). Turn this on to
+#                     get the stock tables back on top of all of that.
+#
+#                     The GOLD is kept whatever this key says. It is not
+#                     content - it is what any level-80 mob is worth - and
+#                     dropping it as well would make every pull in the dungeon
+#                     a net repair-bill loss. A corpse left with neither gold
+#                     nor items stops shimmering instead of opening an empty
+#                     loot window.
+#
+#                     Read live like every other V2 key, so `.reload config`
+#                     decides what the NEXT corpse carries.
+#        Default:     0 - this module's own funnel only
+#                     1 - the creature's stock item table on top of it
+#
+
+ProceduralDungeon.V2.Loot.NativeItems = 0
+
+#
+#    ProceduralDungeon.V2.Loot.Mats.ChancePct
+#    ProceduralDungeon.V2.Loot.Mats.MaxPerMobAtCap
+#        Description: Round E (2026-09-10): crafting materials from every
+#                     dungeon mob, drawn from the weighted FL mat pool across
+#                     all three expansions - the same funnel and the same
+#                     per-player recipients as the currencies.
+#
+#                     ChancePct is the whole gate: 0 stops materials entirely.
+#                     MaxPerMobAtCap is the TOP of the band, not the count -
+#                     the drop is a roll of 1 to that maximum, and the maximum
+#                     itself grows with the ACCOUNT's dungeon level, from 1 at
+#                     dlvl 0 to this value at V2.DlvlCap (so at the shipped 5
+#                     and a cap of 30: dlvl 0 -> 1, 8 -> 2, 15 -> 3, 23 -> 4,
+#                     30 -> 5). That is what puts account progression in the
+#                     bag and not only on the character sheet.
+#
+#                     0 and 1 both mean one material per mob - the band floors
+#                     at 1 - so turn materials off with ChancePct, not here.
+#        Default:     100 / 5
+#
+
+ProceduralDungeon.V2.Loot.Mats.ChancePct = 100
+ProceduralDungeon.V2.Loot.Mats.MaxPerMobAtCap = 5
+
+#
+#    ProceduralDungeon.V2.Loot.MatsToStorage
+#        Description: Round E / WP10 (2026-09-11): put the materials a kill
+#                     pays straight into the Endless Storage instead of the
+#                     player's bags.
+#
+#                     The operator's ask, and the reason is arithmetic: a run
+#                     pays materials on every tagged kill, to every player on
+#                     the map, in stacks of up to Mats.MaxPerMobAtCap - the
+#                     bags are full by the third room, and the Endless Storage
+#                     is where those materials were always going to end up
+#                     anyway. The bonus rare from Loot.BonusRollPct takes the
+#                     same route.
+#
+#                     Only what the storage would actually SHOW is deposited -
+#                     recipes, food and drink that stacks, trade goods and gems
+#                     that stack, which is the storage's own rule read off its
+#                     Lua. Anything else still goes to the bags, and to the
+#                     mailbox from Chromie when those are full.
+#
+#                     The five Remnant currencies are NEVER deposited, whatever
+#                     this says: they are trade goods and would qualify, but
+#                     the Forgotten Talents tree counts them in the bags, so a
+#                     deposited Remnant is one the player cannot spend.
+#
+#                     Needs mod-endless-storage: the deposit is one INSERT into
+#                     its characters table `custom_endless_storage`. PDv2 does
+#                     not require that module, so the worldserver checks for
+#                     the table when it reads this config and turns the feature
+#                     off for the session with one WARN when it is not there -
+#                     `.reload config` probes again after an install.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.Loot.MatsToStorage = 1
+
+#
+#    ProceduralDungeon.V2.Loot.Chest.Items
+#    ProceduralDungeon.V2.Loot.Boss.Items
+#    ProceduralDungeon.V2.Loot.Final.Items
+#        Description: Round E (2026-09-10): how many pieces of GEAR each of the
+#                     three sources pays - a Shifting Cache in a dead end or a
+#                     loop room, the run boss, and Chromie's Cache at the end.
+#
+#                     Each count is multiplied by the run's lootMult (x1.00 at
+#                     difficulty 1 up to x3.00 at 100, times the caster factor)
+#                     and the fraction left over is rolled: one item at x2.50
+#                     is two items plus a coin flip, and pays 2.50 on average.
+#                     Without that the difficulty dial would do nothing at all
+#                     for gear.
+#
+#                     Three keys rather than one because the three sources are
+#                     three different promises - a chest is a find, a boss is a
+#                     fight, the final cache is the run's payout - and an
+#                     operator who wants only one of them to be worth chasing
+#                     must be able to say so. 0 silences that one source; the
+#                     ceiling of 10 is already three times what difficulty 100
+#                     multiplies it to.
+#        Default:     1 / 1 / 1
+#
+
+ProceduralDungeon.V2.Loot.Chest.Items = 1
+ProceduralDungeon.V2.Loot.Boss.Items = 1
+ProceduralDungeon.V2.Loot.Final.Items = 1
+
+#
+#    ProceduralDungeon.V2.Loot.IccDlvl
+#        Description: Round E (2026-09-10): the account dungeon level from which
+#                     chests and the final cache stop drawing from the heroic-5
+#                     and normal-raid pools and start drawing from the ICC ones
+#                     - so the reward tier follows how far the account has come.
+#
+#                     The run's DIFFICULTY dial deliberately does not move this.
+#                     Difficulty already pays in quantity (see the three .Items
+#                     keys above); letting it also buy item level would let a
+#                     brand-new account set the dial to 100 once and skip the
+#                     progression the dungeon is built around. The run boss is
+#                     not affected either way - it draws from the heroic raid
+#                     pool at every dlvl.
+#
+#                     Clamped into 0..V2.DlvlCap: a value above the cap is a
+#                     level no account can reach, which would be a switch that
+#                     never happens. 0 puts every account on the ICC pools.
+#        Default:     10
+#
+
+ProceduralDungeon.V2.Loot.IccDlvl = 10
+
+#
+#    ProceduralDungeon.V2.Loot.ClassFilter
+#        Description: Round E (2026-09-10): roll gear the LOOTER can actually
+#                     wear - armour type (the class's highest), weapon
+#                     subclass, shields for warrior/paladin/shaman, relics, and
+#                     the item's own AllowableClass/AllowableRace. The looter
+#                     is whoever opened the chest, or the killer at a boss.
+#
+#                     On, because an unfiltered draw from a pool of a thousand
+#                     items is mostly disenchant fodder and the reward at the
+#                     end of a run should feel like a reward.
+#
+#                     Round E / WP9 added the STAT line on top of that, and it
+#                     is the PLAYER's choice rather than a second server
+#                     switch: a character who owns the Forgotten Talents node
+#                     "Discerning Eye" gets a stat-profile row in the /pd panel
+#                     (Off / Strength / Agility / Caster), the choice is stored
+#                     per account, and every gear roll of the run then also
+#                     asks whether the item's stats suit it - so a spell-power
+#                     ring stops dropping for a rogue who asked it to. Off for
+#                     everybody else, so a realm that never grants the node
+#                     behaves exactly as it did. There is deliberately no key
+#                     for it here: a talent an account bought is not something
+#                     a .conf should be able to overrule.
+#
+#                     Whenever the filter would leave nothing to roll, it is
+#                     given up in the order the player himself would give it up
+#                     - the stat profile first, the class only if that still
+#                     leaves nothing, the raw pool last. So a class the pool
+#                     has no gear for gets something rather than nothing. 0 is
+#                     for an operator who wants the raw pool; it turns the stat
+#                     profile off with it, because the same roll applies both.
+#        Default:     1 - filtered to the looter
+#                     0 - raw pool
+#
+
+ProceduralDungeon.V2.Loot.ClassFilter = 1
+
+#
+#    ProceduralDungeon.V2.Cap.DeathUnlock
+#    ProceduralDungeon.V2.Cap.CleanUnlock
+#        Description: Round E (2026-09-10): how far one finished run pushes the
+#                     account's DIFFICULTY CAP - the ceiling the 1..100 dial may
+#                     be set to, which since this round is earned instead of
+#                     given. Every account starts capped at 1, the operator's
+#                     own included, and a completed run raises the cap to
+#                     the run's own difficulty plus one of these two steps:
+#                     CleanUnlock when nobody died during the run, DeathUnlock
+#                     when somebody did.
+#
+#                     At the defaults a first clear at difficulty 1 unlocks 6, a
+#                     clear of that at 6 unlocks 11, and a run that cost a death
+#                     still moves the ceiling - just by less. That gap is the
+#                     whole reason there are two keys and not one: dying has to
+#                     cost something without ever becoming a dead end.
+#
+#                     Measured against the run's difficulty and NEVER against
+#                     the cap, so grinding easy runs at a high ceiling cannot
+#                     inch it upwards - the only way to unlock 50 is to clear
+#                     something near 50. The cap only ever rises; the run's own
+#                     frozen difficulty is untouched by it, and lowering these
+#                     keys later takes nothing away from an account that has
+#                     already earned its ceiling.
+#
+#                     Read live, at the moment a run is finished, so
+#                     `.reload config` retunes the next completion. 0 means that
+#                     outcome unlocks nothing at all; the GM test path is
+#                     `.pdungeon v2 cap <n>`, which is the only thing in the
+#                     module that may also lower a cap.
+#        Default:     3 / 5
+#
+
+ProceduralDungeon.V2.Cap.DeathUnlock = 3
+ProceduralDungeon.V2.Cap.CleanUnlock = 5
+
+#
 #    ProceduralDungeon.V2.CastRangeYd
 #        Description: How far a range-role creature will hold and cast from.
 #                     A range mob is only given a filler whose spell actually
@@ -702,6 +1075,70 @@ ProceduralDungeon.V2.Patrol.FollowDistYd = 3.0
 ProceduralDungeon.V2.Patrol.Debug = 0
 
 #
+#    ProceduralDungeon.V2.Debug
+#        Description: Round E (2026-09-10): the module's per-creature,
+#                     per-tick and per-client-verb diagnostics, in the
+#                     worldserver log under `module.pdungeon`. 0 = silent,
+#                     1 = talkative. OFF everywhere but a run somebody is
+#                     actively watching - every line behind this key is one a
+#                     single five-room dungeon prints dozens of times.
+#
+#                     The lines print at INFO once the key is on, so turning
+#                     it on is the WHOLE operation: no Logger.module level to
+#                     find, nothing to put back afterwards. Read LIVE on the
+#                     line that would log, so `.reload config` both arms and
+#                     disarms it without a restart and without re-rolling
+#                     anybody's dungeon.
+#
+#                     What it prints, all prefixed `PDv2`:
+#
+#                       * one line per CREATURE the instance spawns, naming
+#                         its entry, name, faction, whether it is selectable
+#                         and its display id. That is the line that settled
+#                         the 2026-08-10 invisible-attacker hunt, and there
+#                         are a hundred-odd of them per run.
+#                       * one line per Lil' Bro SPLIT - so one per kill of a
+#                         splitting mob, and one more per kill of every child.
+#                       * one line per player DEATH, with the run's tally.
+#                       * one line per player caught FALLING off the dungeon,
+#                         which is per tick for a player who keeps sliding off
+#                         the same ledge (the player's own chat line is not
+#                         gated).
+#                       * one line per PULL in which a mob called reachable
+#                         allies into the fight - so one per fight.
+#                       * one line per patrol re-plan that had to fall back to
+#                         the walk grid, planning a beat or rejoining one.
+#                         These two were WARNs until Round E: the squeeze past
+#                         a pinched lane row is a designed fallback and a
+#                         property of the kit, not a fault of the run.
+#                       * one line per client ACK relayed up, and one per
+#                         malformed or unknown verb from the panel (a bad SET,
+#                         an unknown SET key, a locked-band SET, a bad HUD
+#                         toggle, an unknown verb). What the panel sends is
+#                         client traffic, so its volume is not the server's to
+#                         bound.
+#                       * one line per GEAR ROLL while V2.Loot.ClassFilter is
+#                         on, naming the pool, how much of it the looter's
+#                         class can wear and what the filter cost in ms.
+#
+#                     What it does NOT gate, and what therefore still prints
+#                     on a silent host: the startup and load summaries, the
+#                     per-run build summaries (spawns, props, barriers,
+#                     patrols, ambushes), the finale and FinishRun lines, the
+#                     per-cache loot payout, and every WARN or ERROR that
+#                     names a data fault - a missing chest anchor, an unknown
+#                     pack member, an unknown loot item, a dropped loot row.
+#                     A fault is never diagnostics.
+#
+#                     Independent of V2.Patrol.Debug above, which arms the
+#                     patrol AI's own per-leg trace. That is a different hunt
+#                     at a different volume: neither key implies the other.
+#        Default:     0
+#
+
+ProceduralDungeon.V2.Debug = 0
+
+#
 #    ProceduralDungeon.V2.Ambush.Chance
 #        Description: Round B (2026-09-03): percent chance, per boss segment,
 #                     that one of the corridors on the way to its boss room is
@@ -790,4 +1227,191 @@ ProceduralDungeon.V2.Ambush.Mobs = 4
 #
 
 ProceduralDungeon.V2.Ambush.StunSpell = 20170
+
+#
+#    ProceduralDungeon.V2.Event.ChancePct
+#        Description: Round E / WP5 (2026-09-10): percent chance, per boss
+#                     segment, that the segment gets an EVENT ROOM - a
+#                     dead-end pocket off the main path with a lost pilgrim
+#                     in it who asks to be defended. A gossip click starts
+#                     the defence: attackers spawn at the room's rim and go
+#                     for him, and if he is still standing when the timer
+#                     runs out a cache appears and everyone on the map is
+#                     paid Paragon XP. At most one per segment, and a
+#                     segment with no free spine room to hang the pocket
+#                     off gets none.
+#
+#                     A LAYOUT input, and the only one of the five V2.Event
+#                     keys that is: the room is drawn by the GENERATOR, so
+#                     this value is read when a dungeon is generated and
+#                     stored with it (pdungeon_account.gen_event_pct) for
+#                     login to rebuild the same dungeon from. A .reload
+#                     config therefore reaches the NEXT dungeon somebody
+#                     generates and leaves every stored one exactly as it
+#                     is - `.pdungeon v2 gen` is what applies a new value
+#                     to an account.
+#
+#                     0 switches event rooms off and costs no draw at all,
+#                     so a layout generated at 0 is identical to one from
+#                     before the feature existed.
+#        Default:     25
+#
+
+ProceduralDungeon.V2.Event.ChancePct = 25
+
+#
+#    ProceduralDungeon.V2.Event.DurationSec
+#        Description: Round E / WP5: how long one defence runs, in seconds.
+#                     The event IS this countdown - the pilgrim only has to
+#                     be alive when it reaches zero - so a longer timer
+#                     makes the event harder, not slower.
+#
+#                     Clamped to 10..600. Under ten seconds the wave timer
+#                     barely gets its first attacker out and the reward
+#                     would be free; over ten minutes one event outlasts
+#                     the run it sits in. Read LIVE, so a .reload config
+#                     retunes the next defence that is STARTED and leaves
+#                     one that is already being fought alone.
+#        Default:     60
+#
+
+ProceduralDungeon.V2.Event.DurationSec = 60
+
+#
+#    ProceduralDungeon.V2.Event.SpawnEverySec
+#        Description: Round E / WP5: how often a running defence sends the
+#                     next attacker, in seconds. With the two defaults that
+#                     is roughly a dozen creatures over a 60 s fight,
+#                     arriving one at a time - the pressure comes from the
+#                     stream, not from the size of any one wave.
+#
+#                     Clamped to 1..60: one per second is as fast as the
+#                     1 Hz tick can spawn anything, and a gap longer than a
+#                     minute outlives the longest defence the key above
+#                     allows. Read LIVE.
+#        Default:     5
+#
+
+ProceduralDungeon.V2.Event.SpawnEverySec = 5
+
+#
+#    ProceduralDungeon.V2.Event.CasterPct
+#        Description: Round E / WP5: percent of an event wave drawn as
+#                     casters, the rest melee. Deliberately far below the
+#                     account's own caster ratio: the attackers have to
+#                     CLOSE on the pilgrim for the defence to be a fight
+#                     worth standing in, and a caster-heavy wave would
+#                     simply shoot him from the rim while the players give
+#                     chase.
+#
+#                     Clamped to 0..100. Read LIVE, when a defence draws
+#                     its wave.
+#        Default:     10
+#
+
+ProceduralDungeon.V2.Event.CasterPct = 10
+
+#
+#    ProceduralDungeon.V2.Event.ParagonXp
+#        Description: Round E / WP5: the Paragon XP every player on the map
+#                     is paid when a defence is WON, before the run's loot
+#                     multiplier scales it. Nothing is paid for a defence
+#                     that fails; 0 pays nothing at all and leaves the
+#                     cache as the whole reward.
+#
+#                     Unclamped on purpose, like V2.Ambush.StunSpell above:
+#                     the type (unsigned) is already the only bound that
+#                     matters, and what one module pays into another's
+#                     progression is the operator's call and not this
+#                     module's. Read LIVE, at the moment the event is won.
+#        Default:     1000
+#
+
+ProceduralDungeon.V2.Event.ParagonXp = 1000
+
+#
+#    ProceduralDungeon.V2.Respawn.Enable
+#        Description: Round E / WP6 (2026-09-10): whether the Forgotten
+#                     Talents node "Restless Echoes" does anything in this
+#                     dungeon. With it on, an ordinary monster killed by a
+#                     player who owns that node rises again on the spot as
+#                     one echo per rank - the same creature, freshly hostile
+#                     and already coming for the killer.
+#
+#                     The TALENT is the entitlement: nobody who has not
+#                     bought the node gets an echo whatever this key says.
+#                     What the module reads is not a spell id but the
+#                     node's tag - EffectMiscValue 76001 on its passive
+#                     dummy aura - so mod-forgotten-talents can regenerate
+#                     its spells without this ever noticing.
+#
+#                     An echo is never part of the run: it moves no kill
+#                     counter, clears no room, opens no barrier and cannot
+#                     be the boss of one. What it does pay is materials,
+#                     always, and Paragon XP - currency only when
+#                     V2.Loot.Currency.ExtraMobsDropCurrency is on, because
+#                     a monster that comes back for ever would otherwise be
+#                     a currency faucet. An echo never echoes again, and a
+#                     boss never echoes at all.
+#
+#                     0 makes the node inert without touching anybody's
+#                     talent tree - the switch to reach for when a farm
+#                     turns out to be one. Read LIVE, so a .reload config
+#                     arms and disarms it on a run already being walked.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.Respawn.Enable = 1
+
+#
+#    ProceduralDungeon.V2.Respawn.MaxCopies
+#        Description: Round E / WP6: the most echoes ONE kill may raise,
+#                     whatever the talent's rank says. The node's own
+#                     maximum is 2 today, so this default costs nothing;
+#                     it is the operator's ceiling for the day a later rank
+#                     - or a typo in the talent extension contract - asks
+#                     for more than the loot funnel was tuned for.
+#
+#                     Clamped to 0..5. 0 is the softer of the two switches
+#                     above: the mechanic still runs and simply raises
+#                     nothing. Read LIVE.
+#        Default:     2
+#
+
+ProceduralDungeon.V2.Respawn.MaxCopies = 2
+
+#
+#    ProceduralDungeon.V2.Finale.TeleName
+#        Description: Round E / WP10: where the finale portal puts the player,
+#                     as the NAME of a row in acore_world.game_tele - the same
+#                     names a GM types after `.tele`.
+#
+#                     The portal used to carry its destination as four
+#                     literals in C++, which meant that moving the arrival
+#                     spot meant a rebuild. It now looks the row up on every
+#                     click, so the portal follows the world data: move
+#                     `flcapital` in game_tele and the next run's portal lands
+#                     where you moved it.
+#
+#                     The shipped default is the capital (operator, 2026-09-11
+#                     - a finished run belongs back in town, not at the raid
+#                     door): row 20042 `flcapital`, map 727, 13356.2 /
+#                     12009.1 / -23.39, facing 4.50. C8's original
+#                     `flraidazealia` is row 20040 on the same map.
+#
+#                     The match is EXACT and case-insensitive, so a name that
+#                     is not a row - a typo, a blank value, a row somebody
+#                     deleted - resolves to nothing rather than to whichever
+#                     row happens to contain the text. That case is not
+#                     silent: the player is sent to `flraidazealia`, the C8
+#                     destination compiled in as the fallback, and the
+#                     worldserver logs a WARN naming the key on every click.
+#
+#                     Read LIVE like every other V2 key: `.reload config`
+#                     retargets the next click, including one in a run that is
+#                     already being walked.
+#        Default:     "flcapital"
+#
+
+ProceduralDungeon.V2.Finale.TeleName = "flcapital"
 

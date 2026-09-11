@@ -380,11 +380,15 @@ namespace
         std::vector<PlacedBlock const*> chain(static_cast<size_t>(len), nullptr);
         std::vector<PlacedBlock const*> pockets;
         std::vector<PlacedBlock const*> loops;
+        std::vector<PlacedBlock const*> events;
         int bosses = 0;
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.chainIndex >= 0) chain[static_cast<size_t>(b.chainIndex)] = &b;
-            if (b.branchOf >= 0) pockets.push_back(&b);
+            // Round E / WP5: event pockets out of the pocket list, so the
+            // "pockets" line keeps meaning the pocket BUDGET.
+            if (b.isEvent) events.push_back(&b);
+            else if (b.branchOf >= 0) pockets.push_back(&b);
             if (b.detourOf >= 0) loops.push_back(&b);
             if (b.role == BlockRole::RoomBoss) ++bosses;
         }
@@ -432,6 +436,21 @@ namespace
             out += '\n';
         }
 
+        // Round E / WP5, and printed only when there are any: at the 0 %
+        // default this line never appears, so every output the operator
+        // document quotes reads exactly as it did.
+        if (!events.empty())
+        {
+            out += "events:";
+            for (PlacedBlock const* e : events)
+            {
+                std::snprintf(buf, sizeof(buf), "  R#%d + event room (%d,%d) [segment %d]",
+                              e->branchOf, e->bx, e->by, SegmentOf(plan, *e));
+                out += buf;
+            }
+            out += '\n';
+        }
+
         int segStart = 1;
         int k = 0;
         for (int i = 1; i < len; ++i)
@@ -462,9 +481,13 @@ namespace
         return out;
     }
 
-    void PrintOne(uint32_t seed, int rooms)
+    void PrintOne(uint32_t seed, int rooms, int eventChancePct)
     {
-        BlockCfg const cfg = MakeCfg(seed, rooms);
+        BlockCfg cfg = MakeCfg(seed, rooms);
+        // Round E / WP5: settable so one layout carrying an event pocket can
+        // be looked at - ChainSummary prints an "events:" line when there is
+        // one. 0 keeps the default dump byte-identical.
+        cfg.eventChancePct = eventChancePct;
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))
         {
@@ -497,7 +520,7 @@ namespace
     // stream that rewrites every \n into \r\n -- so piping this through a shell
     // would corrupt it in a way that only shows up as a parse error much later.
     void WriteManifest(uint32_t seed, int rooms, char const* path, int obx, int oby,
-                       int theme, int bossRooms)
+                       int theme, int bossRooms, int eventChancePct)
     {
         BlockCfg cfg = MakeCfg(seed, rooms, obx, oby);
         cfg.theme = theme;
@@ -507,6 +530,14 @@ namespace
         // 2026-09-02 to audit an operator's live layout from its
         // pdungeon_account row; 1 keeps every earlier call byte-identical.
         cfg.bossRooms = bossRooms;
+        // Round E / WP5, and a generation input for the same reason. The
+        // default 0 keeps every earlier call byte-identical; it is settable
+        // so the Python composer - the byte-exact oracle for the client - can
+        // be handed a manifest that actually CONTAINS an event pocket. The
+        // manifest format does not change for one (an event room is a Room
+        // chunk on a block line like any other), and the oracle run is what
+        // proves that rather than asserts it.
+        cfg.eventChancePct = eventChancePct;
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))
         {
@@ -2197,19 +2228,24 @@ namespace
     {
         char msg[200];
         struct Row { int rooms; int boss; int branches; int pockets; int chainLen; int b1; int b2; };
+        // Round E / R2 (spec D13): every row re-derived by hand for
+        // total = max(2, rooms + bossRooms + 1). The entrance is a chain cell,
+        // so a longer chain moves the boss indices too - 15 rooms + 2 bosses
+        // used to seat them at 7 and 14 on a 15-cell chain and now seats them
+        // at 8 and 15 on a 16-cell one.
         Row const rows[] = {
-            {  1, 1, 2, 0,  2, 1, -1 },
-            {  2, 1, 2, 0,  3, 2, -1 },
-            {  3, 1, 2, 1,  3, 2, -1 },
-            {  5, 1, 2, 2,  4, 3, -1 },
-            {  8, 1, 2, 2,  7, 6, -1 },
-            { 12, 2, 2, 2, 12, 6, 11 },
-            { 15, 2, 2, 2, 15, 7, 14 },
-            {  5, 1, 0, 0,  6, 5, -1 },
-            {  1, 2, 2, 0,  3, 1,  2 },
-            {  5, 1, 9, 2,  4, 3, -1 },
-            { 15, 2, 9, 5, 12, 6, 11 },
-            {  5, 0, 2, 1,  4, 3, -1 },     // bossRooms 0 still means one boss
+            {  1, 1, 2, 0,  3, 2, -1 },
+            {  2, 1, 2, 1,  3, 2, -1 },
+            {  3, 1, 2, 1,  4, 3, -1 },
+            {  5, 1, 2, 2,  5, 4, -1 },
+            {  8, 1, 2, 2,  8, 7, -1 },
+            { 12, 2, 2, 2, 13, 6, 12 },
+            { 15, 2, 2, 2, 16, 8, 15 },
+            {  5, 1, 0, 0,  7, 6, -1 },
+            {  1, 2, 2, 0,  4, 2,  3 },
+            {  5, 1, 9, 2,  5, 4, -1 },
+            { 15, 2, 9, 6, 12, 6, 11 },
+            {  5, 0, 2, 2,  4, 3, -1 },     // bossRooms 0 still means one boss
         };
         for (Row const& r : rows)
         {
@@ -2218,7 +2254,7 @@ namespace
                           r.rooms, r.boss, r.branches, pockets, r.pockets);
             Check(pockets == r.pockets, msg, 0);
 
-            int const total = std::max(2, r.rooms + r.boss);
+            int const total = std::max(2, r.rooms + r.boss + 1);
             int const chainLen = total - pockets;
             std::snprintf(msg, sizeof(msg), "chainLen for (%d,%d,%d) = %d, want %d",
                           r.rooms, r.boss, r.branches, chainLen, r.chainLen);
@@ -2245,7 +2281,7 @@ namespace
         {
             for (int boss = 1; boss <= 4; ++boss)
             {
-                int const total = std::max(2, rooms + boss);
+                int const total = std::max(2, rooms + boss + 1);
                 int const chainLen = total - PocketCountFor(rooms, boss, 2);
                 std::snprintf(msg, sizeof(msg),
                               "the pocket clamp left no room for the bosses at (%d rooms, %d boss)",
@@ -2276,6 +2312,549 @@ namespace
         BlockCfg const cfg;
         Check(cfg.branches == 2, "BlockCfg::branches must default to 2", 0);
         Check(cfg.detourChancePct == 33, "BlockCfg::detourChancePct must default to 33", 0);
+    }
+
+    // Round E / R2 (spec D13): the room slider counts ORDINARY rooms.
+    //
+    // The whole point of the change, stated as three counts that hold for
+    // every legal (rooms, bossRooms) the engine can ask for:
+    //
+    //   * plain Room blocks == cfg.rooms + the loop rooms. POCKETS ARE NOT
+    //     ADDED HERE and that is not an oversight: PocketCountFor carves the
+    //     pockets OUT of the same `total` the spine is built from
+    //     (chainLen = total - pockets), so a pocket is a spine room moved off
+    //     the chain, not an extra one. Loop rooms are the only kind that comes
+    //     on top of the budget (design 2026-09-03 0.4), which is why they and
+    //     nothing else appear on the right-hand side. Measured, not reasoned:
+    //     the failure message prints every count so a move can be read.
+    //   * exactly one RoomEntrance, and it is no longer taken out of the
+    //     player's room budget - that is the bug this task closes.
+    //   * exactly cfg.bossRooms RoomBoss blocks, likewise on top.
+    //
+    // Round E / WP5 adds a fourth bucket, EVENTS, and it is a guard rather
+    // than a measurement here: this sweep runs at the BlockCfg default, where
+    // eventChancePct is 0, so the honest expectation is zero of them. Split
+    // out of `pockets` all the same - an event pocket carries branchOf like
+    // any pocket - so that a planner which started seating them at 0 % would
+    // show up as `events <= boss` going red or as `plain` moving, instead of
+    // silently inflating the pocket tally. RunEventPocketChecks below is
+    // where they are actually exercised.
+    //
+    // The engine's HUD denominator (`_run.roomsTotal`) and the panel's
+    // "Current depths" count are both the first line of this table, which is
+    // what makes the two agree with the dial the player moved.
+    void RunOrdinaryRoomCountChecks(int seeds)
+    {
+        char msg[240];
+        // 1 is the slider floor, 14 the largest count that unlocks below the
+        // cap, 5 the shipped default. Both boss counts the band can hand out
+        // at those room counts (GameBossRooms is 1 below dlvl 10, 2 from 10).
+        int const roomChoices[3] = { 1, 5, 14 };
+        for (int rooms : roomChoices)
+        {
+            for (int boss = 1; boss <= 2; ++boss)
+            {
+                for (int i = 0; i < seeds; ++i)
+                {
+                    uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 11u;
+                    BlockCfg cfg = MakeCfg(seed, rooms);
+                    cfg.bossRooms = boss;
+
+                    BlockPlan plan;
+                    if (!GenerateBlockPlan(cfg, &plan))
+                    {
+                        std::snprintf(msg, sizeof(msg),
+                                      "no layout for %d ordinary room(s) + %d boss",
+                                      rooms, boss);
+                        Check(false, msg, seed);
+                        continue;
+                    }
+
+                    int plain = 0, entrance = 0, bossFound = 0;
+                    int pockets = 0, loops = 0, events = 0;
+                    for (PlacedBlock const& b : plan.blocks)
+                    {
+                        // Pocket, loop and event rooms are told apart by the
+                        // fields the planner sets, not by their role: all
+                        // three are plain Rooms (PDBlockPlan.h, PlacedBlock).
+                        if (b.isEvent)
+                        {
+                            ++events;
+                        }
+                        else if (b.branchOf >= 0)
+                        {
+                            ++pockets;
+                        }
+                        if (b.detourOf >= 0)
+                        {
+                            ++loops;
+                        }
+                        if (b.role == BlockRole::Room)
+                        {
+                            ++plain;
+                        }
+                        else if (b.role == BlockRole::RoomEntrance)
+                        {
+                            ++entrance;
+                        }
+                        else if (b.role == BlockRole::RoomBoss)
+                        {
+                            ++bossFound;
+                        }
+                    }
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "the dial no longer counts ordinary rooms: asked for %d + %d "
+                                  "boss, got %d plain room(s) (%d pocket(s), %d loop room(s)), "
+                                  "want %d",
+                                  rooms, boss, plain, pockets, loops, rooms + loops);
+                    Check(plain == rooms + loops, msg, seed);
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "a layout for %d + %d boss has %d entrance block(s), want 1",
+                                  rooms, boss, entrance);
+                    Check(entrance == 1, msg, seed);
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "a layout for %d + %d boss has %d boss room(s)",
+                                  rooms, boss, bossFound);
+                    Check(bossFound == boss, msg, seed);
+
+                    // Round E / WP5. One event pocket per boss segment is the
+                    // ceiling everywhere; at this sweep's eventChancePct of 0
+                    // the honest count is 0, and an event that appeared here
+                    // would ALSO push `plain` one over the first assertion
+                    // above - an event pocket is a plain Room - so the two
+                    // together say "none at the default" without this one
+                    // having to encode the default.
+                    std::snprintf(msg, sizeof(msg),
+                                  "a layout for %d + %d boss has %d event pocket(s) "
+                                  "at eventChancePct 0, ceiling %d",
+                                  rooms, boss, events, boss);
+                    Check(events <= boss, msg, seed);
+                }
+            }
+        }
+    }
+
+    // Round E / WP5: the event pocket, exercised where the coin cannot hide
+    // it - eventChancePct 100, so every boss segment of every layout in the
+    // sweep asks for one. Three things are being measured, and only the first
+    // is a property of a single layout:
+    //
+    //   1. Per segment, exactly one event pocket OR one counted drop. The
+    //      planner never retries and never backtracks for an event room, so
+    //      "asked and got nothing" has to leave a trace or a silently
+    //      event-less dungeon would read as a correct one.
+    //   2. Every event block satisfies the rules ValidateBlockPlan states.
+    //      The validator runs here too, but it is re-checked field by field
+    //      from the outside: a validator that stopped looking at event
+    //      pockets would otherwise pass this sweep by doing nothing.
+    //   3. The DROP RATE over the whole sweep, split into the two kinds of
+    //      drop, because they mean opposite things:
+    //        * STRUCTURAL - the segment has no ordinary spine room at all, so
+    //          no planner could hang anything there. At rooms 1 / boss 2,
+    //          segment 2 is the boss room and nothing else, so its event is
+    //          arithmetically impossible. That is the room budget's shape, not
+    //          a planner fault, and the layouts that show it are exactly the
+    //          ones WP5 Task 2's engine will have to cope with anyway.
+    //          Since the design call of 2026-09-10 an ordinary pocket on a
+    //          room no longer disqualifies it, so "the pocket pass took the
+    //          only candidate" is no longer one of these - the eligible set
+    //          below is the segment's ordinary spine rooms, full stop.
+    //        * GEOMETRIC - hosts existed and none of them had a free cell to
+    //          step into. That IS a planner fault if it happens often, and it
+    //          is the number this check holds to a threshold.
+    //      Both are printed; the sweep's totals are the measurement the
+    //      report quotes.
+    //
+    // Since the same design call this function also proves the NEW freedom is
+    // real rather than merely permitted: it counts the hosts that carry a
+    // pocket AND an event, refuses a sweep where that number is zero, and
+    // checks each such host is the ordinary four-socket (mask 15) room chunk
+    // the kit ships - which is the whole reason the rule could be dropped.
+    void RunEventPocketChecks(int seeds)
+    {
+        char msg[300];
+        int const roomChoices[3] = { 1, 5, 14 };
+
+        int segmentsAsked = 0;
+        int eventsPlaced = 0;
+        int dropsTotal = 0;
+        int dropsStructural = 0;
+        int dropsGeometric = 0;
+        int dropsGeometric1 = 0;    // of those, segments down to a single eligible host
+        int layouts = 0;
+        int sharedHosts = 0;        // spine rooms carrying a pocket AND an event
+
+        // The mask-15 room chunk is what a shared host renders as, so its
+        // existence in the kit is a precondition of the whole design call, not
+        // a detail of one layout. Stated here over both themes and every alt
+        // rather than only where a sweep happens to produce one.
+        if (!g_masks.empty())
+        {
+            for (int theme = 1; theme <= 2; ++theme)
+            {
+                for (int alt = 0; alt < AltCountFor(BlockRole::Room); ++alt)
+                {
+                    int const base = (theme == 1) ? 2000 : 12000;
+                    int const id = base + alt * 1000 + 15;
+                    std::snprintf(msg, sizeof(msg),
+                                  "theme %d alt %d: the four-socket room chunk %d has no walk "
+                                  "mask in the kit SQL - a host carrying a pocket AND an event "
+                                  "could not render", theme, alt, id);
+                    Check(MaskFor(id) != nullptr, msg, 0);
+                }
+            }
+        }
+
+        std::printf("event pockets at eventChancePct 100, %d seeds per row:\n", seeds);
+        std::printf("  rooms  boss  segments  placed  drop:struct  drop:geom  geom:1host\n");
+
+        for (int rooms : roomChoices)
+        {
+            for (int boss = 1; boss <= 2; ++boss)
+            {
+                // Per row, so the two drop kinds can be read where they
+                // happen rather than as one blended number: the structural
+                // ones are a property of (rooms, boss) alone, the geometric
+                // ones of how full an 8x8 field gets at that room count.
+                int rowSegments = 0, rowPlaced = 0, rowStruct = 0, rowGeom = 0, rowGeom1 = 0;
+                for (int i = 0; i < seeds; ++i)
+                {
+                    // The same seed ladder RunOrdinaryRoomCountChecks walks,
+                    // so a layout that misbehaves here can be looked at there
+                    // with the events switched off.
+                    uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 11u;
+                    BlockCfg cfg = MakeCfg(seed, rooms);
+                    cfg.bossRooms = boss;
+                    cfg.eventChancePct = 100;
+
+                    BlockPlan plan;
+                    if (!GenerateBlockPlan(cfg, &plan))
+                    {
+                        std::snprintf(msg, sizeof(msg),
+                                      "no layout for %d ordinary room(s) + %d boss at "
+                                      "eventChancePct 100", rooms, boss);
+                        Check(false, msg, seed);
+                        continue;
+                    }
+                    ++layouts;
+
+                    std::string err;
+                    Check(ValidateBlockPlan(plan, &err),
+                          err.empty() ? "validation failed with event pockets" : err.c_str(), seed);
+
+                    // The spine by chain index, and which of its rooms an
+                    // ORDINARY pocket hangs off. Since the design call an
+                    // event may join one of those - `hostedPocket` is no
+                    // longer an exclusion but the thing that identifies a
+                    // SHARED host, and the socket check below is what proves
+                    // sharing is legal geometry rather than an overwrite.
+                    int const chainLen = ChainLength(plan);
+                    std::vector<int> chainAt(static_cast<size_t>(chainLen), -1);
+                    std::vector<bool> hostedPocket(static_cast<size_t>(chainLen), false);
+                    std::vector<bool> hostedEvent(static_cast<size_t>(chainLen), false);
+                    for (size_t bi = 0; bi < plan.blocks.size(); ++bi)
+                    {
+                        PlacedBlock const& b = plan.blocks[bi];
+                        if (b.chainIndex >= 0 && b.chainIndex < chainLen)
+                        {
+                            chainAt[static_cast<size_t>(b.chainIndex)] = static_cast<int>(bi);
+                        }
+                        if (b.branchOf >= 0 && !b.isEvent && b.branchOf < chainLen)
+                        {
+                            hostedPocket[static_cast<size_t>(b.branchOf)] = true;
+                        }
+                    }
+
+                    std::vector<int> perSegment(static_cast<size_t>(boss) + 1, 0);
+                    int events = 0;
+                    for (PlacedBlock const& b : plan.blocks)
+                    {
+                        if (!b.isEvent)
+                        {
+                            continue;
+                        }
+                        ++events;
+
+                        int sockets = 0;
+                        for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                        {
+                            if (b.socketMask & bit) ++sockets;
+                        }
+
+                        std::snprintf(msg, sizeof(msg),
+                                      "event pocket (%d,%d) is role %d with %d socket(s), "
+                                      "roomId %d, chainIndex %d, detourOf %d - want a plain "
+                                      "Room dead end with one socket and a room id",
+                                      b.bx, b.by, static_cast<int>(b.role), sockets,
+                                      b.roomId, b.chainIndex, b.detourOf);
+                        Check(b.role == BlockRole::Room && sockets == 1 && b.roomId >= 0 &&
+                              b.chainIndex < 0 && b.detourOf < 0, msg, seed);
+
+                        std::snprintf(msg, sizeof(msg),
+                                      "event pocket (%d,%d) hangs off chain %d, chain length %d "
+                                      "- want 1..%d", b.bx, b.by, b.branchOf, chainLen,
+                                      chainLen - 2);
+                        bool const hostOk = b.branchOf >= 1 && b.branchOf < chainLen - 1;
+                        Check(hostOk, msg, seed);
+
+                        if (hostOk && chainAt[static_cast<size_t>(b.branchOf)] >= 0)
+                        {
+                            PlacedBlock const& host =
+                                plan.blocks[static_cast<size_t>(chainAt[static_cast<size_t>(b.branchOf)])];
+                            std::snprintf(msg, sizeof(msg),
+                                          "event pocket (%d,%d) hangs off chain %d, which is "
+                                          "role %d - the entrance and the boss rooms may host "
+                                          "nothing", b.bx, b.by, b.branchOf,
+                                          static_cast<int>(host.role));
+                            Check(host.role == BlockRole::Room, msg, seed);
+
+                            // Two EVENTS never share a host - the one half of
+                            // the old rule the design call kept. Re-derived
+                            // here rather than read off the planner, which is
+                            // the point of a harness rule.
+                            std::snprintf(msg, sizeof(msg),
+                                          "two event pockets share chain %d - a segment's "
+                                          "scripted encounter must stand alone in its dead end",
+                                          b.branchOf);
+                            Check(!hostedEvent[static_cast<size_t>(b.branchOf)], msg, seed);
+                            hostedEvent[static_cast<size_t>(b.branchOf)] = true;
+
+                            // A host carrying BOTH is the case the design call
+                            // unlocked, so it is checked rather than forbidden:
+                            // chain in, chain out, pocket, event is exactly the
+                            // four sockets a room chunk has, and the chunk id
+                            // must be the ordinary mask-15 room the kit ships.
+                            // A fifth hanger would have to show up here as a
+                            // popcount of 4 that is not mask 15, or as a chunk
+                            // id with no walk mask.
+                            if (hostedPocket[static_cast<size_t>(b.branchOf)])
+                            {
+                                ++sharedHosts;
+                                int hostSockets = 0;
+                                for (unsigned bit = 1; bit <= SOCKET_W; bit <<= 1)
+                                {
+                                    if (host.socketMask & bit) ++hostSockets;
+                                }
+                                std::snprintf(msg, sizeof(msg),
+                                              "chain %d hosts a pocket and an event but carries "
+                                              "mask %u (%d socket(s)) and chunk %d - want the "
+                                              "four-socket room chunk %d",
+                                              b.branchOf, host.socketMask, hostSockets,
+                                              host.chunkId, 2000 + host.alt * 1000 + 15);
+                                Check(hostSockets == 4 && host.socketMask == 15u &&
+                                      host.chunkId == 2000 + host.alt * 1000 + 15, msg, seed);
+
+                                if (!g_masks.empty())
+                                {
+                                    std::snprintf(msg, sizeof(msg),
+                                                  "chain %d hosts a pocket and an event as chunk "
+                                                  "%d, which has no walk mask in the kit SQL",
+                                                  b.branchOf, host.chunkId);
+                                    Check(MaskFor(host.chunkId) != nullptr, msg, seed);
+                                }
+                            }
+                        }
+
+                        // The chunk id must be an ordinary ROOM chunk of the
+                        // block's own mask: theme base + alt stride + role 0.
+                        // Written out rather than taken from the planner, so a
+                        // planner that emitted, say, a boss chunk for the
+                        // event room could not agree with itself.
+                        int const wantChunk = 2000 + b.alt * 1000 + static_cast<int>(b.socketMask);
+                        std::snprintf(msg, sizeof(msg),
+                                      "event pocket (%d,%d) carries chunk %d, want the room "
+                                      "chunk %d (mask %u, alt %d)", b.bx, b.by, b.chunkId,
+                                      wantChunk, b.socketMask, b.alt);
+                        Check(b.chunkId == wantChunk &&
+                              b.alt >= 0 && b.alt < AltCountFor(BlockRole::Room), msg, seed);
+
+                        if (!g_masks.empty())
+                        {
+                            std::snprintf(msg, sizeof(msg),
+                                          "event pocket (%d,%d) uses chunk %d, which has no walk "
+                                          "mask in the kit SQL", b.bx, b.by, b.chunkId);
+                            Check(MaskFor(b.chunkId) != nullptr, msg, seed);
+                        }
+
+                        int const seg = SegmentOf(plan, b);
+                        std::snprintf(msg, sizeof(msg),
+                                      "event pocket (%d,%d) reports segment %d of %d",
+                                      b.bx, b.by, seg, boss);
+                        Check(seg >= 1 && seg <= boss, msg, seed);
+                        if (seg >= 1 && seg <= boss)
+                        {
+                            ++perSegment[static_cast<size_t>(seg)];
+                        }
+                    }
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "%d block(s) carry isEvent but EventPocketCount says %d",
+                                  events, EventPocketCount(plan));
+                    Check(events == EventPocketCount(plan), msg, seed);
+
+                    std::snprintf(msg, sizeof(msg),
+                                  "%d ordinary room(s) + %d boss placed %d event pocket(s) and "
+                                  "counted %d drop(s) - every segment must do exactly one of the "
+                                  "two", rooms, boss, events, plan.eventsDropped);
+                    Check(events + plan.eventsDropped == boss, msg, seed);
+
+                    for (int k = 1; k <= boss; ++k)
+                    {
+                        std::snprintf(msg, sizeof(msg),
+                                      "boss segment %d of %d carries %d event pockets, ceiling 1",
+                                      k, boss, perSegment[static_cast<size_t>(k)]);
+                        Check(perSegment[static_cast<size_t>(k)] <= 1, msg, seed);
+                    }
+
+                    // Which kind of drop this layout took, per segment: a
+                    // segment with no event was dropped, and it is STRUCTURAL
+                    // when the segment had no eligible host to begin with.
+                    // The eligible set is re-derived here from the finished
+                    // plan rather than read out of the planner, which is the
+                    // whole point of measuring it - and since the design call
+                    // it is simply the segment's ordinary spine rooms
+                    // (1..L-2, role Room). A pocket on one of them no longer
+                    // takes it out of the set, which is exactly the change
+                    // this table is here to measure.
+                    for (int k = 1; k <= boss; ++k)
+                    {
+                        if (perSegment[static_cast<size_t>(k)] > 0)
+                        {
+                            continue;
+                        }
+                        int eligible = 0;
+                        for (int idx = 1; idx < chainLen - 1; ++idx)
+                        {
+                            int const at = chainAt[static_cast<size_t>(idx)];
+                            if (at < 0 || plan.blocks[static_cast<size_t>(at)].role != BlockRole::Room)
+                            {
+                                continue;
+                            }
+                            if (SegmentOf(plan, plan.blocks[static_cast<size_t>(at)]) != k)
+                            {
+                                continue;
+                            }
+                            ++eligible;
+                        }
+                        if (eligible > 0)
+                        {
+                            ++rowGeom;
+                            // A geometric drop in a segment with exactly ONE
+                            // eligible host is a different animal from one in
+                            // a segment with several: no host rule can widen a
+                            // set of size one, so the only lever left there is
+                            // the STEP (a two-cell route, report §6 option 3).
+                            // Split out because the two numbers point at
+                            // different fixes and a blended rate hides which.
+                            if (eligible == 1)
+                            {
+                                ++rowGeom1;
+                            }
+                        }
+                        else
+                        {
+                            ++rowStruct;
+                        }
+                    }
+
+                    rowSegments += boss;
+                    rowPlaced += events;
+                    dropsTotal += plan.eventsDropped;
+                }
+
+                std::printf("  %5d  %4d  %8d  %6d  %11d  %9d  %10d\n",
+                            rooms, boss, rowSegments, rowPlaced, rowStruct, rowGeom, rowGeom1);
+                segmentsAsked += rowSegments;
+                eventsPlaced += rowPlaced;
+                dropsStructural += rowStruct;
+                dropsGeometric += rowGeom;
+                dropsGeometric1 += rowGeom1;
+            }
+        }
+
+        // Non-vacuity first: a sweep at 100 % that placed nothing would pass
+        // every rule above by having no event pocket to break one.
+        Check(eventsPlaced > 0,
+              "no seed in the sweep placed an event pocket at eventChancePct 100 - the "
+              "event pass is dead code", 0);
+
+        // The design call of 2026-09-10 is only worth its comment if the
+        // sweep actually exercises it: at 5 rooms the pocket budget takes two
+        // of the three ordinary spine rooms, so shared hosts are not a corner
+        // case here, they are the common one. Zero would mean the placement
+        // still avoids pocket hosts and the drop rate below improved for some
+        // other reason.
+        std::snprintf(msg, sizeof(msg),
+                      "no host in the sweep carries a pocket AND an event - the one-hanger "
+                      "rule is still in force somewhere");
+        Check(sharedHosts > 0, msg, 0);
+
+        int const possible = segmentsAsked - dropsStructural;
+        int const pctX10 = segmentsAsked ? (dropsTotal * 1000 + segmentsAsked / 2) / segmentsAsked : 0;
+        int const geoX10 = possible ? (dropsGeometric * 1000 + possible / 2) / possible : 0;
+        std::printf("event pockets: %d placed over %d boss segment(s) in %d layout(s); "
+                    "%d drop(s) = %d.%d%% (structural %d, geometric %d = %d.%d%% of the "
+                    "%d segment(s) that could have carried one, %d of them in a segment with "
+                    "a SINGLE eligible host); %d host(s) carry a pocket and an event\n",
+                    eventsPlaced, segmentsAsked, layouts, dropsTotal,
+                    pctX10 / 10, pctX10 % 10, dropsStructural, dropsGeometric,
+                    geoX10 / 10, geoX10 % 10, possible, dropsGeometric1, sharedHosts);
+
+        std::snprintf(msg, sizeof(msg),
+                      "the two drop kinds add up to %d, but %d drops were counted",
+                      dropsStructural + dropsGeometric, dropsTotal);
+        Check(dropsStructural + dropsGeometric == dropsTotal, msg, 0);
+
+        // The threshold is on the GEOMETRIC drops alone, over the segments
+        // that could have carried an event at all. A structural drop is the
+        // room budget's own shape - at rooms 1 / boss 2 the second segment is
+        // nothing but its boss room, and nothing a planner does can change
+        // that - and holding the planner to a number it cannot move would only
+        // teach the next reader to raise the number.
+        //
+        // HISTORY, because the number moved and the reason matters more than
+        // the number: WP5 Task 1 first shipped with an event host that had to
+        // be free of ordinary pockets too, which at 5 rooms left the event a
+        // single candidate and MEASURED 19.6 % geometric drops (411 of 2100).
+        // That was reported as a deviation rather than tuned away, and the
+        // design call of 2026-09-10 (report §6, option 2) answered it: an
+        // event may share its host with a pocket, because a room chunk has
+        // four sockets and chain in + chain out + pocket + event is exactly
+        // four. The host set is now the segment's ordinary spine rooms, full
+        // stop. In absolute terms that is strictly better - 1689 -> 1910
+        // events placed, 1011 -> 790 drops, 37.4 % -> 29.3 % overall - while
+        // the GEOMETRIC percentage stayed flat at 19.6 % -> 20.4 %, because
+        // the 300 structural drops the change dissolved moved INTO the pool
+        // this rate is measured against (2100 -> 2400 possible segments).
+        //
+        // 25 % IS A REGRESSION FLOOR, NOT A TARGET. Today's sweep measures
+        // 20.4 %, and the controller ACCEPTED that rate on 2026-09-10: an
+        // event room is a bonus, not a promise. At 14 rooms / 1 boss the drop
+        // rate is 1 %, and `V2.Event.ChancePct` is the operator's lever for
+        // how often one is even asked for; balancing is a later round's job.
+        // So the floor's one job is to go red if the host set is ever
+        // narrowed again - it sits above the measurement with room to breathe
+        // and far below the 30 %+ a re-narrowed rule would produce.
+        //
+        // The residual is NOT the host set: it is the one-step
+        // `StepCandidates` rule at crowded chain ends, where every eligible
+        // host is boxed in (Manhattan 2..3, MIN_ROOM_GAP 2 against every room
+        // placed, a free L-route). The `geom:1host` column splits off the
+        // segments down to a single eligible host, where no host rule could
+        // ever have helped. A two-step route when the one-step set is empty
+        // (report §6 option 3) is the lever if this ever matters; it is a
+        // task, not a threshold change. If a sweep prints above the floor,
+        // the per-row table above says which (rooms, boss) row moved -
+        // re-measure the host rule rather than raising the floor.
+        std::snprintf(msg, sizeof(msg),
+                      "%d of the %d boss segments that could have carried an event lost it to "
+                      "a full field (%d.%d%%), regression floor 25%% - re-measure the host "
+                      "rule before moving this",
+                      dropsGeometric, possible, geoX10 / 10, geoX10 % 10);
+        Check(geoX10 < 250, msg, 0);
     }
 
     void RunGameMathChecks()
@@ -2455,6 +3034,58 @@ namespace
                   "lootMult must clamp its difficulty, not extrapolate it", 0);
         }
 
+        // Round E / D8 room factor - the whole reason a one-room run is not the
+        // most profitable run there is. Below the baseline, just below it, ON
+        // it, above it, and the run that is no run at all.
+        Check(GameRoomFactorX100(1, 10, 1) == 10,
+              "a one-room run must pay a tenth of a ten-room run", 0);
+        Check(GameRoomFactorX100(9, 10, 1) == 90,
+              "nine rooms must pay nine tenths - a share, not a step", 0);
+        Check(GameRoomFactorX100(10, 10, 1) == 100,
+              "the baseline run must pay exactly 1.00", 0);
+        Check(GameRoomFactorX100(15, 10, 1) == 105,
+              "five rooms past the baseline must add 5 %, not 50 %", 0);
+        Check(GameRoomFactorX100(0, 10, 1) == 0,
+              "a run with no rooms must pay nothing", 0);
+
+        // Round E / D9 gear counts: the integer part is certain, the fraction
+        // is a percent chance of one more item, and the roll is a parameter -
+        // which is the only reason this can be pinned at all.
+        Check(GameScaledCount(1, 100, 50) == 1,
+              "one item at lootMult 1.00 is one item, whatever the roll", 0);
+        Check(GameScaledCount(1, 300, 1) == 3,
+              "one item at lootMult 3.00 is three, no fraction left", 0);
+        Check(GameScaledCount(1, 250, 50) == 3,
+              "a roll ON the fraction percent must win the extra item", 0);
+        Check(GameScaledCount(1, 250, 51) == 2,
+              "a roll one past the fraction percent must not", 0);
+        Check(GameScaledCount(2, 360, 100) == 7,
+              "7.20 items must not round up on the highest roll there is", 0);
+        Check(GameScaledCount(1, 250, 0) == 2,
+              "roll 0 is a caller asking for the floor and no gamble", 0);
+
+        // Round E / L3 material ceiling: 1 at dlvl 0, the configured maximum at
+        // the cap, and clamped past it - dlvl is not capped on the way in.
+        Check(GameMatsMaxCount(0, 30, 5) == 1,
+              "a fresh account must still be able to get one material", 0);
+        Check(GameMatsMaxCount(8, 30, 5) == 2,
+              "the mats ceiling must climb with dlvl, integer-floored", 0);
+        Check(GameMatsMaxCount(30, 30, 5) == 5,
+              "the dlvl cap must reach the configured maximum exactly", 0);
+        Check(GameMatsMaxCount(31, 30, 5) == 5,
+              "a dlvl past the cap must not out-earn the cap", 0);
+
+        // Round E / L2 drop chance in basis points: a conf percent times the
+        // room factor, and never past a certainty.
+        Check(GameChanceBp(100, 100) == 10000,
+              "a 100 % chance at the baseline must be exactly certain", 0);
+        Check(GameChanceBp(5, 10) == 50,
+              "a 5 % chance on a one-room run must be 0.50 %", 0);
+        Check(GameChanceBp(1, 105) == 105,
+              "the room factor's decimals must survive a 1 % chance", 0);
+        Check(GameChanceBp(100, 150) == 10000,
+              "no room factor may push a chance past certainty", 0);
+
         // The level-cost chain: each level costs 10 % more than the one before,
         // integer floor at every step. These ten numbers ARE the curve - if one
         // of them moves, every stored dxp means a different level than it did.
@@ -2627,6 +3258,280 @@ namespace
             }
             Check(flat, "run dxp must be difficulty-independent (01 §8)", 0);
         }
+
+        // --- Round E / D5 class fit (FitsClassRaw) --------------------------
+        //
+        // The pure half of the loot filter. PDv2LootMgr::ItemFitsPlayer only
+        // reads an ItemTemplate's four fields and ANDs the race mask on top,
+        // so everything that can go wrong in the class table can be caught
+        // here - with no worldserver, no item and no player.
+        //
+        // ALL is the -1 an item_template row carries when it belongs to
+        // everyone (0xFFFFFFFF by the time it reaches this function); MAGE is
+        // what a row that names one single class looks like.
+        {
+            uint32_t const ALL = 0xFFFFFFFFu;
+            uint32_t const MAGE = 1u << (PD_CLASS_MAGE - 1);
+
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 4, PD_CLASS_MAGE),
+                  "plate must never be rolled for a mage", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_MAGE),
+                  "cloth is exactly what a mage is rewarded in", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 3, PD_CLASS_HUNTER) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 2, PD_CLASS_HUNTER),
+                  "a level-80 hunter takes mail and not leather", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 2, PD_CLASS_DRUID) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_DRUID),
+                  "a druid takes leather and not cloth", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 6, PD_CLASS_SHAMAN),
+                  "a shield must be rollable for a shaman", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 6, PD_CLASS_MAGE),
+                  "and never for a mage", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 0, PD_CLASS_WARRIOR) &&
+                  FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 0, PD_CLASS_MAGE),
+                  "a ring (armour misc) must fit every class there is", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 7, PD_CLASS_PALADIN) &&
+                  FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 8, PD_CLASS_DRUID),
+                  "relics are gated by AllowableClass alone (spec D5)", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 15, PD_CLASS_PALADIN),
+                  "a paladin has no dagger in his table", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 4, PD_CLASS_PALADIN),
+                  "a one-hand mace is the paladin weapon", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 19, PD_CLASS_PRIEST),
+                  "a wand must be rollable for a priest", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 19, PD_CLASS_WARRIOR),
+                  "and never for a warrior", 0);
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 2, PD_CLASS_HUNTER) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 2, PD_CLASS_PALADIN),
+                  "a bow is a hunter's reward and not a paladin's", 0);
+            Check(!FitsClassRaw(MAGE, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_PRIEST),
+                  "AllowableClass must exclude a class the type allows", 0);
+            Check(FitsClassRaw(MAGE, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_MAGE),
+                  "and must still let the class it names through", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 0) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 12),
+                  "a class id that is not a class must fit nothing", 0);
+            Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 40, PD_CLASS_WARRIOR),
+                  "a weapon subclass past the table must not fit either", 0);
+            Check(FitsClassRaw(ALL, 15, 0, PD_CLASS_MAGE),
+                  "an item class with no rule is AllowableClass' business", 0);
+
+            // The index armor_pick adds to a bonus row's base item. Same
+            // table the armour fit reads, so the two cannot disagree.
+            Check(GameArmourIndexForClass(PD_CLASS_WARRIOR) == PD_ARMOUR_PLATE &&
+                  GameArmourIndexForClass(PD_CLASS_DEATH_KNIGHT) == PD_ARMOUR_PLATE &&
+                  GameArmourIndexForClass(PD_CLASS_SHAMAN) == PD_ARMOUR_MAIL &&
+                  GameArmourIndexForClass(PD_CLASS_ROGUE) == PD_ARMOUR_LEATHER &&
+                  GameArmourIndexForClass(PD_CLASS_WARLOCK) == PD_ARMOUR_CLOTH,
+                  "armor_pick adds cloth 0 / leather 1 / mail 2 / plate 3", 0);
+
+            // EXACTLY ONE of the four armour types per class, swept rather
+            // than spot-checked: a filter that accepted two would hand out
+            // the fodder D5 exists to stop, and one that accepted none would
+            // empty the candidate list and fall back to the raw pool - the
+            // same bug wearing the opposite mask.
+            bool armourOk = true;
+            int armourBadAt = 0;
+            for (uint8_t c = PD_CLASS_WARRIOR; c <= PD_CLASS_MAX; ++c)
+            {
+                uint8_t const want = static_cast<uint8_t>(
+                    GameArmourIndexForClass(c) + PD_ITEM_SUBCLASS_ARMOR_CLOTH);
+                for (uint8_t sub = PD_ITEM_SUBCLASS_ARMOR_CLOTH;
+                     sub <= PD_ITEM_SUBCLASS_ARMOR_PLATE; ++sub)
+                {
+                    if (FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, sub, c) !=
+                        (sub == want))
+                    {
+                        armourOk = false;
+                        armourBadAt = c * 10 + sub;
+                    }
+                }
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "one armour type per class broke at class*10+sub %d",
+                          armourBadAt);
+            Check(armourOk, msg, 0);
+
+            // Wands and shields are the two subclasses whose table is a short
+            // named list rather than a rule, so they are counted rather than
+            // read back: three classes each, and a typo in a mask moves the
+            // count instead of hiding in a bit.
+            int wandClasses = 0;
+            int shieldClasses = 0;
+            for (uint8_t c = PD_CLASS_WARRIOR; c <= PD_CLASS_MAX; ++c)
+            {
+                if (FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 19, c))
+                {
+                    ++wandClasses;
+                }
+                if (FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 6, c))
+                {
+                    ++shieldClasses;
+                }
+            }
+            Check(wandClasses == 3,
+                  "exactly priest, mage and warlock may be rolled a wand", 0);
+            Check(shieldClasses == 3,
+                  "exactly warrior, paladin and shaman may be rolled a shield", 0);
+        }
+    }
+
+    // --- Round E / WP9 stat profile (FitsProfileRaw) ------------------------
+    //
+    // The other pure half of the loot filter, pinned for the same reason the
+    // class table is: PDv2LootMgr::StatMaskFor turns an ItemTemplate into one
+    // byte and everything after that byte is decidable here, with no
+    // worldserver, no item and no player.
+    //
+    // Read the cases as the items they are. The masks below are hand-built
+    // rather than taken from a pool, because the POINT of the pin is that the
+    // rule holds for masks nobody has measured yet - a future expansion's
+    // itemisation is exactly the input that would break a rule tuned on today's
+    // 3 887 rows.
+    void RunFitsProfileChecks()
+    {
+        uint8_t const NONE = 0;
+        uint8_t const STR = PD_STAT_STR;
+        uint8_t const AGI = PD_STAT_AGI;
+        uint8_t const INT_ = PD_STAT_INT;
+        uint8_t const CAST = PD_STAT_CASTER_EVIDENCE;
+        uint8_t const PHYS = PD_STAT_PHYS_EVIDENCE;
+
+        // A trinket, a relic, a legendary replica: no stat line at all, and it
+        // must reach every looter. This is the case that turns the filter from
+        // a narrowing into a rejection if it is ever got wrong.
+        Check(FitsProfileRaw(NONE, PD_STAT_PROFILE_OFF) &&
+              FitsProfileRaw(NONE, PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(NONE, PD_STAT_PROFILE_AGILITY) &&
+              FitsProfileRaw(NONE, PD_STAT_PROFILE_CASTER),
+              "an item with no stats must fit every profile there is", 0);
+
+        // Off is Off: the default, and what every account that never bought
+        // Discerning Eye rolls with for ever.
+        Check(FitsProfileRaw(STR, PD_STAT_PROFILE_OFF) &&
+              FitsProfileRaw(AGI, PD_STAT_PROFILE_OFF) &&
+              FitsProfileRaw(INT_, PD_STAT_PROFILE_OFF) &&
+              FitsProfileRaw(static_cast<uint8_t>(STR | AGI | INT_ | CAST | PHYS),
+                             PD_STAT_PROFILE_OFF),
+              "profile Off must pass everything, whatever the mask says", 0);
+
+        // The three primaries, each fitting exactly its own profile. A plate
+        // helm of strength, a leather chest of agility, a cloth robe of
+        // intellect.
+        Check(FitsProfileRaw(STR, PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(STR, PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(STR, PD_STAT_PROFILE_CASTER),
+              "a strength item fits Strength and neither of the others", 0);
+        Check(FitsProfileRaw(AGI, PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(AGI, PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(AGI, PD_STAT_PROFILE_CASTER),
+              "an agility item fits Agility and neither of the others", 0);
+        Check(FitsProfileRaw(INT_, PD_STAT_PROFILE_CASTER) &&
+              !FitsProfileRaw(INT_, PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(INT_, PD_STAT_PROFILE_AGILITY),
+              "an intellect item fits Caster and neither of the others", 0);
+
+        // "Primary stat wins" is what makes the hybrids work. A retribution
+        // paladin and a holy paladin are the same class and want opposite
+        // halves of the same drop table; a rule of "no intellect" would have
+        // thrown the holy half away.
+        Check(FitsProfileRaw(static_cast<uint8_t>(STR | INT_), PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(static_cast<uint8_t>(STR | INT_), PD_STAT_PROFILE_CASTER) &&
+              !FitsProfileRaw(static_cast<uint8_t>(STR | INT_), PD_STAT_PROFILE_AGILITY),
+              "a strength+intellect hybrid fits Strength AND Caster", 0);
+        Check(FitsProfileRaw(static_cast<uint8_t>(AGI | INT_), PD_STAT_PROFILE_AGILITY) &&
+              FitsProfileRaw(static_cast<uint8_t>(AGI | INT_), PD_STAT_PROFILE_CASTER) &&
+              !FitsProfileRaw(static_cast<uint8_t>(AGI | INT_), PD_STAT_PROFILE_STRENGTH),
+              "an agility+intellect hybrid fits Agility AND Caster", 0);
+        Check(FitsProfileRaw(static_cast<uint8_t>(STR | AGI), PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(static_cast<uint8_t>(STR | AGI), PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(static_cast<uint8_t>(STR | AGI), PD_STAT_PROFILE_CASTER),
+              "a strength+agility hybrid fits both physical profiles", 0);
+
+        // The no-primary items, which are most of the jewellery and every
+        // cloak. Evidence is all there is to go on, and it only ever rejects.
+        Check(FitsProfileRaw(CAST, PD_STAT_PROFILE_CASTER) &&
+              !FitsProfileRaw(CAST, PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(CAST, PD_STAT_PROFILE_AGILITY),
+              "a spirit / spell-power ring is a caster ring with no intellect on it", 0);
+        Check(FitsProfileRaw(PHYS, PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(PHYS, PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(PHYS, PD_STAT_PROFILE_CASTER),
+              "a defence / dodge tank ring fits both physical profiles and not Caster", 0);
+
+        // Stamina, hit, crit, haste and resilience leave the mask empty on
+        // purpose, so this is the same case as the stat-less trinket - stated
+        // separately because it is the one an operator will ask about.
+        Check(FitsProfileRaw(NONE, PD_STAT_PROFILE_STRENGTH) &&
+              FitsProfileRaw(NONE, PD_STAT_PROFILE_CASTER),
+              "a pure stamina / crit item is nobody's and therefore everybody's", 0);
+
+        // Contradictory evidence with no primary stat - spell power AND attack
+        // power, which real 3.3.5a items do carry. Neither bucket wins; the
+        // profile that finds its own evidence absent is the one that passes,
+        // and both physical profiles read the caster bit first.
+        Check(!FitsProfileRaw(static_cast<uint8_t>(CAST | PHYS), PD_STAT_PROFILE_STRENGTH) &&
+              !FitsProfileRaw(static_cast<uint8_t>(CAST | PHYS), PD_STAT_PROFILE_AGILITY) &&
+              !FitsProfileRaw(static_cast<uint8_t>(CAST | PHYS), PD_STAT_PROFILE_CASTER),
+              "an item that is evidence for both is evidence for neither", 0);
+
+        // A primary stat OUTRANKS the other side's evidence, which is question
+        // 1 beating question 3: an intellect staff with spell power is a
+        // caster staff, and an agility bow with attack power is a hunter's.
+        Check(FitsProfileRaw(static_cast<uint8_t>(INT_ | CAST), PD_STAT_PROFILE_CASTER) &&
+              FitsProfileRaw(static_cast<uint8_t>(AGI | PHYS), PD_STAT_PROFILE_AGILITY) &&
+              FitsProfileRaw(static_cast<uint8_t>(STR | PHYS), PD_STAT_PROFILE_STRENGTH),
+              "a primary stat decides before its own evidence is even read", 0);
+
+        // The wire is a TINYINT column and a client panel, so an out-of-range
+        // profile is a thing that can arrive. It must read as Off - a value
+        // nobody can name must never be a value that fits nothing.
+        Check(FitsProfileRaw(STR, 4) && FitsProfileRaw(INT_, 200) &&
+              FitsProfileRaw(static_cast<uint8_t>(AGI | CAST), 255),
+              "a profile outside 0..3 must behave exactly like Off", 0);
+
+        // The clamp that keeps such a value out of the column in the first
+        // place, and the one that keeps a negative out of a uint8_t.
+        Check(GameClampStatProfile(-1) == PD_STAT_PROFILE_OFF &&
+              GameClampStatProfile(0) == PD_STAT_PROFILE_OFF &&
+              GameClampStatProfile(3) == PD_STAT_PROFILE_CASTER &&
+              GameClampStatProfile(4) == PD_STAT_PROFILE_MAX &&
+              GameClampStatProfile(5000) == PD_STAT_PROFILE_MAX,
+              "the stat profile clamp must hold 0..3 from both sides", 0);
+
+        // EVERY mask the five bits can make must fit at least one profile.
+        // This is the pin that says the filter can never empty a pool on its
+        // own: whatever an item turns out to look like, some profile still
+        // wants it, so no single mask is a hole in the reward table. The
+        // fallback in RollGear covers the pool-level case; this covers the
+        // item-level one.
+        bool everyMaskPlaced = true;
+        int orphanMask = -1;
+        for (int mask = 0; mask < 32; ++mask)
+        {
+            bool fitsAny = false;
+            for (uint8_t p = PD_STAT_PROFILE_STRENGTH; p <= PD_STAT_PROFILE_MAX; ++p)
+            {
+                if (FitsProfileRaw(static_cast<uint8_t>(mask), p))
+                {
+                    fitsAny = true;
+                }
+            }
+            // CAST|PHYS with no primary is the one mask that fits no profile
+            // by design (checked above), and it is the one exception this
+            // sweep allows - stated as a value and not as a skip, so a second
+            // orphan appearing would still fail here.
+            if (!fitsAny && mask != (PD_STAT_CASTER_EVIDENCE | PD_STAT_PHYS_EVIDENCE))
+            {
+                everyMaskPlaced = false;
+                orphanMask = mask;
+            }
+        }
+        char orphanMsg[128];
+        std::snprintf(orphanMsg, sizeof(orphanMsg),
+                      "stat mask %d fits no profile at all - the filter has a hole",
+                      orphanMask);
+        Check(everyMaskPlaced, orphanMsg, 0);
     }
 
     // --- boss rooms (01 §8 "1 + dlvl/10", flagged as the N deepest) ---------
@@ -2646,28 +3551,36 @@ namespace
     // regenerates a different dungeon.
     void RunLayoutFreezeCheck()
     {
-        // Re-pinned for B2's third Room look: AltCountFor(Room) is 3, so the
-        // room's alt draw maps one unchanged raw value onto 0..2 instead of
-        // 0..1 and this layout's two spine rooms became alt 2 (chunk 4011).
-        // The manifest keeps its LENGTH - a four-digit id either way - and
-        // only the CRC moves, which is exactly why the trailer is pinned
-        // beside the byte count. PD_LAYOUT_VERSION stays 3 (spec decision 10;
-        // nothing is deployed). The pin before this one was 403 / E;c1478940
-        // (B0b's loop rooms: one Chance per boss segment before any chain
-        // step), before that 383 / E;0eeda3ad (B0b task 1, the shortcut draw
-        // withdrawn), the B0 pin 363 / E;a5019024, the v2 pin
-        // 571 / E;85fc0e4c, the v1 pin 551 / E;13df5510.
+        // Round E / R2 (spec D13, 2026-09-10). The room budget gained the
+        // ENTRANCE - `rooms` counts ordinary rooms now - so this cfg builds
+        // the layout the OLD generator built at 6 rooms, and every pin over a
+        // generated plan in this file moved with it. Proven rather than
+        // asserted: a HEAD-of-branch build at rooms = 6 emits this exact
+        // manifest, byte for byte, for this seed. PD_LAYOUT_VERSION 3 -> 4.
+        //
+        // The byte count is the coincidence worth naming: 403 either way. One
+        // more room block costs ~10 B and the re-routed spine happens to give
+        // the same back in corridor blocks, which is precisely why the trailer
+        // is pinned beside the length - the CRC caught what the count could
+        // not.
+        //
+        // Before this pin: 403 / E;6576f540 (B2's third Room look, where the
+        // spine rooms became alt 2 / chunk 4011), 403 / E;c1478940 (B0b's loop
+        // rooms: one Chance per boss segment before any chain step), 383 /
+        // E;0eeda3ad (B0b task 1, the shortcut draw withdrawn), the B0 pin
+        // 363 / E;a5019024, the v2 pin 571 / E;85fc0e4c, the v1 pin
+        // 551 / E;13df5510.
         uint32_t const PINNED_SEED = 12345u;
         int const PINNED_ROOMS = 5;
         size_t const PINNED_BYTES = 403;
-        char const* const PINNED_TRAILER = "E;6576f540\n";
+        char const* const PINNED_TRAILER = "E;dab039b3\n";
         // The failure message names the pin this one REPLACED, so whoever
         // reads it can tell a fresh move from the B0b re-roll. Kept as
         // constants beside the live pin: the message used to pair the current
         // byte count with the previous trailer, which read as a third value
         // that never existed.
         size_t const PREVIOUS_BYTES = 403;
-        char const* const PREVIOUS_TRAILER = "E;c1478940";
+        char const* const PREVIOUS_TRAILER = "E;6576f540";
 
         BlockCfg cfg = MakeCfg(PINNED_SEED, PINNED_ROOMS);
         cfg.bossRooms = 1;
@@ -3039,9 +3952,11 @@ namespace
                 // Own arithmetic, deliberately not PocketCountFor. N is the
                 // boss count the PLANNER seats - one even when the config says
                 // zero - and the pocket ceiling is cfg.branches, not the 2 this
-                // used to hardcode.
+                // used to hardcode. The trailing + 1 is the ENTRANCE
+                // (Round E / R2): combo.rooms counts ordinary rooms, so the
+                // entrance is a cell the budget adds rather than one it spends.
                 int const N = std::max(1, combo.bossRooms);
-                int const total = std::max(2, combo.rooms + combo.bossRooms);
+                int const total = std::max(2, combo.rooms + combo.bossRooms + 1);
                 int wantPockets = std::min(std::max(0, cfg.branches), total / 3);
                 wantPockets = std::min(wantPockets, std::max(0, (total - 1 - N) / 2));
                 int const wantChain = total - wantPockets;
@@ -3245,7 +4160,8 @@ namespace
                     }
                 }
                 Check(loops <= N, "more loop rooms than segments", seed);
-                Check(rooms == total + loops, "room count is not rooms + bossRooms + loop rooms", seed);
+                Check(rooms == total + loops,
+                      "room count is not rooms + bossRooms + entrance + loop rooms", seed);
                 // Non-vacuity over the WHOLE sample, exactly like sawPocket -
                 // not a property of any single layout. Set here rather than
                 // from the DetourChance-100 combo alone: that combo already
@@ -3534,7 +4450,8 @@ namespace
         size_t maxManifest = 0;
     };
 
-    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds, int theme = 1)
+    RoomCapRow MeasureRoomCapRow(int rooms, int bossRooms, int seeds, int theme = 1,
+                                 int eventChancePct = 0)
     {
         RoomCapRow row;
         row.rooms = rooms;
@@ -3546,6 +4463,11 @@ namespace
             BlockCfg cfg = MakeCfg(seed, rooms);
             cfg.bossRooms = bossRooms;
             cfg.theme = theme;
+            // Round E / WP5. The default 0 is the historical measurement; the
+            // 100 % pass is the one that matters for the budget, because an
+            // event pocket costs a manifest line for the room and one per
+            // corridor block of its route, up to bossRooms times over.
+            cfg.eventChancePct = eventChancePct;
 
             BlockPlan plan;
             if (!GenerateBlockPlan(cfg, &plan))
@@ -3565,13 +4487,13 @@ namespace
     // Largest room count that generates on EVERY seed and still fits the
     // manifest budget, with the boss-room count a player at that dlvl would
     // actually run (rooms R unlocks at dlvl R - 3, per 01 §8 "3 + dlvl").
-    int MeasureRoomCap(int seeds, bool verbose, int theme = 1)
+    int MeasureRoomCap(int seeds, bool verbose, int theme = 1, int eventChancePct = 0)
     {
         if (verbose)
         {
             std::printf("room-cap measurement: %d seeds per row, field 8x8, "
-                        "theme %d, manifest budget %d B\n\n", seeds, theme,
-                        PD_GAME_MANIFEST_BUDGET_B);
+                        "theme %d, eventChancePct %d, manifest budget %d B\n\n", seeds, theme,
+                        eventChancePct, PD_GAME_MANIFEST_BUDGET_B);
             std::printf("  rooms  boss  cells   genfail  maxManifest  verdict\n");
         }
 
@@ -3585,7 +4507,7 @@ namespace
             // floor constant.
             int const unlockDlvl = rooms > 3 ? rooms - 3 : 0;
             int const boss = GameBossRooms(unlockDlvl);
-            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds, theme);
+            RoomCapRow const row = MeasureRoomCapRow(rooms, boss, seeds, theme, eventChancePct);
             bool const ok = row.failures == 0 &&
                             row.maxManifest <= static_cast<size_t>(PD_GAME_MANIFEST_BUDGET_B);
             if (ok)
@@ -3595,7 +4517,7 @@ namespace
             if (verbose)
             {
                 std::printf("  %5d  %4d  %5d   %7d  %11d  %s\n", row.rooms, row.bossRooms,
-                            row.rooms + row.bossRooms, row.failures,
+                            row.rooms + row.bossRooms + 1, row.failures,
                             static_cast<int>(row.maxManifest), ok ? "ok" : "FAILS");
             }
         }
@@ -3610,13 +4532,22 @@ namespace
         // blow the packet budget theme 1 measured its way under.
         std::printf("\n");
         int const measuredCity = MeasureRoomCap(seeds, true, 2);
+        // Round E / WP5, the worst case the cap has to survive: the widest
+        // chunk ids AND an event pocket in every boss segment. Events are
+        // additional blocks - at most bossRooms rooms plus their corridor
+        // routes - so this is the row that decides whether the cap can stay
+        // where it is once the engine starts asking for them (Task 2).
+        std::printf("\n");
+        int const measuredEvents = MeasureRoomCap(seeds, true, 2, 100);
         std::printf("\nlargest room count clean on every seed: %d (theme 1), "
-                    "%d (theme 2)\n", measured, measuredCity);
+                    "%d (theme 2), %d (theme 2 + events at 100%%)\n",
+                    measured, measuredCity, measuredEvents);
         std::printf("PD_GAME_ROOMS_CAP_MEASURED currently encodes: %d\n",
                     PD_GAME_ROOMS_CAP_MEASURED);
         bool const ok = measured >= PD_GAME_ROOMS_CAP_MEASURED &&
-                        measuredCity >= PD_GAME_ROOMS_CAP_MEASURED;
-        std::printf("%s\n", ok ? "the encoded cap holds for both themes"
+                        measuredCity >= PD_GAME_ROOMS_CAP_MEASURED &&
+                        measuredEvents >= PD_GAME_ROOMS_CAP_MEASURED;
+        std::printf("%s\n", ok ? "the encoded cap holds for both themes, events and all"
                                 : "THE ENCODED CAP IS TOO HIGH - update PDv2GameMath.h");
         return ok ? 0 : 1;
     }
@@ -4346,10 +5277,13 @@ namespace
     // 5 rooms, the shipped fixtures) and paste the value out of the "plan
     // moved" failure message - never by reasoning about what it should be -
     // and only once every change that can move these streams has landed.
+    // (2026-09-10, Round E / R2: the room budget gained the entrance, so this
+    // cfg builds the layout HEAD built at 6 rooms and BOTH streams moved with
+    // it. Re-captured by running, as this paragraph demands.)
     char const* const PD_DECOR_PLAN_PIN =
-        "258,257,1,910020,18.333333,12.500000,3.141593;258,257,4,910050,56.666666,20.833333,0.000000;258,257,5,910051,10.000000,20.833333,3.141593;258,257,5,910051,56.666666,29.166666,0.000000;258,257,6,910054,29.166666,10.000000,4.712389;258,257,7,910055,10.000000,45.833333,3.141593;258,257,10,910060,18.333333,10.000000,3.926991;258,257,10,910060,48.333333,56.666666,0.785398;258,257,11,910062,10.000000,56.666666,2.356194;258,257,11,910062,56.666666,10.000000,5.497787;259,258,3,910020,45.833333,18.333333,4.712389;258,259,9,910052,26.666666,45.833333,3.141593;258,259,12,910063,26.666666,26.666666,3.926991;259,259,1,910020,26.666666,62.500000,3.141593;259,259,4,910050,4.166667,26.666666,4.712389;259,259,7,910055,12.500000,26.666666,4.712389;259,259,11,910062,48.333333,18.333333,5.497787;259,259,11,910062,18.333333,18.333333,3.926991;259,259,13,910070,29.166666,20.833333,0.000000;259,259,13,910070,29.166666,45.833333,0.000000;260,259,9,910052,26.666666,45.833333,3.141593;258,260,3,910020,20.833333,26.666666,4.712389;260,260,3,910020,26.666666,54.166666,3.141593;260,260,9,910052,62.500000,26.666666,4.712389;260,260,12,910063,26.666666,26.666666,3.926991;261,260,1,910020,18.333333,45.833333,3.141593;261,260,1,910020,12.500000,26.666666,4.712389;261,260,1,910020,26.666666,12.500000,3.141593;261,260,4,910050,48.333333,29.166666,0.000000;261,260,6,910054,26.666666,54.166666,3.141593;261,260,7,910055,18.333333,20.833333,3.141593;261,260,10,910060,18.333333,48.333333,2.356194;261,260,11,910062,48.333333,18.333333,5.497787;261,260,11,910062,18.333333,18.333333,3.926991;261,260,13,910070,29.166666,45.833333,0.000000;262,260,3,910020,62.500000,26.666666,4.712389;258,261,1,910020,29.166666,10.000000,4.712389;258,261,1,910020,18.333333,12.500000,3.141593;258,261,1,910020,29.166666,56.666666,1.570796;258,261,5,910051,56.666666,29.166666,0.000000;258,261,5,910051,10.000000,54.166666,3.141593;258,261,6,910054,45.833333,56.666666,1.570796;258,261,7,910055,20.833333,56.666666,1.570796;258,261,10,910060,10.000000,56.666666,2.356194;258,261,11,910062,48.333333,56.666666,0.785398;258,261,11,910062,56.666666,10.000000,5.497787;258,261,13,910070,20.833333,20.833333,0.000000;258,261,13,910070,45.833333,29.166666,0.000000;258,261,13,910070,20.833333,45.833333,0.000000;262,261,3,910020,45.833333,31.666666,1.570796;260,262,1,910020,29.166666,10.000000,4.712389;260,262,1,910020,10.000000,54.166666,3.141593;260,262,1,910020,10.000000,45.833333,3.141593;260,262,6,910054,20.833333,56.666666,1.570796;260,262,7,910055,56.666666,20.833333,0.000000;260,262,8,910056,56.666666,12.500000,0.000000;260,262,10,910060,56.666666,10.000000,5.497787;261,262,3,910020,26.666666,45.833333,3.141593;261,262,9,910052,26.666666,54.166666,3.141593;262,262,1,910020,26.666666,4.166667,3.141593;262,262,2,910021,20.833333,56.666666,1.570796;262,262,2,910021,10.000000,20.833333,3.141593;262,262,7,910055,56.666666,29.166666,0.000000;262,262,10,910060,18.333333,10.000000,3.926991;262,262,11,910062,10.000000,56.666666,2.356194;262,262,13,910070,29.166666,12.500000,0.000000;262,262,14,910073,29.166666,20.833333,0.000000;262,262,14,910073,45.833333,29.166666,0.000000;262,262,14,910073,29.166666,45.833333,0.000000;260,263,3,910020,4.166667,26.666666,4.712389;260,263,9,910052,12.500000,26.666666,4.712389";
+        "261,258,3,910020,62.500000,26.666666,4.712389;258,259,9,910052,26.666666,62.500000,3.141593;259,259,1,910020,10.000000,20.833333,3.141593;259,259,1,910020,10.000000,54.166666,3.141593;259,259,4,910050,26.666666,62.500000,3.141593;259,259,4,910050,45.833333,56.666666,1.570796;259,259,7,910055,56.666666,20.833333,0.000000;259,259,10,910060,10.000000,56.666666,2.356194;259,259,11,910062,56.666666,10.000000,5.497787;259,259,13,910070,20.833333,29.166666,0.000000;259,259,13,910070,29.166666,54.166666,0.000000;260,259,3,910020,26.666666,62.500000,3.141593;261,259,3,910020,54.166666,26.666666,4.712389;261,259,9,910052,26.666666,12.500000,3.141593;258,260,9,910052,4.166667,26.666666,4.712389;261,260,1,910020,10.000000,20.833333,3.141593;261,260,4,910050,45.833333,10.000000,4.712389;261,260,4,910050,4.166667,26.666666,4.712389;261,260,7,910055,26.666666,62.500000,3.141593;261,260,10,910060,10.000000,56.666666,2.356194;261,260,11,910062,18.333333,10.000000,3.926991;262,260,9,910052,26.666666,20.833333,3.141593;258,261,1,910020,56.666666,45.833333,0.000000;258,261,1,910020,20.833333,10.000000,4.712389;258,261,1,910020,10.000000,20.833333,3.141593;258,261,4,910050,29.166666,56.666666,1.570796;258,261,5,910051,56.666666,12.500000,0.000000;258,261,7,910055,10.000000,45.833333,3.141593;258,261,8,910056,4.166667,26.666666,4.712389;258,261,11,910062,10.000000,56.666666,2.356194;258,261,13,910070,20.833333,20.833333,0.000000;261,261,3,910020,62.500000,26.666666,4.712389;261,261,9,910052,56.666666,20.833333,0.000000;262,261,9,910052,45.833333,31.666666,1.570796;260,262,1,910020,10.000000,29.166666,3.141593;260,262,1,910020,10.000000,54.166666,3.141593;260,262,1,910020,45.833333,10.000000,4.712389;260,262,4,910050,56.666666,29.166666,0.000000;260,262,4,910050,20.833333,56.666666,1.570796;260,262,5,910051,45.833333,56.666666,1.570796;260,262,5,910051,10.000000,20.833333,3.141593;260,262,6,910054,56.666666,12.500000,0.000000;260,262,8,910056,29.166666,10.000000,4.712389;260,262,13,910070,20.833333,29.166666,0.000000;260,262,13,910070,45.833333,29.166666,0.000000;260,262,13,910070,29.166666,45.833333,0.000000;261,262,3,910020,4.166667,26.666666,4.712389;262,262,1,910020,29.166666,10.000000,4.712389;262,262,1,910020,56.666666,20.833333,0.000000;262,262,4,910050,56.666666,12.500000,0.000000;262,262,4,910050,45.833333,56.666666,1.570796;262,262,6,910054,62.500000,26.666666,4.712389;262,262,8,910056,26.666666,62.500000,3.141593;262,262,10,910060,48.333333,56.666666,0.785398;262,262,11,910062,56.666666,10.000000,5.497787;262,262,13,910070,45.833333,20.833333,0.000000;263,262,3,910020,54.166666,26.666666,4.712389;261,263,1,910020,10.000000,54.166666,3.141593;261,263,1,910020,45.833333,56.666666,1.570796;261,263,1,910020,56.666666,29.166666,0.000000;261,263,4,910050,10.000000,45.833333,3.141593;261,263,4,910050,10.000000,20.833333,3.141593;261,263,5,910051,20.833333,56.666666,1.570796;261,263,5,910051,10.000000,29.166666,3.141593;261,263,6,910054,56.666666,20.833333,0.000000;261,263,7,910055,29.166666,10.000000,4.712389;261,263,10,910060,10.000000,56.666666,2.356194;261,263,11,910062,56.666666,10.000000,5.497787;261,263,13,910070,20.833333,45.833333,0.000000;261,263,13,910070,45.833333,29.166666,0.000000;262,263,9,910052,12.500000,26.666666,4.712389;263,263,1,910020,10.000000,12.500000,3.141593;263,263,1,910020,56.666666,20.833333,0.000000;263,263,2,910021,56.666666,29.166666,0.000000;263,263,2,910021,29.166666,10.000000,4.712389;263,263,7,910055,20.833333,10.000000,4.712389;263,263,10,910060,10.000000,56.666666,2.356194;263,263,10,910060,56.666666,10.000000,5.497787;263,263,13,910070,20.833333,20.833333,0.000000;263,263,13,910070,20.833333,45.833333,0.000000;263,263,14,910073,20.833333,29.166666,0.000000;263,263,14,910073,45.833333,45.833333,0.000000;263,263,14,910073,45.833333,20.833333,0.000000";
     char const* const PD_CRITTER_PLAN_PIN =
-        "259,259,1,32428,29.166666,45.833333;259,259,1,32428,29.166666,29.166666;259,259,2,23086,29.166666,20.833333;261,260,1,32428,29.166666,29.166666;261,260,2,23086,29.166666,20.833333;258,261,1,32428,29.166666,45.833333;258,261,2,23086,45.833333,45.833333;258,261,2,23086,45.833333,29.166666;258,261,3,2110,29.166666,20.833333;260,261,4,26525,29.166666,29.166666;262,261,4,26525,29.166666,29.166666;262,261,4,26525,54.166666,29.166666;260,262,2,23086,20.833333,29.166666;260,262,2,23086,29.166666,29.166666;262,262,1,32428,45.833333,20.833333;262,262,2,23086,20.833333,20.833333;262,262,2,23086,45.833333,45.833333";
+        "259,259,1,32428,29.166666,29.166666;259,259,1,32428,20.833333,45.833333;259,259,2,23086,45.833333,45.833333;259,259,2,23086,45.833333,29.166666;259,259,3,2110,29.166666,20.833333;260,259,4,26525,29.166666,29.166666;260,259,4,26525,29.166666,54.166666;258,261,1,32428,12.500000,29.166666;261,261,4,26525,29.166666,29.166666;262,261,4,26525,29.166666,29.166666;262,261,4,26525,54.166666,29.166666;260,262,1,32428,29.166666,20.833333;260,262,2,23086,29.166666,45.833333;260,262,2,23086,20.833333,45.833333;260,262,3,2110,45.833333,45.833333;262,262,1,32428,29.166666,20.833333;262,262,1,32428,12.500000,29.166666;261,263,2,23086,20.833333,29.166666;261,263,2,23086,45.833333,45.833333;262,263,4,26525,29.166666,29.166666;263,263,1,32428,45.833333,20.833333;263,263,2,23086,20.833333,45.833333;263,263,2,23086,12.500000,29.166666;263,263,6,26525,29.166666,29.166666";
 
     bool CheckDecorPlanPinned(std::string& why)
     {
@@ -4417,10 +5351,24 @@ namespace
     // manifest bytes and would notice most draw-order moves, but two
     // different chains can in principle emit the same block set; this pin
     // reads the chain order, the pockets and the loop rooms directly.
-    // Format: chain cells `|` pockets `host>x,y;` `|` loops `into>x,y;`.
+    // Format: chain cells `|` pockets `host>x,y;` `|` loops `into>x,y;`
+    // `|` event pockets `host>x,y;` (Round E / WP5).
+    //
+    // The event field is a FORMAT extension, not a re-capture, and the
+    // difference matters: the two pin strings below gained one trailing `|`
+    // and NOTHING else. Every chain cell, every pocket and every loop room
+    // they name is the byte it was before WP5, which is the statement the
+    // event pass had to leave true - eventChancePct defaults to 0, Chance
+    // draws nothing at 0, and no event pocket is seated. Proven before the
+    // field was added: a build carrying only the planner half of WP5 Task 1
+    // ran `pdblock --batch 500` green against the UNCHANGED pins.
     // Captured by RUNNING `pdblock --batch` and reading the "the chain moved"
     // message, never by reasoning about the value.
-    char const* const PD_CHAIN_PIN = "258,261;259,259;261,260;262,262;|1>258,257;2>260,262;|";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE: the chain is one cell
+    // longer and the pockets moved with the stream. The four cells this pin
+    // used to hold are its first four, unchanged, with 263,263 appended.
+    // Before R2: "258,261;259,259;261,260;262,262;|1>258,257;2>260,262;|".
+    char const* const PD_CHAIN_PIN = "258,261;259,259;261,260;262,262;263,263;|2>260,262;3>261,263;||";
 
     // A SECOND chain, because the pin above ends in an empty loop field: seed
     // 12345 draws no loop room at the default DetourChance, so it pins the
@@ -4430,7 +5378,13 @@ namespace
     // Captured the same way: by RUNNING `pdblock --batch` and reading the
     // "the loop chain moved" message, never by reasoning about the value.
     char const* const PD_CHAIN_PIN_LOOP =
-        "263,259;259,259;258,257;260,256;|2>257,258;1>260,260;|1>261,258;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE. Same shape as the pin above:
+    // the first four chain cells are unchanged, 263,256 is appended, and the
+    // LOOP ROOM did not move at all (1>261,258) - the per-segment detour
+    // Chance draws land before the first chain step, so a longer chain cannot
+    // reach them. Before R2:
+    // "263,259;259,259;258,257;260,256;|2>257,258;1>260,260;|1>261,258;".
+        "263,259;259,259;258,257;260,256;263,256;|2>256,257;3>262,257;|1>261,258;|";
 
     std::string ChainPinString(BlockPlan const& plan)
     {
@@ -4438,10 +5392,15 @@ namespace
         std::vector<PlacedBlock const*> chain(static_cast<size_t>(len), nullptr);
         std::vector<PlacedBlock const*> pockets;
         std::vector<PlacedBlock const*> loops;
+        std::vector<PlacedBlock const*> events;
         for (PlacedBlock const& b : plan.blocks)
         {
             if (b.chainIndex >= 0) chain[static_cast<size_t>(b.chainIndex)] = &b;
-            if (b.branchOf >= 0) pockets.push_back(&b);
+            // Round E / WP5: an event pocket carries branchOf like a pocket,
+            // so it has to be split off here or it would appear in the pocket
+            // field and read as a pocket that moved.
+            if (b.isEvent) events.push_back(&b);
+            else if (b.branchOf >= 0) pockets.push_back(&b);
             if (b.detourOf >= 0) loops.push_back(&b);
         }
         std::string got;
@@ -4461,6 +5420,12 @@ namespace
         for (PlacedBlock const* l : loops)
         {
             std::snprintf(buf, sizeof(buf), "%d>%d,%d;", l->detourOf, l->bx, l->by);
+            got += buf;
+        }
+        got += '|';
+        for (PlacedBlock const* e : events)
+        {
+            std::snprintf(buf, sizeof(buf), "%d>%d,%d;", e->branchOf, e->bx, e->by);
             got += buf;
         }
         return got;
@@ -4510,7 +5475,8 @@ namespace
     // coin fell. Format: `bx,by,segment;` per spot, in segment order.
     // Captured by RUNNING `pdblock --batch` and reading the "the ambush plan
     // moved" message, never by reasoning about the value.
-    char const* const PD_AMBUSH_PLAN_PIN = "262,261,1;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE (before R2: "262,261,1;").
+    char const* const PD_AMBUSH_PLAN_PIN = "258,260,1;";
 
     // The shipped default of V2.Ambush.Chance. Mirrored here rather than
     // exported from the generator on purpose: the chance is an operator key
@@ -5393,7 +6359,10 @@ namespace
     // draw answered "29620,84289,25352,84289;" on this very config - 84289
     // Lord Maltrion in boss slots 1 AND 3 - which is the failure this rule
     // was written against, measured rather than argued.
-    char const* const PD_BOSS_NOREPEAT_PIN = "29620,84289,84290,25352;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE: the layout under the draw
+    // has one room more, so the stream this reads moved with it (before R2:
+    // "29620,84289,84290,25352;").
+    char const* const PD_BOSS_NOREPEAT_PIN = "29620,84289,25352,84288;";
 
     bool CheckBossNoRepeatPinned(std::string& why)
     {
@@ -5484,7 +6453,8 @@ namespace
     // "0,0,0;" was in the literal until the batch printed the real string.
     // All THREE boss rooms drew 84289 - a repeat is not a failure here, it is
     // the branch, and a pin that forbade one would forbid the contract.
-    char const* const PD_BOSS_FALLBACK_PIN = "84289,84289,84289;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE (before R2: "84289,84289,84289;").
+    char const* const PD_BOSS_FALLBACK_PIN = "84289,84289,84288;";
 
     bool CheckBossFallbackPinned(std::string& why)
     {
@@ -5562,7 +6532,11 @@ namespace
     //
     //     cfg.rooms       = GameClampRooms(<the player's choice>, dlvl)
     //     cfg.bossRooms   = GameBossRooms(dlvl)
-    //     cfg.fieldBlocks = min(V2.FieldBlocks, GameFieldBlocksForRooms(rooms + bossRooms))
+    //     cfg.fieldBlocks = min(V2.FieldBlocks,
+    //                           GameFieldBlocksForRooms(rooms + bossRooms + 1))
+    //
+    // The trailing + 1 is the entrance, which the slider stopped counting in
+    // Round E / R2; the row loop below repeats the term for the same reason.
     //
     // Every row must generate on every seed, validate, and fit the manifest
     // budget. `retries` is printed per row because it, not the failure count,
@@ -5586,8 +6560,12 @@ namespace
                 {
                     continue;               // the clamp folded two choices onto one row
                 }
+                // + 1 for the entrance, exactly as PDv2Mgr::GeneratePlan sizes
+                // it (Round E / R2): the field has to seat every cell the plan
+                // claims, and since the slider counts ordinary rooms the
+                // entrance is one more cell than the dial names.
                 int const field = std::min(confFieldBlocks,
-                                           GameFieldBlocksForRooms(rooms + boss));
+                                           GameFieldBlocksForRooms(rooms + boss + 1));
                 int failures = 0;
                 int retries = 0;
                 size_t maxManifest = 0;
@@ -5949,9 +6927,15 @@ namespace
     // `blocks,rooms,boss;bytes;E;crc;`. The first three are the numbers the
     // worldserver printed for this run (Server_2026-09-08_09_49_57.log:952 -
     // "spawned 76 creature(s) in 16 room(s) (2 boss) from a 49-block plan");
-    // `rooms` is counted the way SpawnFromPlan counts it into _run.roomsTotal
-    // (PDv2InstanceScript.cpp:1034-1045, :1099): every block with a roomId
-    // EXCEPT the entrance, loop rooms included.
+    // `rooms` is a BLOCK CENSUS: every block with a roomId except the
+    // entrance, loop rooms and boss halls included. It used to be the same
+    // number SpawnFromPlan writes into _run.roomsTotal, and since Round E / R2
+    // it is not - roomsTotal counts ORDINARY rooms, which for this layout is
+    // 15 (13 on the dial plus its two loop rooms) against the 17 pinned here.
+    // The census is what this pin wants: it is a fingerprint of the placed
+    // layout beside the manifest bytes, not a restatement of a gameplay
+    // counter, and dropping the halls out of it would make it blind to a boss
+    // hall that turned into an ordinary room.
     //
     // The manifest byte count and CRC trailer are the same instrument
     // RunLayoutFreezeCheck uses, added here for the reason that check exists
@@ -5964,7 +6948,15 @@ namespace
     // + trailer is a byte identity for the placed layout. seq 1, matching
     // RunLayoutFreezeCheck; the seq goes into the head line, so it is part of
     // the CRC. Captured by RUNNING.
-    char const* const PD_OPERATOR_PLAN_PIN = "49,16,2;1081;E;2ae1a357;";
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE. The account's 13-room dial now
+    // builds 13 ORDINARY rooms rather than 12, so `rooms` here goes 16 -> 17
+    // while the re-routed spine needs six blocks fewer (49 -> 43) and the
+    // manifest shrinks with them (1081 -> 955 B). Measured against a
+    // HEAD-of-branch build with this cfg at rooms = 14: it emits
+    // 43,17,2;955;E;8d03ef7c; too, which is the whole claim of R2 in one
+    // line. The stored layout rerolls once on entry (PD_LAYOUT_VERSION 4),
+    // exactly as v2 and v3 did. Before R2: "49,16,2;1081;E;2ae1a357;".
+    char const* const PD_OPERATOR_PLAN_PIN = "43,17,2;955;E;8d03ef7c;";
 
     // `i:waypoints:cells:cost:offsetSum;` per CORRIDOR of the chain - the
     // merged waypoint count, the raw cell count, the PatrolCost total and the
@@ -6016,14 +7008,33 @@ namespace
     // i.e. fourteen legs where one straight line used to cut across every jog
     // the kit measured. Corridor 3 did not move at all - a passage whose clear
     // points really are collinear still merges to its two ends.
+    // BOTH strings re-captured for Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE.
+    // The chain grew by one room, so the beat list grew by one CORRIDOR:
+    // twelve entries became thirteen. The layered one was measured by running
+    // the harness against the staged kit; the no-layer one by running a
+    // throwaway build of this same file with the kit's patrol layers dropped
+    // after load, which is the only way to reach that branch on a box whose
+    // staging carries them (the clearance histogram it shares that branch with
+    // - PD_PATROL_CLEAR_PIN_NOLAYER - is a property of the KIT and did not
+    // move, which is what says the measurement was sound).
+    //
+    // Before R2, the twelve-corridor pins:
+    //   no layer: 1:2:24:610:0;2:2:8:210:0;3:2:8:210:0;4:2:8:170:0;
+    //             5:3:16:460:0;6:3:15:390:0;7:2:24:570:0;8:2:8:170:0;
+    //             9:2:16:410:0;10:2:16:410:0;11:2:16:370:0;12:3:14:400:0;
+    //   layered:  1:10:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:6:8:250:62;
+    //             5:6:16:1458:278;6:8:15:950:142;7:15:24:1282:296;8:6:8:250:62;
+    //             9:7:16:1082:204;10:5:16:1154:204;11:10:16:482:124;
+    //             12:6:14:1368:214;
     char const* const PD_OPERATOR_PATROL_PIN_NOLAYER =
-        "1:2:24:610:0;2:2:8:210:0;3:2:8:210:0;4:2:8:170:0;5:3:16:460:0;"
-        "6:3:15:390:0;7:2:24:570:0;8:2:8:170:0;9:2:16:410:0;10:2:16:410:0;"
-        "11:2:16:370:0;12:3:14:400:0;";
+        "1:2:24:610:0;2:2:8:210:0;3:2:8:170:0;4:2:8:210:0;5:3:16:460:0;"
+        "6:3:16:420:0;7:3:7:190:0;8:3:9:270:0;9:3:8:220:0;10:3:9:270:0;"
+        "11:2:8:210:0;12:2:24:650:0;13:3:8:220:0;";
     char const* const PD_OPERATOR_PATROL_PIN =
-        "1:10:24:1778:396;2:4:10:1002:190;3:2:8:754:152;4:6:8:250:62;"
-        "5:6:16:1458:278;6:8:15:950:142;7:15:24:1282:296;8:6:8:250:62;"
-        "9:7:16:1082:204;10:5:16:1154:204;11:10:16:482:124;12:6:14:1368:214;";
+        "1:10:24:1778:396;2:4:10:1002:190;3:5:8:242:52;4:4:10:962:190;"
+        "5:6:16:1458:278;6:9:16:1004:168;7:5:7:550:90;8:7:9:622:116;"
+        "9:6:8:604:116;10:7:9:622:116;11:2:8:754:152;12:19:28:1598:396;"
+        "13:5:8:324:70;";
 
     // PD_PATROL_CLEAR_PIN: the distribution of `patrolClear` over every
     // WALKABLE cell of every chunk of the staged kit, 16 buckets, printed as
@@ -6037,8 +7048,14 @@ namespace
     // is the actual spread of the city theme's passages. Both captured by
     // RUNNING, the layered one over the kit v26 SQL script 48 generated for
     // this round.
+    // kit t1b-v39 / kitVersion 27 (Round E K1: the alt-1 room's facade reserve)
+    // re-captured the LAYERED string: K1's pad-slot reserve put a fifth house on
+    // each wall of the alt-1 room, and a facade is what a patrol lane is measured
+    // against, so 8 cells of chunks 13001-13014 changed clearance. The walk masks
+    // did NOT move (8410 walkable cells both sides), which is why the no-layer
+    // string - a property of the masks alone - is untouched.
     char const* const PD_PATROL_CLEAR_PIN_NOLAYER = "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:8410:;";
-    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:350:75:632:61:6955:;";
+    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:353:73:635:59:6953:;";
 
     // The histogram itself, over g_masks and g_patrol rather than over a built
     // grid: this is a statement about the KIT, and a grid only ever holds the
@@ -6166,8 +7183,10 @@ namespace
     // no ambush and why the trigger geometry was never actually exercised. At
     // chance 100 the same layout offers two corridors, so the candidate lists
     // are populated and only the coin was in the way. Captured by RUNNING.
+    // Round E / R2 (spec D13, 2026-09-10): re-captured because the room budget gained the ENTRANCE (before R2:
+    // "chance50:0;chance100:259,259,1;257,258,2;").
     char const* const PD_OPERATOR_AMBUSH_PIN =
-        "chance50:0;chance100:259,259,1;257,258,2;";
+        "chance50:0;chance100:259,259,1;261,256,2;";
 
     // Why Task 4 replaces the 9 yd disc, in one table (research
     // c-research-ambush-trigger.md, "Per-kind lane geometry"; measured over the
@@ -6646,11 +7665,25 @@ namespace
 
         RunLinkStateChecks();
         RunGameMathChecks();
+        // Round E / WP9, beside the class table it shares a filter with: both
+        // are pure functions of a couple of integers and neither needs a seed.
+        RunFitsProfileChecks();
         // Once, not per seed, and before anything that needs a layout: the
         // block derivation is a property of PDv2WorldMath.h alone, and it is
         // what Round C / C2's ambush trigger stands on.
         RunBlockDerivationChecks();
         RunChainMathChecks();
+        // Round E / R2. 200 seeds per (rooms, bossRooms) pair regardless of
+        // --batch n: the counts are STRUCTURAL and hold per seed, so this is a
+        // fixed sweep of the draw space rather than a sample whose size means
+        // anything.
+        RunOrdinaryRoomCountChecks(200);
+        // Round E / WP5, and 300 seeds per (rooms, bossRooms) pair regardless
+        // of --batch n for the same reason as the sweep above: the event
+        // rules are structural. The drop RATE is the one statistical number
+        // in it, which is why the sweep is fixed - a rate measured on a
+        // sample whose size moved with the flag would mean nothing.
+        RunEventPocketChecks(300);
         RunLayoutFreezeCheck();
         RunTypedAnchorChecks();
         // Outside the mask guard on purpose: the corner cases are hand-built
@@ -6811,6 +7844,19 @@ namespace
             Check(cityCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
         }
 
+        // Round E / WP5, on the same sample: the cap has to hold with an
+        // event pocket in every boss segment as well, or turning the conf up
+        // in Task 2 would silently take a room off the top of the slider.
+        // Theme 2 again - widest ids, so the worst manifest.
+        {
+            int const eventCap = MeasureRoomCap(count / 5 + 1, false, 2, 100);
+            char msg[180];
+            std::snprintf(msg, sizeof(msg),
+                          "theme-2 room cap with event pockets at 100%% is %d, below the "
+                          "encoded %d", eventCap, PD_GAME_ROOMS_CAP_MEASURED);
+            Check(eventCap >= PD_GAME_ROOMS_CAP_MEASURED, msg, 0);
+        }
+
         // The encoded room cap is a MEASUREMENT, so it has to be re-measured or
         // it rots: a generator change that makes packing harder would otherwise
         // only surface as accounts whose dungeon stopped generating.
@@ -6882,15 +7928,29 @@ namespace
             // drops rooms would make dlvl meaningless. Loop rooms are the one
             // legitimate extra: B0b adds them ON TOP of the budget, so a layout
             // whose segment drew one has exactly one room more.
+            //
+            // Round E / R2: `rooms` is the ORDINARY count, so the budget is
+            // that plus the boss rooms plus the entrance. Written out of
+            // cfg.bossRooms rather than as a literal, so the expression says
+            // which room each summand is.
+            //
+            // Round E / WP5 event pockets are additional in the same sense
+            // and appear on the same side of the equation. The batch runs at
+            // eventChancePct 0, so the term is 0 here - it is in the sum so
+            // that a planner seating events at 0 % fails THIS check with a
+            // readable count instead of failing the manifest pins with a byte
+            // difference.
             int rooms_found = 0;
             int loopsHere = 0;
+            int eventsHere = 0;
             for (PlacedBlock const& b : plan.blocks)
             {
                 if (b.roomId >= 0) ++rooms_found;
                 if (b.detourOf >= 0) ++loopsHere;
+                if (b.isEvent) ++eventsHere;
             }
-            Check(rooms_found == rooms + 1 + loopsHere,
-                  "room count does not match the config plus the loop rooms", seed);
+            Check(rooms_found == rooms + cfg.bossRooms + 1 + loopsHere + eventsHere,
+                  "room count does not match the config plus the loop and event rooms", seed);
 
             // Entrance and boss must be distinct blocks.
             Check(plan.entranceIndex != plan.bossIndex, "entrance and boss are the same block", seed);
@@ -6960,7 +8020,9 @@ namespace
             int pocketsHere = 0;
             for (PlacedBlock const& b : plan.blocks)
             {
-                if (b.branchOf >= 0) ++pocketsHere;
+                // Ordinary pockets only: an event pocket carries branchOf but
+                // is not part of the pocket budget the summary reports.
+                if (b.branchOf >= 0 && !b.isEvent) ++pocketsHere;
             }
             loopRoomsSeen += loopsHere;
             segmentsSeen += std::max(1, cfg.bossRooms);
@@ -7023,8 +8085,11 @@ int main(int argc, char** argv)
         int const oby = (argc >= 7) ? std::atoi(argv[6]) : 32 * 8;
         int const theme = (argc >= 8) ? std::atoi(argv[7]) : 1;
         int const bossRooms = (argc >= 9) ? std::atoi(argv[8]) : 1;
+        // Round E / WP5: the last optional argument, so every existing
+        // invocation keeps its meaning and its bytes.
+        int const eventChancePct = (argc >= 10) ? std::atoi(argv[9]) : 0;
         WriteManifest(static_cast<uint32_t>(std::strtoul(argv[2], nullptr, 10)),
-                      rooms, argv[3], obx, oby, theme, bossRooms);
+                      rooms, argv[3], obx, oby, theme, bossRooms, eventChancePct);
         return 0;
     }
 
@@ -7037,6 +8102,9 @@ int main(int argc, char** argv)
 
     uint32_t const seed = (argc >= 2) ? static_cast<uint32_t>(std::strtoul(argv[1], nullptr, 10)) : 12345u;
     int const rooms = (argc >= 3) ? std::atoi(argv[2]) : 5;
-    PrintOne(seed, rooms);
+    // Round E / WP5: the last optional argument again, so `pdblock <seed>
+    // [rooms]` keeps printing exactly what it printed before.
+    int const eventChancePct = (argc >= 4) ? std::atoi(argv[3]) : 0;
+    PrintOne(seed, rooms, eventChancePct);
     return 0;
 }

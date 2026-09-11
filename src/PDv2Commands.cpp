@@ -20,10 +20,12 @@
 #include "PDClientLink.h"
 #include "PDDefines.h"
 #include "PDv2InstanceScript.h"
+#include "PDv2LootMgr.h"
 #include "PDv2Mgr.h"
 #include "PDv2PackMgr.h"
 #include "PDv2UILink.h"
 #include "Player.h"
+#include "RBAC.h"
 #include "ScriptMgr.h"
 #include "generator/PDBlockPlan.h"
 
@@ -54,7 +56,19 @@ public:
             { "info",   HandleV2InfoCommand,   SEC_GAMEMASTER, Console::No  },
             // Console::No like its two in-game siblings: the answer is about
             // the dungeon the CALLER stands in, and a console has no instance.
-            { "patrol", HandleV2PatrolCommand, SEC_GAMEMASTER, Console::No  }
+            { "patrol", HandleV2PatrolCommand, SEC_GAMEMASTER, Console::No  },
+            // Round E / R1. An RBAC PERMISSION id where its four siblings
+            // carry a SEC_* LEVEL, which is legal and deliberate rather than a
+            // copy slip: the core reads this field as a permission id when it
+            // is >= rbac::RBAC_PERM_COMMAND_RBAC (200) and as a security level
+            // below that (ChatCommand.cpp, IsInvokerVisible). MODIFY is the
+            // right gate for a command whose whole job is to set a value by
+            // hand, and it reaches a GM anyway - the default GM role links it.
+            //
+            // Console::No because the cap it sets belongs to the INVOKING
+            // account, and a console has none.
+            { "cap",    HandleV2CapCommand,
+              rbac::RBAC_PERM_COMMAND_MODIFY, Console::No  }
         };
         static ChatCommandTable pdungeonTable =
         {
@@ -263,6 +277,79 @@ private:
         return true;
     }
 
+    // Round E / R1 (spec D15). Sets the INVOKING account's difficulty cap.
+    //
+    // A TEST TOOL, and the only writer in the module that may LOWER a cap.
+    // Gameplay raises it exactly one way - finishing a run, through
+    // PDv2Mgr::RaiseDiffCap, which is a ratchet - so testing the bound the
+    // ratchet creates ("does the slider really stop at 30?", "does a capped
+    // account still get re-clamped?") needs a door that turns both ways. That
+    // door is GM-only and must never be wired to anything a player can reach.
+    //
+    // The account is the CALLER's, not a named one: a cap is per account, and
+    // a `.pdungeon v2 cap 30 <someone else>` would need a target resolver, an
+    // online check and a push to a session this handler does not have. The
+    // caller can log in as the account they want to test.
+    static bool HandleV2CapCommand(ChatHandler* handler, Optional<uint32> capArg)
+    {
+        if (!RequireEnabled(handler))
+        {
+            return true;
+        }
+
+        uint32 const accountId = AccountOf(handler);
+        if (!accountId)
+        {
+            handler->SendSysMessage("pdungeon v2: no account behind this command.");
+            return true;
+        }
+
+        // The usage line doubles as the help string, and it says "test tool"
+        // out loud on purpose: a GM who reads only this line still learns that
+        // the number they are about to type is not something a player earned.
+        if (!capArg)
+        {
+            PDv2AccountState const account = sPDv2Mgr->GetAccountState(accountId);
+            handler->PSendSysMessage("pdungeon v2: cap now {} (dial {}).",
+                                     account.diffCap, account.cfgDifficulty);
+            handler->PSendSysMessage("Usage: .pdungeon v2 cap <{}-{}> - TEST TOOL: sets this "
+                                     "account's difficulty cap by hand and MAY LOWER it. "
+                                     "Play raises it only by finishing runs.",
+                                     PD_GAME_DIFF_MIN, PD_GAME_DIFF_MAX);
+            return true;
+        }
+
+        // Clamped, not refused: 0 and 500 are both a GM saying "floor" and
+        // "ceiling", and GameClampDiff is the same clamp every other door into
+        // this dial goes through.
+        int const cap = sPDv2Mgr->SetDiffCap(accountId, static_cast<int>(*capArg));
+
+        // The echo IS half the command: `c.diffMax` bounds the panel's slider,
+        // so without a fresh C payload the GM sets a cap and watches a slider
+        // that still stops where it used to. Harmless when the panel was never
+        // opened - SendCfg addresses a client that simply ignores it.
+        if (Player* player = handler->GetPlayer())
+        {
+            sPDv2UILink->SendCfg(player);
+        }
+
+        PDv2AccountState const account = sPDv2Mgr->GetAccountState(accountId);
+        handler->PSendSysMessage("pdungeon v2: cap now {} (dial {}).",
+                                 cap, account.cfgDifficulty);
+        // Said only when it is true, and it is the one surprise this command
+        // has: the dial is NOT retuned here. It is re-clamped the next time it
+        // is written (SetAccountCfg, i.e. the panel's next change) or read
+        // from the row (LoadAccountState), and a run already spawned keeps the
+        // difficulty it froze either way.
+        if (account.cfgDifficulty > cap)
+        {
+            handler->PSendSysMessage("pdungeon v2: the dial is still {} - it is re-clamped to "
+                                     "the cap on the next settings change or reload.",
+                                     account.cfgDifficulty);
+        }
+        return true;
+    }
+
     static bool HandleV2InfoCommand(ChatHandler* handler)
     {
         PDv2Config const& cfg = sPDv2Mgr->GetConfig();
@@ -316,12 +403,34 @@ private:
         handler->PSendSysMessage("  {} decor rule(s), {} critter rule(s) loaded",
                                  uint32(sPDv2Mgr->DecorRules().size()),
                                  uint32(sPDv2Mgr->CritterRules().size()));
+        // Round E / L1, and the same failure class a fourth time: a pool at 0
+        // means mod_pdungeon_loot_pools.sql never landed, and the run's
+        // chests, bosses and final cache pay nothing at all - which looks
+        // like bad luck in play and like nothing whatsoever in the log.
+        handler->PSendSysMessage("loot: {}", sPDv2LootMgr->Describe());
         handler->PSendSysMessage("pdungeon v2: {}",
                                  sPDClientLink->DebugLine(AccountOf(handler)));
         // The panel's side of the same conversation: whether this account's
         // client has ever opened the UI, and what it last asked to change.
         handler->PSendSysMessage("pdungeon v2: {}",
                                  sPDv2UILink->DebugLine(AccountOf(handler)));
+
+        // Round E / R1. The caller's own progression, and the reason it is
+        // ABOVE the plan section: everything below returns early when the
+        // account has no stored layout, and the cap is exactly what an
+        // operator wants to read after `.pdungeon v2 cap` - a run that has not
+        // been generated yet is no reason to hide it. `dial` and `cap`
+        // together, because the pair is the whole rule: the dial is what the
+        // next run is played at, the cap is the highest the dial may be set
+        // to, and a dial ABOVE the cap is the one state worth seeing (a
+        // hand-set cap, re-clamped on the next write - see `.pdungeon v2 cap`).
+        // The unlock keys are printed beside them so the effect of the next
+        // clear can be read off this one line.
+        PDv2AccountState const account = sPDv2Mgr->GetAccountState(AccountOf(handler));
+        handler->PSendSysMessage("pdungeon v2: dlvl {} | dial {} | cap {} | "
+                                 "unlock +{} clean / +{} after a death",
+                                 account.dlvl, account.cfgDifficulty, account.diffCap,
+                                 cfg.capCleanUnlock, cfg.capDeathUnlock);
 
         auto const plan = sPDv2Mgr->GetPlan(AccountOf(handler));
         if (!plan)

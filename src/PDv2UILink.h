@@ -178,8 +178,11 @@ namespace PDungeon
         // how a resend is forced.
         //
         // The COUNT alone would not be enough, and the corner is real: the
-        // count is _run.roomsCleared, which only counts rooms emptied BY
+        // count is _run.roomsEmptied, which only counts rooms emptied BY
         // KILLS, while the K payload also carries rooms that spawned nothing.
+        // (roomsEmptied, not the HUD's roomsCleared: since Round E / R2 that
+        // one leaves the boss halls to bossKilled/bossTotal, while the K set
+        // paints them - so keying on it would leave a finished hall grey.)
         // A rebuild resets the count to 0, so a player whose record was
         // already 0 - told before the first room fell - would keep the
         // previous layout's green blocks until the next kill. The generation

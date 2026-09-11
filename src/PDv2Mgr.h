@@ -159,6 +159,21 @@ namespace PDungeon
         // arms it on a dungeon that is already being walked.
         bool        patrolDebug = false;
 
+        // Round E / R3 (2026-09-10). The module-wide diagnostics switch, and
+        // the only reason anything in PDv2 speaks per creature, per tick or
+        // per client verb. OFF by default and expected to stay off everywhere
+        // but a run somebody is actively watching: every line behind it is one
+        // a five-room dungeon prints dozens of times, and none of them is a
+        // fault - a fault names itself at WARN or ERROR and is never gated.
+        //
+        // Deliberately NOT the same key as patrolDebug above. That one arms
+        // the patrol AI's per-leg trace, which is a different hunt at a
+        // different volume: an operator chasing a spawn, a death or a client
+        // verb should not have to read a corridor's movement informs to get
+        // there. Read live like every other V2 knob, on the line that would
+        // log, so `.reload config` both arms and disarms it mid-run.
+        bool        debug = false;
+
         // B5. Chance per boss segment that one of its corridors is armed, how
         // many mobs the trap spawns, and the stun it opens with (0 = no stun).
         // The chance is read live and is not a layout input - BuildAmbushPlan
@@ -168,6 +183,174 @@ namespace PDungeon
         int         ambushChancePct = 50;
         int         ambushMobs = 4;
         uint32_t    ambushStunSpell = 20170;
+
+        // Round E / WP5 (2026-09-10). The event room: a dead-end pocket off
+        // the spine with a host who asks to be defended, one per boss segment
+        // at most.
+        //
+        // ChancePct is a LAYOUT input, and the only one of the five that is:
+        // the generator draws the pocket, so this value is read when a plan is
+        // GENERATED, stored with it as pdungeon_account.gen_event_pct and read
+        // back on login to rebuild the same dungeon. A `.reload config`
+        // therefore reaches the NEXT generated dungeon and leaves every stored
+        // one alone. Clamped 0..100 for two reasons at once: it is a percent,
+        // and the column is TINYINT UNSIGNED - a typo above it would make
+        // SavePlanToDB fail under strict sql_mode and lose the layout that was
+        // just generated (the gen_branches lesson, LoadConfig says it again).
+        int         eventChancePct = 25;
+
+        // The other four are engine-side and read LIVE, like the ambush trio
+        // above: how long one defence runs, how often it sends the next
+        // attacker, how much of a wave is casters (far below the account's own
+        // ratio on purpose - the wave has to CLOSE on the host, not shoot him
+        // from the rim), and the Paragon XP a won defence pays. None of them
+        // is part of what a layout IS, so retuning them re-arms the next event
+        // instead of rerolling anybody's dungeon.
+        int         eventDurationSec = 60;
+        int         eventSpawnEverySec = 5;
+        int         eventCasterPct = 10;
+        uint32_t    eventParagonXp = 1000;
+
+        // Round E / L2-L4 (2026-09-10). The loot half of a run: five
+        // currencies, the room factor their chances are scaled by, the per-mob
+        // material band, how much gear each source pays, where the gear pools
+        // switch to ICC, and whether what drops fits the looter. All read live
+        // like every other V2 knob and cached nowhere else, so `.reload config`
+        // retunes the next kill and the next chest without disturbing the run
+        // that is being walked.
+
+        // The five currency item ids, tier 1..5. The conf is the ONLY place
+        // this module names them - no PD item id is written anywhere in the
+        // code - so an operator who regenerates mod_pdungeon_currency.sql at
+        // other entries needs no rebuild, and mod-forgotten-talents, which
+        // spends them, is pointed at the same five ids from its own keys.
+        uint32_t    lootCurrencyItem[5] = { 920105, 920106, 920107, 920108, 920109 };
+        // Base chance for one unit of that tier, before the room factor scales
+        // it. T1-T3 are rolled per tagged mob for every player on the map, T4
+        // and T5 once per looter when the final cache is opened - one array,
+        // because the roll is one formula and only its call site differs.
+        int         lootCurrencyChancePct[5] = { 100, 5, 1, 50, 10 };
+        // The run difficulty a tier needs before it drops at all. T1-T3 sit at
+        // 1, the bottom of the dial, which is the same as ungated and is why
+        // those three have no conf key; only the two cache tiers are gated, and
+        // those two gates are what makes a hard run worth setting up.
+        int         lootCurrencyMinDiff[5] = { 1, 1, 1, 50, 75 };
+        // The room factor (D8, GameRoomFactorX100): a run of lootRoomsBaseline
+        // ordinary rooms pays full price, a shorter one pays its share, and
+        // every room past the baseline adds lootRoomsBonusPctPerRoom percent.
+        // Without it the shortest dungeon would be the most profitable one per
+        // minute and nobody would ever build a long one again.
+        int         lootRoomsBaseline = 10;
+        int         lootRoomsBonusPctPerRoom = 1;
+        // Whether the mobs that were never in the layout - event waves, respawn
+        // copies - pay currency too. Off, because those mobs exist to be farmed
+        // in place and would turn the currency into a faucet. Materials they do
+        // always drop: mats are a crafting input, currency is progression.
+        bool        lootExtraMobsDropCurrency = false;
+
+        // Round E / WP8 (2026-09-10, operator finding 4). Whether a dungeon mob
+        // keeps the item half of its OWN creature_template loot table. Off,
+        // because the packs are drawn from stock entries - Shadowfang Keep,
+        // Scholomance, Ahn'kahet - and their tables are those dungeons' content,
+        // not this one's: what a PDv2 kill is worth is the currency, the
+        // materials and, on a room boss, the injected gear. The GOLD is kept
+        // whatever this key says; only the items are dropped.
+        bool        lootNativeItems = false;
+
+        // Materials, per tagged mob and per player. The chance is the whole
+        // gate (0 turns materials off); the count is urand(1, max), with the
+        // max running from 1 at dlvl 0 to lootMatsMaxPerMobAtCap at V2.DlvlCap,
+        // so account progression shows up in the bag and not only on the sheet.
+        int         lootMatsChancePct = 100;
+        int         lootMatsMaxPerMobAtCap = 5;
+
+        // Round E / WP10 (2026-09-11, operator: "die beim Mob-Kill geaddeten
+        // Mats gehen noch immer in den Bag und nicht in den Endless Storage.
+        // das soll automatisch passieren"). Whether a granted material is
+        // deposited straight into custom_endless_storage instead of the bags.
+        // On: a run pays five kinds of material per kill and 16 bag slots are
+        // gone by the third room, which is the whole reason the Endless
+        // Storage exists.
+        //
+        // NOT purely an operator switch: LoadConfig turns it off for the
+        // session when the table is not there, so a realm running PDv2 without
+        // mod-endless-storage degrades to bags rather than to a stream of
+        // failed INSERTs. The currency Remnants are excluded from it by entry
+        // whatever this key says - the talent tree counts them in the bags.
+        bool        lootMatsToStorage = true;
+
+        // Gear per source, before lootMult scales it (GameScaledCount rolls the
+        // fraction, so one item at x2.50 is two plus a coin flip). Three keys
+        // rather than one because the three sources are three different
+        // promises: a chest is a find, a boss is a fight, and the final cache
+        // is the run's payout.
+        int         lootChestItems = 1;
+        int         lootBossItems = 1;
+        int         lootFinalItems = 1;
+        // The account dlvl from which chests and the final cache draw from the
+        // ICC pools instead of the heroic-5 / raid ones. The run's difficulty
+        // dial deliberately does NOT move it: dlvl is the account's
+        // progression, and the item level of a reward should follow that rather
+        // than how hard one single run was set to.
+        int         lootIccDlvl = 10;
+        // Roll gear the looter's class can actually wear - armour type, weapon
+        // subclass, AllowableClass/AllowableRace. On, because a pure draw from
+        // a thousand items is mostly disenchant fodder; off is for an operator
+        // who wants the raw pool, and the filter falls back to the unfiltered
+        // pool anyway whenever it would leave nothing to roll.
+        bool        lootClassFilter = true;
+
+        // Round E / R1 (2026-09-10, spec D15). How far ONE completed run may
+        // push the account's difficulty cap: the cap becomes
+        // min(100, max(cap, runDifficulty + unlock)), and the unlock is the
+        // clean value when nobody died in the run and the death value when
+        // somebody did. Two keys rather than one factor because the whole
+        // point is the gap between them - dying still progresses the account,
+        // just more slowly, so a wipe-heavy clear is never a dead end.
+        //
+        // Measured against the run's OWN difficulty, never against the cap, so
+        // farming easy runs at a high cap cannot inch it upwards. Both are
+        // clamped into 0..100: 0 makes that outcome pay nothing (a legitimate
+        // way to say "deaths do not unlock anything"), and no unlock can be
+        // bigger than the whole dial.
+        int         capDeathUnlock = 3;
+        int         capCleanUnlock = 5;
+
+        // Round E / WP6 (2026-09-10, spec D7). The respawn echoes: an ordinary
+        // kill by a player who carries the Forgotten Talents "Restless Echoes"
+        // node rises again as that many tagged copies. The TALENT is the
+        // entitlement - a player who has not bought it gets nothing whatever
+        // these two say - and this pair is only the operator's brake on it.
+        //
+        // Enable is the kill switch: off makes the node inert without touching
+        // anyone's talent tree or refunding anything, which is what an
+        // operator needs the evening a farm turns out to be one. MaxCopies is
+        // the ceiling the node's own rank is capped against, clamped to 0..5:
+        // the node maxes at 2 today, so the default costs nothing, and a later
+        // rank - or a typo in the extension contract - cannot outgrow the
+        // server's opinion of how many echoes one corpse may owe. 0 is the
+        // softer switch of the two (the mechanic runs and pays nothing).
+        //
+        // Both read LIVE like every other engine-side V2 knob. Whether an echo
+        // pays currency as well as materials is NOT here: that is the D7 half
+        // V2.Loot.Currency.ExtraMobsDropCurrency already governs, for the event
+        // waves and the echoes together.
+        bool        respawnEnable = true;
+        uint32_t    respawnMaxCopies = 2;
+
+        // Round E / WP10 (2026-09-11). Where the C8 finale portal puts the
+        // player: the NAME of an acore_world.game_tele row, resolved at click
+        // time (PDExitObjects.cpp), never a set of coordinates typed into a
+        // conf. A destination is world data - it moves when the world moves -
+        // and the row is the one thing an operator already edits when a hub
+        // moves, so the portal follows `.tele <name>` for free.
+        //
+        // A std::string and not a resolved GameTele const*, because the store
+        // is loaded after this config is first read and `.reload config` must
+        // not be able to cache a stale pointer into it. The lookup costs one
+        // pass over the tele store per CLICK, which is a human pressing a
+        // portal at the end of a run.
+        std::string finaleTeleName = "flcapital";
     };
 
     // The 01 §7 gameplay half of a pdungeon_account row: progression, and the
@@ -186,12 +369,37 @@ namespace PDungeon
         // anywhere any more - see mod_pdungeon_account_difficulty.sql for why
         // the column survives its own retirement.
         int         cfgDifficulty = PD_GAME_DIFF_DEFAULT;
+        // Round E / R1 (spec D15): the ceiling cfgDifficulty may be set to.
+        // Per ACCOUNT and earned by finishing runs, which is why it lives here
+        // beside the knobs the player owns and not on the run - a run records
+        // the difficulty it was PLAYED at, and the cap only bounds the choice
+        // that started it.
+        //
+        // PD_GAME_DIFF_MIN rather than PD_GAME_DIFF_MAX: a state with no row
+        // behind it has to read as "capped at the floor". The dial was freely
+        // choosable from 2026-08-08 until Round E, so a default of 100 would
+        // silently hand that back to every account whose row is missing - and
+        // 1 is exactly what the column's own DEFAULT says a fresh account gets.
+        int         diffCap = PD_GAME_DIFF_MIN;
         int         cfgCasterPct = PD_GAME_CASTER_PCT_DEFAULT;
         // 76 rather than the column's default of 1: 76..80 is the only band v1's
         // imported pack stock actually covers, so a fresh account that never
         // touched the setting still gets real creatures instead of an empty
         // pool. A stored row is always taken at face value.
         int         cfgBandMin = PD_GAME_BAND_MAX;
+        // Round E / WP9 (cfg_stat_profile): which stat line the gear rolls
+        // prefer - Off / Strength / Agility / Caster. A uint8_t and not an int
+        // like its neighbours because it is a 0..3 wire value end to end (the
+        // C payload, the column, PDv2LootMgr::RollGear's argument), and a
+        // wider type would only invite a cast at each of those.
+        //
+        // The UNLOCK is not stored anywhere: it is the Forgotten Talents node
+        // Discerning Eye, read live off the character's auras
+        // (PD_TALENT_TAG_STATFILTER). A profile chosen and then refunded
+        // therefore stops biting the moment the aura goes, and starts again if
+        // the node is bought back - which is what a permission that lives on a
+        // talent tree should do. Everything below this line still reads Off.
+        uint8_t     cfgStatProfile = PD_STAT_PROFILE_OFF;
         std::string cfgPacks;
         bool        loaded = false;
     };
@@ -223,7 +431,24 @@ namespace PDungeon
     // V2.DetourChance (B0b: loop rooms; the forward-cut mechanism the key was
     // named for is withdrawn). Every stored layout rerolls once; dlvl/dxp
     // untouched, as before.
-    constexpr uint32_t PD_LAYOUT_VERSION = 3;
+    //
+    // v4 (2026-09-10, Round E / R2): the room slider counts ORDINARY rooms and
+    // the entrance is added on top (`total = max(2, rooms + bossRooms + 1)`),
+    // so a stored v3 seed at the same cfg_rooms now builds one room more and
+    // the whole chain draw shifts with it. Every stored layout rerolls once;
+    // dlvl/dxp untouched, as before.
+    //
+    // v5 (2026-09-10, Round E / WP5): event pockets are a layout input. The
+    // generator seats up to one dead-end event room per boss segment from
+    // V2.Event.ChancePct, and `gen_event_pct` joins the stored generation
+    // inputs beside gen_branches. A v4 row predates that column and carries
+    // its DEFAULT 0, so it regenerates once rather than for ever: a plan
+    // stored at 25 % that was generated with 0 % would silently miss its
+    // events, and nothing would say so - at 0 % the coin costs no draw, so the
+    // old seed still regenerates cleanly and not even the "should have been
+    // bumped" error path below would fire. Every stored layout rerolls once;
+    // dlvl/dxp untouched, as before.
+    constexpr uint32_t PD_LAYOUT_VERSION = 5;
 
     class PDv2Mgr
     {
@@ -279,6 +504,37 @@ namespace PDungeon
         // documents for the layout columns: settings must never clobber
         // progression, and a reroll must never clobber settings.
         void SaveAccountCfg(uint32_t accountId);
+
+        // Round E / R1 (spec D15). Raises the account's difficulty cap towards
+        // `wanted` and returns the cap now in force. `wanted` is clamped into
+        // [1, 100] and the cap NEVER moves down - a run finished at a low
+        // difficulty, a stale cached state or a second call with an older
+        // value all have to be no-ops, so the caller may pass whatever a run
+        // computed without checking it first.
+        //
+        // Writes `diff_cap` and nothing else, the fourth disjoint writer of
+        // this row beside SavePlanToDB (layout), SaveAccountCfg (cfg_*) and
+        // GrantRunReward (dlvl/dxp) - unlocking a difficulty must not speak
+        // for the player's settings, the stored layout or the progression.
+        int RaiseDiffCap(uint32_t accountId, int wanted);
+
+        // Round E / R1. The TEST door beside the ratchet: sets the cap to
+        // `wanted` (clamped into [1, 100]) in EITHER direction and returns it.
+        //
+        // Its own entry point rather than a `force` flag on RaiseDiffCap, so
+        // that the ratchet has no bypass parameter a future caller could pass
+        // by accident: every gameplay path calls RaiseDiffCap and cannot lower
+        // a cap even by mistake, and the only caller of this one is the
+        // GM-only `.pdungeon v2 cap`, which exists to test the bound the
+        // gameplay path can only ever open.
+        //
+        // Writes `diff_cap` and nothing else, exactly like RaiseDiffCap -
+        // including leaving cfgDifficulty alone. Lowering the cap under a dial
+        // already set above it does NOT retune the setting here; SetAccountCfg
+        // and LoadAccountState both re-clamp, so the dial is corrected the
+        // next time it is written or read from the row, and a run already
+        // spawned keeps the difficulty it froze.
+        int SetDiffCap(uint32_t accountId, int wanted);
 
         // Pays out a finished run: 01 §8 dxp (difficulty-independent by
         // design), recomputes dlvl, and persists dlvl/dxp only.
@@ -393,5 +649,25 @@ namespace PDungeon
 }
 
 #define sPDv2Mgr PDungeon::PDv2Mgr::instance()
+
+namespace PDungeon
+{
+    // Round E / R3. The module-wide diagnostics gate, asked ON the line that
+    // would log rather than cached anywhere: ProceduralDungeon.V2.Debug is
+    // read live in LoadConfig, so an operator who types `.reload config`
+    // mid-run starts and stops the evidence without a restart - which is the
+    // whole point, because what is wanted is one pull, one spawn or one client
+    // handshake and not the rest of the night.
+    //
+    // Mirrors PatrolDebug() in PDv2CreatureAI.cpp, which keeps its own key and
+    // its own thirteen sites for the patrol AI's per-leg trace.
+    //
+    // Below the class and below the macro because it dereferences the
+    // singleton; inline so a gated site costs a config read and a branch.
+    inline bool PDv2Debug()
+    {
+        return sPDv2Mgr->GetConfig().debug;
+    }
+}
 
 #endif

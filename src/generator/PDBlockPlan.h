@@ -107,20 +107,37 @@ namespace PDungeon
 
     // Round B chain arithmetic (spec 2026-09-02 §2), pure and draw-free so the
     // engine, the planner and the harness agree by construction.
-    //   total    = max(2, rooms + bossRooms)
+    //   total    = max(2, rooms + bossRooms + 1)
     //   pockets  = min(branches, total / 3, (total - 1 - N) / 2)   N = max(1, bossRooms)
     //   chainLen = total - pockets
     //   boss k   = round(k * (chainLen - 1) / N), k = 1..N
+    //
+    // Round E / R2 (spec D13): the "+ 1" is the ENTRANCE. `rooms` is the count
+    // of ORDINARY rooms the player was promised - the slider's own number - so
+    // the entrance and the boss halls are added on top of it rather than
+    // eating one of them. Before R2 the entrance was chain 0 of a `rooms +
+    // bossRooms` budget, which is why a 14-room dial built 13 ordinary rooms
+    // and the HUD (which skips the entrance) and the panel (which shows the
+    // dial) disagreed by exactly one.
     int PocketCountFor(int rooms, int bossRooms, int branches);
     int BossChainIndex(int chainLen, int bossRooms, int k);
 
     struct BlockCfg
     {
         uint32_t seed = 0;
-        int rooms = 3;              // ROOM blocks, before boss rooms are added
+        int rooms = 3;              // ordinary rooms; the entrance and the boss rooms come on top
         int bossRooms = 1;
         int fieldBlocks = 8;        // planning field is fieldBlocks square
         int detourChancePct = 33;   // Round B (B0b): chance per boss segment that a loop room hangs off the run
+        // Round E / WP5: chance per boss segment that an EVENT POCKET - a
+        // dead-end room the event host stands in - hangs off one of that
+        // segment's ordinary spine rooms. 0 is the default on purpose: every
+        // pin in tests/blockplan_harness.cpp and every layout stored before
+        // WP5 was captured without event pockets, and at 0 PDRandom::Chance
+        // draws NOTHING (PDRandom.h:58-68), so a plan built at 0 is
+        // byte-identical to a pre-WP5 one. The engine fills this from the
+        // conf in WP5 Task 2.
+        int eventChancePct = 0;
         int originBX = 256;         // global block coord of the field origin
         int originBY = 256;
         int theme = 1;
@@ -149,6 +166,16 @@ namespace PDungeon
         int chainIndex = -1;
         int branchOf = -1;
         int detourOf = -1;
+
+        // Round E / WP5. An EVENT POCKET is a pocket in every geometric
+        // respect - a dead-end Room hanging off an ordinary spine room, so it
+        // carries `branchOf` and nothing else - but it is NOT part of the
+        // pocket budget: it comes on top of it, at most one per boss segment,
+        // and the engine puts an event host in it instead of a trash pack.
+        // Read it as "which kind of hanger this is", never as geometry:
+        // SegmentOf, the barrier floods and the boss-cut rule all treat an
+        // event pocket exactly like a pocket, because it IS one.
+        bool isEvent = false;
     };
 
     struct BlockPlan
@@ -158,6 +185,12 @@ namespace PDungeon
         std::vector<PlacedBlock> blocks;
         int entranceIndex = -1;     // index into blocks
         int bossIndex = -1;
+        // Round E / WP5: boss segments whose event coin came up but that had
+        // no free host left to hang the pocket off. No retry and no backtrack
+        // - an event room is a bonus, never a reason to reject a layout - so
+        // this is the only trace such a segment leaves. The harness watches
+        // the rate; the engine ignores it.
+        int eventsDropped = 0;
 
         PlacedBlock const* At(int bx, int by) const;
     };
@@ -168,6 +201,22 @@ namespace PDungeon
     // segment, -1 for corridors.
     int ChainLength(BlockPlan const& plan);
     int SegmentOf(BlockPlan const& plan, PlacedBlock const& block);
+
+    // Round E / WP5: how many event pockets a plan carries (blocks with
+    // `isEvent`). Never more than the boss-room count - one per segment at
+    // most - which ValidateBlockPlan proves rather than assumes.
+    int EventPocketCount(BlockPlan const& plan);
+
+    // Mixed into the layout seed to open the EVENT stream the engine draws
+    // its waves from (WP5 Task 4). It lives here, beside the plan the events
+    // hang off, so a reader of the planner can see which streams a stored
+    // layout feeds; the layout draw itself does NOT use it - event pockets
+    // are geometry and come out of the layout stream inside GenerateBlockPlan.
+    // An arbitrary odd constant, distinct from PD_AMBUSH_SEED_MIX
+    // (PDv2AmbushPlan.h), PD_DECOR_SEED_MIX / PD_CRITTER_SEED_MIX
+    // (PDv2DecorPlan.h) and PD_PATROL_SEED_MIX (PDv2InstanceScript.cpp), and
+    // fixed for ever: changing it re-rolls every stored dungeon's events.
+    constexpr uint32_t PD_EVENT_SEED_MIX = 0xE7E27A5Du;
 
     // Round B / B3-B5: the corridor run behind socket `bit` of block `from`.
     // Walks corridor blocks, ignores chest stubs, continues straight through a

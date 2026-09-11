@@ -79,9 +79,11 @@ namespace PDungeon
 
     // Room floor. 01 §8's "3 + dlvl" is the CAP, not a floor - the floor was 3
     // until the first in-game test, when the operator asked for 1 (2026-08-07):
-    // a 1-room run is entrance + boss room, a legal boss-rush micro-dungeon
-    // (the planner scatters max(2, rooms + bossRooms) cells, so the layout
-    // never degenerates below two rooms).
+    // a 1-room run is entrance + one ordinary room + one boss room, a legal
+    // boss-rush micro-dungeon. Since Round E / R2 the planner scatters
+    // max(2, rooms + bossRooms + 1) cells - the + 1 is the entrance, which the
+    // slider stopped counting - and GameBossRooms never returns 0, so the
+    // smallest legal layout is three blocks and cannot degenerate below two.
     constexpr int PD_GAME_ROOMS_MIN = 1;
 
     // The "3" in 01 §8's cap formula "3 + dlvl" - deliberately its own
@@ -110,17 +112,23 @@ namespace PDungeon
     // (ONE ADT tile - multi-tile plans are untested client-side, so the field
     // is never widened to buy rooms). bossRooms per row is GameBossRooms at the
     // dlvl where that room count unlocks, i.e. what a player there would run.
-    // Measured 2026-09-02 (Round B chain generator), 3000 seeds per row:
+    // Re-measured 2026-09-10 (Round E / R2: `rooms` counts ORDINARY rooms, so
+    // every row seats one cell more than it used to - the entrance), 3000
+    // seeds per row, theme 1:
     //
     //   rooms  bossRooms  room cells  gen failures  max manifest B
-    //      12          1          13         0             913
-    //      13          2          15         0             971
-    //      14          2          16         0            1033
-    //      15          2          17         0            1071
+    //      12          1          14         0             931
+    //      13          2          16         0            1093
+    //      14          2          17         0            1133
+    //      15          2          18         0            1173
+    //
+    // Theme 2's wider chunk ids are the real ceiling and were measured in the
+    // same run: 1229 B at 15 rooms + 2 boss, 0 gen failures - 65 % of the
+    // 1900 B budget, so the cap stays 15 rather than dropping to 14.
     //
     // Both constraints are far from binding at 15, and the chain leaves MORE
     // manifest headroom than the MST it replaced (15 rooms measured 1406 B on
-    // 2026-08-07 and 1071 B now: one spine plus its pockets needs fewer
+    // 2026-08-07 and 1173 B now: one spine plus its pockets needs fewer
     // corridor blocks than a tree with loops and stubs did). A separate sweep
     // past the design cap (1000 seeds per row) puts the real edges at:
     //   * manifest size saturates around 1330 B - 70% of the 1900 B ceiling
@@ -134,8 +142,10 @@ namespace PDungeon
     //     2 -> 3 at the dlvl that would have wanted it), then collapses fast -
     //     432 of 1000 at 27 cells, and nothing generates at all at 32.
     //
-    // So 15 rooms + 2 boss rooms = 17 cells sits 9 cells below the first
-    // observed failure. If either the gap rule or the manifest format changes,
+    // So 15 rooms + 2 boss rooms + the entrance = 18 cells sits 8 cells below
+    // the first observed failure - the R2 entrance spent one of that margin,
+    // and the packing sweep is unaffected by WHERE the cell count comes from.
+    // If either the gap rule or the manifest format changes,
     // re-run `pdblock --roomcap 3000`; the batch re-measures this constant on
     // every run so it cannot rot silently.
     constexpr int PD_GAME_ROOMS_CAP_MEASURED = 15;
@@ -230,6 +240,122 @@ namespace PDungeon
                                        (PD_GAME_DIFF_MAX - PD_GAME_DIFF_MIN);
         int64_t const factor = 80 + GameClampCasterPct(casterPct) / 2;
         return static_cast<int>(base * factor / 100);
+    }
+
+    // Round E / D8 room factor, carried x100 like every other multiplier here.
+    // Every currency roll and every legacy-rare roll of a run is multiplied by
+    // it, so a one-room run pays a tenth of what a ten-room run pays and an
+    // eleven-room run pays 1 % more. The operator's reason IS the rule ("damit
+    // nicht einfach nur ein-raum-runs gespammt werden"): without it the
+    // shortest run is also the most profitable one per minute, and nobody
+    // would ever build a long dungeon again.
+    //
+    // `baseline` and `bonusPctPerRoom` are parameters and deliberately carry
+    // no default value: both are operator keys (V2.Loot.Currency.RoomsBaseline
+    // and .RoomsBonusPctPerRoom), and a default here would be a second copy of
+    // a conf-owned number - the same thing PDv2UILink.h forbids the panel.
+    //
+    // Below the baseline the factor is the plain share rooms/baseline; at and
+    // above it the run is "full" and only the bonus is left. rooms <= 0 is not
+    // a run at all and pays nothing, which is also what keeps the division
+    // safe: it is only reached with 0 < rooms < baseline, so the divisor is at
+    // least 2. No floor on the result - a negative bonusPctPerRoom is not a
+    // legal conf value, and GameChanceBp below clamps what it is fed anyway.
+    constexpr int GameRoomFactorX100(int rooms, int baseline,
+                                     int bonusPctPerRoom)
+    {
+        if (rooms <= 0)
+        {
+            return 0;
+        }
+        if (rooms < baseline)
+        {
+            return rooms * 100 / baseline;
+        }
+        return 100 + (rooms - baseline) * bonusPctPerRoom;
+    }
+
+    // Round E / D9 item count: "expected = Items x lootMult", split into the
+    // part that is certain and the part that is rolled for. floor(items x mult)
+    // items always drop; the fraction left over is the PERCENT chance of one
+    // more, so one item at lootMult 2.50 is two items plus a coin flip and
+    // pays 2.50 on average. Without it the difficulty dial does nothing at all
+    // for gear - chest 1 / boss 1 / final 1 would be the same three items at
+    // difficulty 1 and at difficulty 100.
+    //
+    // The roll is a PARAMETER and not a urand call. This header is engine-free
+    // by the rule at the top of the file, and a function that rolled its own
+    // dice could not be pinned by the harness; the engine passes urand(1, 100).
+    // A rollPct of 0 is what a caller that wants no gamble passes and takes
+    // the floor alone; anything else outside 1..100 does the same, because the
+    // fraction can never exceed 99.
+    //
+    // Plain int is enough for the product, unlike GameLootMultX100's: `items`
+    // is a per-source count in the low single digits and lootMultX100 tops out
+    // at 360, so reaching the int range would take some 5.9 million items.
+    constexpr int GameScaledCount(int items, int lootMultX100, int rollPct)
+    {
+        if (items <= 0 || lootMultX100 <= 0)
+        {
+            return 0;
+        }
+        int const total = items * lootMultX100;
+        int const whole = total / 100;
+        int const fracPct = total % 100;
+        return (rollPct >= 1 && rollPct <= fracPct) ? whole + 1 : whole;
+    }
+
+    // Round E / L3 material ceiling: 1 at dlvl 0 and maxAtCap at the dlvl cap,
+    // linear and integer-floored in between (with the shipped 5 per mob and a
+    // cap of 30: dlvl 0 -> 1, 8 -> 2, 15 -> 3, 23 -> 4, 30 -> 5). The engine
+    // then rolls urand(1, maxCount), so this is the TOP of the band and never
+    // the count itself.
+    //
+    // Clamped to [1, maxAtCap] at both ends. The floor comes free from the
+    // "1 +" and a non-negative dlvl; the ceiling is load-bearing, because dlvl
+    // is not itself capped anywhere on the way in and an account that somehow
+    // sits past the cap must not out-earn the cap.
+    constexpr int GameMatsMaxCount(int dlvl, int dlvlCap, int maxAtCap)
+    {
+        if (maxAtCap <= 1 || dlvlCap <= 0)
+        {
+            return 1;
+        }
+        int const d = dlvl > 0 ? dlvl : 0;
+        int const n = 1 + (maxAtCap - 1) * d / dlvlCap;
+        return n > maxAtCap ? maxAtCap : n;
+    }
+
+    // A whole chance, in basis points: 10000 = 100 %. The rolls are
+    // urand(1, 10000) - PDv2InstanceScript's bonus-mat roll already works this
+    // way - which is the resolution a 1 % chance needs once the room factor's
+    // two decimals are multiplied into it.
+    constexpr int PD_GAME_CHANCE_BP_MAX = 10000;
+
+    // Round E / L2 drop chance: a percent from the conf, times the D8 room
+    // factor, in basis points. Written as the spec states it - percent to
+    // basis points (x100), then the factor (x roomFactorX100 / 100) - rather
+    // than collapsed into one multiplication, because those are two separate
+    // decisions and whoever tunes one of them next should see which is which.
+    //
+    // Clamped at both ends: at 10000 because a certainty cannot be exceeded
+    // (T1 is already 100 % and any room factor above 1.00 would push it past
+    // the roll's range), and at 0 because a run with no rooms must pay nothing
+    // rather than feed a negative product to the roll.
+    //
+    // int64 intermediate for the same reason GameLootMultX100 uses one: a conf
+    // typo is the only realistic way to get a huge chancePct in here, and it
+    // has to clamp rather than wrap.
+    constexpr int GameChanceBp(int chancePct, int roomFactorX100)
+    {
+        if (chancePct <= 0 || roomFactorX100 <= 0)
+        {
+            return 0;
+        }
+        int64_t const bp =
+            static_cast<int64_t>(chancePct) * 100 * roomFactorX100 / 100;
+        return bp > PD_GAME_CHANCE_BP_MAX ? PD_GAME_CHANCE_BP_MAX
+                                          : static_cast<int>(bp);
     }
 
     // 01 §8 mob level band in steps of 5: clamp to [1, 76], snap DOWN onto the
@@ -347,7 +473,8 @@ namespace PDungeon
     // How large the planning field should be for a given room count.
     //
     // `rooms` is the TOTAL room count the planner will seat - cfg.rooms PLUS
-    // cfg.bossRooms - and not the player's room slider on its own. Every cell
+    // cfg.bossRooms PLUS the entrance (Round E / R2) - and not the player's
+    // room slider on its own. Every cell
     // the layout claims counts here: a boss room needs the same cell and the
     // same MIN_ROOM_GAP as any other room, so a field sized from the slider
     // alone is a field the plan provably does not fit in. That is not
@@ -389,6 +516,369 @@ namespace PDungeon
             ++side;
         }
         return side;
+    }
+
+    // --- Round E / D5: does an item fit a class? ---------------------------
+    //
+    // The pure half of the loot class filter. PDv2LootMgr::ItemFitsPlayer is
+    // the two-line wrapper that reads the ItemTemplate fields and adds the
+    // race mask; everything decidable from four integers lives here, so
+    // tests/blockplan_harness.cpp pins the whole table without a worldserver.
+    // A table this large is only safe to carry BECAUSE it is pinned.
+    //
+    // Why a table at all, when Player::CanUseItem exists: that function
+    // answers the EQUIP question (AllowableClass/Race, level, required skill
+    // and spell), and a mage may legally carry a plate helm - it simply may
+    // not wear it. D5 asks a different question, "is this a sensible reward
+    // for this looter", and the answer to that is a design decision, not a
+    // client rule.
+    //
+    // The STAT line used to be out of scope here - "a spell-power ring for a
+    // rogue still passes, because stat profile is explicitly NOT filtered" was
+    // the rule until Round E / WP9. It IS filtered now, by FitsProfileRaw
+    // below, and only because the player asked for it: the profile is a
+    // per-account setting that the Forgotten Talents node *Discerning Eye*
+    // unlocks, it reads Off for everybody who never bought that node, and a
+    // roll the profile empties drops the PROFILE before it drops the class
+    // (the two stages in PDv2LootMgr::RollGear). The old worry - that
+    // second-guessing itemisation is how a filter starts handing out nothing
+    // at all - is exactly what those two stages answer.
+    //
+    // The four numbers are exactly item_template.AllowableClass, .class,
+    // .subclass and the looter's class id. Every id below is a 3.3.5a
+    // ItemClass.dbc / ItemSubClass.dbc value, restated as a constant rather
+    // than included from SharedDefines.h, because this header is engine-free
+    // by the rule at the top of the file.
+
+    // The two item classes this filter has an opinion about.
+    constexpr uint8_t PD_ITEM_CLASS_WEAPON = 2;
+    constexpr uint8_t PD_ITEM_CLASS_ARMOR = 4;
+
+    // Armour subclasses. 0 is misc (rings, necks, cloaks, trinkets - anyone),
+    // 1..4 are the four armour types in ascending order, 5 is the deprecated
+    // buckler, 6 is the shield, and 7..10 are the four relic slots (libram,
+    // idol, totem, sigil), which AllowableClass gates on its own.
+    constexpr uint8_t PD_ITEM_SUBCLASS_ARMOR_CLOTH = 1;
+    constexpr uint8_t PD_ITEM_SUBCLASS_ARMOR_PLATE = 4;
+    constexpr uint8_t PD_ITEM_SUBCLASS_ARMOR_SHIELD = 6;
+
+    // The playable class ids. 10 exists in the enum and in no character.
+    constexpr uint8_t PD_CLASS_WARRIOR = 1;
+    constexpr uint8_t PD_CLASS_PALADIN = 2;
+    constexpr uint8_t PD_CLASS_HUNTER = 3;
+    constexpr uint8_t PD_CLASS_ROGUE = 4;
+    constexpr uint8_t PD_CLASS_PRIEST = 5;
+    constexpr uint8_t PD_CLASS_DEATH_KNIGHT = 6;
+    constexpr uint8_t PD_CLASS_SHAMAN = 7;
+    constexpr uint8_t PD_CLASS_MAGE = 8;
+    constexpr uint8_t PD_CLASS_WARLOCK = 9;
+    constexpr uint8_t PD_CLASS_DRUID = 11;
+    constexpr uint8_t PD_CLASS_MAX = 11;
+
+    // The armour types, as the INDEX the bonus rows' armor_pick adds to their
+    // base item (cloth 0, leather 1, mail 2, plate 3 - the order the four
+    // Mystery Box entries were created in). Subclass = index + 1, which is
+    // why the two are one table and not two.
+    constexpr uint8_t PD_ARMOUR_CLOTH = 0;
+    constexpr uint8_t PD_ARMOUR_LEATHER = 1;
+    constexpr uint8_t PD_ARMOUR_MAIL = 2;
+    constexpr uint8_t PD_ARMOUR_PLATE = 3;
+
+    // One bit per weapon subclass, so a class's whole weapon table is a
+    // single mask and the ten tables below read like the design doc. The
+    // gaps are real: 9, 11, 12, 14, 17 and 20 are obsolete, exotic, misc,
+    // spear and fishing pole - nothing in the loot pools, nobody's table.
+    constexpr uint32_t PD_W_AXE1 = 1u << 0;
+    constexpr uint32_t PD_W_AXE2 = 1u << 1;
+    constexpr uint32_t PD_W_BOW = 1u << 2;
+    constexpr uint32_t PD_W_GUN = 1u << 3;
+    constexpr uint32_t PD_W_MACE1 = 1u << 4;
+    constexpr uint32_t PD_W_MACE2 = 1u << 5;
+    constexpr uint32_t PD_W_POLEARM = 1u << 6;
+    constexpr uint32_t PD_W_SWORD1 = 1u << 7;
+    constexpr uint32_t PD_W_SWORD2 = 1u << 8;
+    constexpr uint32_t PD_W_STAFF = 1u << 10;
+    constexpr uint32_t PD_W_FIST = 1u << 13;
+    constexpr uint32_t PD_W_DAGGER = 1u << 15;
+    constexpr uint32_t PD_W_THROWN = 1u << 16;
+    constexpr uint32_t PD_W_CROSSBOW = 1u << 18;
+    constexpr uint32_t PD_W_WAND = 1u << 19;
+
+    // The ten class weapon tables, transcribed from spec D5. Ranged slots are
+    // in them (a hunter's bow, a warrior's thrown) because those are real
+    // rewards; a wand is a priest/mage/warlock item and nobody else's.
+    constexpr uint32_t PD_WEAPONS_WARRIOR =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_GUN | PD_W_MACE1 |
+        PD_W_MACE2 | PD_W_POLEARM | PD_W_SWORD1 | PD_W_SWORD2 | PD_W_STAFF |
+        PD_W_FIST | PD_W_DAGGER | PD_W_THROWN | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_PALADIN =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_MACE1 | PD_W_MACE2 | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2;
+    constexpr uint32_t PD_WEAPONS_HUNTER =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_GUN | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2 | PD_W_STAFF | PD_W_FIST | PD_W_DAGGER |
+        PD_W_THROWN | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_ROGUE =
+        PD_W_AXE1 | PD_W_BOW | PD_W_GUN | PD_W_MACE1 | PD_W_SWORD1 |
+        PD_W_FIST | PD_W_DAGGER | PD_W_THROWN | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_PRIEST =
+        PD_W_MACE1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_DEATH_KNIGHT =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_MACE1 | PD_W_MACE2 | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2;
+    constexpr uint32_t PD_WEAPONS_SHAMAN =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_MACE1 | PD_W_MACE2 | PD_W_STAFF |
+        PD_W_FIST | PD_W_DAGGER;
+    constexpr uint32_t PD_WEAPONS_MAGE =
+        PD_W_SWORD1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_WARLOCK =
+        PD_W_SWORD1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_DRUID =
+        PD_W_MACE1 | PD_W_MACE2 | PD_W_POLEARM | PD_W_STAFF | PD_W_FIST |
+        PD_W_DAGGER;
+
+    // Which armour type a class is rewarded in - the highest it wears at 80,
+    // which is also the index armor_pick adds. An id outside 1..11 (and the
+    // unused 10) answers cloth rather than refusing: this feeds an item id,
+    // and a bonus row must resolve to SOMETHING even for a class that cannot
+    // exist. FitsClassRaw below rejects such an id outright, so the two
+    // together never hand a nonexistent class a piece of gear.
+    constexpr uint8_t GameArmourIndexForClass(uint8_t classId)
+    {
+        constexpr uint8_t BY_CLASS[PD_CLASS_MAX + 1] =
+        {
+            PD_ARMOUR_CLOTH,        //  0 no class
+            PD_ARMOUR_PLATE,        //  1 warrior
+            PD_ARMOUR_PLATE,        //  2 paladin
+            PD_ARMOUR_MAIL,         //  3 hunter
+            PD_ARMOUR_LEATHER,      //  4 rogue
+            PD_ARMOUR_CLOTH,        //  5 priest
+            PD_ARMOUR_PLATE,        //  6 death knight
+            PD_ARMOUR_MAIL,         //  7 shaman
+            PD_ARMOUR_CLOTH,        //  8 mage
+            PD_ARMOUR_CLOTH,        //  9 warlock
+            PD_ARMOUR_CLOTH,        // 10 unused in 3.3.5a
+            PD_ARMOUR_LEATHER       // 11 druid
+        };
+        return classId <= PD_CLASS_MAX ? BY_CLASS[classId] : PD_ARMOUR_CLOTH;
+    }
+
+    // The class's weapon table. 0 for an id that is not a class, which makes
+    // every weapon fail for it rather than every weapon pass.
+    constexpr uint32_t GameWeaponMaskForClass(uint8_t classId)
+    {
+        constexpr uint32_t BY_CLASS[PD_CLASS_MAX + 1] =
+        {
+            0,                          //  0 no class
+            PD_WEAPONS_WARRIOR,         //  1
+            PD_WEAPONS_PALADIN,         //  2
+            PD_WEAPONS_HUNTER,          //  3
+            PD_WEAPONS_ROGUE,           //  4
+            PD_WEAPONS_PRIEST,          //  5
+            PD_WEAPONS_DEATH_KNIGHT,    //  6
+            PD_WEAPONS_SHAMAN,          //  7
+            PD_WEAPONS_MAGE,            //  8
+            PD_WEAPONS_WARLOCK,         //  9
+            0,                          // 10 unused in 3.3.5a
+            PD_WEAPONS_DRUID            // 11
+        };
+        return classId <= PD_CLASS_MAX ? BY_CLASS[classId] : 0u;
+    }
+
+    // The D5 fit itself. Order matters: AllowableClass first, because it is
+    // the item's own statement about who may have it and it overrules
+    // nothing below - a plate item flagged mage-only is still plate.
+    constexpr bool FitsClassRaw(uint32_t allowableClass, uint8_t itemClass,
+                                uint8_t subclass, uint8_t classId)
+    {
+        if (classId < PD_CLASS_WARRIOR || classId > PD_CLASS_MAX)
+        {
+            return false;
+        }
+
+        // -1 in the column arrives here as 0xFFFFFFFF and passes every class
+        // by itself, so the "all classes" convention needs no special case -
+        // which is exactly how the core tests it (Player.cpp:10746,
+        // `AllowableClass & getClassMask()`, and getClassMask() is
+        // 1 << (class - 1)).
+        if ((allowableClass & (1u << (classId - 1))) == 0)
+        {
+            return false;
+        }
+
+        if (itemClass == PD_ITEM_CLASS_ARMOR)
+        {
+            if (subclass >= PD_ITEM_SUBCLASS_ARMOR_CLOTH &&
+                subclass <= PD_ITEM_SUBCLASS_ARMOR_PLATE)
+            {
+                // The ONE type, not "up to": a level-80 druid is rewarded in
+                // leather, and cloth for a druid is the disenchant fodder
+                // this filter exists to stop.
+                return subclass == GameArmourIndexForClass(classId) +
+                                       PD_ITEM_SUBCLASS_ARMOR_CLOTH;
+            }
+            if (subclass == PD_ITEM_SUBCLASS_ARMOR_SHIELD)
+            {
+                return classId == PD_CLASS_WARRIOR ||
+                       classId == PD_CLASS_PALADIN ||
+                       classId == PD_CLASS_SHAMAN;
+            }
+            // Misc (0), the deprecated buckler (5) and the four relic slots
+            // (7..10): AllowableClass above is the whole gate, which is what
+            // "relics via AllowableClass" means in spec D5.
+            return true;
+        }
+
+        if (itemClass == PD_ITEM_CLASS_WEAPON)
+        {
+            // A subclass the mask cannot hold is one 3.3.5a does not have.
+            // Refusing it also keeps the shift below defined, which is the
+            // real reason the guard is here and not an assumption.
+            if (subclass >= 32)
+            {
+                return false;
+            }
+            return (GameWeaponMaskForClass(classId) & (1u << subclass)) != 0;
+        }
+
+        // Everything else a pool can hold - a container, a consumable, a
+        // recipe - is gated by AllowableClass alone.
+        return true;
+    }
+
+    // --- Round E / WP9: does an item fit a STAT PROFILE? -------------------
+    //
+    // The second half of the same filter, and the same split: everything
+    // decidable from two integers lives here where the harness can pin it,
+    // and PDv2LootMgr::StatMaskFor is the one place that reads ItemStat[] out
+    // of an ItemTemplate. A pool row carries the resulting mask as a single
+    // byte computed once at Load(), so a filtered draw over 2 235 entries
+    // costs 2 235 byte tests and not 2 235 template lookups.
+    //
+    // The profile is the PLAYER's choice, not the server's guess: Off until
+    // the Forgotten Talents node *Discerning Eye* is bought, then one of three
+    // words in the /pd panel. That is why the rule below may be opinionated at
+    // all - nobody is having a filter applied to them that they did not ask
+    // for, and RollGear drops the profile before it drops the class when a
+    // pool has nothing left.
+    //
+    // The values are stored in pdungeon_account.cfg_stat_profile and travel on
+    // the C payload, so they are a WIRE CONTRACT: 0..3 and never renumbered.
+    constexpr uint8_t PD_STAT_PROFILE_OFF = 0;
+    constexpr uint8_t PD_STAT_PROFILE_STRENGTH = 1;
+    constexpr uint8_t PD_STAT_PROFILE_AGILITY = 2;
+    constexpr uint8_t PD_STAT_PROFILE_CASTER = 3;
+    constexpr uint8_t PD_STAT_PROFILE_MAX = 3;
+
+    // What a pool row's one byte can say about an item. Three primary stats,
+    // and two "evidence" buckets for the items that have no primary stat at
+    // all - a ring of spirit and spell power is a caster ring even though it
+    // names no intellect, and a tank ring of defence and dodge is not.
+    //
+    // Stamina, hit, crit, haste and resilience are deliberately in NEITHER
+    // bucket: every profile wants them, so a bit for them would only ever
+    // reject something. Anything else the column can hold (mana, health,
+    // health regen, the resistances) is neutral for the same reason.
+    enum PDStatMaskBits : uint8_t
+    {
+        PD_STAT_STR = 1,
+        PD_STAT_AGI = 2,
+        PD_STAT_INT = 4,
+        PD_STAT_CASTER_EVIDENCE = 8,
+        PD_STAT_PHYS_EVIDENCE = 16
+    };
+
+    // 0..PD_STAT_PROFILE_MAX. Clamps to the RANGE like every sibling clamp in
+    // this file rather than folding an illegal value to Off - the setting only
+    // ever narrows a pool, so there is nothing to exploit by asking for 99,
+    // and FitsProfileRaw treats anything out of range as Off on its own. The
+    // two therefore cannot disagree into a profile that fits nothing.
+    constexpr uint8_t GameClampStatProfile(int wanted)
+    {
+        if (wanted < static_cast<int>(PD_STAT_PROFILE_OFF))
+        {
+            return PD_STAT_PROFILE_OFF;
+        }
+        return wanted > static_cast<int>(PD_STAT_PROFILE_MAX)
+                   ? PD_STAT_PROFILE_MAX
+                   : static_cast<uint8_t>(wanted);
+    }
+
+    // "PRIMARY STAT WINS, and zero evidence passes."
+    //
+    // Read it as three questions asked in order:
+    //
+    //   1. does the item name the profile's own primary stat? Then it fits,
+    //      full stop. This is what lets a hybrid pass BOTH of its profiles: a
+    //      strength/intellect plate helm is a holy paladin's and a protection
+    //      paladin's, and no rule that starts from "no intellect" can say so.
+    //   2. does it name a DIFFERENT primary stat instead? Then it does not.
+    //      This is the whole point of the filter - the agility dagger a mage
+    //      cannot use, the intellect ring a rogue cannot.
+    //   3. it names no primary stat at all (a ring, a neck, a cloak, a
+    //      trinket). Then only the evidence decides, and only against it: a
+    //      ring of spirit and spell power is refused by the two physical
+    //      profiles, a ring of expertise and armour penetration is refused by
+    //      Caster, and a ring of pure stamina and crit fits everybody.
+    //
+    // Mask 0 - a trinket with no stats, a relic, a legendary replica whose
+    // whole text is one use effect - passes EVERY profile. Rejecting those
+    // would be the filter deciding it knows better than an item that
+    // deliberately has no stat line (recon risk 3), and it is 39 of the 3 887
+    // gear rows.
+    //
+    // A profile this function does not know is treated as Off. That is not
+    // politeness: the value crosses a wire from a client panel and lands in a
+    // TINYINT column an operator can edit, and "unknown means unfiltered" is
+    // the only reading that cannot end a run with an empty loot window.
+    constexpr bool FitsProfileRaw(uint8_t statMask, uint8_t profile)
+    {
+        if (profile == PD_STAT_PROFILE_OFF || profile > PD_STAT_PROFILE_MAX)
+        {
+            return true;
+        }
+        if (statMask == 0)
+        {
+            return true;
+        }
+
+        if (profile == PD_STAT_PROFILE_STRENGTH)
+        {
+            if ((statMask & PD_STAT_STR) != 0)
+            {
+                return true;
+            }
+            if ((statMask & (PD_STAT_AGI | PD_STAT_INT)) != 0)
+            {
+                return false;
+            }
+            return (statMask & PD_STAT_CASTER_EVIDENCE) == 0;
+        }
+
+        if (profile == PD_STAT_PROFILE_AGILITY)
+        {
+            if ((statMask & PD_STAT_AGI) != 0)
+            {
+                return true;
+            }
+            if ((statMask & (PD_STAT_STR | PD_STAT_INT)) != 0)
+            {
+                return false;
+            }
+            return (statMask & PD_STAT_CASTER_EVIDENCE) == 0;
+        }
+
+        // PD_STAT_PROFILE_CASTER, and the mirror image of the two above -
+        // except that the evidence it rejects is the PHYSICAL one.
+        if ((statMask & PD_STAT_INT) != 0)
+        {
+            return true;
+        }
+        if ((statMask & (PD_STAT_STR | PD_STAT_AGI)) != 0)
+        {
+            return false;
+        }
+        return (statMask & PD_STAT_PHYS_EVIDENCE) == 0;
     }
 }
 

@@ -30,6 +30,28 @@
 
 namespace PDungeon
 {
+    namespace
+    {
+        // Round E / WP10. Does the Endless Storage table exist on THIS realm?
+        //
+        // SHOW TABLES and not `SELECT 1 FROM custom_endless_storage LIMIT 1`,
+        // because the two failures are indistinguishable through the second
+        // one: a missing table and an EMPTY table both come back as a null
+        // QueryResult, and a fresh realm has an empty storage on the day it is
+        // installed. SHOW TABLES answers about the schema and nothing else -
+        // one row means the table is there whatever is in it.
+        //
+        // Asked from LoadConfig, which is safe: World::SetInitialWorldSettings
+        // starts the database pools well before it reads the config
+        // (World.cpp:318, and LoadDBAllowedSecurityLevel queries three lines
+        // later), so this never runs against a pool that is not up.
+        bool StorageTableExists()
+        {
+            return CharacterDatabase.Query(
+                       "SHOW TABLES LIKE 'custom_endless_storage'") != nullptr;
+        }
+    }
+
     PDv2Mgr* PDv2Mgr::instance()
     {
         static PDv2Mgr mgr;
@@ -133,6 +155,15 @@ namespace PDungeon
         _config.patrolDebug = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Patrol.Debug", false);
 
+        // Round E / R3: off, and read exactly like the patrol switch above and
+        // for the same reason - every gated line asks PDv2Debug() on the tick
+        // that would print it, so `.reload config` arms and disarms the whole
+        // per-creature / per-tick / per-verb stream on a run that is already
+        // being walked. Two keys rather than one because the two hunts have
+        // nothing to do with each other (PDv2Mgr.h says which is which).
+        _config.debug = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Debug", false);
+
         // B5: a percent roll like the ones above, and a mob count the spawn
         // ring can actually seat (0 disarms the ambush without disarming
         // anything else). V2.Ambush.RadiusYd is gone since Round C / C2 - the
@@ -145,6 +176,175 @@ namespace PDungeon
         // the operator's choice of spell, which this module must not overrule.
         _config.ambushStunSpell = sConfigMgr->GetOption<uint32>(
             "ProceduralDungeon.V2.Ambush.StunSpell", 20170);
+
+        // Round E / WP5: the event room. ChancePct is clamped into a percent
+        // for both of the reasons V2.Branches is clamped - it IS one, and it is
+        // persisted into a TINYINT UNSIGNED column (gen_event_pct) that a typo
+        // above 255 would make unwritable, taking the layout that was just
+        // generated down with it. It is also the only one of the five read at
+        // GENERATION time; the four below are engine-side and read live.
+        _config.eventChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Event.ChancePct", 25)));
+        // 10..600 s. Under ten seconds the wave timer barely gets its first
+        // attacker out and the reward is free; over ten minutes one event
+        // outlasts the run it sits in.
+        _config.eventDurationSec = std::min(600, std::max(10, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Event.DurationSec", 60)));
+        // 1..60 s. One per second is as fast as the 1 Hz tick can spawn, and a
+        // gap longer than a minute outlives the longest defence above.
+        _config.eventSpawnEverySec = std::min(60, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Event.SpawnEverySec", 5)));
+        _config.eventCasterPct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Event.CasterPct", 10)));
+        // Unclamped on purpose, exactly like the ambush's stun spell above: the
+        // type is already the bound, 0 means "pay no Paragon XP", and what one
+        // module pays into another's progression is the operator's call.
+        _config.eventParagonXp = sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Event.ParagonXp", 1000);
+
+        // Round E / L2: the five currency items. Clamped to at least 1 because
+        // 0 is not an item id and every grant would silently fail on it; a tier
+        // is retired with its ChancePct, never by blanking its item. These five
+        // reads are the module's only knowledge of a PD item id.
+        _config.lootCurrencyItem[0] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier1.Item", 920105));
+        _config.lootCurrencyItem[1] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier2.Item", 920106));
+        _config.lootCurrencyItem[2] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier3.Item", 920107));
+        _config.lootCurrencyItem[3] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier4.Item", 920108));
+        _config.lootCurrencyItem[4] = std::max<uint32>(1, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier5.Item", 920109));
+
+        // Percent rolls, so the same [0, 100] every other chance here gets: 0
+        // retires a tier without touching the other four, 100 is every mob (T1,
+        // T2, T3) or every looter (T4, T5), before the room factor scales it.
+        _config.lootCurrencyChancePct[0] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier1.ChancePct", 100)));
+        _config.lootCurrencyChancePct[1] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier2.ChancePct", 5)));
+        _config.lootCurrencyChancePct[2] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier3.ChancePct", 1)));
+        _config.lootCurrencyChancePct[3] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier4.ChancePct", 50)));
+        _config.lootCurrencyChancePct[4] = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier5.ChancePct", 10)));
+
+        // Only the two cache tiers are gated, so only those two have a key -
+        // slots 0..2 keep the header's 1, the bottom of the dial, which every
+        // run clears. Both are clamped into the run's own 1..100 difficulty
+        // range, exactly like V2.Patrol.Size2Diff/Size3Diff: a gate outside the
+        // dial would be a tier that can never drop or one that is not gated at
+        // all, and neither is what the key says it does.
+        _config.lootCurrencyMinDiff[3] = std::min(100, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier4.MinDiff", 50)));
+        _config.lootCurrencyMinDiff[4] = std::min(100, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.Tier5.MinDiff", 75)));
+
+        // The room factor's two inputs (GameRoomFactorX100, which takes both as
+        // parameters precisely so this pair stays the only copy of them). The
+        // baseline is a room COUNT and never 0: at 0 every run would count as
+        // full and the length of a dungeon would stop paying anything. The
+        // per-room bonus is a percent and gets the percent clamp; 0 makes a
+        // long run merely as good as the baseline, never worse.
+        _config.lootRoomsBaseline = std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.RoomsBaseline", 10));
+        _config.lootRoomsBonusPctPerRoom = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Currency.RoomsBonusPctPerRoom", 1)));
+
+        _config.lootExtraMobsDropCurrency = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Loot.Currency.ExtraMobsDropCurrency", false);
+
+        // WP8. No clamp to write: a bool has no range to get wrong, and it is
+        // read live like every other V2 key, so `.reload config` decides what
+        // the NEXT corpse carries without disturbing the run being walked.
+        _config.lootNativeItems = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Loot.NativeItems", false);
+
+        // L3. The chance is the on/off switch for materials; the ceiling is a
+        // count and gets the [0, 10] count clamp. 0 and 1 both mean one
+        // material per mob, because GameMatsMaxCount floors its band at 1 - the
+        // way to stop materials dropping is Mats.ChancePct 0.
+        _config.lootMatsChancePct = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Mats.ChancePct", 100)));
+        _config.lootMatsMaxPerMobAtCap = std::min(10, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Mats.MaxPerMobAtCap", 5)));
+
+        // Round E / WP10: materials into the Endless Storage instead of the
+        // bags. The key says what the operator WANTS; the probe below decides
+        // whether it is possible, because the table belongs to another module
+        // and PDv2 does not require it.
+        _config.lootMatsToStorage = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Loot.MatsToStorage", true);
+        if (_config.lootMatsToStorage && !StorageTableExists())
+        {
+            // Off for this session rather than per deposit: without it every
+            // material of every kill would be one failed INSERT and one line in
+            // the DB error log, on a hot path, for as long as the realm runs.
+            // `.reload config` probes again, so an operator who installs
+            // mod-endless-storage gets the feature without a restart.
+            _config.lootMatsToStorage = false;
+            LOG_WARN(PD_LOG, "PDv2: V2.Loot.MatsToStorage is on but the characters "
+                             "table `custom_endless_storage` does not exist - materials "
+                             "go to the bags. The table belongs to mod-endless-storage; "
+                             "install it (or set the key to 0) and `.reload config`");
+        }
+
+        // L4. Counts, clamped into [0, 10]: 0 silences that one source and 10
+        // is already three times what a difficulty-100 run multiplies it to.
+        _config.lootChestItems = std::min(10, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Chest.Items", 1)));
+        _config.lootBossItems = std::min(10, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Boss.Items", 1)));
+        _config.lootFinalItems = std::min(10, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.Final.Items", 1)));
+
+        // Clamped into [0, V2.DlvlCap] and therefore read AFTER it: the key is
+        // a dlvl and a dlvl above the cap is one no account can reach, which
+        // would be an ICC switch that never happens. The cap itself is floored
+        // at 0 here because V2.DlvlCap is deliberately unclamped above and a
+        // negative one must not drag this key below zero.
+        int const dlvlCeil = std::max(0, _config.dlvlCap);
+        _config.lootIccDlvl = std::min(dlvlCeil, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Loot.IccDlvl", 10)));
+
+        _config.lootClassFilter = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Loot.ClassFilter", true);
+
+        // Round E / R1. The two unlock steps of the account-wide difficulty
+        // cap. Clamped into [0, 100] and not into the dial's [1, 100]: 0 is a
+        // meaningful setting here - it says that outcome unlocks nothing - and
+        // an unlock wider than the dial itself cannot mean anything, because
+        // RaiseDiffCap clamps the resulting cap into the dial anyway.
+        _config.capDeathUnlock = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Cap.DeathUnlock", 3)));
+        _config.capCleanUnlock = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Cap.CleanUnlock", 5)));
+
+        // Round E / WP6: the respawn echoes. Engine-side and read LIVE like the
+        // four V2.Event keys above, so `.reload config` arms or disarms the
+        // Forgotten Talents node on a run that is already being walked - the
+        // only way an operator can answer "is THIS what is flooding the room"
+        // without a restart.
+        _config.respawnEnable = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Respawn.Enable", true);
+        // Only a ceiling, no floor: the type is unsigned, so 0 is already the
+        // bottom and it means "the mechanic runs and pays nothing". Five is
+        // more corpses per pull than the L2-L4 loot funnel was ever tuned for,
+        // and the node's own maximum is 2 - this clamp is what a content change
+        // or a typo in the FT extension contract runs into, not the default.
+        _config.respawnMaxCopies = std::min<uint32>(5, sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Respawn.MaxCopies", 2));
+
+        // Round E / WP10: the finale portal's destination, by game_tele NAME.
+        // Not validated here on purpose - the tele store is loaded from the
+        // world DB after the first config read, so a lookup at this point
+        // would report every name as missing on startup and only ever succeed
+        // on `.reload config`. PDExitObjects.cpp resolves it per click and
+        // says so loudly when the row is not there.
+        _config.finaleTeleName = sConfigMgr->GetOption<std::string>(
+            "ProceduralDungeon.V2.Finale.TeleName", "flcapital");
 
         LOG_INFO(PD_LOG, "PDv2: {} map {} floorZ {} rooms {}+{} field {} origin ({},{}) pockets {} detour {}%",
                  _config.enabled ? "enabled" : "disabled", _config.mapId, _config.floorZ,
@@ -193,11 +393,18 @@ namespace PDungeon
         // rooms do not exist on the 3x3 field the old expression handed it -
         // MIN_ROOM_GAP 2 admits at most 5 cells on 3x3, so every attempt failed
         // and the player got "no valid layout" (final review of B0, 2026-09-03).
-        // The live default is unmoved: 5 + 1 = 24 cells still asks for 5x5.
+        // Round E / R2 adds the ENTRANCE to that total: since the slider
+        // counts ordinary rooms, the plan seats rooms + bossRooms + 1 cells,
+        // and a field sized one cell short is the same provable misfit this
+        // paragraph was written about. The live default is unmoved:
+        // 5 + 1 + 1 = 7 rooms still asks for 6x6, capped at V2.FieldBlocks.
         cfg.fieldBlocks = std::min(_config.fieldBlocks,
-                                   GameFieldBlocksForRooms(cfg.rooms + cfg.bossRooms));
+                                   GameFieldBlocksForRooms(cfg.rooms + cfg.bossRooms + 1));
         cfg.detourChancePct = _config.detourChancePct;
         cfg.branches = _config.branches;
+        // Round E / WP5: a layout input like the two above it, so the value the
+        // plan was generated with is the one SavePlanToDB stores (gen_event_pct).
+        cfg.eventChancePct = _config.eventChancePct;
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;
         cfg.theme = themeOverride ? themeOverride : _config.theme;
@@ -242,21 +449,24 @@ namespace PDungeon
         // cached state keeps a first `v2 gen` from silently disagreeing with
         // the state the server has been using since login.
 
-        // gen_loop_pct carries V2.DetourChance since B0b
+        // gen_loop_pct carries V2.DetourChance since B0b; gen_event_pct carries
+        // V2.Event.ChancePct since Round E / WP5
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
-            "gen_loop_pct, gen_branches, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
-            "cfg_packs) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
+            "gen_loop_pct, gen_branches, gen_event_pct, cfg_rooms, cfg_difficulty, "
+            "cfg_caster_pct, cfg_mob_level_min, cfg_stat_profile, cfg_packs) "
+            "VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE theme = VALUES(theme), "
             "layout_seed = VALUES(layout_seed), layout_version = VALUES(layout_version), "
             "gen_rooms = VALUES(gen_rooms), gen_boss_rooms = VALUES(gen_boss_rooms), "
             "gen_field_blocks = VALUES(gen_field_blocks), gen_origin_bx = VALUES(gen_origin_bx), "
             "gen_origin_by = VALUES(gen_origin_by), gen_loop_pct = VALUES(gen_loop_pct), "
-            "gen_branches = VALUES(gen_branches)",
+            "gen_branches = VALUES(gen_branches), gen_event_pct = VALUES(gen_event_pct)",
             accountId, cfg.theme, cfg.seed, PD_LAYOUT_VERSION, cfg.rooms, cfg.bossRooms,
             cfg.fieldBlocks, cfg.originBX, cfg.originBY, cfg.detourChancePct, cfg.branches,
-            state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct, state.cfgBandMin, packs);
+            cfg.eventChancePct, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
+            state.cfgBandMin, uint32(state.cfgStatProfile), packs);
     }
 
     void PDv2Mgr::LoadAccountState(uint32_t accountId)
@@ -272,7 +482,8 @@ namespace PDungeon
         PDv2AccountState state;
         QueryResult result = CharacterDatabase.Query(
             "SELECT dlvl, dxp, cfg_rooms, cfg_difficulty, cfg_caster_pct, cfg_mob_level_min, "
-            "cfg_packs FROM pdungeon_account WHERE accountId = {}", accountId);
+            "cfg_packs, diff_cap, cfg_stat_profile FROM pdungeon_account WHERE accountId = {}",
+            accountId);
         if (result)
         {
             Field* fields = result->Fetch();
@@ -283,6 +494,15 @@ namespace PDungeon
             state.cfgCasterPct = fields[4].Get<uint8>();
             state.cfgBandMin = fields[5].Get<uint8>();
             state.cfgPacks = fields[6].Get<std::string>();
+            // Round E / R1. Appended to the SELECT rather than slotted in
+            // beside cfg_difficulty, because every index below it is a
+            // positional read of this one statement and renumbering them buys
+            // nothing but a chance to get one wrong.
+            state.diffCap = fields[7].Get<uint8>();
+            // Round E / WP9, appended for exactly the same reason as diff_cap
+            // above: the tail of this SELECT is where a new column goes, and
+            // renumbering the seven reads above it buys nothing.
+            state.cfgStatProfile = fields[8].Get<uint8>();
             state.loaded = true;
         }
 
@@ -299,8 +519,26 @@ namespace PDungeon
         // No dlvl argument any more: the dial is open from the first run, so
         // the only illegal difficulty is one outside [1, 100].
         state.cfgDifficulty = GameClampDiff(state.cfgDifficulty);
+        // Round E / R1. The cap gets the same clamp for the same reason - a
+        // hand-edited 0 or 200 must not become a live ceiling - and then bounds
+        // the dial itself. Order matters: the cap has to be legal before it can
+        // be used as a limit, and cfgDifficulty has to have passed its own
+        // clamp before this one narrows it further. A row where the player's
+        // chosen difficulty sits above the cap is not a fault to log about: it
+        // is exactly what the pre-Round-E rows look like, and what a GM
+        // `.pdungeon v2 cap` lowering leaves behind.
+        state.diffCap = GameClampDiff(state.diffCap);
+        state.cfgDifficulty = std::min(state.cfgDifficulty, state.diffCap);
         state.cfgCasterPct = GameClampCasterPct(state.cfgCasterPct);
         state.cfgBandMin = GameClampBandMin(state.cfgBandMin);
+        // Round E / WP9. The column is a TINYINT an operator can edit and the
+        // value crosses a wire from a client panel, so it gets the same
+        // treatment as every knob above it. Note what is NOT re-checked here:
+        // whether the account may HAVE a profile at all. That is the FT node,
+        // it is per character, and a stored 2 on an account whose characters
+        // all refunded it simply never bites (PDv2LootMgr::StatProfileFor) -
+        // storing it is not the same as honouring it.
+        state.cfgStatProfile = GameClampStatProfile(state.cfgStatProfile);
 
         std::lock_guard<std::mutex> guard(_lock);
         _accounts[accountId] = state;
@@ -319,9 +557,22 @@ namespace PDungeon
         PDv2AccountState& state = _accounts[accountId];
         int const dlvl = static_cast<int>(state.dlvl);
         state.cfgRooms = GameClampRooms(cfg.cfgRooms, dlvl);
-        state.cfgDifficulty = GameClampDiff(cfg.cfgDifficulty);
+        // Round E / R1: the dial is bounded by the account's own cap on top of
+        // its 1..100 clamp. `state.diffCap` and NOT `cfg.diffCap` on purpose -
+        // the cap is progression, not a setting, and this entry point is fed
+        // by player-facing commands and the UI link. Letting a caller hand in
+        // a cap here would make every one of them a way around it; RaiseDiffCap
+        // is the only door, and it only opens upwards.
+        state.cfgDifficulty = std::min(GameClampDiff(cfg.cfgDifficulty), state.diffCap);
         state.cfgCasterPct = GameClampCasterPct(cfg.cfgCasterPct);
         state.cfgBandMin = GameClampBandMin(cfg.cfgBandMin);
+        // Round E / WP9, and NO unlock parameter beside it on purpose: this
+        // function clamps, it does not authorise. Whether the player owns
+        // Discerning Eye at all is decided by the SET handler in
+        // PDv2UILink.cpp before it ever calls here - the same shape the locked
+        // band row has - so that every future caller of SetAccountCfg cannot
+        // accidentally become a way around the node.
+        state.cfgStatProfile = GameClampStatProfile(cfg.cfgStatProfile);
         state.cfgPacks = cfg.cfgPacks;
         state.loaded = true;
     }
@@ -339,12 +590,87 @@ namespace PDungeon
         // change must never touch progression or the stored layout.
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, cfg_rooms, cfg_difficulty, "
-            "cfg_caster_pct, cfg_mob_level_min, cfg_packs) VALUES ({}, {}, {}, {}, {}, '{}') "
+            "cfg_caster_pct, cfg_mob_level_min, cfg_stat_profile, cfg_packs) "
+            "VALUES ({}, {}, {}, {}, {}, {}, '{}') "
             "ON DUPLICATE KEY UPDATE cfg_rooms = VALUES(cfg_rooms), "
             "cfg_difficulty = VALUES(cfg_difficulty), cfg_caster_pct = VALUES(cfg_caster_pct), "
-            "cfg_mob_level_min = VALUES(cfg_mob_level_min), cfg_packs = VALUES(cfg_packs)",
+            "cfg_mob_level_min = VALUES(cfg_mob_level_min), "
+            "cfg_stat_profile = VALUES(cfg_stat_profile), cfg_packs = VALUES(cfg_packs)",
             accountId, state.cfgRooms, state.cfgDifficulty, state.cfgCasterPct,
-            state.cfgBandMin, packs);
+            state.cfgBandMin, uint32(state.cfgStatProfile), packs);
+    }
+
+    int PDv2Mgr::RaiseDiffCap(uint32_t accountId, int wanted)
+    {
+        int cap = 0;
+        {
+            std::lock_guard<std::mutex> guard(_lock);
+            PDv2AccountState& state = _accounts[accountId];
+            // The ratchet, and it lives HERE rather than at the call site: the
+            // caller computes "difficulty + unlock" from the run it just
+            // finished and cannot know whether some other session raised the
+            // cap in the meantime, so a value below the cached cap has to be a
+            // silent no-op instead of a downgrade.
+            state.diffCap = std::max(state.diffCap, GameClampDiff(wanted));
+            cap = state.diffCap;
+            // Deliberately NOT touching cfgDifficulty: raising the ceiling
+            // never moves the dial the player set under it. The cap only
+            // bounds the next choice, and SetAccountCfg applies that bound.
+            state.loaded = true;
+        }
+
+        // diff_cap only - the disjoint-writer rule this row is built on
+        // (SavePlanToDB owns the layout, SaveAccountCfg the cfg_*, and
+        // GrantRunReward dlvl/dxp). The INSERT half names the columns this
+        // writer owns and lets the column defaults speak for the rest, exactly
+        // as GrantRunReward does; on the path that matters the row always
+        // exists by now, because a finished run means a stored layout, which
+        // means SavePlanToDB has already seeded the cfg_* columns from the
+        // cached state.
+        //
+        // GREATEST on the UPDATE half so the ratchet holds in the DATABASE too,
+        // and not only in this process's cache: two worldservers on one
+        // characters DB, or a cache built before a manual edit, must not be
+        // able to write a cap backwards. VALUES(diff_cap) rather than the bound
+        // parameter is the SaveAccountCfg idiom - one value, named once.
+        CharacterDatabase.Execute(
+            "INSERT INTO pdungeon_account (accountId, diff_cap) VALUES ({}, {}) "
+            "ON DUPLICATE KEY UPDATE diff_cap = GREATEST(diff_cap, VALUES(diff_cap))",
+            accountId, cap);
+
+        return cap;
+    }
+
+    int PDv2Mgr::SetDiffCap(uint32_t accountId, int wanted)
+    {
+        int const cap = GameClampDiff(wanted);
+        {
+            std::lock_guard<std::mutex> guard(_lock);
+            PDv2AccountState& state = _accounts[accountId];
+            // Assignment, not std::max: this is the one door that may close.
+            // Everything the ratchet's comment says about not trusting a
+            // caller's number still applies to the VALUE - it is clamped into
+            // the dial above - but not to its DIRECTION, which is the whole
+            // point of the entry point existing.
+            state.diffCap = cap;
+            // `loaded` for the same reason RaiseDiffCap sets it: a cap set
+            // before this account ever had a row is still a real answer, and
+            // GeneratePlan must follow it rather than the server config.
+            state.loaded = true;
+        }
+
+        // No GREATEST on the UPDATE half, and that is the ONLY difference
+        // from RaiseDiffCap's statement: the ratchet is enforced in the
+        // database precisely so that no gameplay path can write a cap
+        // backwards, and this path is not a gameplay path. Still diff_cap
+        // alone - a test tool is not a licence to clobber the neighbouring
+        // columns.
+        CharacterDatabase.Execute(
+            "INSERT INTO pdungeon_account (accountId, diff_cap) VALUES ({}, {}) "
+            "ON DUPLICATE KEY UPDATE diff_cap = VALUES(diff_cap)",
+            accountId, cap);
+
+        return cap;
     }
 
     PDv2RunReward PDv2Mgr::GrantRunReward(uint32_t accountId, int roomsUsed)
@@ -392,7 +718,8 @@ namespace PDungeon
 
         QueryResult result = CharacterDatabase.Query(
             "SELECT layout_seed, layout_version, theme, gen_rooms, gen_boss_rooms, "
-            "gen_field_blocks, gen_origin_bx, gen_origin_by, gen_loop_pct, gen_branches "
+            "gen_field_blocks, gen_origin_bx, gen_origin_by, gen_loop_pct, gen_branches, "
+            "gen_event_pct "
             "FROM pdungeon_account WHERE accountId = {}", accountId);
         if (!result)
         {
@@ -406,6 +733,12 @@ namespace PDungeon
         {
             return;
         }
+        // A foreign version means the stored inputs no longer describe the
+        // dungeon this generator would build from them, so the row is kept and
+        // the account rerolls on its next `v2 gen`. What makes a row written
+        // yesterday foreign is v5: `gen_event_pct` joined the generation inputs,
+        // and a v4 row would otherwise come back at the column default of 0 - an
+        // eventless dungeon, silently and for ever (PDv2Mgr.h, the ladder).
         if (version != PD_LAYOUT_VERSION)
         {
             LOG_INFO(PD_LOG, "PDv2: account {} has a layout stamped v{} (current v{}) - "
@@ -424,6 +757,7 @@ namespace PDungeon
         cfg.originBY = fields[7].Get<uint16>();
         cfg.detourChancePct = fields[8].Get<uint8>();
         cfg.branches = fields[9].Get<uint8>();
+        cfg.eventChancePct = fields[10].Get<uint8>();
 
         BlockPlan plan;
         if (!GenerateBlockPlan(cfg, &plan))
