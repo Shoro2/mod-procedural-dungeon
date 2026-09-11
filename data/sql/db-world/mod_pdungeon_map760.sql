@@ -39,8 +39,8 @@ INSERT INTO `mapdifficulty_dbc` (`ID`, `MapID`, `Difficulty`, `Message_Lang_enUS
 DELETE FROM `areatable_dbc` WHERE `ID` IN (5100, 5101, 5102);
 INSERT INTO `areatable_dbc` (`ID`, `ContinentID`, `ParentAreaID`, `AreaBit`, `Flags`, `SoundProviderPref`, `SoundProviderPrefUnderwater`, `AmbienceID`, `ZoneMusic`, `IntroSound`, `ExplorationLevel`, `AreaName_Lang_enUS`, `AreaName_Lang_enGB`, `AreaName_Lang_koKR`, `AreaName_Lang_frFR`, `AreaName_Lang_deDE`, `AreaName_Lang_enCN`, `AreaName_Lang_zhCN`, `AreaName_Lang_enTW`, `AreaName_Lang_zhTW`, `AreaName_Lang_esES`, `AreaName_Lang_esMX`, `AreaName_Lang_ruRU`, `AreaName_Lang_ptPT`, `AreaName_Lang_ptBR`, `AreaName_Lang_itIT`, `AreaName_Lang_Unk`, `AreaName_Lang_Mask`, `FactionGroupMask`, `LiquidTypeID_1`, `LiquidTypeID_2`, `LiquidTypeID_3`, `LiquidTypeID_4`, `MinElevation`, `Ambient_Multiplier`, `Lightid`) VALUES
 (5100, 760, 0, 4007, 0, 76, 0, 37, 439, 551, 0, 'The Forgotten Depths', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0),
-(5101, 760, 0, 4007, 0, 76, 0, 34, 236, 551, 0, 'The Forgotten Mine', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0),
-(5102, 760, 0, 4007, 0, 76, 0, 35, 1, 551, 0, 'The Forgotten Woods', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0);
+(5101, 760, 0, 4007, 0, 76, 0, 34, 236, 0, 0, 'The Forgotten Mine', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0),
+(5102, 760, 0, 4007, 0, 76, 0, 35, 1, 0, 0, 'The Forgotten Woods', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0);
 
 -- The lights. The server reads ID/ContinentID/X/Y/Z only, and it reads them
 -- for exactly one thing: GetDefaultMapLight(760) scans DESCENDING and returns
