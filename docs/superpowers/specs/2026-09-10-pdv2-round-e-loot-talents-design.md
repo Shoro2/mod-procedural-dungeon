@@ -3,7 +3,7 @@
 **Date** 2026-09-10 · **Status** **APPROVED 2026-09-10 — the operator accepted the design and every default
 in §2 ("ok machen wir so"). WP1 (L1–L5), WP3 (R1–R4), WP2 (T1), WP4 (K1+K2 = kit v39), WP5 (R5
 event rooms) and WP6 (T2 legendary nodes) are BUILT and T1 on the workbench (PD branch, FT `bba4d30` + `fe2bbee`, core `adec223ba`, itemgen `1605a7c` + `547f4de`; installed, booted,
-patch-9 rebuilt, kit v39 deployed; runde31 §1–§9), WP7 (progress cost curve), WP8 (nine Runde-31 findings) and WP9 (stat-profile filter, PD `2ba56f9`) followed on 2026-09-10/11 (runde31 §10–§11); T2 = Runde 31 — nothing merged** ·
+patch-9 rebuilt, kit v39 deployed; runde31 §1–§9), WP7 (progress cost curve), WP8 (nine Runde-31 findings) and WP9 (stat-profile filter, PD `2ba56f9`) followed on 2026-09-10/11 (runde31 §10–§11); T2 = Runde 31 — **MERGED 2026-09-11 (PD `761dfba`, FT `e3fdeef`, itemgen `f4cb981`, core `e454cb407`) and ON THE HOST (MIG-021 applied 2026-09-11 08:46 UTC)**; WP10–WP12 (spent caches, portal flcapital, mats to storage, currency tokens) followed the same day** ·
 **Branches** `claude/pdv2-round-e-63ac9a2a` in `mod-procedural-dungeon` (off the plan branch `117b629` =
 `main` `d47e015` + docs), the same name in `mod-forgotten-talents`, `azerothcore-wotlk` (one
 prepared-statement block) and, for WP6, `mod-paragon-itemgen` · **Plans**
