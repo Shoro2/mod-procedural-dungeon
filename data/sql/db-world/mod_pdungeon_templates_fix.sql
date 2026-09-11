@@ -83,10 +83,13 @@
 --
 -- The DELETE below names every entry individually rather than a BETWEEN
 -- range: this file's rows are not contiguous (910048-910049, 910069,
--- 910077-910099 are unused gaps in the reserved block), and an explicit list
--- can never claim a gap id some later addition might use for something else.
--- Same discipline as mod_pdungeon_prop_displays.sql. (910067 and 910068 were
--- two of those gaps until Round C / C8 took them for the finale below.)
+-- 910087-910099 are unused gaps in the reserved block - SIXTEEN ids), and an
+-- explicit list can never claim a gap id some later addition might use for
+-- something else. Same discipline as mod_pdungeon_prop_displays.sql. (910067
+-- and 910068 were two of those gaps until Round C / C8 took them for the
+-- finale below; 910077-910086 were ten more until Round F / F1 took them for
+-- the mine props. The sixteen that remain are the forest's budget - F2's
+-- design asks for about ten of them.)
 --
 -- The real fix - narrowing mod_pdungeon_templates.sql's range delete to
 -- 910000-910033 - is recorded in the global queue
@@ -162,6 +165,38 @@
 -- confusion only, never a functional clash: ours are type 5 GENERIC, not
 -- the quest GO's type/ScriptName, so ours are never clickable and never
 -- satisfy anyone's objective.
+--
+-- Mine props (910077-910086, Round F / F1): the theme-1 dressing - glowing
+-- cave crystals, a Dark Iron brazier and the mining clutter (lumber, ore
+-- crates, a powder keg, a wheelbarrow, an ore cart). Placed by the theme-1
+-- rules in mod_pdungeon_decor_mine.sql and by nothing else; a theme-2 (city)
+-- run never sees them. All ten are type 5 GENERIC and size 1.0, for the
+-- reasons the clutter paragraph above gives - and 1.0 survives the bbox
+-- argument in every one of the ten cases, which is written into each row.
+--
+-- All ten went through the same three-way check, done on this box on
+-- 2026-09-11 and recorded PER ROW below as (1) the DBC model path, (2) the
+-- GameObjectModels.dtree bounding box in yards, (3) the count of stock
+-- `gameobject_template` rows already using that displayId. Every one of the
+-- ten passed all three - no mine id needed the 910066 exception - and the
+-- dtree bbox is what settles `size`, because the DBC's own GeoBox columns are
+-- all zero on all ten (a known gap of this client's
+-- GameObjectDisplayInfo.dbc, not a property of these models).
+--
+-- The yardstick for "is this too big for a wall foot": the two lights this
+-- module already ships at size 1.0 are 910020 'PD Torch' (display 7858,
+-- 4.91 x 5.19 x 3.80 yd) and 910021 'PD Brazier' (display 8191, 10.72 x
+-- 13.15 x 6.65 yd). The Dark Iron brazier below is 3.33 x 3.33 x 5.28 yd -
+-- a SMALLER footprint than either, on an 8.33 yd cell - so size 1.0 needed
+-- no shrinking. Blizzard's own six Doodad_DarkIronBrazier rows use 0.67 and
+-- its two 'Shadowforge Brazier' rows use 1.0; we take the 1.0 precedent
+-- because ours has to read as a light source across a 66 yd room.
+--
+-- The three crystals are ONE prop at three sizes, not three interchangeable
+-- ones: 1.25 / 2.40 / 2.97 yd tall at size 1.0. That ladder is the whole
+-- reason there are three rows - a mine wall with three identical crystals is
+-- three copies, and with three heights it is a formation. Do not "normalise"
+-- their sizes.
 -- ----------------------------------------------------------------------------
 
 DELETE FROM `gameobject_template` WHERE `entry` IN (
@@ -172,7 +207,9 @@ DELETE FROM `gameobject_template` WHERE `entry` IN (
     910058, 910059,
     910060, 910061, 910062, 910063, 910064, 910065, 910066,
     910067, 910068,
-    910070, 910071, 910072, 910073, 910074, 910075, 910076
+    910070, 910071, 910072, 910073, 910074, 910075, 910076,
+    910077, 910078, 910079, 910080, 910081, 910082, 910083, 910084,
+    910085, 910086
 );
 INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`, `Data0`, `Data1`, `ScriptName`) VALUES
 -- the loop-room / pocket cache (Round C / C3: lock 57 so the client's
@@ -310,7 +347,107 @@ INSERT INTO `gameobject_template` (`entry`, `type`, `displayId`, `name`, `size`,
 -- ScriptName - a chest is looted through the client's Opening cast, and
 -- GameObject::Use() has no CHEST case for a script to hook.
 (910067, 10, 9041, 'Portal to Azealia', 1, 0, 0, 'go_pdungeon_azealia_portal'),
-(910068, 3, 259, 'Chromie''s Cache', 2, 57, 910068, '');
+(910068, 3, 259, 'Chromie''s Cache', 2, 57, 910068, ''),
+-- ----------------------------------------------------------------------------
+-- Round F / F1: the mine props (theme 1 only - see the header). Three numbers
+-- per row: (1) DBC model path, (2) dtree bbox, (3) stock rows on that display.
+--
+-- mine: crystals. The mine's LIGHT - they glow, and in a dungeon whose
+-- tileset is rock they are the only thing that is not rock. Three rows, three
+-- heights, one model family; the size ladder is the point (see the header).
+-- Three rows sharing the name 'Cave Crystal' is deliberate and stock-normal:
+-- a type 5 GENERIC object is never clickable and shows the player no name at
+-- all, the name is for whoever reads the table, and the display id in each
+-- comment is the discriminator.
+--
+-- 910077: (1) World\Dungeon\Cave\PassiveDoodads\Crystals\
+--             CaveMineCrystalFormation06.mdx
+--         (2) Caveminecrystalformation06.m2, (-0.927, -1.466, -0.087) to
+--             (1.151, 1.353, 2.316) = 2.08 x 2.82 x 2.40 yd - the middle rung
+--         (3) 3 stock rows: 22246 'Tear of Theradras', 22550 'Draenethyst
+--             Crystals', 152622 'Azsharite Formation'
+(910077, 5,  219, 'Cave Crystal',        1.0, 0, 0, ''),
+-- 910078: (1) ...\CaveMineCrystalFormation02.mdx
+--         (2) Caveminecrystalformation02.m2, (-0.287, -0.582, -0.232) to
+--             (0.663, 0.531, 1.022) = 0.95 x 1.11 x 1.25 yd - the low rung,
+--             a knee-high cluster. Stock 2705 'Shards of Myzrael' runs this
+--             model at size 3.47, so scaling it is precedented; we keep 1.0
+--             because the LADDER is what this row exists for.
+--         (3) 2 stock rows: 2705, 178185 'Sapphire of Aku''Mai'
+(910078, 5,  244, 'Cave Crystal',        1.0, 0, 0, ''),
+-- 910079: (1) ...\CaveMineCrystalFormation07.mdx
+--         (2) Caveminecrystalformation07.m2, (-1.037, -1.754, -0.111) to
+--             (1.405, 1.406, 2.862) = 2.44 x 3.16 x 2.97 yd - the tall rung,
+--             taller than a player and still under a third of a cell wide
+--         (3) 2 stock rows: 152631 'Azsharite Formation', 175324 'Frostmaul
+--             Shards'
+(910079, 5, 2592, 'Cave Crystal',        1.0, 0, 0, ''),
+-- mine: the boss-room light.
+-- 910080: (1) WORLD\KHAZMODAN\BLACKROCK\ACTIVEDOODADS\DARKIRONBRAZIER\
+--             DARKIRONBRAZIER.MDX
+--         (2) Darkironbrazier.m2, (-1.666, -1.663, 0.004) to (1.669, 1.672,
+--             5.283) = 3.33 x 3.33 x 5.28 yd. Tall, but a SMALLER footprint
+--             than both lights this module already ships at size 1.0 (see the
+--             header's yardstick), and 3.33 yd on an 8.33 yd cell leaves the
+--             wall foot walkable past it.
+--         (3) 14 stock rows, e.g. 174744/174745 'Shadowforge Brazier' at
+--             size 1.0 (the precedent taken) and six
+--             'Doodad_DarkIronBrazier0n' at 0.67
+(910080, 5, 3411, 'Dark Iron Brazier',   1.0, 0, 0, ''),
+-- mine: the clutter a working dig leaves on the floor. Scattered, never at a
+-- wall foot - these are things you walk around, not things that lean.
+-- 910081: (1) World\Generic\Human\Passive Doodads\LumberPiles\
+--             DeadMineLumberPileSmall.mdx
+--         (2) Deadminelumberpilesmall.m2, (-1.673, -0.640, 0.000) to
+--             (1.681, 0.654, 0.561) = 3.35 x 1.29 x 0.56 yd - long and flat,
+--             ankle height, exactly what `scatter` wants
+--         (3) 2 stock rows: 103573 'Cut Woodpile' (0.5), 181687 'Lumber Pile'
+-- 910082: (1) ...\DeadMineLumberPileLarge.mdx
+--         (2) Deadminelumberpilelarge.m2, (-1.674, -0.914, 0.000) to
+--             (1.675, 0.855, 1.668) = 3.35 x 1.77 x 1.67 yd - the same
+--             footprint stacked three times as high
+--         (3) 1 stock row: 181686 'Lumber Pile'
+--         Both stock rows are literally named 'Lumber Pile' on these two
+--         displays, which is where these two names come from.
+(910081, 5, 1108, 'Lumber Pile',         1.0, 0, 0, ''),
+(910082, 5, 1109, 'Lumber Pile',         1.0, 0, 0, ''),
+-- 910083: (1) World\Generic\Human\Passive Doodads\CargoBoxes\
+--             DeadMineCargoBoxes.mdx
+--         (2) Deadminecargoboxes.m2, (-1.272, -1.147, -0.019) to (1.294,
+--             1.120, 1.763) = 2.57 x 2.27 x 1.78 yd
+--         (3) 14 stock rows; the exact precedent is 180052 'Deadmine Cargo
+--             Boxes', which is type 5 at size 1.0 - the same two values
+(910083, 5,   36, 'Ore Crates',          1.0, 0, 0, ''),
+-- 910084: (1) World\Generic\Human\Passive Doodads\DeadMinePowderKeg\
+--             DeadMinePowderKeg.mdx
+--         (2) Deadminepowderkeg.m2, (-0.239, -0.255, 0.000) to (0.244,
+--             0.304, 0.592) = 0.48 x 0.56 x 0.59 yd - the smallest prop in
+--             the module
+--         (3) 2 stock rows: 193640/193713 'Doodad_deadminepowderkeg01/02',
+--             both type 5 at size 0.74
+--         Size 1.0 rather than Blizzard's 0.74 on purpose: at 0.74 the model
+--         is 0.36 x 0.41 x 0.44 yd, under half a yard in every axis, which on
+--         a 66 yd room floor is a pebble nobody sees. 1.0 leaves it the
+--         smallest thing here and still readable as a keg.
+(910084, 5,  436, 'Powder Keg',          1.0, 0, 0, ''),
+-- 910085: (1) WORLD\GENERIC\PASSIVEDOODADS\MISC\WHEELBARROW\
+--             CAVEMINEWHEELBARROW01.MDX
+--         (2) Caveminewheelbarrow01.m2, (-1.728, -0.710, 0.031) to (1.149,
+--             0.640, 1.231) = 2.88 x 1.35 x 1.20 yd
+--         (3) 1 stock row: 190859 (type 5, size 1, no name) - the thinnest
+--             precedent of the ten, but a real one, and unlike 910066 it is
+--             a GameObject row rather than terrain dressing
+(910085, 5,  215, 'Wheelbarrow',         1.0, 0, 0, ''),
+-- 910086: (1) World\Azeroth\Stranglethorn\PassiveDoodads\GemMineCar02\
+--             GemMineCar03.mdx  (the folder name is Blizzard's, not a typo)
+--         (2) Gemminecar03.m2, (-1.025, -0.769, -0.041) to (1.025, 1.075,
+--             2.427) = 2.05 x 1.84 x 2.47 yd - the tallest piece of clutter,
+--             and the one silhouette that says "mine" on its own
+--         (3) 2 stock rows: 192058 'Ore Cart' (type 3 CHEST, size 1.0) and
+--             190767 'Inconspicuous Mine Car' (type 10, 0.65). Ours is type 5
+--             GENERIC, so unlike 192058 it is never clickable and satisfies
+--             nobody's objective - the same argument the clutter ids make.
+(910086, 5, 7997, 'Ore Cart',            1.0, 0, 0, '');
 
 -- Chest data beyond the INSERT's column list: Data3 = consumable (one loot per spawn),
 -- Data2 = restock 0. Without Data3 the cache refilled every tick (Round C research 1.3).
