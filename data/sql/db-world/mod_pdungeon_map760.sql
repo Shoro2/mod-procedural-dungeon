@@ -26,12 +26,35 @@ DELETE FROM `mapdifficulty_dbc` WHERE `MapID` = 760;
 INSERT INTO `mapdifficulty_dbc` (`ID`, `MapID`, `Difficulty`, `Message_Lang_enUS`, `Message_Lang_enGB`, `Message_Lang_koKR`, `Message_Lang_frFR`, `Message_Lang_deDE`, `Message_Lang_enCN`, `Message_Lang_zhCN`, `Message_Lang_enTW`, `Message_Lang_zhTW`, `Message_Lang_esES`, `Message_Lang_esMX`, `Message_Lang_ruRU`, `Message_Lang_ptPT`, `Message_Lang_ptBR`, `Message_Lang_itIT`, `Message_Lang_Unk`, `Message_Lang_Mask`, `RaidDuration`, `MaxPlayers`, `Difficultystring`) VALUES
 (857, 760, 0, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 0, 0, 5, '');
 
--- The area the whole map falls back to; see linked_zone above. AreaBit
--- 4007 is this dungeon's own exploration bit - it must match the client
--- DBC exactly or the two sides credit different zones.
-DELETE FROM `areatable_dbc` WHERE `ID` = 5100;
+-- One row per theme:
+--   5100 = theme 2 'The Forgotten Depths', ambience 37, music 439
+--   5101 = theme 1 'The Forgotten Mine', ambience 34, music 236
+--   5102 = theme 3 'The Forgotten Woods', ambience 35, music 1
+-- 5100 is the area the whole map falls back to; see linked_zone above. The
+-- other two are CLIENT-side ids the composer stamps into the MCNK headers,
+-- and the server never answers them - they are shipped here only so this
+-- file's client-against-server check stays a real diff. AreaBit 4007 is this
+-- dungeon's own exploration bit, shared by all three because exploration
+-- runs off the server area, which is always 5100.
+DELETE FROM `areatable_dbc` WHERE `ID` IN (5100, 5101, 5102);
 INSERT INTO `areatable_dbc` (`ID`, `ContinentID`, `ParentAreaID`, `AreaBit`, `Flags`, `SoundProviderPref`, `SoundProviderPrefUnderwater`, `AmbienceID`, `ZoneMusic`, `IntroSound`, `ExplorationLevel`, `AreaName_Lang_enUS`, `AreaName_Lang_enGB`, `AreaName_Lang_koKR`, `AreaName_Lang_frFR`, `AreaName_Lang_deDE`, `AreaName_Lang_enCN`, `AreaName_Lang_zhCN`, `AreaName_Lang_enTW`, `AreaName_Lang_zhTW`, `AreaName_Lang_esES`, `AreaName_Lang_esMX`, `AreaName_Lang_ruRU`, `AreaName_Lang_ptPT`, `AreaName_Lang_ptBR`, `AreaName_Lang_itIT`, `AreaName_Lang_Unk`, `AreaName_Lang_Mask`, `FactionGroupMask`, `LiquidTypeID_1`, `LiquidTypeID_2`, `LiquidTypeID_3`, `LiquidTypeID_4`, `MinElevation`, `Ambient_Multiplier`, `Lightid`) VALUES
-(5100, 760, 0, 4007, 0, 76, 0, 37, 439, 551, 0, 'The Forgotten Depths', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0);
+(5100, 760, 0, 4007, 0, 76, 0, 37, 439, 551, 0, 'The Forgotten Depths', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0),
+(5101, 760, 0, 4007, 0, 76, 0, 34, 236, 551, 0, 'The Forgotten Mine', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0),
+(5102, 760, 0, 4007, 0, 76, 0, 35, 1, 551, 0, 'The Forgotten Woods', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 2, 0, 0, 0, 0, -500.0, 0.0, 0);
+
+-- The lights. The server reads ID/ContinentID/X/Y/Z only, and it reads them
+-- for exactly one thing: GetDefaultMapLight(760) scans DESCENDING and returns
+-- the first row of this map at (0,0,0), which is the id every
+-- SMSG_OVERRIDE_LIGHT packet carries as the light to fall back to. With
+-- light_dbc empty that id is 0, and a client told to fall back to light 0
+-- has nothing to fall back to. 2863 is that row; 2864 and 2865 are
+-- parked off-field and are only ever reached through
+-- Map::SetZoneOverrideLight(5100, id, fade).
+DELETE FROM `light_dbc` WHERE `ID` IN (2863, 2864, 2865);
+INSERT INTO `light_dbc` (`ID`, `ContinentID`, `X`, `Y`, `Z`, `FalloffStart`, `FalloffEnd`, `LightParamsID_1`, `LightParamsID_2`, `LightParamsID_3`, `LightParamsID_4`, `LightParamsID_5`, `LightParamsID_6`, `LightParamsID_7`, `LightParamsID_8`) VALUES
+(2863, 760, 0.0, 0.0, 0.0, 0.0, 0.0, 918, 918, 918, 918, 4, 0, 0, 0),
+(2864, 760, 1200000.0, 1200000.0, 0.0, 100.0, 200.0, 919, 919, 919, 919, 4, 0, 0, 0),
+(2865, 760, 1200000.0, 1200000.0, 0.0, 100.0, 200.0, 920, 920, 920, 920, 4, 0, 0, 0);
 
 -- NOT done here: removing v1's map-37 override. mod_pdungeon_base.sql still
 -- INSERTs those rows, so deleting them from this file would only work
