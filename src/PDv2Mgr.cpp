@@ -110,6 +110,31 @@ namespace PDungeon
             _config.themeLightId[static_cast<size_t>(theme - 1)] =
                 sConfigMgr->GetOption<uint32>(key, 0u);
         }
+
+        // Round F / L1 (recon D section 6, decision 1): the REGION a theme is
+        // laid out in, read in the same shape and the same window as the light
+        // ids above, because a positioned Light row is only a per-theme mood if
+        // the themes stand in different places (PDv2Mgr.h, themeOriginBX).
+        //
+        // Not clamped and not validated against the tile field here. The
+        // planner is the one that knows what fits - it refuses a layout whose
+        // blocks leave the field - and a bad origin surfaces at generation with
+        // the block coordinates printed beside it, which is more use than a
+        // silent clamp to an origin the operator did not ask for. The values
+        // ARE persisted (gen_origin_bx/by is SMALLINT UNSIGNED), so the same
+        // reasoning as V2.Branches applies at the far end of the range; a
+        // negative or absurd origin makes the plan fail long before the row is
+        // written, because no 8x8 window of it lands on a composable tile.
+        for (int theme = 1; theme <= PD_THEME_LIGHT_MAX; ++theme)
+        {
+            std::string const prefix = "ProceduralDungeon.V2.Theme" +
+                                       std::to_string(theme) + ".Origin";
+            size_t const slot = static_cast<size_t>(theme - 1);
+            _config.themeOriginBX[slot] =
+                sConfigMgr->GetOption<int32>(prefix + "BX", 0);
+            _config.themeOriginBY[slot] =
+                sConfigMgr->GetOption<int32>(prefix + "BY", 0);
+        }
         _config.manifestPath = sConfigMgr->GetOption<std::string>(
             "ProceduralDungeon.V2.ManifestPath", "");
 
@@ -457,14 +482,45 @@ namespace PDungeon
         // Round E / WP5: a layout input like the two above it, so the value the
         // plan was generated with is the one SavePlanToDB stores (gen_event_pct).
         cfg.eventChancePct = _config.eventChancePct;
+        // The theme FIRST, because the origin is a property of it (Round F /
+        // L1). The global keys are the base and a theme that names its own
+        // region overwrites them per axis; a theme that names none - and every
+        // server that sets no such key - keeps exactly the origin this line
+        // wrote, which is what makes L1 inert until an operator opts in.
+        cfg.theme = themeOverride ? themeOverride : _config.theme;
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;
-        cfg.theme = themeOverride ? themeOverride : _config.theme;
+        ThemeOriginBlock(cfg.theme, cfg.originBX, cfg.originBY);
 
         if (!GenerateBlockPlan(cfg, &out))
         {
             LOG_ERROR(PD_LOG, "PDv2: no valid layout for seed {} after {} tries", seed, cfg.maxTries);
             return false;
+        }
+
+        // One line per generation, and the reason it carries a WORLD position
+        // rather than only the block pair: the positioned Light.dbc rows
+        // workspace script 47 writes have to sit on top of the theme's region,
+        // and this is the number they are placed against. Deriving it here -
+        // from the module's own BlockLocalToWorld, on the plan's own config -
+        // is what keeps the two from being computed twice by hand and drifting.
+        //
+        // The centre of the 8x8-block window the origin opens - the layout's
+        // ADT TILE, which is what a positioned Light row is placed over and
+        // what the client composes (tx = bx / 8). Deliberately the TILE and
+        // not cfg.fieldBlocks: the field follows the room count downwards and
+        // is a different number per run, while the tile is the same region for
+        // every layout of this theme. Origin + half a tile on each axis, at
+        // that block's own north-west corner (u = v = 0), which is exactly the
+        // tile midpoint because a block boundary lies there.
+        {
+            double centreX = 0.0, centreY = 0.0;
+            BlockLocalToWorld(cfg.originBX + PD_BLOCKS_PER_TILE / 2,
+                              cfg.originBY + PD_BLOCKS_PER_TILE / 2,
+                              0.0, 0.0, centreX, centreY);
+            LOG_INFO(PD_LOG, "PDv2: theme {} layout origin block ({}, {}) - "
+                             "window centre world ({:.1f}, {:.1f})",
+                     cfg.theme, cfg.originBX, cfg.originBY, centreX, centreY);
         }
 
         StorePlan(accountId, out);
@@ -1192,6 +1248,34 @@ namespace PDungeon
             return 0;
         }
         return _config.themeLightId[static_cast<size_t>(theme - 1)];
+    }
+
+    void PDv2Mgr::ThemeOriginBlock(int theme, int& bx, int& by) const
+    {
+        // Same range contract as ThemeLightId above, and for the same reason:
+        // theme 0 is the account row's "follow the conf" and never reaches a
+        // plan, and a theme beyond the conf window has no key to read. Both
+        // leave the caller's global origin standing.
+        if (theme < 1 || theme > PD_THEME_LIGHT_MAX)
+        {
+            return;
+        }
+
+        size_t const slot = static_cast<size_t>(theme - 1);
+        // Per AXIS, not per theme. 0 is "the global value for this axis", so a
+        // theme that moves only along BY - which is what the shipped mine and
+        // forest do - says so by leaving OriginBX unset, and the two halves of
+        // an origin never have to be kept in step by hand. Block 0 is
+        // therefore not addressable as a theme origin; it is the corner of the
+        // map, where no dungeon has ever been laid out.
+        if (_config.themeOriginBX[slot])
+        {
+            bx = _config.themeOriginBX[slot];
+        }
+        if (_config.themeOriginBY[slot])
+        {
+            by = _config.themeOriginBY[slot];
+        }
     }
 
     uint8_t const* PDv2Mgr::WalkMaskFor(int chunkId) const

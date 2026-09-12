@@ -3913,6 +3913,163 @@ namespace
         }
     }
 
+    // Round F / L1: the per-theme LAYOUT ORIGIN.
+    //
+    // SMSG_OVERRIDE_LIGHT turned out to be a dead channel - the 3.3.5a client
+    // ignores it for our off-field Light rows - so the mood comes from
+    // POSITIONED Light.dbc rows instead, which the client selects by camera
+    // position. That works only if the themes are laid out in different
+    // REGIONS of map 760, which is what PDv2Mgr::ThemeOriginBlock now gives
+    // them: the mine at origin (256, 272), the city at the global (256, 256),
+    // the forest at (256, 240).
+    //
+    // The engine half of that is one field pair the planner has always had
+    // (BlockCfg::originBX/BY), so what this check states is the two promises
+    // the conf keys are worth nothing without:
+    //
+    //   1. an origin is a pure TRANSLATION. Same seed, same everything, every
+    //      block moved by exactly the origin delta and not one chunk id, role,
+    //      mask, alt or chain index touched. If that ever stopped holding, a
+    //      theme moving to its own tile would silently be a different dungeon.
+    //   2. the layout stays inside the 8x8-block window its origin opens, i.e.
+    //      inside ONE ADT tile - the unit the client composer works in
+    //      (tx = bx / 8, fl-stream-client composer.cpp:301) and the unit a
+    //      positioned Light row is placed over.
+    //
+    // and, beside them, the world number the engine LOGS at generation and
+    // workspace script 47 places its Light rows against: the centre of that
+    // window. Re-derived here from the TILE form named in PDv2WorldMath.h's
+    // own frame note - tile (tx, ty) has its north-west corner at
+    // ((32 - ty) * TILE, (32 - tx) * TILE), so the centre of tile (tx, ty) is
+    // ((31.5 - ty) * TILE, (31.5 - tx) * TILE) - rather than by repeating
+    // BlockLocalToWorld's expression, which would prove only that the compiler
+    // is deterministic.
+    //
+    // Every fixture in this file keeps the default origin (MakeCfg's 32 * 8),
+    // so no pin can move: this check builds its own plans at its own origins.
+    void RunThemeOriginWindowChecks(int seeds)
+    {
+        // The three origins the .conf.dist ships, and the world centre each
+        // one puts the theme's tile at - the numbers the INFO line prints to
+        // one decimal and the planner cross-checks script 47 against. Written
+        // out by hand on purpose: a table that derived them would agree with
+        // any bug in the derivation.
+        struct Origin { int bx; int by; double cx; double cy; char const* what; };
+        Origin const origins[3] = {
+            { 256, 256, -266.7, -266.7, "city (global)" },
+            { 256, 272, -1333.3, -266.7, "mine (+16 BY)" },
+            { 256, 240, 800.0, -266.7, "forest (-16 BY)" },
+        };
+
+        char msg[224];
+        for (Origin const& o : origins)
+        {
+            // The window centre, exactly as PDv2Mgr::GeneratePlan derives it:
+            // origin + half a tile on each axis, at that block's own north-west
+            // corner, which is the tile midpoint because a block boundary lies
+            // there.
+            double wx = 0.0, wy = 0.0;
+            BlockLocalToWorld(o.bx + PD_BLOCKS_PER_TILE / 2,
+                              o.by + PD_BLOCKS_PER_TILE / 2, 0.0, 0.0, wx, wy);
+
+            double const tx = static_cast<double>(o.bx) / PD_BLOCKS_PER_TILE;
+            double const ty = static_cast<double>(o.by) / PD_BLOCKS_PER_TILE;
+            double const wantX = (31.5 - ty) * PD_TILE_SIZE_YD;
+            double const wantY = (31.5 - tx) * PD_TILE_SIZE_YD;
+            std::snprintf(msg, sizeof(msg),
+                          "origin (%d,%d) %s: window centre (%.4f,%.4f) is not the "
+                          "tile-form centre (%.4f,%.4f)",
+                          o.bx, o.by, o.what, wx, wy, wantX, wantY);
+            Check(std::fabs(wx - wantX) < 1e-6 && std::fabs(wy - wantY) < 1e-6, msg, 0);
+
+            // And against the printed decimal, which is what a human reads off
+            // the log line and off script 47's row.
+            std::snprintf(msg, sizeof(msg),
+                          "origin (%d,%d) %s: window centre (%.1f,%.1f) moved off the "
+                          "shipped (%.1f,%.1f)", o.bx, o.by, o.what, wx, wy, o.cx, o.cy);
+            Check(std::fabs(wx - o.cx) < 0.05 && std::fabs(wy - o.cy) < 0.05, msg, 0);
+
+            // The centre names its own block back, so the number in the log
+            // cannot be a point in the tile next door.
+            int gcx = 0, gcy = 0;
+            WorldToCell(wx, wy, gcx, gcy);
+            std::snprintf(msg, sizeof(msg),
+                          "origin (%d,%d) %s: window centre divides back to block (%d,%d)",
+                          o.bx, o.by, o.what,
+                          gcx / PD_CELLS_PER_BLOCK, gcy / PD_CELLS_PER_BLOCK);
+            Check(gcx / PD_CELLS_PER_BLOCK == o.bx + PD_BLOCKS_PER_TILE / 2 &&
+                  gcy / PD_CELLS_PER_BLOCK == o.by + PD_BLOCKS_PER_TILE / 2, msg, 0);
+        }
+
+        // The mine's own origin against the default one, layout for layout.
+        int const shiftBX = 256 - 32 * 8;
+        int const shiftBY = 272 - 32 * 8;
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            BlockCfg cfgHome = MakeCfg(seed, 6);
+            BlockCfg cfgMine = MakeCfg(seed, 6, 256, 272);
+
+            BlockPlan home;
+            BlockPlan mine;
+            if (!GenerateBlockPlan(cfgHome, &home))
+            {
+                Check(false, "the default origin failed to generate", seed);
+                continue;
+            }
+            if (!GenerateBlockPlan(cfgMine, &mine))
+            {
+                Check(false, "origin (256,272) failed to generate where the default "
+                             "origin could", seed);
+                continue;
+            }
+
+            Check(home.blocks.size() == mine.blocks.size(),
+                  "origin (256,272) laid out a different block count", seed);
+            if (home.blocks.size() != mine.blocks.size())
+            {
+                continue;
+            }
+
+            bool translated = true;
+            bool inWindow = true;
+            for (size_t k = 0; k < mine.blocks.size(); ++k)
+            {
+                PlacedBlock const& a = home.blocks[k];
+                PlacedBlock const& b = mine.blocks[k];
+                if (b.bx != a.bx + shiftBX || b.by != a.by + shiftBY ||
+                    b.role != a.role || b.socketMask != a.socketMask ||
+                    b.alt != a.alt || b.chunkId != a.chunkId ||
+                    b.roomId != a.roomId || b.depth != a.depth ||
+                    b.chainIndex != a.chainIndex || b.branchOf != a.branchOf ||
+                    b.detourOf != a.detourOf || b.isEvent != a.isEvent)
+                {
+                    translated = false;
+                }
+                // Inside the 8x8 window the origin opens - stated as the
+                // window AND as the tile, because they are the same statement
+                // only while the origin is a multiple of PD_BLOCKS_PER_TILE,
+                // which is what makes a layout composable into one ADT.
+                if (b.bx < 256 || b.bx >= 256 + PD_BLOCKS_PER_TILE ||
+                    b.by < 272 || b.by >= 272 + PD_BLOCKS_PER_TILE ||
+                    b.bx / PD_BLOCKS_PER_TILE != 32 ||
+                    b.by / PD_BLOCKS_PER_TILE != 34)
+                {
+                    inWindow = false;
+                }
+            }
+            Check(translated, "origin (256,272) is not the default layout translated "
+                              "by the origin delta", seed);
+            Check(inWindow, "a block of the origin-(256,272) layout left its 8x8 "
+                            "window / its ADT tile (32,34)", seed);
+            Check(home.entranceIndex == mine.entranceIndex &&
+                  home.bossIndex == mine.bossIndex &&
+                  home.effectiveSeed == mine.effectiveSeed &&
+                  home.eventsDropped == mine.eventsDropped,
+                  "origin (256,272) moved the plan's own bookkeeping", seed);
+        }
+    }
+
     // --- Round B: the spine (spec 2026-09-02 §7.1) --------------------------
     //
     // Re-derived from the plan's blocks and sockets, never from the planner's
@@ -8219,6 +8376,13 @@ namespace
         // extends: the property is per layout, so the sample only decides how
         // many role/mask/alt combinations get their id re-derived.
         RunThemeThreeNamespaceChecks(count / 10 + 1);
+        // Round F / L1, same tenth-of-the-batch size and the same reasoning as
+        // the two checks above it: "an origin is a pure translation that keeps
+        // the layout inside one tile" is a property of every single layout, so
+        // the sample size only decides how many shapes get walked. The three
+        // window centres it pins are not seed-dependent at all and are checked
+        // once per call.
+        RunThemeOriginWindowChecks(count / 10 + 1);
         // Same tenth-of-the-batch reasoning: one pack per room is structural
         // too, and a real seed only ever gets a handful of rooms per run.
         RunPackThemeChecks(count / 10 + 1);

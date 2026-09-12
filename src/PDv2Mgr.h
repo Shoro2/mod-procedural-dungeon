@@ -53,13 +53,20 @@ class Player;
 //     where the floor is (`GroundZ -100000`); only the client does.
 namespace PDungeon
 {
-    // Round F / F3-B. How many per-theme light slots the conf carries:
-    // ProceduralDungeon.V2.Theme1.LightId .. Theme9.LightId. A FIXED window
-    // and deliberately not ThemeMax(): the keys are read in LoadConfig, which
-    // runs long before LoadChunkMeta has told anyone which themes the kit
+    // Round F / F3-B. How many per-theme slots the conf carries. A FIXED
+    // window and deliberately not ThemeMax(): the keys are read in LoadConfig,
+    // which runs long before LoadChunkMeta has told anyone which themes the kit
     // ships, so a config reader has nothing else to size itself by. Nine
     // matches the AreaTable block PDv2 reserved for itself (5101-5109), i.e.
     // the most themes this dungeon can ever name.
+    //
+    // It sizes every per-theme key FAMILY, not just the light one it was
+    // introduced for: ProceduralDungeon.V2.Theme1.LightId .. Theme9.LightId
+    // since F3-B, and .Theme1.OriginBX/.OriginBY .. Theme9 since L1. One
+    // window for all of them on purpose - a theme that is worth a mood is
+    // worth a region, and two windows of different sizes would be a silent
+    // trap the day they disagreed. (The name still says LIGHT; widening it is
+    // a rename this task deliberately did not take, see the L1 report.)
     int const PD_THEME_LIGHT_MAX = 9;
 
     struct PDv2Config
@@ -104,6 +111,36 @@ namespace PDungeon
         // operator lever and never a layout input - nobody's stored plan
         // rerolls because the mine got a new mood.
         std::array<uint32_t, PD_THEME_LIGHT_MAX> themeLightId{};
+        // Round F / L1 (recon D section 6, decision 1). The block coordinate a
+        // run of theme N lays its field out from, indexed theme-1 exactly like
+        // themeLightId above: themeOriginBX[0] is V2.Theme1.OriginBX. 0 on an
+        // axis means "use the global V2.OriginBX / V2.OriginBY for that axis",
+        // and 0 is the default for every slot - a server that sets none
+        // generates every theme on the same tile, exactly as it did before
+        // these keys existed.
+        //
+        // WHY a theme needs its own region: the F3-B light channel does not
+        // work. The 3.3.5a client ignores SMSG_OVERRIDE_LIGHT for our
+        // off-field Light rows (the server log proves the packet goes out,
+        // the sky stays the map default), so the mood has to come from the
+        // mechanism every stock WoW zone uses instead - POSITIONED Light.dbc
+        // rows, which the client selects by CAMERA POSITION. That only
+        // separates two themes if the two themes are in different places.
+        //
+        // A layout never leaves the 8x8-block window starting at its origin
+        // (V2.FieldBlocks is capped there and the field only shrinks below
+        // it), i.e. it stays inside exactly one ADT tile - PD_BLOCKS_PER_TILE,
+        // the unit the client composer works in. So an origin is a multiple of
+        // 8 and a theme owns a tile of its own.
+        //
+        // Unlike the light id beside it this IS a layout input: GeneratePlan
+        // copies it into BlockCfg::originBX/BY and SavePlanToDB persists it
+        // (pdungeon_account.gen_origin_bx/by). So retuning a key moves only
+        // layouts generated AFTER it, and every stored dungeon keeps the
+        // region it was built in - LoadPlanFromDB reads the stored origin and
+        // never these keys.
+        std::array<int, PD_THEME_LIGHT_MAX> themeOriginBX{};
+        std::array<int, PD_THEME_LIGHT_MAX> themeOriginBY{};
         std::string manifestPath;        // where `v2 gen` writes the manifest
 
         // 01 §8 gameplay knobs.
@@ -651,6 +688,22 @@ namespace PDungeon
         // touches nothing already standing, because the override is sent once
         // per build and then lives on the Map.
         uint32_t ThemeLightId(int theme) const;
+
+        // Round F / L1. Overwrites `bx` / `by` with the layout origin of
+        // `theme`, per axis and only where that theme really names one.
+        //
+        // A MUTATOR and not a getter on purpose: "0 means follow the global
+        // origin" then lives in exactly one place instead of at every call
+        // site, and the caller passes in the global values it already has.
+        // A theme outside the conf's 1..PD_THEME_LIGHT_MAX window, and the
+        // theme 0 that means "follow the conf" on an account row, leave both
+        // arguments untouched - so a caller never has to range check.
+        //
+        // Read straight off the live config like ThemeLightId, but unlike it
+        // this value is FROZEN into the plan by the caller (GeneratePlan ->
+        // BlockCfg::originBX/BY -> gen_origin_bx/by), so `.reload config`
+        // moves the next layout to be GENERATED and no layout already stored.
+        void ThemeOriginBlock(int theme, int& bx, int& by) const;
 
         // The 8x8 walk mask for a kit chunk, or nullptr for an unknown id -
         // the shape BuildWalkGrid's WalkMaskProvider wants.

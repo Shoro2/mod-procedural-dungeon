@@ -291,6 +291,9 @@ ProceduralDungeon.V2.FieldBlocks = 8
 #        Description: Global block coordinate of the field's origin. A tile is 8
 #                     blocks, so 256 puts the field on tile 32. Changing these
 #                     moves the dungeon to another tile of the same map.
+#                     These are the FALLBACK since Round F / L1: a theme that
+#                     names its own region in V2.Theme<N>.OriginBX / .OriginBY
+#                     below overrides them, per axis, for its own layouts.
 #        Default:     256 / 256
 #
 
@@ -401,6 +404,52 @@ ProceduralDungeon.V2.Packs.ThemeExclusive = 1
 ProceduralDungeon.V2.Theme1.LightId = 2864
 ProceduralDungeon.V2.Theme2.LightId = 0
 ProceduralDungeon.V2.Theme3.LightId = 2865
+
+#
+#    ProceduralDungeon.V2.Theme<N>.OriginBX / .OriginBY   (N = 1 .. 9)
+#        Description: Round F / L1: the REGION of the map a run generated with
+#                     theme N is laid out in - the global block coordinate its
+#                     8x8-block field starts at, overriding V2.OriginBX /
+#                     V2.OriginBY above for that theme alone.
+#                     0 on an axis = use the global value for that axis, which
+#                     is what every unset slot means and what this module did
+#                     before L1. Block 0 is therefore not addressable as a
+#                     theme origin; it is the corner of the map.
+#                     WHY: the per-theme mood cannot be delivered by the
+#                     V2.Theme<N>.LightId packet above - the 3.3.5a client
+#                     ignores SMSG_OVERRIDE_LIGHT for our off-field Light rows
+#                     (the server log shows the packet going out and the sky
+#                     staying the map default). The mechanism that DOES work
+#                     is the one every stock WoW zone uses: POSITIONED
+#                     Light.dbc rows, which the client picks by camera
+#                     position - and that only tells two themes apart when the
+#                     two themes are in different places.
+#                     A layout never leaves the 8x8-block window starting at
+#                     its origin (V2.FieldBlocks is capped there), i.e. it
+#                     stays inside exactly ONE ADT tile, so an origin is a
+#                     multiple of 8 and a theme owns a tile of its own. The
+#                     city stays where it has always been (256, 256 = tile
+#                     32,32), the mine sits two tiles along BY (+16 blocks =
+#                     tile 32,34) and the forest two tiles the other way
+#                     (-16 = tile 32,30). Workspace script 47 places each
+#                     theme's Light row over the window centre this names, and
+#                     the worldserver logs that centre once per generation:
+#                     "PDv2: theme N layout origin block (bx, by) - window
+#                     centre world (x, y)".
+#                     A LAYOUT INPUT, unlike the light id above it: the value
+#                     is frozen into the plan and stored with it
+#                     (pdungeon_account.gen_origin_bx/by), so retuning a key
+#                     moves only layouts generated AFTER it and every stored
+#                     dungeon keeps the region it was built in.
+#        Default:     0 / 0 for every theme that is not listed below
+#
+
+ProceduralDungeon.V2.Theme1.OriginBX = 256
+ProceduralDungeon.V2.Theme1.OriginBY = 272
+ProceduralDungeon.V2.Theme2.OriginBX = 0
+ProceduralDungeon.V2.Theme2.OriginBY = 0
+ProceduralDungeon.V2.Theme3.OriginBX = 256
+ProceduralDungeon.V2.Theme3.OriginBY = 240
 
 #
 #    ProceduralDungeon.V2.RequiredDllVersion
