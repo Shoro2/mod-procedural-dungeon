@@ -90,6 +90,12 @@ namespace PDungeon
         // restart; the next instance to build draws under whatever it says.
         _config.packsThemeExclusive = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Packs.ThemeExclusive", true);
+        // Round F / K5. Read live for the same reason and with the same
+        // consequence as the pack key above: it is handed to BuildCritterPlan
+        // at the instance build, so `.reload config` retunes the next dungeon
+        // and nobody's stored layout rerolls.
+        _config.crittersThemeExclusive = sConfigMgr->GetOption<bool>(
+            "ProceduralDungeon.V2.Critters.ThemeExclusive", true);
 
         // Round F / F3-B (recon D 2b): the mood per theme. One key per theme
         // slot, 0 = no override, which is what every slot reads on a server
@@ -1395,8 +1401,80 @@ namespace PDungeon
             _critterRules.push_back(std::move(rule));
         } while (result->NextRow());
 
-        LOG_INFO(PD_LOG, "PDv2: loaded {} critter rule(s) from pdungeon_critter_rules",
-                 uint32(_critterRules.size()));
+        LOG_INFO(PD_LOG, "PDv2: loaded {} critter rule(s) from pdungeon_critter_rules "
+                         "across all themes - {} (ThemeExclusive {})",
+                 uint32(_critterRules.size()), DescribeCritterRulesPerTheme(),
+                 _config.crittersThemeExclusive ? 1 : 0);
+
+        // Round F / K5, the critter half of PDv2PackMgr::ReportThemeCoverage:
+        // which of the kit's looks have no ambient life of their own and draw
+        // the theme-0 rules instead. INFO and not a warning - that is the
+        // normal state of a theme whose art shipped before its critters, and
+        // it is exactly what every theme looked like before K5. Bounded by
+        // ThemeMax() and not by "every theme the rules mention", for the same
+        // reason the pack report gives: the question is what a PLAYER can
+        // pick, and that is the art the kit shipped. LoadChunkMeta runs before
+        // this (PDWorldScript.cpp), so the kit's themes are known here.
+        int const themeMax = ThemeMax();
+        for (int theme = 1; theme <= themeMax; ++theme)
+        {
+            if (!HasTheme(theme))
+            {
+                continue;               // a gap in the kit's ids, not a theme
+            }
+
+            bool own = false;
+            for (CritterRule const& rule : _critterRules)
+            {
+                if (rule.theme == theme)
+                {
+                    own = true;
+                    break;
+                }
+            }
+            if (!own)
+            {
+                LOG_INFO(PD_LOG, "PDv2: theme {} has no critter rule of its own - runs "
+                                 "generated with it place the theme-0 critters", theme);
+            }
+        }
+    }
+
+    std::string PDv2Mgr::DescribeCritterRulesPerTheme() const
+    {
+        // A linear scan over a handful of rules and deliberately not a map,
+        // the same shape and the same reasoning as
+        // PDv2PackMgr::DescribePacksPerTheme: the themes are single digits,
+        // the list has to come out ASCENDING for a line a human reads, and
+        // _critterRules is already ordered by id.
+        std::vector<int> themes;
+        for (CritterRule const& rule : _critterRules)
+        {
+            auto const slot = std::lower_bound(themes.begin(), themes.end(), rule.theme);
+            if (slot == themes.end() || *slot != rule.theme)
+            {
+                themes.insert(slot, rule.theme);
+            }
+        }
+
+        std::string out;
+        for (int theme : themes)
+        {
+            uint32 count = 0;
+            for (CritterRule const& rule : _critterRules)
+            {
+                if (rule.theme == theme)
+                {
+                    ++count;
+                }
+            }
+            if (!out.empty())
+            {
+                out += ", ";
+            }
+            out += "theme " + std::to_string(theme) + ": " + std::to_string(count);
+        }
+        return out.empty() ? std::string("no critter rules") : out;
     }
 
     bool PDv2Mgr::EntranceWorldPos(BlockPlan const& plan, float& x, float& y, float& z) const

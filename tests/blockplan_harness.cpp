@@ -5616,8 +5616,14 @@ namespace
             why = "the pinned critter plan could not generate a layout";
             return false;
         }
+        // ThemeExclusive ON, which is the shipped default - and the pin does
+        // not move under it (Round F / K5): every rule of CritterFixture() is
+        // theme 0, MakeCfg builds a theme-1 plan, and a theme that owns no
+        // rule of its own falls back to the theme-0 rules. That fallback IS
+        // the pre-K5 behaviour, which is what makes this string a pin across
+        // the change rather than a re-capture.
         std::vector<CritterSpot> const spots = BuildCritterPlan(
-            plan, MaskFor, CritterFixture(), plan.effectiveSeed);
+            plan, MaskFor, CritterFixture(), plan.effectiveSeed, true);
 
         std::string got;
         for (CritterSpot const& s : spots)
@@ -5637,6 +5643,173 @@ namespace
             return false;
         }
         return true;
+    }
+
+    // --- Round F / K5: ambient life follows the theme ----------------------
+    //
+    // The operator's verdict of 2026-09-12, on a screenshot of the forest:
+    // "Critter sollen auch passend zum Theme sein" - a Sewer Rat was running
+    // between the pines, because every rule this module had shipped is
+    // `theme 0` and a theme-0 rule is ADDITIVE on a themed run. The fix is the
+    // rule the PACKS already keep (SelectThemePacks, generator/PDv2PackDraw.h)
+    // and this is its critter twin.
+    //
+    // The fixture below is CritterFixture()'s five shipped theme-0 rows plus
+    // the FOREST set the same commit ships in
+    // mod_pdungeon_critter_mine_forest.sql (ids 16-20, theme 3), mirrored row
+    // for row exactly as CritterFixture mirrors the base file.
+    //
+    // The MINE set of that file (ids 11-15, theme 1) is deliberately NOT here,
+    // and that is not an oversight: every pinned layout in this file is a
+    // theme-1 plan (MakeCfg leaves BlockCfg::theme at its default 1), so a
+    // themed mine rule would take those runs away from the theme-0 rules and
+    // move PD_CRITTER_PLAN_PIN. That is precisely the behaviour under test
+    // here - but testing it must not cost the pin whose job is to prove that
+    // nothing ELSE moved. Theme 3 carries no pin, so it is the free axis, and
+    // theme 1 stays in this file as the "a theme with no rules of its own"
+    // case, which is the half that has to reproduce the old dungeon exactly.
+    std::vector<CritterRule> ThemedCritterFixture()
+    {
+        std::vector<CritterRule> rules = CritterFixture();
+        CritterRule r;
+        r.id = 16; r.theme = 3; r.roleFilter = "room";
+        r.creatureEntry = 721; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 100;
+        rules.push_back(r);
+        r.id = 17; r.theme = 3; r.roleFilter = "room";
+        r.creatureEntry = 1412; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 80;
+        rules.push_back(r);
+        r.id = 18; r.theme = 3; r.roleFilter = "room";
+        r.creatureEntry = 883; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 60;
+        rules.push_back(r);
+        r.id = 19; r.theme = 3; r.roleFilter = "corridor";
+        r.creatureEntry = 1420; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 100;
+        rules.push_back(r);
+        r.id = 20; r.theme = 3; r.roleFilter = "room_boss";
+        r.creatureEntry = 1420; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 60;
+        rules.push_back(r);
+        return rules;
+    }
+
+    void RunCritterThemeChecks()
+    {
+        std::vector<CritterRule> const rules = ThemedCritterFixture();
+
+        std::vector<int> const shipped = { 1, 2, 3, 4, 6 };
+        std::vector<int> const forest = { 16, 17, 18, 19, 20 };
+        std::vector<int> both = shipped;
+        both.insert(both.end(), forest.begin(), forest.end());
+
+        // --- the rule itself, stated in full and without a kit --------------
+        Check(SelectCritterRules(rules, 3, true) == forest,
+              "an exclusive forest run did not take the forest rules ALONE", 0);
+        Check(SelectCritterRules(rules, 3, false) == both,
+              "ThemeExclusive = 0 did not merge the forest rules with theme 0", 0);
+        Check(SelectCritterRules(rules, 2, true) == shipped,
+              "a theme with no critter rule of its own did not fall back to theme 0", 0);
+        Check(SelectCritterRules(rules, 2, false) == shipped,
+              "a theme with no rule of its own must read the same in both modes", 0);
+        // theme 0 is not a look, it is the absence of one - so it can never be
+        // its own theme, in either mode.
+        Check(SelectCritterRules(rules, 0, true) == shipped,
+              "theme 0 claimed a theme of its own under ThemeExclusive = 1", 0);
+        Check(SelectCritterRules(rules, 0, false) == shipped,
+              "theme 0 claimed a theme of its own under ThemeExclusive = 0", 0);
+        // And the pre-K5 world: a rule set with no themed row at all behaves
+        // exactly as it always did, whatever the key says.
+        Check(SelectCritterRules(CritterFixture(), 3, true) == shipped,
+              "a rule set with no themed row stopped answering the theme-0 rules", 0);
+        Check(SelectCritterRules(CritterFixture(), 3, false) == shipped,
+              "a rule set with no themed row answered something else at 0", 0);
+
+        // --- the same rule where the masks are ------------------------------
+        //
+        // A kit staged before t1b-v40 has no theme-3 chunk, and then a forest
+        // plan would decorate nothing at all and every check below would pass
+        // vacuously. Say so and stop instead; the rule checks above need no
+        // kit and have already run.
+        // 22001 spelled out and not taken from ThemeChunkIdBase, for the
+        // reason the inventory sweep above gives: that table lives in the
+        // file under test and this one states the id scheme independently
+        // (themeBase 22000 + alt 0 + role 0 + socket mask 1 - a forest room).
+        if (!MaskFor(22001))
+        {
+            std::printf("  (no theme-3 chunk in the staged kit - "
+                        "critter theme plan checks skipped)\n");
+            return;
+        }
+
+        bool sawThemed = false;
+        bool sawThemedInUnion = false;
+        bool sawTheme0InUnion = false;
+        for (int i = 0; i < 40; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
+
+            BlockPlan forestPlan;
+            BlockCfg forestCfg = MakeCfg(seed, 6);
+            forestCfg.theme = 3;
+            if (!GenerateBlockPlan(forestCfg, &forestPlan))
+            {
+                Check(false, "the forest layout would not generate", seed);
+                continue;
+            }
+
+            // THE OPERATOR'S CASE: no theme-0 critter may stand in a forest
+            // that has critters of its own.
+            std::vector<CritterSpot> const only = BuildCritterPlan(
+                forestPlan, MaskFor, rules, forestPlan.effectiveSeed, true);
+            for (CritterSpot const& s : only)
+            {
+                Check(std::find(forest.begin(), forest.end(), s.ruleId) != forest.end(),
+                      "an exclusive forest run placed a critter from a foreign rule", seed);
+                sawThemed = true;
+            }
+
+            // ThemeExclusive off: the same layout, both rule sets.
+            std::vector<CritterSpot> const merged = BuildCritterPlan(
+                forestPlan, MaskFor, rules, forestPlan.effectiveSeed, false);
+            for (CritterSpot const& s : merged)
+            {
+                bool const themed =
+                    std::find(forest.begin(), forest.end(), s.ruleId) != forest.end();
+                bool const theme0 =
+                    std::find(shipped.begin(), shipped.end(), s.ruleId) != shipped.end();
+                Check(themed || theme0,
+                      "the merged forest run placed a critter from no rule of the set", seed);
+                sawThemedInUnion = sawThemedInUnion || themed;
+                sawTheme0InUnion = sawTheme0InUnion || theme0;
+            }
+
+            // A theme with NO rule of its own is the dungeon this module built
+            // before K5 - spot for spot, in BOTH modes, and identical to the
+            // plan the theme-0-only fixture produces. This is the half that
+            // says the change is additive for the city and the mine until
+            // their own rules are loaded.
+            BlockPlan minePlan;
+            if (!GenerateBlockPlan(MakeCfg(seed, 6), &minePlan))
+            {
+                Check(false, "the theme-1 layout would not generate", seed);
+                continue;
+            }
+            std::vector<CritterSpot> const strict = BuildCritterPlan(
+                minePlan, MaskFor, rules, minePlan.effectiveSeed, true);
+            std::vector<CritterSpot> const loose = BuildCritterPlan(
+                minePlan, MaskFor, rules, minePlan.effectiveSeed, false);
+            std::vector<CritterSpot> const preK5 = BuildCritterPlan(
+                minePlan, MaskFor, CritterFixture(), minePlan.effectiveSeed, true);
+            Check(SameCritters(strict, loose),
+                  "a theme with no rule of its own read differently in the two modes", seed);
+            Check(SameCritters(strict, preK5),
+                  "a theme with no rule of its own stopped building the pre-K5 plan", seed);
+        }
+
+        // Non-vacuity, and it is not decoration: a fixture or a rule change
+        // that quietly stopped placing the themed critters would leave every
+        // "only forest rules" check above trivially true.
+        Check(sawThemed,
+              "no exclusive forest run placed a single critter - the check is vacuous", 0);
+        Check(sawThemedInUnion && sawTheme0InUnion,
+              "ThemeExclusive = 0 never produced a mixed sample - the union is not one", 0);
     }
 
     // Round B: the chain itself, pinned. RunLayoutFreezeCheck pins the
@@ -5986,6 +6159,7 @@ namespace
             bool const ok = CheckCritterPlanPinned(why);
             Check(ok, why.c_str(), 12345u);
         }
+        RunCritterThemeChecks();
 
         std::vector<DecorRule> const rules = DecorFixture();
         std::vector<CritterRule> const critterRules = CritterFixture();
@@ -6048,9 +6222,9 @@ namespace
                     }
 
                     std::vector<CritterSpot> const critters = BuildCritterPlan(
-                        plan, MaskFor, critterRules, plan.effectiveSeed);
+                        plan, MaskFor, critterRules, plan.effectiveSeed, true);
                     std::vector<CritterSpot> const crittersAgain = BuildCritterPlan(
-                        plan, MaskFor, critterRules, plan.effectiveSeed);
+                        plan, MaskFor, critterRules, plan.effectiveSeed, true);
                     Check(SameCritters(critters, crittersAgain),
                           "two critter builds of the same plan differ", seed);
                     Check(CheckCritterSpots(plan, critters, why),

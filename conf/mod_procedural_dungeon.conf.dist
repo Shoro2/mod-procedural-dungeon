@@ -371,6 +371,32 @@ ProceduralDungeon.V2.Theme = 2
 ProceduralDungeon.V2.Packs.ThemeExclusive = 1
 
 #
+#    ProceduralDungeon.V2.Critters.ThemeExclusive
+#        Description: Round F / K5: the same question for AMBIENT LIFE. Does a
+#                     run place ONLY the critters authored for its own theme
+#                     (pdungeon_critter_rules.theme)?
+#                     1 = yes, and a theme with at least one critter rule of
+#                     its own places nothing else - the forest gets its
+#                     rabbits and toads and no Sewer Rat (operator verdict
+#                     2026-09-12: "Critter sollen auch passend zum Theme
+#                     sein", on a forest screenshot with exactly that rat in
+#                     it). 0 = the themed rules merely join the theme-0 ones,
+#                     which is the shape this module had before K5.
+#                     A theme with no critter rule of its own places the
+#                     theme-0 critters either way, so a look whose art has
+#                     shipped before its ambient life is still alive (the boot
+#                     log says which themes are in that state).
+#                     Read live: `.reload config` retunes the next instance to
+#                     build. It is NOT a layout input - the critter draw has
+#                     its own RNG stream, so flipping this re-rolls which
+#                     critters a stored seed places and moves no prop, no
+#                     spawn and no layout.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.Critters.ThemeExclusive = 1
+
+#
 #    ProceduralDungeon.V2.Theme<N>.LightId       (N = 1 .. 9)
 #        Description: Round F / F3-B: the MOOD of a theme. The Light.dbc ROW
 #                     id a run generated with theme N overrides its zone

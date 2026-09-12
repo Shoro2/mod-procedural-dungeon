@@ -695,10 +695,77 @@ namespace PDungeon
         return out;
     }
 
+    std::vector<int> SelectCritterRules(std::vector<CritterRule> const& rules,
+                                        int theme, bool exclusive)
+    {
+        // Does the run's own look have ambient life of its own? Asked FIRST
+        // and over the whole list, because the answer decides what every test
+        // after it means - one themed rule takes the run, and none at all
+        // hands it back to theme 0 without the themed rows ever being looked
+        // at again. The `theme != 0` guard is the degenerate case: theme 0 is
+        // not a look, it is the absence of one, so it can never be its own
+        // theme. Word for word the shape SelectThemePacks keeps for the packs,
+        // on purpose - two exclusivity rules that read differently are two
+        // rules to get wrong.
+        bool themedRules = false;
+        if (theme != 0)
+        {
+            for (CritterRule const& r : rules)
+            {
+                if (r.theme == theme)
+                {
+                    themedRules = true;
+                    break;
+                }
+            }
+        }
+
+        std::vector<int> chosen;
+        chosen.reserve(rules.size());
+        for (CritterRule const& r : rules)
+        {
+            bool keep = false;
+            if (exclusive && themedRules)
+            {
+                // The themed run: the theme-0 rules are OUT, including the
+                // ones that would have fitted. That is the whole point of the
+                // key - the operator's verdict of 2026-09-12 was a Sewer Rat
+                // running through the forest, and a rat that reads as a city
+                // sewer does not stop reading that way because a rabbit is
+                // standing beside it.
+                keep = r.theme == theme;
+            }
+            else if (exclusive)
+            {
+                // A look nobody has written ambient life for yet. It falls
+                // back to the theme-0 rules rather than to nothing: a theme
+                // ships its art long before its rosters, and a dungeon with no
+                // life at all reads as a broken server rather than as missing
+                // content. Every theme looked like this before Round F / K5.
+                keep = r.theme == 0;
+            }
+            else
+            {
+                // ThemeExclusive off: the themed rules merely JOIN the
+                // theme-0 ones, which is the pre-K5 filter this line replaces
+                // (`rule.theme != 0 && rule.theme != plan.config.theme`) and
+                // what an operator who wants variety over coherence asks for.
+                keep = r.theme == 0 || r.theme == theme;
+            }
+
+            if (keep)
+            {
+                chosen.push_back(r.id);
+            }
+        }
+        return chosen;
+    }
+
     std::vector<CritterSpot> BuildCritterPlan(BlockPlan const& plan,
                                               DecorMaskProvider const& maskFor,
                                               std::vector<CritterRule> const& rules,
-                                              uint32_t layoutSeed)
+                                              uint32_t layoutSeed,
+                                              bool themeExclusive)
     {
         std::vector<CritterSpot> out;
 
@@ -715,6 +782,14 @@ namespace PDungeon
         {
             return rules[l].id < rules[r].id;
         });
+
+        // Which rules this run may draw from at all - the theme question,
+        // answered ONCE here rather than per block, because it is a property
+        // of the rule set and the run's look and nothing a block can change.
+        // Rule ids and not indices, so the answer is the same thing
+        // SelectCritterRules states to its harness case.
+        std::vector<int> const allowed =
+            SelectCritterRules(rules, plan.config.theme, themeExclusive);
 
         // Its OWN stream, mixed with its own constant: adding or removing a
         // critter rule must never move a single prop.
@@ -741,7 +816,14 @@ namespace PDungeon
             for (size_t const i : byId)
             {
                 CritterRule const& rule = rules[i];
-                if (rule.theme != 0 && rule.theme != plan.config.theme) continue;
+                // A linear find over a handful of ids, and deliberately not a
+                // set: nothing under src/generator/ may let a hash container's
+                // iteration order near a draw, and the membership test does
+                // not touch the order the rules are walked in - a rule the
+                // theme excludes costs no draw at all, exactly as a rule whose
+                // roleFilter misses costs none.
+                if (std::find(allowed.begin(), allowed.end(), rule.id) == allowed.end())
+                    continue;
                 if (!DecorRoleMatches(rule.roleFilter, roleName)) continue;
                 matching.push_back(i);
                 totalWeight += (rule.weight > 0 ? rule.weight : 1);

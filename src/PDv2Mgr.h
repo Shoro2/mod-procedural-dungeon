@@ -98,6 +98,23 @@ namespace PDungeon
         // rerolling anybody's stored plan. It does move WHICH creatures a
         // stored seed spawns, exactly as adding a pack does.
         bool        packsThemeExclusive = true;
+        // Round F / K5. The same question for AMBIENT LIFE: does a run of
+        // theme N draw ONLY from the critter rules authored for theme N?
+        // On by default for the reason the operator gave on 2026-09-12,
+        // looking at a forest screenshot - "Critter sollen auch passend zum
+        // Theme sein" - with a Sewer Rat (a theme-0 rule) running between the
+        // pines. Off keeps the pre-K5 shape, where the themed rules merely
+        // join the theme-0 ones.
+        //
+        // A theme with no critter rule of its own falls back to the theme-0
+        // rules either way, so a look whose art shipped before its ambient
+        // life still has some (SelectCritterRules, generator/PDv2DecorPlan.h).
+        //
+        // An operator lever and NOT a layout input, exactly like the pack key
+        // above: BuildCritterPlan draws on its own stream
+        // (PD_CRITTER_SEED_MIX), so flipping this re-rolls which critters a
+        // stored seed places and moves no prop, no spawn and no layout.
+        bool        crittersThemeExclusive = true;
         // Round F / F3-B (recon D 2b). The Light.dbc ROW id a run of theme N
         // overrides its zone with, indexed theme-1: themeLightId[0] is
         // V2.Theme1.LightId. 0 = no override, and 0 is the default for every
@@ -761,6 +778,13 @@ namespace PDungeon
         // The critter rules, in the order they were loaded (ascending id).
         // BuildCritterPlan's determinism promise rests on that order.
         std::vector<CritterRule> const& CritterRules() const { return _critterRules; }
+
+        // "theme 0: 5, theme 1: 5, theme 3: 5" - the per-theme shape of the
+        // loaded critter rules for the boot line, the critter twin of
+        // PDv2PackMgr::DescribePacksPerTheme. Public for no other reason than
+        // that LoadCritterRules is the only caller; it is a pure formatter
+        // over _critterRules and touches nothing else.
+        std::string DescribeCritterRulesPerTheme() const;
 
     private:
         void StorePlan(uint32_t accountId, BlockPlan const& plan);

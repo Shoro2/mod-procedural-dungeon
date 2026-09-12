@@ -239,7 +239,12 @@ namespace PDungeon
     int const PD_CRITTER_MAX_SPOTS = 100;
 
     // One row of `pdungeon_critter_rules`. `roleFilter` is the same prefix
-    // match `DecorRule` uses.
+    // match `DecorRule` uses; `theme` 0 means "any look", the sentinel
+    // `pdungeon_decor_rules` and `pdungeon_packs` use - but see
+    // SelectCritterRules below for what "any" means since Round F / K5: a
+    // theme that owns critter rules of its own no longer collects the theme-0
+    // ones beside them, because a Sewer Rat running through a forest is the
+    // one thing the operator asked for it not to do.
     struct CritterRule
     {
         int         id = 0;
@@ -262,14 +267,43 @@ namespace PDungeon
         double orientation = 0.0;
     };
 
+    // Which critter rules a run of `theme` draws from, as rule ids in `rules`
+    // order. Round F / K5, and deliberately the SAME three-way rule
+    // SelectThemePacks (generator/PDv2PackDraw.h) states for the packs:
+    //
+    //   exclusive && the theme owns at least one rule -> that theme's rules
+    //   exclusive (but it owns none)                  -> the theme-0 rules
+    //   !exclusive                                    -> both
+    //
+    // theme 0 answers the theme-0 rules in either mode: theme 0 is not a look,
+    // it is the absence of one, so it can never be its own theme - which is
+    // what makes a caller that never themes anything behave exactly as it did
+    // before this rule existed.
+    //
+    // One exported function rather than a condition inside the block walk, for
+    // the reason SelectThemePacks gives: the rule IS the feature, and a rule
+    // that can only be exercised through a running dungeon is a rule nobody
+    // tests. BuildCritterPlan calls it ONCE per plan - the answer is a
+    // property of the rule set and the theme and never of the block.
+    std::vector<int> SelectCritterRules(std::vector<CritterRule> const& rules,
+                                        int theme, bool exclusive);
+
     // Critters for a layout, in the same fixed order BuildDecorPlan uses:
     // blocks in plan order, rules by ascending id, candidate cells row-major.
     // Placed on OPEN floor only (the scatter candidate set), so a critter never
     // stands inside a prop and never on the line every player walks.
+    //
+    // `themeExclusive` is the operator key `ProceduralDungeon.V2.Critters.
+    // ThemeExclusive`, handed IN and never read here: this file is engine-free
+    // and has no sConfigMgr, exactly like the pack draw, which takes its own
+    // theme decision through SpawnSelectInputs. It carries NO default value on
+    // purpose - both answers are legitimate, so a call site that forgot the
+    // argument would silently pick one rather than fail to compile.
     std::vector<CritterSpot> BuildCritterPlan(BlockPlan const& plan,
                                               DecorMaskProvider const& maskFor,
                                               std::vector<CritterRule> const& rules,
-                                              uint32_t layoutSeed);
+                                              uint32_t layoutSeed,
+                                              bool themeExclusive);
 }
 
 #endif

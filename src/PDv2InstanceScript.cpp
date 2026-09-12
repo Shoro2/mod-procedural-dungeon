@@ -3357,10 +3357,17 @@ namespace PDungeon
         // The PLAN's seed, exactly like SpawnDecor: BuildCritterPlan derives
         // its own stream from it (PD_CRITTER_SEED_MIX), so critters follow a
         // re-roll the way the props and the terrain do.
+        // The theme flag travels with the call and is never read inside the
+        // generator (Round F / K5): src/generator/ is engine-free, so the
+        // operator key reaches BuildCritterPlan the way V2.Packs.ThemeExclusive
+        // reaches the spawn draw - through the inputs. Read here, at the
+        // instance build, which is what makes `.reload config` retune the next
+        // dungeon without touching anybody's stored layout.
         std::vector<CritterSpot> const spots = BuildCritterPlan(
             plan,
             [](int chunkId) { return sPDv2Mgr->WalkMaskFor(chunkId); },
-            rules, plan.effectiveSeed);
+            rules, plan.effectiveSeed,
+            sPDv2Mgr->GetConfig().crittersThemeExclusive);
 
         uint32 placed = 0;
         uint32 skippedForClearance = 0;
