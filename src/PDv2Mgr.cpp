@@ -1415,6 +1415,19 @@ namespace PDungeon
         // reason the pack report gives: the question is what a PLAYER can
         // pick, and that is the art the kit shipped. LoadChunkMeta runs before
         // this (PDWorldScript.cpp), so the kit's themes are known here.
+        // The pack report's second half too: a theme without rules of its own
+        // only has something to fall back to while a theme-0 rule exists. The
+        // base file invites operators to replace its rows, so this is not a
+        // hypothetical state.
+        bool anyTheme0 = false;
+        for (CritterRule const& rule : _critterRules)
+        {
+            if (rule.theme == 0)
+            {
+                anyTheme0 = true;
+                break;
+            }
+        }
         int const themeMax = ThemeMax();
         for (int theme = 1; theme <= themeMax; ++theme)
         {
@@ -1432,10 +1445,20 @@ namespace PDungeon
                     break;
                 }
             }
-            if (!own)
+            if (own)
+            {
+                continue;
+            }
+            if (anyTheme0)
             {
                 LOG_INFO(PD_LOG, "PDv2: theme {} has no critter rule of its own - runs "
                                  "generated with it place the theme-0 critters", theme);
+            }
+            else
+            {
+                LOG_ERROR(PD_LOG, "PDv2: theme {} has no critter rule of its own AND there "
+                                  "is no theme-0 rule to fall back to - runs generated "
+                                  "with it place no critters", theme);
             }
         }
     }

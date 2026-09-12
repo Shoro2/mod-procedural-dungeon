@@ -75,7 +75,7 @@
 -- black rat is a mine rat as much as it is anything else, and an entry may
 -- appear in rules of several themes - the rules are keyed by id, not by entry.
 --
--- MOVEMENT, because three of the eight carry `MovementType` 1 (RANDOM) in
+-- MOVEMENT, because seven of the eight carry `MovementType` 1 (RANDOM) in
 -- their template and this file spawns them as SUMMONS: `Creature::Create`
 -- reads the template's movement type and immediately downgrades it -
 -- `if (!m_wanderDistance && m_defaultMovementType == RANDOM_MOTION_TYPE)
