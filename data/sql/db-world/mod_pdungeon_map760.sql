@@ -44,17 +44,25 @@ INSERT INTO `areatable_dbc` (`ID`, `ContinentID`, `ParentAreaID`, `AreaBit`, `Fl
 
 -- The lights. The server reads ID/ContinentID/X/Y/Z only, and it reads them
 -- for exactly one thing: GetDefaultMapLight(760) scans DESCENDING and returns
--- the first row of this map at (0,0,0), which is the id every
+-- the first row of this map whose position is all zero, which is the id every
 -- SMSG_OVERRIDE_LIGHT packet carries as the light to fall back to. With
 -- light_dbc empty that id is 0, and a client told to fall back to light 0
--- has nothing to fall back to. 2863 is that row; 2864 and 2865 are
--- parked off-field and are only ever reached through
--- Map::SetZoneOverrideLight(5100, id, fade).
+-- has nothing to fall back to. 2863 is that row, and it is the CITY's light by
+-- the same token: the map default is what applies wherever no positioned
+-- light reaches. The other rows ARE positioned, one per theme region -
+-- SMSG_OVERRIDE_LIGHT is ignored by the 3.3.5a client, so the client picks
+-- them up by camera position instead:
+--   2864 = theme 1, origin block (256,272) = tile (32,34), window centre (-1333.33, -266.67) yd, falloff 450/520 yd
+--   2865 = theme 3, origin block (256,240) = tile (32,30), window centre (800.00, -266.67) yd, falloff 450/520 yd
+-- The X/Y/Z column names are AzerothCore's own and are nominal: the DBC
+-- fields behind them are (17066.66656 - worldY) x 36, worldZ x 36 and
+-- (17066.66656 - worldX) x 36 - measured, see script 47. The core only ever
+-- tests them for all-zero, so the naming costs it nothing.
 DELETE FROM `light_dbc` WHERE `ID` IN (2863, 2864, 2865);
 INSERT INTO `light_dbc` (`ID`, `ContinentID`, `X`, `Y`, `Z`, `FalloffStart`, `FalloffEnd`, `LightParamsID_1`, `LightParamsID_2`, `LightParamsID_3`, `LightParamsID_4`, `LightParamsID_5`, `LightParamsID_6`, `LightParamsID_7`, `LightParamsID_8`) VALUES
 (2863, 760, 0.0, 0.0, 0.0, 0.0, 0.0, 918, 918, 918, 918, 4, 0, 0, 0),
-(2864, 760, 1200000.0, 1200000.0, 0.0, 100.0, 200.0, 919, 919, 919, 919, 4, 0, 0, 0),
-(2865, 760, 1200000.0, 1200000.0, 0.0, 100.0, 200.0, 920, 920, 920, 920, 4, 0, 0, 0);
+(2864, 760, 624000.0, 1800.0, 662400.0, 16200.0, 18720.0, 919, 919, 919, 919, 4, 0, 0, 0),
+(2865, 760, 624000.0, 1800.0, 585600.0, 16200.0, 18720.0, 920, 920, 920, 920, 4, 0, 0, 0);
 
 -- NOT done here: removing v1's map-37 override. mod_pdungeon_base.sql still
 -- INSERTs those rows, so deleting them from this file would only work
