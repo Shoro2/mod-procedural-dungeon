@@ -27,6 +27,7 @@
 #include "Player.h"
 #include "RBAC.h"
 #include "ScriptMgr.h"
+#include "StringFormat.h"
 #include "generator/PDBlockPlan.h"
 
 #include <sstream>
@@ -373,6 +374,21 @@ private:
                                  cfg.enabled ? "enabled" : "disabled", cfg.mapId, cfg.floorZ,
                                  cfg.rooms, cfg.bossRooms, cfg.fieldBlocks,
                                  cfg.originBX, cfg.originBY, cfg.branches, cfg.detourChancePct);
+        // Round F / D5b: a theme may own its own region (V2.Theme<N>.OriginBX/BY),
+        // so the global origin above is only the city's. List the themes that
+        // differ - a mine or forest run really sits on those blocks.
+        {
+            std::string themed;
+            for (int theme = 1; theme <= 9; ++theme)
+            {
+                int bx = 0, by = 0;
+                sPDv2Mgr->ThemeOriginBlock(theme, bx, by);
+                if (bx != cfg.originBX || by != cfg.originBY)
+                    themed += Acore::StringFormat("{}theme {} ({},{})", themed.empty() ? "" : ", ", theme, bx, by);
+            }
+            handler->PSendSysMessage("pdungeon v2: theme origins: {}",
+                                     themed.empty() ? std::string("all themes share the global origin") : themed);
+        }
         // Round B / B3-B5, the run-shaping keys. They are read live, so this
         // line is the only place an operator can confirm that the
         // `.reload config` they just ran actually reached the module.
