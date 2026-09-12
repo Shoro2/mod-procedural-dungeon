@@ -19,6 +19,7 @@
 
 #include "Chat.h"
 #include "Creature.h"
+#include "DBCStores.h"
 #include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "InstanceScript.h"
@@ -2421,13 +2422,19 @@ namespace PDungeon
             uint32 const zoneId = mapEntry ? mapEntry->linked_zone : 0;
             if (zoneId)
             {
-                // No fade: the player is arriving, there is nothing to fade
-                // FROM, and a fade would start the run in the wrong light.
-                instance->SetZoneOverrideLight(zoneId, themeLight, 0ms);
+                // One second of fade: every production override (Lich King,
+                // Malygos, the gunship) sends a non-zero transition, and the
+                // first workbench run with 0 ms left the client on the map
+                // default - a zero-length transition is not a documented
+                // client state. The map default id travels in the packet
+                // (Map::_defaultLight = GetDefaultMapLight at construction),
+                // so it is logged here: 0 would mean the light_dbc row is
+                // missing and the client has nothing to override.
+                instance->SetZoneOverrideLight(zoneId, themeLight, 1000ms);
                 LOG_INFO(PD_LOG, "PDv2: instance {} theme {} overrides zone {} "
-                                 "light with Light.dbc row {}",
+                                 "light with Light.dbc row {} (map default light {})",
                          instance->GetInstanceId(), plan.config.theme, zoneId,
-                         themeLight);
+                         themeLight, GetDefaultMapLight(instance->GetId()));
             }
             else
             {
