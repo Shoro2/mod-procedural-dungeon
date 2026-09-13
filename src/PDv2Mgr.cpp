@@ -621,8 +621,8 @@ namespace PDungeon
         // this plan was generated with, frozen, and updated on every reroll -
         // while `cfg_theme` is the knob that will shape the NEXT one and rides
         // the INSERT half only, like every other cfg_*. Where the knob says 0
-        // the two deliberately differ: the layout records the conf's theme, the
-        // knob keeps saying "follow the conf".
+        // the two deliberately differ: the layout records the concrete theme
+        // (rolled or picked), the knob keeps saying "Random" (0, F1c).
         CharacterDatabase.Execute(
             "INSERT INTO pdungeon_account (accountId, theme, layout_seed, layout_version, "
             "gen_rooms, gen_boss_rooms, gen_field_blocks, gen_origin_bx, gen_origin_by, "
@@ -721,7 +721,7 @@ namespace PDungeon
         // the kit's chunk meta carries, so a row that names a theme this
         // server has no art for - a kit rolled back, a hand-edited column, a
         // characters DB moved to a box with an older kit - falls back to 0
-        // ("follow the conf") instead of generating into a namespace the block
+        // ("Random", F1c) instead of generating into a namespace the block
         // planner would refuse.
         //
         // LoadChunkMeta runs at startup and this at login, so the themes are
@@ -778,7 +778,8 @@ namespace PDungeon
 
     uint8_t PDv2Mgr::ClampThemeChoice(int wanted) const
     {
-        // 0 is always legal and means "follow ProceduralDungeon.V2.Theme" -
+        // 0 is always legal and means "Random" (F1c: GeneratePlan rolls one of
+        // the loaded themes; V2.Theme only stands with fewer than two themes) -
         // the answer for an account that never touched the panel row, and the
         // one value that cannot go stale when a kit changes.
         if (wanted == 0 || !HasTheme(wanted))
@@ -1317,7 +1318,7 @@ namespace PDungeon
     uint32_t PDv2Mgr::ThemeLightId(int theme) const
     {
         // The range test IS the contract (see the declaration): theme 0 means
-        // "follow the conf" on the account row and never reaches a plan, and a
+        // "Random" on the account row and never reaches a plan, and a
         // theme beyond the conf window simply has no key to read.
         if (theme < 1 || theme > PD_THEME_LIGHT_MAX)
         {
@@ -1329,7 +1330,7 @@ namespace PDungeon
     void PDv2Mgr::ThemeOriginBlock(int theme, int& bx, int& by) const
     {
         // Same range contract as ThemeLightId above, and for the same reason:
-        // theme 0 is the account row's "follow the conf" and never reaches a
+        // theme 0 is the account row's "Random" and never reaches a
         // plan, and a theme beyond the conf window has no key to read. Both
         // leave the caller's global origin standing.
         if (theme < 1 || theme > PD_THEME_LIGHT_MAX)

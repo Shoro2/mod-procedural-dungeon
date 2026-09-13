@@ -723,7 +723,7 @@ namespace PDungeon
         // origin" then lives in exactly one place instead of at every call
         // site, and the caller passes in the global values it already has.
         // A theme outside the conf's 1..PD_THEME_LIGHT_MAX window, and the
-        // theme 0 that means "follow the conf" on an account row, leave both
+        // theme 0 that means "Random" on an account row (F1c), leave both
         // arguments untouched - so a caller never has to range check.
         //
         // Read straight off the live config like ThemeLightId, but unlike it
@@ -802,7 +802,7 @@ namespace PDungeon
 
         // Round F / F1. The one statement of what a legal cfg_theme is, used
         // by BOTH the load and the SET path, because a clamp written twice is
-        // a clamp that will disagree with itself: 0 (follow the conf) always
+        // a clamp that will disagree with itself: 0 (Random, F1c) always
         // passes, and any other id has to be one the loaded chunk meta really
         // carries. An unknown id therefore becomes 0 rather than a generation
         // the validator would refuse later with "no valid layout".
