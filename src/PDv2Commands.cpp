@@ -122,9 +122,16 @@ private:
         //
         // Round F / F1: asked of the KIT rather than of a literal 1-or-2 list.
         // The themes are a property of the chunk meta the kit shipped
-        // (PDv2Mgr::HasTheme), the panel's slider is already bounded by the
+        // (PDv2Mgr::HasTheme), the panel's dropdown is already bounded by the
         // same fact, and a hand-written list here was one more place a third
         // theme would have had to be remembered in.
+        //
+        // Round F / F1c: NO argument (or 0) no longer means "follow V2.Theme",
+        // it means the same thing it means on the panel - the server rolls a
+        // theme out of this run's seed. Deliberately the same rule for the GM
+        // path: `gen <seed>` is reproducible either way (the roll is a pure
+        // function of the seed), and `gen <seed> <theme>` is still how a look
+        // is pinned for a test.
         //
         // Round F / F3-B is exactly that third theme, and it needed no code
         // change here at all - only the NAMES below, which are prose for a GM
@@ -136,7 +143,7 @@ private:
         {
             handler->PSendSysMessage("pdungeon v2: theme {} is unknown - this kit carries "
                                      "1..{} (1 = mine, 2 = city, 3 = forest; 0 or no "
-                                     "argument follows the server config).",
+                                     "argument rolls one at random from this run's seed).",
                                      themeOverride, sPDv2Mgr->ThemeMax());
             return true;
         }

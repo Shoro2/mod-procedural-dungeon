@@ -493,7 +493,57 @@ namespace PDungeon
         // region overwrites them per axis; a theme that names none - and every
         // server that sets no such key - keeps exactly the origin this line
         // wrote, which is what makes L1 inert until an operator opts in.
-        cfg.theme = themeOverride ? themeOverride : _config.theme;
+        //
+        // Round F / F1c (operator 2026-09-13, spec D16): a Generate that names
+        // NO theme - cfg_theme 0 off the panel, `.pdungeon v2 gen` without a
+        // theme argument - now ROLLS one uniformly over the themes this kit
+        // really loaded, instead of taking V2.Theme. Both no-choice callers go
+        // through this one branch on purpose: "0 = roll" is a property of the
+        // knob and not of who read it, and a GM who wants a fixed look already
+        // has `gen <seed> <theme>` to say so.
+        //
+        // Seeded from THIS run's seed and from nothing else (RollTheme,
+        // generator/PDBlockPlan.h), so the roll is reproducible: the same seed
+        // comes back as the same dungeon in the same look, which is what keeps
+        // `gen <seed>` a test tool. It is also why the roll cannot use the
+        // account id, the clock or urand - the seed is the only thing the
+        // stored layout carries.
+        //
+        // What is stored is the CONCRETE theme this line chose, never the 0 it
+        // was asked with: SavePlanToDB writes cfg.theme into
+        // `pdungeon_account.theme` and LoadPlanFromDB regenerates from that
+        // column, so a layout an account already owns keeps the look it rolled
+        // even if the roll, the kit or V2.Theme changes underneath it.
+        //
+        // V2.Theme survives as the fallback for the one case where a roll is
+        // meaningless: a kit that loaded fewer than two themes. There is then
+        // nothing to choose between, and the operator's key is still the way a
+        // single-theme server names its one look (a kit whose only theme is 2
+        // and a conf that says 2 must not start depending on which of them is
+        // read). Zero themes loaded is the same branch: the module already
+        // refuses to generate in that state and V2.Theme keeps the old
+        // message.
+        if (themeOverride)
+        {
+            cfg.theme = themeOverride;
+        }
+        else if (_chunkThemes.size() < 2)
+        {
+            cfg.theme = _config.theme;
+            LOG_INFO(PD_LOG, "PDv2: no theme chosen for seed {} and this kit loaded {} "
+                             "theme(s) - V2.Theme {} stands",
+                     seed, uint32(_chunkThemes.size()), cfg.theme);
+        }
+        else
+        {
+            // No lock, exactly like ThemeMax/HasTheme one screen down:
+            // _chunkThemes is written once by LoadChunkMeta at startup and is
+            // read-only afterwards.
+            cfg.theme = RollTheme(_chunkThemes, seed);
+            LOG_INFO(PD_LOG, "PDv2: no theme chosen for seed {} - rolled theme {} uniformly "
+                             "from the {} theme(s) this kit loaded",
+                     seed, cfg.theme, uint32(_chunkThemes.size()));
+        }
         cfg.originBX = _config.originBX;
         cfg.originBY = _config.originBY;
         ThemeOriginBlock(cfg.theme, cfg.originBX, cfg.originBY);
@@ -1223,10 +1273,30 @@ namespace PDungeon
         }
         if (configThemeRows == 0)
         {
-            LOG_ERROR(PD_LOG, "PDv2: configured theme {} has NO chunk-meta rows - "
-                              "new generations will fail until the kit ships that "
-                              "theme or V2.Theme points at one it has",
-                      _config.theme);
+            // Round F / F1c. V2.Theme is only read where a random roll would
+            // be meaningless - a kit carrying fewer than two themes - so a key
+            // pointing at a theme this kit does not have is an ERROR exactly
+            // there and merely a dead key anywhere else: an account that names
+            // no theme gets a rolled one, and an account or GM that names one
+            // is checked against HasTheme before it ever reaches the planner.
+            // The same demotion ReportThemeCoverage makes for the pack pools,
+            // and for the same reason - an ERROR nobody can act on teaches an
+            // operator to stop reading them.
+            if (_chunkThemes.size() < 2)
+            {
+                LOG_ERROR(PD_LOG, "PDv2: configured theme {} has NO chunk-meta rows and "
+                                  "this kit carries {} theme(s), so nothing can be "
+                                  "rolled instead - new generations will fail until the "
+                                  "kit ships that theme or V2.Theme points at one it has",
+                          _config.theme, uint32(_chunkThemes.size()));
+            }
+            else
+            {
+                LOG_INFO(PD_LOG, "PDv2: configured theme {} has no chunk-meta rows, but "
+                                 "this kit carries {} themes and an unnamed theme is "
+                                 "ROLLED (F1c) - V2.Theme is unused on this server",
+                         _config.theme, uint32(_chunkThemes.size()));
+            }
         }
     }
 

@@ -223,6 +223,37 @@ namespace PDungeon
     // fixed for ever: changing it re-rolls every stored dungeon's events.
     constexpr uint32_t PD_EVENT_SEED_MIX = 0xE7E27A5Du;
 
+    // Round F / F1c (operator 2026-09-13, spec D16): which theme a Generate
+    // that names NONE is built with. Uniform over `themes` - the ids the
+    // loaded chunk meta really carries, ascending and unique - drawn from
+    // `seed` and from nothing else.
+    //
+    // Here rather than in PDv2Mgr for the reason SelectThemePacks lives in
+    // PDv2PackDraw: the engine half of this module can never be linked into
+    // tests/blockplan_harness.cpp (it includes DatabaseEnv.h), and a draw the
+    // harness cannot pin is a draw that drifts between compilers. The caller
+    // owns the SET - which is a property of the kit's SQL and therefore
+    // engine-side - and this owns the draw over it.
+    //
+    // A PURE function of its two arguments with no state of its own: the same
+    // (themes, seed) answers the same id however many draws ran before it, and
+    // on gcc/clang/MSVC alike (PDRandom's hand-rolled helpers, never a std
+    // distribution). That is what makes a re-generated seed reproduce the same
+    // dungeon in the same look. The draw takes its OWN stream, seed ^
+    // PD_THEME_SEED_MIX, and not the layout's: the layout stream is consumed
+    // inside GenerateBlockPlan, which cannot run until the theme is known.
+    //
+    // The index drawn is into the LIST, never into the id range it spans, so a
+    // kit whose ids are not contiguous (1 and 3, no 2) is uniform over what it
+    // has. An empty list answers 0 - "no theme at all", the caller's cue to
+    // fall back to its own default - and a list of one answers that one.
+    //
+    // An arbitrary odd constant like the mix above it, distinct from every
+    // other stream's, and fixed for ever: changing it re-rolls which look a
+    // stored seed comes back as.
+    constexpr uint32_t PD_THEME_SEED_MIX = 0x7EED0A5Du;
+    int RollTheme(std::vector<int> const& themes, uint32_t seed);
+
     // Round B / B3-B5: the corridor run behind socket `bit` of block `from`.
     // Walks corridor blocks, ignores chest stubs, continues straight through a
     // loop attachment, and returns the index of the first ROOM reached. -1

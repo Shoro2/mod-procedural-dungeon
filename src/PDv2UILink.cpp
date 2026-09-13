@@ -516,13 +516,18 @@ namespace PDungeon
             // the WP9 pair above: new fields go at the END, in front of the
             // free-text tail, so an older panel simply drops them.
             //
-            // The look the NEXT Generate will use (0 = follow the server's
-            // V2.Theme) and the highest theme this server has art for. themeMax
-            // is what bounds the panel's slider, and it is READ FROM THE KIT
+            // The look the NEXT Generate will use (0 = RANDOM since F1c: the
+            // server rolls one of the loaded themes out of that run's seed) and
+            // the highest theme this server has art for. themeMax is what the
+            // panel's dropdown ends at, and it is READ FROM THE KIT
             // (PDv2Mgr::ThemeMax, off the loaded chunk meta) rather than being
-            // a constant in either half: a kit that ships a third theme lights
-            // the third slider position up with no Lua and no C++ change, and
-            // one rolled back to a single theme hides it again.
+            // a constant in either half: a kit that ships a third theme adds a
+            // third entry with no Lua and no C++ change, and one rolled back to
+            // a single theme drops it again.
+            //
+            // The wire did NOT move for F1c - same two fields, same order, same
+            // meanings for every id above 0. Only what 0 MEANS changed, and the
+            // one thing the client does with it is print the word "Random".
             //
             // static_cast<int> for the same reason as the profile above -
             // cfgTheme is a uint8_t and an ostream would write it as a
@@ -1002,10 +1007,11 @@ namespace PDungeon
                 // player asked for a mine is exactly the kind of "it worked,
                 // just not like that" this module keeps out of the wire.
                 //
-                // 0 always passes: it is not a theme at all, it is "follow the
-                // server's V2.Theme", which is what every account did before
-                // this row existed and what a player who changes their mind
-                // needs a way back to.
+                // 0 always passes: it is not a theme at all, it is "let the
+                // server roll one" (F1c; it used to be "follow V2.Theme"). It
+                // is the column's default, the entry the dropdown calls Random,
+                // and the way back for a player who changes their mind - so it
+                // can never be refused, whatever the kit carries.
                 if (value != 0 && !sPDv2Mgr->HasTheme(value))
                 {
                     if (PDv2Debug())
@@ -1071,9 +1077,10 @@ namespace PDungeon
             }
 
             // Round F / F1 (spec D1). The panel's own theme knob, handed in as
-            // the override the GM command has always used - 0 still means
-            // "follow ProceduralDungeon.V2.Theme", so an account that never
-            // touched the row generates exactly what it generated before.
+            // the override the GM command has always used - and since F1c a 0
+            // here means "roll one", which GeneratePlan does off the run's seed.
+            // Nothing about that decision lives on this side: the panel sends a
+            // knob, not a theme.
             //
             // Read HERE and not cached anywhere: the knob is what the account
             // row says at the moment Generate is pressed, and GeneratePlan then

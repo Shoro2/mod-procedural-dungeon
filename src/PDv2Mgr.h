@@ -493,9 +493,13 @@ namespace PDungeon
         // talent tree should do. Everything below this line still reads Off.
         uint8_t     cfgStatProfile = PD_STAT_PROFILE_OFF;
         // Round F / F1 (cfg_theme, spec D1): the look the account's NEXT
-        // Generate is built with. 0 = follow the server's V2.Theme, which is
-        // what every account did before the panel had a theme row, and what an
-        // account that never touches it keeps doing.
+        // Generate is built with. 0 = RANDOM since Round F / F1c (operator
+        // 2026-09-13, spec D16): GeneratePlan rolls one of the themes the kit
+        // loaded, uniformly and out of the run's own seed. It is the default of
+        // the column and therefore what an account that never touches the row
+        // gets. It used to mean "follow the server's V2.Theme", which now
+        // stands only where a roll would be meaningless - a kit with fewer than
+        // two themes.
         //
         // A uint8_t for the same reason cfgStatProfile is one: it is a small
         // wire value end to end (the C payload, the column, the themeOverride
@@ -573,9 +577,13 @@ namespace PDungeon
         // Builds a plan for `accountId`, replaces any previous one and saves
         // its generation inputs to the characters DB. Returns false when the
         // generator could not produce a valid layout.
-        // themeOverride 0 follows the server config; a nonzero value is
-        // persisted like any other gen input - the theme is frozen into the
-        // layout. Two callers hand one in: the GM test path
+        // themeOverride 0 means "no theme named" and, since Round F / F1c,
+        // ROLLS one uniformly over the themes the loaded chunk meta carries,
+        // out of `seed` alone (V2.Theme stands only for a kit with fewer than
+        // two themes); a nonzero value is taken as given. Either way the
+        // CONCRETE theme is persisted like any other gen input and frozen into
+        // the layout, so a stored dungeon keeps the look it was rolled in.
+        // Two callers hand one in: the GM test path
         // (`.pdungeon v2 gen [seed] [theme]`) and, since Round F / F1, the gen
         // panel's Generate button, which passes the account's own cfg_theme.
         // Both have already checked the id against HasTheme; this function
@@ -684,9 +692,11 @@ namespace PDungeon
         // the only thing that knows, and it says so one row per chunk.
         //
         // ThemeMax is the highest id present (2 with kit t1b-v39) and travels
-        // to the panel as the theme slider's upper bound; HasTheme answers for
-        // one id, because the ids a kit ships need not be contiguous and a
-        // slider bound alone would happily offer a gap. Both answer 0 / false
+        // to the panel as the last entry of its theme dropdown; HasTheme
+        // answers for one id, because the ids a kit ships need not be
+        // contiguous and a bound alone would happily offer a gap - which is
+        // also why F1c's random roll draws over the LIST of loaded themes and
+        // never over 1..ThemeMax(). Both answer 0 / false
         // before LoadChunkMeta has run, and after a chunk-meta load that found
         // nothing at all - which is the state the module already refuses to
         // generate in.
@@ -815,7 +825,8 @@ namespace PDungeon
         };
         std::unordered_map<int, PatrolLayerBytes> _chunkPatrol;
         // Round F / F1. Every theme id the chunk meta carries, ascending and
-        // without duplicates - the whole backing store of ThemeMax/HasTheme.
+        // without duplicates - the whole backing store of ThemeMax/HasTheme,
+        // and since F1c the very list GeneratePlan rolls a random theme out of.
         // A sorted vector rather than a set: it holds two entries today, it is
         // written once and read on every panel refresh, and an ascending
         // vector is also what makes the boot line read in theme order.

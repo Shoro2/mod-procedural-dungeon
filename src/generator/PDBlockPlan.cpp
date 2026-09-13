@@ -1043,6 +1043,26 @@ namespace PDungeon
         return n;
     }
 
+    int RollTheme(std::vector<int> const& themes, uint32_t seed)
+    {
+        // "No theme at all" rather than a guess: the caller (PDv2Mgr's
+        // GeneratePlan) is the only thing that knows what a server with no
+        // chunk meta should build, and it has V2.Theme for exactly that.
+        if (themes.empty())
+        {
+            return 0;
+        }
+
+        // ONE draw on this seed's own theme stream, and the index is into the
+        // list rather than over the range its ids span - see the header. A
+        // one-entry list needs no draw of its own: UniformInt(0, 0) answers 0
+        // without touching the engine (PDRandom.h), so this stays the same
+        // function for every list size.
+        PDRandom rng(seed ^ PD_THEME_SEED_MIX);
+        int const pick = rng.UniformInt(0, static_cast<int>(themes.size()) - 1);
+        return themes[static_cast<size_t>(pick)];
+    }
+
     int SegmentOf(BlockPlan const& plan, PlacedBlock const& block)
     {
         // Spine room: its own index. Pocket: its host's. Loop room (B0b): the

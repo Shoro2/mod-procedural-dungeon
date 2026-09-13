@@ -337,14 +337,24 @@ ProceduralDungeon.V2.Branches = 2
 #                     one GM test generation.
 #                     Since Round F / F1 this is the FALLBACK, not the last
 #                     word: the gen panel carries a theme row, and an account
-#                     that picked a look there (pdungeon_account.cfg_theme,
-#                     0 = follow this key) generates with it instead. The
-#                     slider offers exactly the themes the kit's chunk meta
-#                     carries, so a value here that the kit does not have is
-#                     still an error and still refuses to generate.
-#        Default:     2 - the city is the standard look the UI presents;
-#                     the mine stays reachable with `gen [seed] 1` or by
-#                     picking it on the panel.
+#                     that picked a look there (pdungeon_account.cfg_theme)
+#                     generates with it instead. The dropdown offers exactly
+#                     the themes the kit's chunk meta carries, so a value here
+#                     that the kit does not have is still an error and still
+#                     refuses to generate.
+#                     Since Round F / F1c (operator 2026-09-13) cfg_theme 0 -
+#                     the column default, shown as "Random" - no longer follows
+#                     this key at all: the server rolls one of the loaded
+#                     themes out of the run's own seed, so a player who picks
+#                     nothing gets a different look per Generate while the same
+#                     seed always comes back as the same one. This key is then
+#                     read ONLY where a roll would be meaningless, i.e. a kit
+#                     whose chunk meta carries fewer than two themes, and by
+#                     nothing else.
+#        Default:     2 - the city, which is what a single-theme kit falls
+#                     back to. On the shipped multi-theme kit it decides
+#                     nothing: a look is either picked on the panel / with
+#                     `gen [seed] [theme]`, or rolled.
 #
 
 ProceduralDungeon.V2.Theme = 2

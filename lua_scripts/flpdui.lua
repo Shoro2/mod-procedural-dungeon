@@ -151,12 +151,12 @@ local function ParseCfg(body)
         -- - the server refuses `SET statprofile` on its own side while the
         -- talent is missing, exactly as it does for the band row.
         statProfile = f[25], statUnlocked = f[26],
-        -- The account's theme for the NEXT generation (0 = follow the server's
-        -- own V2.Theme) and the highest theme id the loaded kit can build. Both
-        -- are the server's word: this panel knows neither which themes exist
-        -- nor what the conf default is, it only moves the knob between 0 and
-        -- the ceiling it was handed - which is how a kit that learns a new
-        -- theme widens this row without a new addon.
+        -- The account's theme for the NEXT generation (0 = the server rolls
+        -- one) and the highest theme id the loaded kit can build. Both are the
+        -- server's word: this panel knows neither which themes exist nor how
+        -- the roll picks, it only moves the knob between 0 and the ceiling it
+        -- was handed - which is how a kit that learns a new theme widens this
+        -- row without a new addon.
         cfgTheme = f[27], themeMax = f[28],
         verdictText = f.tail,
     }
@@ -170,10 +170,11 @@ local function ParseCfg(body)
         return nil
     end
     -- The theme menu's LOW bound does not travel, because it is the wire
-    -- contract itself: 0 ("follow the server's V2.Theme") is always a legal
-    -- choice, so a themeMax under it is the same "lo > hi" the line above
-    -- refuses. A server with exactly one theme sends 0 and gets a menu of one
-    -- entry reading "Default", which is the honest picture of it.
+    -- contract itself: 0 ("let the server roll one") is always a legal choice,
+    -- so a themeMax under it is the same "lo > hi" the line above refuses. A
+    -- server with exactly one theme sends 0 and gets a menu of one entry
+    -- reading "Random", which is the honest picture of it - what such a server
+    -- rolls between is its business and not this panel's.
     if c.themeMax < 0 then return nil end
     return c
 end
@@ -392,7 +393,13 @@ end
 -- contract, so a theme this table has no word for still prints its NUMBER:
 -- hiding a choice the server would accept is worse than showing it unnamed, and
 -- "..." would claim the server had said nothing when it had.
-local THEME_NAMES = { [0] = "Default", [1] = "Mine", [2] = "City", [3] = "Forest" }
+--
+-- Id 0 reads "Random" since the operator's 2026-09-13 verdict (spec D16): the
+-- server rolls one of the themes it loaded, out of the run's own seed, so the
+-- word is a description of what the server will DO and no longer the name of a
+-- configured default. Still one word in one table - the client neither knows
+-- nor needs to know which themes the roll draws between.
+local THEME_NAMES = { [0] = "Random", [1] = "Mine", [2] = "City", [3] = "Forest" }
 local function RenderTheme(v)
     local name = THEME_NAMES[v]
     if name then return name end
@@ -492,10 +499,16 @@ end
 -- kit that learns a forest widens the menu with no new addon. A panel that has
 -- not been told anything yet offers nothing, and the control is disabled until
 -- the first C anyway. themeMax 0 is a legal, ordinary answer - a server whose
--- kit can build one theme - and the menu is then a single ENABLED "Default"
+-- kit can build one theme - and the menu is then a single ENABLED "Random"
 -- entry rather than a greyed-out box, because grey in this panel means "the
 -- server has not spoken" and that would be a lie. The check mark is read from
 -- cfg.cfgTheme when the menu opens, never from the last click, for that reason.
+--
+-- Entry 0 is "Random" and it is the one the panel shows by default, because it
+-- is the account column's default: an account that never touched this row has
+-- cfgTheme 0 and ApplyCfg writes the box from that. The default selection is
+-- therefore the server's value as always - the panel guesses nothing, it just
+-- has a word for what 0 now means (spec D16).
 local function ThemeDropDownInit()
     if not cfg then return end
     for id = 0, cfg.themeMax do

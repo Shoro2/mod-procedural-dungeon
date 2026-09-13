@@ -2,8 +2,13 @@
 -- mod-procedural-dungeon: pdungeon_account.cfg_theme (characters database)
 --
 -- Round F / F1 (2026-09-11, spec D1). Which LOOK this account's next dungeon is
--- generated with: 0 = follow the server's ProceduralDungeon.V2.Theme, 1 = mine,
--- 2 = city, and whatever a later kit adds. The kit has shipped both themes since
+-- generated with: 1 = mine, 2 = city, and whatever a later kit adds. 0 - the
+-- column default - means RANDOM since Round F / F1c (2026-09-13, spec D16): the
+-- server rolls one of the themes its kit loaded, out of the run's own seed. It
+-- meant "follow the server's ProceduralDungeon.V2.Theme" when this column was
+-- added, and that key is now read only by a kit carrying fewer than two themes;
+-- no stored value changed meaning, because only 0 moved and the DDL below is
+-- untouched. The kit has shipped both themes since
 -- t1b-v39 and `.pdungeon v2 gen <seed> <theme>` could already pick one, but only
 -- for a GM - this column is what puts the choice on the gen panel.
 --

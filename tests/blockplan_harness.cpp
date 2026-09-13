@@ -45,6 +45,10 @@
 #endif
 
 #include "generator/PDBlockPlan.h"
+// Round F / F1c: the theme-roll check draws a stream of its own BETWEEN two
+// asks of RollTheme, which is how "the roll carries no state between calls" is
+// stated in a form a global engine would fail.
+#include "generator/PDRandom.h"
 #include "generator/PDv2AmbushPlan.h"
 #include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
@@ -4068,6 +4072,220 @@ namespace
                   home.eventsDropped == mine.eventsDropped,
                   "origin (256,272) moved the plan's own bookkeeping", seed);
         }
+    }
+
+    // --- Round F / F1c: the random theme (operator 2026-09-13, spec D16) ----
+    //
+    // `cfg_theme` 0 means RANDOM, and RollTheme is the whole of that draw. The
+    // engine half around it - which list it is handed, when V2.Theme stands
+    // instead - lives in PDv2Mgr and cannot be linked here, which is exactly
+    // why the draw itself was lifted into the planner (PDBlockPlan.h).
+    //
+    // Two properties, and the second is the one that matters to a player: the
+    // roll is UNIFORM over the list it is given (every loaded theme really
+    // comes up), and it is a PURE function of the seed (the same seed is the
+    // same look, whatever else has been drawn).
+    //
+    // The rolls cost no layout, so the coverage and fairness samples are their
+    // own FIXED size rather than the batch's tenth: a `--batch 10` run would
+    // otherwise ask three themes to show up in two draws and fail for being
+    // small. The caller's `seeds` still drives the purity walk, which is where
+    // a bigger batch buys more.
+    int const PD_THEME_ROLL_SAMPLE = 600;
+
+    // The first 16 rolls over the live kit's three themes, seeds 1..16.
+    // Captured by RUNNING the harness, never by reasoning about the value.
+    // This is what makes the draw the same dungeon on MSVC and on gcc, and
+    // what catches a changed PD_THEME_SEED_MIX: nothing stored re-skins when
+    // the mix moves (the theme is a COLUMN), but `gen <seed>` would stop
+    // reproducing the run an operator wrote down.
+    //
+    // It reads clumpy - five 3s, then four 1s - and that is what sixteen
+    // samples of a one-in-three draw look like, not a broken one. Measured
+    // over 500 CONSECUTIVE seeds before this was written: 159 / 164 / 177
+    // against a fair share of 167, longest run 6 (log_3(500) is about 5.7).
+    // A multiply-by-golden-ratio spread of the seed was measured beside it and
+    // was not better (177 / 162 / 161, longest run 5), so the plain mix stays.
+    // The fairness band below is the statement a sixteen-roll string cannot
+    // make.
+    char const* const PD_THEME_ROLL_PIN = "2,3,2,3,3,3,3,3,1,1,1,1,2,3,3,2;";
+
+    void RunThemeRollChecks(int seeds)
+    {
+        // The three themes kit t1b-v40 carries, a pair (what t1b-v39 had), and
+        // a deliberately NON-contiguous list: a kit whose ids have a gap must
+        // be uniform over what it HAS, never over the range it spans, or the
+        // roll would offer a look nothing composes.
+        std::vector<int> const three = { 1, 2, 3 };
+        std::vector<int> const pair = { 1, 2 };
+        std::vector<int> const gapped = { 1, 3, 7 };
+
+        char msg[256];
+
+        // 1. The edges, which no seed sample can say anything about: an empty
+        //    list is "no theme at all" - the caller's cue to fall back to
+        //    V2.Theme - and a one-entry list is that entry for every seed.
+        std::vector<int> const none;
+        std::vector<int> const one = { 2 };
+        Check(RollTheme(none, 12345u) == 0,
+              "RollTheme over an empty list did not answer 0", 0);
+        bool oneAlways = true;
+        for (int i = 0; i < 64; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
+            if (RollTheme(one, seed) != 2)
+            {
+                oneAlways = false;
+            }
+        }
+        Check(oneAlways, "RollTheme over a one-entry list answered something else", 0);
+
+        // 2. Purity, over the caller's sample. Three statements in one walk:
+        //    the same (list, seed) answers the same id when asked twice; it
+        //    still does after OTHER draws have run in between (so the function
+        //    carries no stream of its own between calls); and walking the
+        //    seeds backwards answers what walking them forwards did (so the
+        //    answer cannot depend on call ORDER).
+        std::vector<int> forward;
+        forward.reserve(static_cast<size_t>(seeds));
+        bool stable = true;
+        bool member = true;
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            int const first = RollTheme(three, seed);
+
+            // Noise between the two asks: another list, another seed, and a
+            // whole PDRandom stream of this harness's own.
+            RollTheme(gapped, seed ^ 0x5A5A5A5Au);
+            RollTheme(pair, seed + 1u);
+            PDRandom noise(seed);
+            for (int k = 0; k < 7; ++k)
+            {
+                noise.NextUInt32();
+            }
+
+            if (RollTheme(three, seed) != first)
+            {
+                stable = false;
+            }
+            if (first != 1 && first != 2 && first != 3)
+            {
+                member = false;
+            }
+            forward.push_back(first);
+        }
+        Check(stable, "RollTheme answered two different themes for one seed - the roll "
+                      "is not a pure function of the seed", 0);
+        Check(member, "RollTheme answered a theme that is not in the list it was given", 0);
+
+        bool backwardsAgrees = true;
+        for (int i = seeds - 1; i >= 0; --i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            if (RollTheme(three, seed) != forward[static_cast<size_t>(i)])
+            {
+                backwardsAgrees = false;
+            }
+        }
+        Check(backwardsAgrees, "RollTheme answers depend on the ORDER the seeds are "
+                               "asked in", 0);
+
+        // 3. Coverage and fairness, over the fixed sample. NON-VACUOUS by
+        //    construction: "0 failures" here would be a lie if some theme
+        //    never came up at all, so every loaded theme must be rolled, and
+        //    its share must sit between half and double the fair one. The
+        //    sample is fixed and the draw deterministic, so these counts are
+        //    the same numbers on every run - this band cannot flake, it can
+        //    only catch a draw that stopped being uniform.
+        struct ListCase { std::vector<int> const* ids; char const* what; };
+        ListCase const cases[3] = {
+            { &three, "the three themes kit t1b-v40 loads" },
+            { &pair, "the two themes kit t1b-v39 loaded" },
+            { &gapped, "a kit whose theme ids have gaps (1, 3, 7)" },
+        };
+
+        // Both seed sources the module really has, because they are different
+        // questions of the same draw: CONSECUTIVE seeds are what a GM types
+        // (`gen 1`, `gen 2`, ...) and the only place a weak seeding would show
+        // as "it keeps giving me the mine", while SPREAD seeds are what a
+        // player's Generate uses (urand over the whole range).
+        struct SeedSource { uint32_t step; uint32_t base; char const* what; };
+        SeedSource const sources[2] = {
+            { 1u, 1u, "consecutive seeds" },
+            { 2654435761u, 13u, "spread seeds" },
+        };
+
+        for (ListCase const& c : cases)
+        {
+            std::vector<int> const& ids = *c.ids;
+            for (SeedSource const& src : sources)
+            {
+                std::map<int, int> hits;
+                bool inList = true;
+                for (int i = 0; i < PD_THEME_ROLL_SAMPLE; ++i)
+                {
+                    uint32_t const seed = static_cast<uint32_t>(i) * src.step + src.base;
+                    int const got = RollTheme(ids, seed);
+                    if (std::find(ids.begin(), ids.end(), got) == ids.end())
+                    {
+                        inList = false;
+                    }
+                    ++hits[got];
+                }
+
+                std::snprintf(msg, sizeof(msg),
+                              "%s, %s: RollTheme answered an id outside the list",
+                              c.what, src.what);
+                Check(inList, msg, 0);
+
+                // Read BEFORE the fairness loop, and with find() inside it:
+                // std::map::operator[] INSERTS a zero for a missing key, which
+                // would grow `hits` to the full id list and make the "every
+                // theme came up" check below pass for ever. Measured, not
+                // feared - the mutant that always answers the first theme was
+                // caught by every band below and by NOTHING else until this
+                // line moved up.
+                size_t const distinct = hits.size();
+
+                int const fair = PD_THEME_ROLL_SAMPLE / static_cast<int>(ids.size());
+                for (int id : ids)
+                {
+                    std::map<int, int>::const_iterator const it = hits.find(id);
+                    int const n = it == hits.end() ? 0 : it->second;
+                    std::snprintf(msg, sizeof(msg),
+                                  "%s, %s: theme %d came up %d times in %d rolls (fair "
+                                  "share %d, band %d..%d)",
+                                  c.what, src.what, id, n, PD_THEME_ROLL_SAMPLE, fair,
+                                  fair / 2, fair * 2);
+                    Check(n >= fair / 2 && n <= fair * 2, msg, 0);
+                }
+
+                // And the count itself: a list of n ids must produce exactly n
+                // distinct answers, which is the statement "every loaded theme
+                // is reachable" said once more in a form a silent drop cannot
+                // pass.
+                std::snprintf(msg, sizeof(msg),
+                              "%s, %s: %d of %d themes ever came up", c.what, src.what,
+                              static_cast<int>(distinct), static_cast<int>(ids.size()));
+                Check(distinct == ids.size(), msg, 0);
+            }
+        }
+
+        // 4. The pin: the exact rolls, so a changed mix or a changed draw is
+        //    loud rather than merely different.
+        std::string got;
+        for (uint32_t seed = 1; seed <= 16; ++seed)
+        {
+            if (seed > 1)
+            {
+                got += ',';
+            }
+            got += std::to_string(RollTheme(three, seed));
+        }
+        got += ';';
+        std::snprintf(msg, sizeof(msg), "the pinned theme roll moved: %s", got.c_str());
+        Check(got == PD_THEME_ROLL_PIN, msg, 0);
     }
 
     // --- Round B: the spine (spec 2026-09-02 §7.1) --------------------------
@@ -8557,6 +8775,11 @@ namespace
         // window centres it pins are not seed-dependent at all and are checked
         // once per call.
         RunThemeOriginWindowChecks(count / 10 + 1);
+        // Round F / F1c. The batch's tenth drives the PURITY walk only; the
+        // coverage and fairness samples inside are a fixed size of their own,
+        // because a roll costs no layout and "every theme comes up" must not
+        // depend on how big a batch somebody asked for.
+        RunThemeRollChecks(count / 10 + 1);
         // Same tenth-of-the-batch reasoning: one pack per room is structural
         // too, and a real seed only ever gets a handful of rooms per run.
         RunPackThemeChecks(count / 10 + 1);
