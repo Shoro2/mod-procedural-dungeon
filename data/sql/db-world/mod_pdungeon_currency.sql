@@ -81,13 +81,8 @@
 -- (the tier ladder), subclass 0, InventoryType 0, BuyCount 1, BuyPrice 0,
 -- SellPrice 0, ItemLevel 80, RequiredLevel 0, maxcount 0, bonding 1, Material 2,
 -- sheath 0 and the Description. In particular:
---   stackable stays 1000. The stock template does NOT demand 2147483647 -
---   measured over all 41 currency tokens on this realm the stacks are
---   2147483647 (21), 20000000 (6), 100 (4), 255 (4), 5000 (2), 500000, 200,
---   9999 and 1 - and FL's own existing tokens are finite too (920920 Paragon
---   Point 9999, 251144 Mount Token 100, 251145 Cosmetic Token 200). A stack
---   past 1000 simply takes a second of the 32 token slots, and every count and
---   destroy path sums across them.
+--   stackable is no longer on this list: WP12 kept it at 1000, and that was
+--   the mistake - see the 2026-09-19 block at the end of this header.
 --   maxcount stays 0 (no cap), which is what the stock emblems carry too.
 --   Material stays 2. Material only selects the pick-up sound, and a token can
 --   never be picked up: the core refuses to move one out of the hidden bag
@@ -182,6 +177,36 @@
 -- A fresh host still needs the DBC file deployed next to the SQL; that is a
 -- client-patch + server-DBC job in its own right (scripts 35/36/39/40 style)
 -- and it carries its own migration-ledger entry.
+--
+-- ============================================================================
+-- 2026-09-19: stackable 1000 -> 2147483647, THE COLUMN WP12 SHOULD HAVE MOVED
+-- ============================================================================
+--
+-- WP12 kept stackable 1000 on the reasoning that "a stack past 1000 simply
+-- takes a second of the 32 token slots, and every count and destroy path sums
+-- across them". Both halves are true, and together they are fatal: the 32
+-- slots are shared by EVERY currency the character holds, T1 drops from every
+-- mob at 100 %, and Player::CanStoreItem's currency branch places only what
+-- fits (PlayerStorage.cpp:1462-1481) - the rest falls through to the bag loop
+-- (:1483) and lands in the BAGS, a trade good again. Measured on the core-sync
+-- T2 (2026-09-19): ~42,000 Remnants on one character were ~42 stacks, 21 in
+-- the token slots and 25 in the bags. At 1000 a character runs out after about
+-- (32 - other currencies held) x 1000 Remnants.
+--
+-- 2147483647 is the stock "unlimited" value. Measured over all 41 currency
+-- tokens on this realm the stacks were 2147483647 (21, the emblems among
+-- them), 20000000 (6), 100 (4), 255 (4), 5000 (2), 500000, 200, 9999 and 1;
+-- ItemTemplate::GetMaxStackSize() maps 2147483647 to 0x7FFFFFFE
+-- (ItemTemplate.h:727-730). Each tier now takes exactly ONE token slot.
+--
+-- Stacks that already exist do not merge by themselves - a new grant folds
+-- into the first stack with room, and split stacks stay split. The login hook
+-- RelocateCurrencyTokens (src/PDClientLink.cpp) folds them: bag stacks into
+-- the token slots as before, and now also the second and later token-slot
+-- stacks of a tier into its first. No client-cache bump rides along: the
+-- client only reads a stack size when a player splits or drags a stack, and a
+-- token in the Currency tab can do neither (the core refuses to move one, see
+-- Material above).
 -- ----------------------------------------------------------------------------
 
 DELETE FROM `item_template` WHERE `entry` BETWEEN 920105 AND 920109;
@@ -192,19 +217,19 @@ INSERT INTO `item_template`
      `ItemLevel`, `RequiredLevel`, `maxcount`, `stackable`, `bonding`,
      `Material`, `sheath`, `Description`) VALUES
     -- display 55240 borrowed from 37700 Crystallized Air (pale white crystal)
-    (920105, 10, 0, 'Faded Remnant',     55240, 1, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 1000, 1, 2, 0,
+    (920105, 10, 0, 'Faded Remnant',     55240, 1, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 2147483647, 1, 2, 0,
      'Currency of the Forgotten Depths. Spent in the Forgotten Talents tree.'),
     -- display 55242 borrowed from 37704 Crystallized Life (green crystal)
-    (920106, 10, 0, 'Gleaming Remnant',  55242, 2, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 1000, 1, 2, 0,
+    (920106, 10, 0, 'Gleaming Remnant',  55242, 2, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 2147483647, 1, 2, 0,
      'Currency of the Forgotten Depths. Spent in the Forgotten Talents tree.'),
     -- display 60021 borrowed from 37705 Crystallized Water (blue crystal)
-    (920107, 10, 0, 'Radiant Remnant',   60021, 3, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 1000, 1, 2, 0,
+    (920107, 10, 0, 'Radiant Remnant',   60021, 3, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 2147483647, 1, 2, 0,
      'Currency of the Forgotten Depths. Spent in the Forgotten Talents tree.'),
     -- display 55243 borrowed from 37703 Crystallized Shadow (purple crystal)
-    (920108, 10, 0, 'Sovereign Remnant', 55243, 4, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 1000, 1, 2, 0,
+    (920108, 10, 0, 'Sovereign Remnant', 55243, 4, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 2147483647, 1, 2, 0,
      'Currency of the Forgotten Depths. Spent in the Forgotten Talents tree.'),
     -- display 55241 borrowed from 37702 Crystallized Fire (orange crystal)
-    (920109, 10, 0, 'Eternal Remnant',   55241, 5, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 1000, 1, 2, 0,
+    (920109, 10, 0, 'Eternal Remnant',   55241, 5, 2048, 8192, 1, 0, 0, 0, 80, 0, 0, 2147483647, 1, 2, 0,
      'Currency of the Forgotten Depths. Spent in the Forgotten Talents tree.');
 
 -- The same five CurrencyTypes records the shipped CurrencyTypes.dbc carries as

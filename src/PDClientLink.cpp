@@ -37,6 +37,7 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <vector>
 
@@ -361,12 +362,30 @@ namespace
     // CurrencyTypes.dbc has no record for the entry, since
     // ObjectMgr::LoadItemTemplates strips the BagFamily bit again in that case
     // (ObjectMgr.cpp:3820-3828).
+    //
+    // 2026-09-19: IT ALSO FOLDS SPLIT STACKS INSIDE THE TOKEN SLOTS. Until
+    // then the five carried stackable 1000, and the 32 token slots are shared
+    // by every currency a character holds: a big Remnant count used them up,
+    // and CanStoreItem's currency branch placed only what fitted and sent the
+    // rest into the bags (PlayerStorage.cpp:1462-1481, then the bag loop at
+    // :1483). The core-sync T2 measured ~42,000 Remnants as 21 stacks in the
+    // token slots and 25 in the bags. mod_pdungeon_currency.sql now gives the
+    // five the stock unlimited stack, so a new grant merges into the first
+    // stack with room - but stacks that already exist stay split, and every
+    // extra one still costs a token slot. So the token slots are walked too,
+    // and every stack of the entry there except the FIRST joins the collected
+    // set, but only when the tier's token-slot count fits in fewer stacks than
+    // it occupies at the template's stack size. That condition keeps the fold
+    // idempotent: a layout already as small as the stack size allows is left
+    // alone, so no login re-creates items for nothing, and even with the old
+    // 1000 template only genuinely partial stacks would fold.
     void RelocateCurrencyTokens(Player* player)
     {
         PDungeon::PDv2Config const& cfg = sPDv2Mgr->GetConfig();
 
         uint32 movedEntries = 0;
-        uint32 movedTotal = 0;
+        uint32 movedTotal = 0;   // Remnants that came out of the bags
+        uint32 foldedStacks = 0; // split token-slot stacks folded into the first
 
         for (uint32 const entry : cfg.lootCurrencyItem)
         {
@@ -397,10 +416,10 @@ namespace
                 total += item->GetCount();
             };
 
-            // Backpack and bank main slots. The token slots themselves are
-            // deliberately not walked - an item already there is where it
-            // belongs - and neither is the keyring, which only accepts
-            // BAG_FAMILY_MASK_KEYS.
+            // Backpack and bank main slots. The token slots are walked on their
+            // own further down, for split stacks only - an item there is
+            // already where it belongs - and the keyring is not walked at all,
+            // it only accepts BAG_FAMILY_MASK_KEYS.
             for (uint8 slot = INVENTORY_SLOT_ITEM_START;
                  slot < INVENTORY_SLOT_ITEM_END; ++slot)
             {
@@ -436,6 +455,35 @@ namespace
                 }
             }
 
+            size_t const bagStacks = found.size();
+            uint32 const bagTotal = total;
+
+            // Split stacks in the token slots (the 2026-09-19 note above):
+            // the first stays, the rest are collected - but only when the
+            // tier's token-slot count fits in fewer stacks than it occupies.
+            // GetMaxStackSize() is never 0 (ItemTemplate.h:727-730).
+            uint32 const maxStack = proto->GetMaxStackSize();
+            std::vector<uint8> tokenStacks;
+            uint64 tokenCount = 0;
+            for (uint8 slot = CURRENCYTOKEN_SLOT_START;
+                 slot < CURRENCYTOKEN_SLOT_END; ++slot)
+            {
+                Item* held = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+                if (held && held->GetEntry() == entry)
+                {
+                    tokenStacks.push_back(slot);
+                    tokenCount += held->GetCount();
+                }
+            }
+            uint64 const stacksNeeded = (tokenCount + maxStack - 1) / maxStack;
+            if (tokenStacks.size() > stacksNeeded)
+            {
+                for (size_t i = 1; i < tokenStacks.size(); ++i)
+                {
+                    note(INVENTORY_SLOT_BAG_0, tokenStacks[i]);
+                }
+            }
+
             if (found.empty() || !total)
             {
                 continue;
@@ -451,14 +499,17 @@ namespace
             // same predicate the core uses there and it guarantees
             // GetCount() < GetMaxStackSize(), so the subtraction cannot wrap).
             // uint64 because 32 x GetMaxStackSize() overflows uint32 for an
-            // infinite-stack token.
-            uint32 const maxStack = proto->GetMaxStackSize();
+            // infinite-stack token. A split stack collected above counts as
+            // an empty slot: it is destroyed before the store below.
             uint64 room = 0;
             for (uint8 slot = CURRENCYTOKEN_SLOT_START;
                  slot < CURRENCYTOKEN_SLOT_END && room < total; ++slot)
             {
                 Item* held = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-                if (!held)
+                uint16 const pos =
+                    static_cast<uint16>(INVENTORY_SLOT_BAG_0) << 8 | slot;
+                if (!held ||
+                    std::find(found.begin(), found.end(), pos) != found.end())
                 {
                     room += maxStack;
                 }
@@ -475,10 +526,10 @@ namespace
                 // them to a migration would be far worse than leaving them in
                 // the bags - and the next login retries.
                 LOG_ERROR(PDungeon::PD_LOG,
-                          "PDv2 currency: {} x item {} STAY in {}'s bags - the "
-                          "32 currency slots have room for {} only. Nothing "
-                          "was destroyed; free a currency slot and the next "
-                          "login moves them.",
+                          "PDv2 currency: {} x item {} STAY where they are in "
+                          "{}'s inventory - the 32 currency slots have room "
+                          "for {} only. Nothing was destroyed; free a currency "
+                          "slot and the next login moves them.",
                           total, entry, player->GetName(), room);
                 continue;
             }
@@ -491,13 +542,16 @@ namespace
 
             // No stack of this entry is left in a bag now, so the NULL_BAG /
             // NULL_SLOT query can only land in the token slots: its merge pass
-            // finds token stacks alone and its free-slot search takes the
+            // finds token stacks alone - after a fold, only the first one -
+            // and its free-slot search takes the
             // IsCurrencyToken() branch (PlayerStorage.cpp:1462-1464) before it
             // ever looks at a bag. CanStoreNewItem + StoreNewItem rather than
             // Player::AddItem because this pair is all-or-nothing, while
             // AddItem trims the count to whatever fits and still reports
             // success (Player.cpp:15805-15825). SendNewItem is what AddItem
-            // does on the way out, kept so the client reacts as before.
+            // does on the way out, kept so the client reacts as before - for
+            // the part that came out of the bags only: a fold moves nothing
+            // the player did not already have in the Currency tab.
             ItemPosCountVec dest;
             InventoryResult err =
                 player->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entry, total);
@@ -518,22 +572,27 @@ namespace
                 continue;
             }
 
-            player->SendNewItem(stored, total, true, false);
+            if (bagTotal)
+            {
+                player->SendNewItem(stored, bagTotal, true, false);
+            }
 
             ++movedEntries;
-            movedTotal += total;
+            movedTotal += bagTotal;
+            foldedStacks += static_cast<uint32>(found.size() - bagStacks);
         }
 
         if (movedEntries)
         {
-            // Once per character, ever - not PDv2Debug()-gated, because this
-            // is a one-off data migration and its absence from the log is the
-            // only evidence that a character never carried a bagged Remnant.
+            // Once per character and migration (WP12's bag relocation, the
+            // 2026-09-19 fold) - not PDv2Debug()-gated, because these are
+            // one-off data migrations and their absence from the log is the
+            // only evidence that a character never needed one.
             LOG_INFO(PDungeon::PD_LOG,
-                     "PDv2 currency: moved {} Remnants across {} tiers out of "
-                     "{}'s bags into the currency slots (one-time migration to "
-                     "the Round-E currency tokens)",
-                     movedTotal, movedEntries, player->GetName());
+                     "PDv2 currency: {}: moved {} Remnants out of the bags and "
+                     "folded {} split currency-slot stacks, across {} tiers "
+                     "(one-time migration to one currency-slot stack per tier)",
+                     player->GetName(), movedTotal, foldedStacks, movedEntries);
         }
     }
 }
