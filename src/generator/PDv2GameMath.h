@@ -573,7 +573,13 @@ namespace PDungeon
     constexpr uint8_t PD_CLASS_MAGE = 8;
     constexpr uint8_t PD_CLASS_WARLOCK = 9;
     constexpr uint8_t PD_CLASS_DRUID = 11;
-    constexpr uint8_t PD_CLASS_MAX = 11;
+    // The 21 Chapters-of-Azeroth classes, ids 12..32 (CLASS_BARBARIAN ..
+    // CLASS_SPIRIT_MAGE in the core's SharedDefines.h). They are real classes
+    // with real characters, so every table below has to answer for them; 10
+    // stays the one id in the range that nobody can be.
+    constexpr uint8_t PD_CLASS_CUSTOM_FIRST = 12;
+    constexpr uint8_t PD_CLASS_CUSTOM_LAST = 32;
+    constexpr uint8_t PD_CLASS_MAX = 32;
 
     // The armour types, as the INDEX the bonus rows' armor_pick adds to their
     // base item (cloth 0, leather 1, mail 2, plate 3 - the order the four
@@ -638,11 +644,28 @@ namespace PDungeon
         PD_W_DAGGER;
 
     // Which armour type a class is rewarded in - the highest it wears at 80,
-    // which is also the index armor_pick adds. An id outside 1..11 (and the
+    // which is also the index armor_pick adds. An id outside 1..32 (and the
     // unused 10) answers cloth rather than refusing: this feeds an item id,
     // and a bonus row must resolve to SOMETHING even for a class that cannot
     // exist. FitsClassRaw below rejects such an id outright, so the two
     // together never hand a nonexistent class a piece of gear.
+    //
+    // Classes 12..32 (CoA) are derived, not invented, and the derivation is
+    // two rules applied in order:
+    //   1. the legacy class the core's GetLegacyClassForCustomClass() names
+    //      supplies the ITEMISATION tier, because "which of the four types is
+    //      this class geared in" is a design answer and the legacy class is
+    //      the only design answer that exists for a CoA class;
+    //   2. capped by what the class is actually TRAINED in - measured from
+    //      CoA's own creation proficiencies (playercreateinfo_spell_custom,
+    //      world package coa-world-20260912 as M2 imported it: spells 9078
+    //      cloth / 9077 leather / 8737 mail / 750 plate).
+    // Three classes need the cap, and without it they would be handed armour
+    // they cannot equip: 16 Stormbringer (legacy shaman/mail, trained cloth
+    // only), 21 Ranger and 32 Runemaster (legacy hunter/shaman = mail,
+    // trained up to leather). PDv2LootMgr.cpp static_asserts rule 1 - that no
+    // custom class sits ABOVE its legacy class's tier - against the core's
+    // own map, so the table cannot drift past it unnoticed.
     constexpr uint8_t GameArmourIndexForClass(uint8_t classId)
     {
         constexpr uint8_t BY_CLASS[PD_CLASS_MAX + 1] =
@@ -658,10 +681,114 @@ namespace PDungeon
             PD_ARMOUR_CLOTH,        //  8 mage
             PD_ARMOUR_CLOTH,        //  9 warlock
             PD_ARMOUR_CLOTH,        // 10 unused in 3.3.5a
-            PD_ARMOUR_LEATHER       // 11 druid
+            PD_ARMOUR_LEATHER,      // 11 druid
+            PD_ARMOUR_LEATHER,      // 12 Barbarian        (legacy rogue)
+            PD_ARMOUR_MAIL,         // 13 Witch Doctor     (legacy shaman)
+            PD_ARMOUR_LEATHER,      // 14 Felsworn         (legacy rogue)
+            PD_ARMOUR_MAIL,         // 15 Witch Hunter     (legacy hunter)
+            PD_ARMOUR_CLOTH,        // 16 Stormbringer     (legacy shaman, capped)
+            PD_ARMOUR_PLATE,        // 17 Knight of Xoroth (legacy warrior)
+            PD_ARMOUR_PLATE,        // 18 Guardian         (legacy warrior)
+            PD_ARMOUR_LEATHER,      // 19 Templar          (legacy rogue)
+            PD_ARMOUR_LEATHER,      // 20 Bloodmage        (legacy druid)
+            PD_ARMOUR_LEATHER,      // 21 Ranger           (legacy hunter, capped)
+            PD_ARMOUR_CLOTH,        // 22 Chronomancer     (legacy priest)
+            PD_ARMOUR_CLOTH,        // 23 Necromancer      (legacy warlock)
+            PD_ARMOUR_CLOTH,        // 24 Pyromancer       (legacy mage)
+            PD_ARMOUR_PLATE,        // 25 Cultist          (legacy paladin)
+            PD_ARMOUR_LEATHER,      // 26 Starcaller       (legacy druid)
+            PD_ARMOUR_CLOTH,        // 27 Sun Cleric       (legacy priest)
+            PD_ARMOUR_MAIL,         // 28 Tinker           (legacy hunter)
+            PD_ARMOUR_MAIL,         // 29 Venomancer       (legacy shaman)
+            PD_ARMOUR_LEATHER,      // 30 Reaper           (legacy rogue)
+            PD_ARMOUR_LEATHER,      // 31 Primalist        (legacy druid)
+            PD_ARMOUR_LEATHER       // 32 Runemaster       (legacy shaman, capped)
         };
         return classId <= PD_CLASS_MAX ? BY_CLASS[classId] : PD_ARMOUR_CLOTH;
     }
+
+    // The 21 CoA class weapon tables. These are NOT transcribed from D5 -
+    // there is no D5 for a class that did not exist when D5 was written - and
+    // they are NOT the legacy class's table either. They are the weapon
+    // subclasses CoA itself trains the class in, measured from the same
+    // creation proficiencies the armour table above cites plus the
+    // ascension_custom_class_spell rows the class learns later (spells 196
+    // axe / 197 axe2 / 264 bow / 266 gun / 198 mace / 199 mace2 / 200 polearm
+    // / 201 sword / 202 sword2 / 227 staff / 15590 fist / 1180 dagger / 2567
+    // thrown / 5011 crossbow / 5009 wand).
+    //
+    // The legacy class was tried here first and is wrong in both directions:
+    // it would offer a Starcaller fist weapons (druid table, no fist
+    // proficiency) and deny it every ranged weapon (druid table has none,
+    // while CoA trains Starcaller in Auto Shot, bows, crossbows and wands).
+    // For armour the legacy class still decides, because "one type" needs a
+    // design answer; a weapon table is a SET, and a set the server itself
+    // says the class is trained in needs no arbitration.
+    constexpr uint32_t PD_WEAPONS_BARBARIAN =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_MACE1 | PD_W_MACE2 | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2 | PD_W_FIST | PD_W_DAGGER | PD_W_THROWN;
+    constexpr uint32_t PD_WEAPONS_WITCH_DOCTOR =
+        PD_W_AXE1 | PD_W_BOW | PD_W_MACE1 | PD_W_POLEARM | PD_W_STAFF |
+        PD_W_FIST | PD_W_DAGGER | PD_W_CROSSBOW | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_FELSWORN =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_MACE2 | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2 | PD_W_STAFF | PD_W_FIST | PD_W_DAGGER |
+        PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_WITCH_HUNTER =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_GUN | PD_W_MACE2 | PD_W_SWORD1 |
+        PD_W_SWORD2 | PD_W_DAGGER | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_STORMBRINGER =
+        PD_W_MACE1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_KNIGHT_OF_XOROTH =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_MACE1 | PD_W_MACE2 |
+        PD_W_POLEARM | PD_W_SWORD1 | PD_W_SWORD2 | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_GUARDIAN =
+        PD_W_AXE1 | PD_W_BOW | PD_W_GUN | PD_W_MACE1 | PD_W_SWORD1 |
+        PD_W_FIST | PD_W_THROWN | PD_W_CROSSBOW | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_TEMPLAR =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_MACE1 | PD_W_MACE2 |
+        PD_W_POLEARM | PD_W_SWORD1 | PD_W_SWORD2 | PD_W_STAFF | PD_W_FIST |
+        PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_BLOODMAGE =
+        PD_W_AXE2 | PD_W_BOW | PD_W_MACE2 | PD_W_POLEARM | PD_W_SWORD1 |
+        PD_W_SWORD2 | PD_W_STAFF | PD_W_FIST | PD_W_DAGGER | PD_W_CROSSBOW |
+        PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_RANGER =
+        PD_W_AXE1 | PD_W_BOW | PD_W_POLEARM | PD_W_SWORD1 | PD_W_FIST |
+        PD_W_DAGGER | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_CHRONOMANCER =
+        PD_W_MACE1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_NECROMANCER =
+        PD_W_SWORD1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_PYROMANCER =
+        PD_W_SWORD1 | PD_W_STAFF | PD_W_DAGGER | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_CULTIST =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_GUN | PD_W_MACE1 |
+        PD_W_MACE2 | PD_W_POLEARM | PD_W_SWORD1 | PD_W_SWORD2 | PD_W_STAFF |
+        PD_W_FIST | PD_W_DAGGER | PD_W_CROSSBOW | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_STARCALLER =
+        PD_W_AXE1 | PD_W_BOW | PD_W_MACE1 | PD_W_MACE2 | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2 | PD_W_STAFF | PD_W_DAGGER |
+        PD_W_CROSSBOW | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_SUN_CLERIC =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_MACE1 | PD_W_MACE2 |
+        PD_W_POLEARM | PD_W_SWORD1 | PD_W_SWORD2 | PD_W_STAFF |
+        PD_W_CROSSBOW | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_TINKER =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_GUN | PD_W_MACE1 | PD_W_MACE2 |
+        PD_W_POLEARM | PD_W_STAFF | PD_W_DAGGER;
+    constexpr uint32_t PD_WEAPONS_VENOMANCER =
+        PD_W_BOW | PD_W_MACE1 | PD_W_MACE2 | PD_W_POLEARM | PD_W_STAFF |
+        PD_W_FIST | PD_W_DAGGER | PD_W_CROSSBOW | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_REAPER =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_MACE2 | PD_W_POLEARM |
+        PD_W_SWORD1 | PD_W_SWORD2 | PD_W_DAGGER | PD_W_CROSSBOW;
+    constexpr uint32_t PD_WEAPONS_PRIMALIST =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_BOW | PD_W_MACE1 | PD_W_MACE2 |
+        PD_W_POLEARM | PD_W_FIST | PD_W_WAND;
+    constexpr uint32_t PD_WEAPONS_RUNEMASTER =
+        PD_W_AXE1 | PD_W_AXE2 | PD_W_POLEARM | PD_W_SWORD1 | PD_W_SWORD2 |
+        PD_W_STAFF | PD_W_FIST | PD_W_DAGGER | PD_W_WAND;
 
     // The class's weapon table. 0 for an id that is not a class, which makes
     // every weapon fail for it rather than every weapon pass.
@@ -680,9 +807,44 @@ namespace PDungeon
             PD_WEAPONS_MAGE,            //  8
             PD_WEAPONS_WARLOCK,         //  9
             0,                          // 10 unused in 3.3.5a
-            PD_WEAPONS_DRUID            // 11
+            PD_WEAPONS_DRUID,           // 11
+            PD_WEAPONS_BARBARIAN,       // 12
+            PD_WEAPONS_WITCH_DOCTOR,    // 13
+            PD_WEAPONS_FELSWORN,        // 14
+            PD_WEAPONS_WITCH_HUNTER,    // 15
+            PD_WEAPONS_STORMBRINGER,    // 16
+            PD_WEAPONS_KNIGHT_OF_XOROTH,// 17
+            PD_WEAPONS_GUARDIAN,        // 18
+            PD_WEAPONS_TEMPLAR,         // 19
+            PD_WEAPONS_BLOODMAGE,       // 20
+            PD_WEAPONS_RANGER,          // 21
+            PD_WEAPONS_CHRONOMANCER,    // 22
+            PD_WEAPONS_NECROMANCER,     // 23
+            PD_WEAPONS_PYROMANCER,      // 24
+            PD_WEAPONS_CULTIST,         // 25
+            PD_WEAPONS_STARCALLER,      // 26
+            PD_WEAPONS_SUN_CLERIC,      // 27
+            PD_WEAPONS_TINKER,          // 28
+            PD_WEAPONS_VENOMANCER,      // 29
+            PD_WEAPONS_REAPER,          // 30
+            PD_WEAPONS_PRIMALIST,       // 31
+            PD_WEAPONS_RUNEMASTER       // 32
         };
         return classId <= PD_CLASS_MAX ? BY_CLASS[classId] : 0u;
+    }
+
+    // Who may be rolled a shield. Warrior, paladin and shaman as before, plus
+    // the six CoA classes CoA trains in Shield (spell 9116): 17 Knight of
+    // Xoroth, 18 Guardian, 25 Cultist, 26 Starcaller, 27 Sun Cleric and
+    // 28 Tinker. Measured, not derived from the legacy class - three of the
+    // six have a legacy class that cannot hold a shield at all, and a shield
+    // they can equip is a real reward rather than fodder.
+    constexpr bool GameCanUseShield(uint8_t classId)
+    {
+        return classId == PD_CLASS_WARRIOR || classId == PD_CLASS_PALADIN ||
+               classId == PD_CLASS_SHAMAN || classId == 17 || classId == 18 ||
+               classId == 25 || classId == 26 || classId == 27 ||
+               classId == 28;
     }
 
     // The D5 fit itself. Order matters: AllowableClass first, because it is
@@ -692,6 +854,15 @@ namespace PDungeon
                                 uint8_t subclass, uint8_t classId)
     {
         if (classId < PD_CLASS_WARRIOR || classId > PD_CLASS_MAX)
+        {
+            return false;
+        }
+
+        // 10 is the one id inside the range that is not a class. It used to
+        // fall out of the weapon table on its own (mask 0) and out of the
+        // armour table by accident (cloth); now that the range reaches 32 it
+        // is named, so a CoA class is never confused with the hole.
+        if (classId == 10)
         {
             return false;
         }
@@ -719,9 +890,7 @@ namespace PDungeon
             }
             if (subclass == PD_ITEM_SUBCLASS_ARMOR_SHIELD)
             {
-                return classId == PD_CLASS_WARRIOR ||
-                       classId == PD_CLASS_PALADIN ||
-                       classId == PD_CLASS_SHAMAN;
+                return GameCanUseShield(classId);
             }
             // Misc (0), the deprecated buckler (5) and the four relic slots
             // (7..10): AllowableClass above is the whole gate, which is what

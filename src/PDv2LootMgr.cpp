@@ -44,6 +44,37 @@ namespace PDungeon
         // that clearer than ten plus a total do - they bury whatever else
         // went wrong at boot.
         constexpr uint32 LOOT_MAX_NAMED_DROPS = 10;
+
+        // The one place PDv2GameMath.h's CoA class tables can be held against
+        // the core, because the header itself is engine-free
+        // (PDBlockPlan.h:38-40) and must not see SharedDefines.h.
+        //
+        // The invariant is rule 1 of GameArmourIndexForClass: a custom class
+        // is geared in its legacy class's armour type or LOWER, never higher.
+        // Cloth 0 < leather 1 < mail 2 < plate 3, so "not above" is a plain
+        // <=. If a later CoA pin moves a class's legacy class - or if the
+        // table is edited by hand and puts a caster in plate - this fails the
+        // build instead of shipping the itemisation.
+        constexpr bool CustomClassArmourNeverAboveLegacy()
+        {
+            for (uint8_t classId = PD_CLASS_CUSTOM_FIRST;
+                 classId <= PD_CLASS_CUSTOM_LAST; ++classId)
+            {
+                uint8_t const legacy = static_cast<uint8_t>(
+                    GetLegacyClassForCustomClass(Classes(classId)));
+                if (legacy == classId ||
+                    GameArmourIndexForClass(classId) >
+                        GameArmourIndexForClass(legacy))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static_assert(CustomClassArmourNeverAboveLegacy(),
+                      "a CoA class is geared above its legacy class, or the "
+                      "core no longer maps it - see GameArmourIndexForClass");
     }
 
     PDv2LootMgr* PDv2LootMgr::instance()

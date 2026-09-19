@@ -3368,7 +3368,8 @@ namespace
             Check(FitsClassRaw(MAGE, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_MAGE),
                   "and must still let the class it names through", 0);
             Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 0) &&
-                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 12),
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 10) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 33),
                   "a class id that is not a class must fit nothing", 0);
             Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 40, PD_CLASS_WARRIOR),
                   "a weapon subclass past the table must not fit either", 0);
@@ -3393,6 +3394,10 @@ namespace
             int armourBadAt = 0;
             for (uint8_t c = PD_CLASS_WARRIOR; c <= PD_CLASS_MAX; ++c)
             {
+                if (c == 10)
+                {
+                    continue;   // the hole in the range, not a class
+                }
                 uint8_t const want = static_cast<uint8_t>(
                     GameArmourIndexForClass(c) + PD_ITEM_SUBCLASS_ARMOR_CLOTH);
                 for (uint8_t sub = PD_ITEM_SUBCLASS_ARMOR_CLOTH;
@@ -3413,8 +3418,11 @@ namespace
 
             // Wands and shields are the two subclasses whose table is a short
             // named list rather than a rule, so they are counted rather than
-            // read back: three classes each, and a typo in a mask moves the
-            // count instead of hiding in a bit.
+            // read back: a typo in a mask moves the count instead of hiding
+            // in a bit. Wands: priest, mage, warlock plus the 14 CoA classes
+            // CoA trains in spell 5009 (13, 14, 16, 18, 20, 22, 23, 24, 25,
+            // 26, 27, 29, 31, 32). Shields: warrior, paladin, shaman plus the
+            // six CoA classes with spell 9116 (17, 18, 25, 26, 27, 28).
             int wandClasses = 0;
             int shieldClasses = 0;
             for (uint8_t c = PD_CLASS_WARRIOR; c <= PD_CLASS_MAX; ++c)
@@ -3428,10 +3436,61 @@ namespace
                     ++shieldClasses;
                 }
             }
-            Check(wandClasses == 3,
-                  "exactly priest, mage and warlock may be rolled a wand", 0);
-            Check(shieldClasses == 3,
-                  "exactly warrior, paladin and shaman may be rolled a shield", 0);
+            Check(wandClasses == 17,
+                  "3 stock and 14 CoA classes may be rolled a wand", 0);
+            Check(shieldClasses == 9,
+                  "3 stock and 6 CoA classes may be rolled a shield", 0);
+
+            // The 21 CoA classes, swept the way the stock ones are. Every one
+            // of them must be reachable by the filter at all - the bug this
+            // whole change fixes was FitsClassRaw answering false for every
+            // item of every class above 11, which empties the candidate list
+            // and drops the looter back onto the unfiltered pool.
+            int customClassesWithGear = 0;
+            bool customWeaponsOk = true;
+            int customBadAt = 0;
+            for (uint8_t c = PD_CLASS_CUSTOM_FIRST; c <= PD_CLASS_CUSTOM_LAST; ++c)
+            {
+                bool anyArmour = false;
+                for (uint8_t sub = PD_ITEM_SUBCLASS_ARMOR_CLOTH;
+                     sub <= PD_ITEM_SUBCLASS_ARMOR_PLATE; ++sub)
+                {
+                    anyArmour = anyArmour ||
+                                FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, sub, c);
+                }
+                bool anyWeapon = false;
+                for (uint8_t sub = 0; sub < 21; ++sub)
+                {
+                    anyWeapon = anyWeapon ||
+                                FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, sub, c);
+                }
+                if (anyArmour && anyWeapon)
+                {
+                    ++customClassesWithGear;
+                }
+                else
+                {
+                    customWeaponsOk = false;
+                    customBadAt = c;
+                }
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "a CoA class can be rolled no gear at all: class %d",
+                          customBadAt);
+            Check(customWeaponsOk && customClassesWithGear == 21, msg, 0);
+
+            // Class 26 Starcaller end to end, because it is the class the
+            // migration brief names: leather (legacy druid) and not the plate
+            // its raw proficiency list would allow, a shield (CoA trains it in
+            // 9116 although a druid cannot hold one), a wand, and no fist
+            // weapon (the druid table has fist, CoA's Starcaller does not).
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 2, 26) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 4, 26) &&
+                  FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 6, 26) &&
+                  FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 19, 26) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 13, 26) &&
+                  GameArmourIndexForClass(26) == PD_ARMOUR_LEATHER,
+                  "class 26 Starcaller: leather, shield, wand, no fist", 0);
         }
     }
 
