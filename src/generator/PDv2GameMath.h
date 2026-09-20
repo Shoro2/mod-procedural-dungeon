@@ -577,6 +577,11 @@ namespace PDungeon
     // CLASS_SPIRIT_MAGE in the core's SharedDefines.h). They are real classes
     // with real characters, so every table below has to answer for them; 10
     // stays the one id in the range that nobody can be.
+    //
+    // A MIRROR of the core's range, because this header is engine-free on
+    // purpose (PDBlockPlan.h:38-40) and must not include SharedDefines.h. The
+    // core header names this site and the one other mirror,
+    // mod-custom-spells/lua/CustomSpells_Server.lua - all three move together.
     constexpr uint8_t PD_CLASS_CUSTOM_FIRST = 12;
     constexpr uint8_t PD_CLASS_CUSTOM_LAST = 32;
     constexpr uint8_t PD_CLASS_MAX = 32;

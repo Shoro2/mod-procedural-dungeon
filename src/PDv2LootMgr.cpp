@@ -28,6 +28,11 @@
 #include "Player.h"
 #include "QueryResult.h"
 #include "Random.h"
+// Explicit, although Player.h / ItemTemplate.h already pull it in: the
+// static_assert below reads GetLegacyClassForCustomClass and the Classes enum
+// from here. The generator header PDv2GameMath.h must NOT include it (see the
+// comment on the assert) - this .cpp is where the two meet.
+#include "SharedDefines.h"
 #include "Timer.h"
 #include "WorldSession.h"
 #include "generator/PDv2GameMath.h"
