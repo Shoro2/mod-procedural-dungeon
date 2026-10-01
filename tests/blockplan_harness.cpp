@@ -45,6 +45,10 @@
 #endif
 
 #include "generator/PDBlockPlan.h"
+// Round F / F1c: the theme-roll check draws a stream of its own BETWEEN two
+// asks of RollTheme, which is how "the roll carries no state between calls" is
+// stated in a form a global engine would fail.
+#include "generator/PDRandom.h"
 #include "generator/PDv2AmbushPlan.h"
 #include "generator/PDv2DecorPlan.h"
 #include "generator/PDv2GameMath.h"
@@ -287,6 +291,35 @@ namespace
     };
 
     std::map<int, KitChunk> g_kit;
+
+    // Round F / K2: how many theme namespaces the staged kit actually ships,
+    // read off the chunk ids themselves. The id scheme is themeBase +
+    // alt*1000 + role*100 + mask with themeBase 2000 / 12000 / 22000, so
+    // id / 10000 is the theme index minus one - the same arithmetic
+    // ThemeChunkIdBase and script 48's THEME_BASES agree on.
+    //
+    // It exists because the theme count is the ONE factor in this file's
+    // inventory sweep that moves every time a look is added (Phase 4 shipped
+    // 2, K2 ships 3, the conf window reserves 9), while the factors that
+    // state the CONTRACT - 15 socket masks, AltCountFor's alt count - do not.
+    int KitThemeCount()
+    {
+        unsigned seen = 0;
+        for (auto const& kv : g_kit)
+        {
+            int const idx = kv.first / 10000;
+            if (idx >= 0 && idx < 32)
+            {
+                seen |= 1u << idx;
+            }
+        }
+        int n = 0;
+        for (int b = 0; b < 32; ++b)
+        {
+            n += (seen >> b) & 1u;
+        }
+        return n;
+    }
 
     bool LoadKitMeta(char const* path)
     {
@@ -843,7 +876,24 @@ namespace
     // counts moved" message, never by reasoning about the value. `rejected` is
     // the size of the defect the Round C fix removes: pairs the shipped
     // Bresenham sampler approved and the supercover test does not.
-    char const* const PD_SUPERCOVER_PAIRS_PIN = "291480,9604;";
+    //
+    // Round F / K2 (2026-09-11): 291480,9604 -> 440120,13408. This sweep runs
+    // over EVERY kit walk mask, so a kit that gains a theme moves it by
+    // construction - the pin's domain grew, nothing about themes 1 and 2
+    // changed. Measured rather than argued, by running this same harness
+    // against the kit SQL cut down to each theme subset in turn:
+    //
+    //     theme 1 only  (122 rows)  ->  148640,3804
+    //     themes 1+2    (244 rows)  ->  PIN HELD at 291480,9604
+    //     themes 1+2+3  (366 rows)  ->  440120,13408
+    //
+    // 291480 + 148640 = 440120 and 9604 + 3804 = 13408 exactly, i.e. the
+    // forest added theme 1's own contribution a second time. It does, and this
+    // is the structural fact behind the whole theme: the forest is theme 1's
+    // GEOMETRY under different art (no pad ring, blob alt-1 rooms), and all
+    // 122 of its chunk-meta rows are byte-identical to their theme-1 twin
+    // (id - 20000) in walkMask, patrolClear, patrolDu and patrolDv.
+    char const* const PD_SUPERCOVER_PAIRS_PIN = "440120,13408;";
 
     // Over EVERY kit walk mask and every ordered pair of its walkable cells:
     //   (1) whatever the supercover test approves, the sampled reference approves too
@@ -2489,15 +2539,24 @@ namespace
 
         // The mask-15 room chunk is what a shared host renders as, so its
         // existence in the kit is a precondition of the whole design call, not
-        // a detail of one layout. Stated here over both themes and every alt
+        // a detail of one layout. Stated here over every theme and every alt
         // rather than only where a sweep happens to produce one.
+        //
+        // Round F / K2: theme 3 (forest, base 22000) joins the loop now that
+        // its 122 chunks are in the kit SQL. F3-B reserved that namespace in
+        // the engine while the kit still had none, so the loop was left at
+        // 1..2 then - a theme with no chunk meta would have failed this for a
+        // reason that was not a bug. The bases are spelled out rather than
+        // taken from ThemeChunkIdBase for the same reason
+        // RunThemeThreeNamespaceChecks re-derives its ids: this file states
+        // the contract independently of the code under test.
         if (!g_masks.empty())
         {
-            for (int theme = 1; theme <= 2; ++theme)
+            for (int theme = 1; theme <= 3; ++theme)
             {
                 for (int alt = 0; alt < AltCountFor(BlockRole::Room); ++alt)
                 {
-                    int const base = (theme == 1) ? 2000 : 12000;
+                    int const base = (theme == 1) ? 2000 : (theme == 2) ? 12000 : 22000;
                     int const id = base + alt * 1000 + 15;
                     std::snprintf(msg, sizeof(msg),
                                   "theme %d alt %d: the four-socket room chunk %d has no walk "
@@ -3309,7 +3368,8 @@ namespace
             Check(FitsClassRaw(MAGE, PD_ITEM_CLASS_ARMOR, 1, PD_CLASS_MAGE),
                   "and must still let the class it names through", 0);
             Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 0) &&
-                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 12),
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 10) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 1, 33),
                   "a class id that is not a class must fit nothing", 0);
             Check(!FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 40, PD_CLASS_WARRIOR),
                   "a weapon subclass past the table must not fit either", 0);
@@ -3334,6 +3394,10 @@ namespace
             int armourBadAt = 0;
             for (uint8_t c = PD_CLASS_WARRIOR; c <= PD_CLASS_MAX; ++c)
             {
+                if (c == 10)
+                {
+                    continue;   // the hole in the range, not a class
+                }
                 uint8_t const want = static_cast<uint8_t>(
                     GameArmourIndexForClass(c) + PD_ITEM_SUBCLASS_ARMOR_CLOTH);
                 for (uint8_t sub = PD_ITEM_SUBCLASS_ARMOR_CLOTH;
@@ -3354,8 +3418,11 @@ namespace
 
             // Wands and shields are the two subclasses whose table is a short
             // named list rather than a rule, so they are counted rather than
-            // read back: three classes each, and a typo in a mask moves the
-            // count instead of hiding in a bit.
+            // read back: a typo in a mask moves the count instead of hiding
+            // in a bit. Wands: priest, mage, warlock plus the 14 CoA classes
+            // CoA trains in spell 5009 (13, 14, 16, 18, 20, 22, 23, 24, 25,
+            // 26, 27, 29, 31, 32). Shields: warrior, paladin, shaman plus the
+            // six CoA classes with spell 9116 (17, 18, 25, 26, 27, 28).
             int wandClasses = 0;
             int shieldClasses = 0;
             for (uint8_t c = PD_CLASS_WARRIOR; c <= PD_CLASS_MAX; ++c)
@@ -3369,10 +3436,61 @@ namespace
                     ++shieldClasses;
                 }
             }
-            Check(wandClasses == 3,
-                  "exactly priest, mage and warlock may be rolled a wand", 0);
-            Check(shieldClasses == 3,
-                  "exactly warrior, paladin and shaman may be rolled a shield", 0);
+            Check(wandClasses == 17,
+                  "3 stock and 14 CoA classes may be rolled a wand", 0);
+            Check(shieldClasses == 9,
+                  "3 stock and 6 CoA classes may be rolled a shield", 0);
+
+            // The 21 CoA classes, swept the way the stock ones are. Every one
+            // of them must be reachable by the filter at all - the bug this
+            // whole change fixes was FitsClassRaw answering false for every
+            // item of every class above 11, which empties the candidate list
+            // and drops the looter back onto the unfiltered pool.
+            int customClassesWithGear = 0;
+            bool customWeaponsOk = true;
+            int customBadAt = 0;
+            for (uint8_t c = PD_CLASS_CUSTOM_FIRST; c <= PD_CLASS_CUSTOM_LAST; ++c)
+            {
+                bool anyArmour = false;
+                for (uint8_t sub = PD_ITEM_SUBCLASS_ARMOR_CLOTH;
+                     sub <= PD_ITEM_SUBCLASS_ARMOR_PLATE; ++sub)
+                {
+                    anyArmour = anyArmour ||
+                                FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, sub, c);
+                }
+                bool anyWeapon = false;
+                for (uint8_t sub = 0; sub < 21; ++sub)
+                {
+                    anyWeapon = anyWeapon ||
+                                FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, sub, c);
+                }
+                if (anyArmour && anyWeapon)
+                {
+                    ++customClassesWithGear;
+                }
+                else
+                {
+                    customWeaponsOk = false;
+                    customBadAt = c;
+                }
+            }
+            std::snprintf(msg, sizeof(msg),
+                          "a CoA class can be rolled no gear at all: class %d",
+                          customBadAt);
+            Check(customWeaponsOk && customClassesWithGear == 21, msg, 0);
+
+            // Class 26 Starcaller end to end, because it is the class the
+            // migration brief names: leather (legacy druid) and not the plate
+            // its raw proficiency list would allow, a shield (CoA trains it in
+            // 9116 although a druid cannot hold one), a wand, and no fist
+            // weapon (the druid table has fist, CoA's Starcaller does not).
+            Check(FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 2, 26) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 4, 26) &&
+                  FitsClassRaw(ALL, PD_ITEM_CLASS_ARMOR, 6, 26) &&
+                  FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 19, 26) &&
+                  !FitsClassRaw(ALL, PD_ITEM_CLASS_WEAPON, 13, 26) &&
+                  GameArmourIndexForClass(26) == PD_ARMOUR_LEATHER,
+                  "class 26 Starcaller: leather, shield, wand, no fist", 0);
         }
     }
 
@@ -3626,10 +3744,13 @@ namespace
     void RunPhase2Checks(int seeds)
     {
         // Rooms ship all 15 masks; straight corridors the two facing pairs;
-        // dead ends exactly the four single bits. Both theme namespaces must
-        // be complete - the planner can aim at either, and a missing row is
-        // the per-block "mobs stand still" failure.
-        int const themeBases[2] = { 2000, 12000 };
+        // dead ends exactly the four single bits. Every theme namespace must
+        // be complete - mine 2000, city 12000 and, since Round F, forest
+        // 22000 - because the planner can aim at any of them, and a missing
+        // row is the per-block "mobs stand still" failure. (Today the forest
+        // rows are the mine rows +20000; this sweep stays the gate if they
+        // ever diverge.)
+        int const themeBases[3] = { 2000, 12000, 22000 };
         for (int base : themeBases)
         for (unsigned m = 1; m <= 15; ++m)
         {
@@ -3776,6 +3897,454 @@ namespace
             Check(CheckAllRoomsConnected(city, grid, why, longest),
                   "a theme-2 dungeon has unreachable rooms", seed);
         }
+    }
+
+    // Round F / F3-B: the theme-3 (forest) chunk-id namespace, engine side.
+    //
+    // Deliberately stops where the parity check above goes on: no walk grid,
+    // because the shipped kit has no theme-3 chunks to build one from (task K2
+    // makes them, and the engine has to reserve the namespace first so the kit
+    // and the composer oracle have something to agree with). What it does state
+    // is the whole of F3-B.1:
+    //
+    //   * theme 3 GENERATES at all. GenerateBlockPlan runs ValidateBlockPlan on
+    //     every attempt, and an unknown theme fails it on the first block with
+    //     "no kit namespace for it" - so before this wave this loop returned
+    //     false for every seed and maxTries. A pass here is the validator
+    //     accepting 3, measured rather than asserted.
+    //   * the ids are 22000-based, re-derived from the documented formula
+    //     (themeBase + alt*1000 + role*100 + mask) rather than read off the
+    //     planner, which is the same stance the event-pocket check takes.
+    //   * the LAYOUT did not move: same seed, same blocks as theme 1, ids
+    //     offset by exactly 20000. A theme is art and a namespace, never a
+    //     draw - that is what keeps every PD_*_PIN in this file (all captured
+    //     at theme 0/1) out of reach of a new look.
+    void RunThemeThreeNamespaceChecks(int seeds)
+    {
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            BlockCfg cfgMine = MakeCfg(seed, 6);
+            BlockCfg cfgForest = cfgMine;
+            cfgForest.theme = 3;
+
+            BlockPlan mine;
+            BlockPlan forest;
+            if (!GenerateBlockPlan(cfgMine, &mine))
+            {
+                Check(false, "theme 1 failed to generate", seed);
+                continue;
+            }
+            if (!GenerateBlockPlan(cfgForest, &forest))
+            {
+                Check(false, "theme 3 does not generate - the validator has no kit "
+                             "namespace for it", seed);
+                continue;
+            }
+            Check(mine.blocks.size() == forest.blocks.size(),
+                  "theme 3 laid out a different block count", seed);
+            if (mine.blocks.size() != forest.blocks.size())
+            {
+                continue;
+            }
+            bool same = true;
+            bool ids = true;
+            for (size_t k = 0; k < mine.blocks.size(); ++k)
+            {
+                PlacedBlock const& a = mine.blocks[k];
+                PlacedBlock const& b = forest.blocks[k];
+                if (a.bx != b.bx || a.by != b.by || a.role != b.role ||
+                    a.socketMask != b.socketMask || a.alt != b.alt ||
+                    a.chainIndex != b.chainIndex || a.branchOf != b.branchOf ||
+                    a.detourOf != b.detourOf ||
+                    b.chunkId - a.chunkId != 20000)
+                {
+                    same = false;
+                }
+                int const wantChunk = 22000 + b.alt * 1000
+                                    + static_cast<int>(b.role) * 100
+                                    + static_cast<int>(b.socketMask);
+                if (b.chunkId != wantChunk)
+                {
+                    ids = false;
+                }
+            }
+            Check(same, "theme 3 is not the same layout with ids moved by the "
+                        "namespace distance", seed);
+            Check(ids, "a theme-3 chunk id is not 22000 + alt*1000 + role*100 + mask",
+                  seed);
+        }
+    }
+
+    // Round F / L1: the per-theme LAYOUT ORIGIN.
+    //
+    // SMSG_OVERRIDE_LIGHT turned out to be a dead channel - the 3.3.5a client
+    // ignores it for our off-field Light rows - so the mood comes from
+    // POSITIONED Light.dbc rows instead, which the client selects by camera
+    // position. That works only if the themes are laid out in different
+    // REGIONS of map 760, which is what PDv2Mgr::ThemeOriginBlock now gives
+    // them: the mine at origin (256, 272), the city at the global (256, 256),
+    // the forest at (256, 240).
+    //
+    // The engine half of that is one field pair the planner has always had
+    // (BlockCfg::originBX/BY), so what this check states is the two promises
+    // the conf keys are worth nothing without:
+    //
+    //   1. an origin is a pure TRANSLATION. Same seed, same everything, every
+    //      block moved by exactly the origin delta and not one chunk id, role,
+    //      mask, alt or chain index touched. If that ever stopped holding, a
+    //      theme moving to its own tile would silently be a different dungeon.
+    //   2. the layout stays inside the 8x8-block window its origin opens, i.e.
+    //      inside ONE ADT tile - the unit the client composer works in
+    //      (tx = bx / 8, fl-stream-client composer.cpp:301) and the unit a
+    //      positioned Light row is placed over.
+    //
+    // and, beside them, the world number the engine LOGS at generation and
+    // workspace script 47 places its Light rows against: the centre of that
+    // window. Re-derived here from the TILE form named in PDv2WorldMath.h's
+    // own frame note - tile (tx, ty) has its north-west corner at
+    // ((32 - ty) * TILE, (32 - tx) * TILE), so the centre of tile (tx, ty) is
+    // ((31.5 - ty) * TILE, (31.5 - tx) * TILE) - rather than by repeating
+    // BlockLocalToWorld's expression, which would prove only that the compiler
+    // is deterministic.
+    //
+    // Every fixture in this file keeps the default origin (MakeCfg's 32 * 8),
+    // so no pin can move: this check builds its own plans at its own origins.
+    void RunThemeOriginWindowChecks(int seeds)
+    {
+        // The three origins the .conf.dist ships, and the world centre each
+        // one puts the theme's tile at - the numbers the INFO line prints to
+        // one decimal and the planner cross-checks script 47 against. Written
+        // out by hand on purpose: a table that derived them would agree with
+        // any bug in the derivation.
+        struct Origin { int bx; int by; double cx; double cy; char const* what; };
+        Origin const origins[3] = {
+            { 256, 256, -266.7, -266.7, "city (global)" },
+            { 256, 272, -1333.3, -266.7, "mine (+16 BY)" },
+            { 256, 240, 800.0, -266.7, "forest (-16 BY)" },
+        };
+
+        char msg[224];
+        for (Origin const& o : origins)
+        {
+            // The window centre, exactly as PDv2Mgr::GeneratePlan derives it:
+            // origin + half a tile on each axis, at that block's own north-west
+            // corner, which is the tile midpoint because a block boundary lies
+            // there.
+            double wx = 0.0, wy = 0.0;
+            BlockLocalToWorld(o.bx + PD_BLOCKS_PER_TILE / 2,
+                              o.by + PD_BLOCKS_PER_TILE / 2, 0.0, 0.0, wx, wy);
+
+            double const tx = static_cast<double>(o.bx) / PD_BLOCKS_PER_TILE;
+            double const ty = static_cast<double>(o.by) / PD_BLOCKS_PER_TILE;
+            double const wantX = (31.5 - ty) * PD_TILE_SIZE_YD;
+            double const wantY = (31.5 - tx) * PD_TILE_SIZE_YD;
+            std::snprintf(msg, sizeof(msg),
+                          "origin (%d,%d) %s: window centre (%.4f,%.4f) is not the "
+                          "tile-form centre (%.4f,%.4f)",
+                          o.bx, o.by, o.what, wx, wy, wantX, wantY);
+            Check(std::fabs(wx - wantX) < 1e-6 && std::fabs(wy - wantY) < 1e-6, msg, 0);
+
+            // And against the printed decimal, which is what a human reads off
+            // the log line and off script 47's row.
+            std::snprintf(msg, sizeof(msg),
+                          "origin (%d,%d) %s: window centre (%.1f,%.1f) moved off the "
+                          "shipped (%.1f,%.1f)", o.bx, o.by, o.what, wx, wy, o.cx, o.cy);
+            Check(std::fabs(wx - o.cx) < 0.05 && std::fabs(wy - o.cy) < 0.05, msg, 0);
+
+            // The centre names its own block back, so the number in the log
+            // cannot be a point in the tile next door.
+            int gcx = 0, gcy = 0;
+            WorldToCell(wx, wy, gcx, gcy);
+            std::snprintf(msg, sizeof(msg),
+                          "origin (%d,%d) %s: window centre divides back to block (%d,%d)",
+                          o.bx, o.by, o.what,
+                          gcx / PD_CELLS_PER_BLOCK, gcy / PD_CELLS_PER_BLOCK);
+            Check(gcx / PD_CELLS_PER_BLOCK == o.bx + PD_BLOCKS_PER_TILE / 2 &&
+                  gcy / PD_CELLS_PER_BLOCK == o.by + PD_BLOCKS_PER_TILE / 2, msg, 0);
+        }
+
+        // The mine's own origin against the default one, layout for layout.
+        int const shiftBX = 256 - 32 * 8;
+        int const shiftBY = 272 - 32 * 8;
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            BlockCfg cfgHome = MakeCfg(seed, 6);
+            BlockCfg cfgMine = MakeCfg(seed, 6, 256, 272);
+
+            BlockPlan home;
+            BlockPlan mine;
+            if (!GenerateBlockPlan(cfgHome, &home))
+            {
+                Check(false, "the default origin failed to generate", seed);
+                continue;
+            }
+            if (!GenerateBlockPlan(cfgMine, &mine))
+            {
+                Check(false, "origin (256,272) failed to generate where the default "
+                             "origin could", seed);
+                continue;
+            }
+
+            Check(home.blocks.size() == mine.blocks.size(),
+                  "origin (256,272) laid out a different block count", seed);
+            if (home.blocks.size() != mine.blocks.size())
+            {
+                continue;
+            }
+
+            bool translated = true;
+            bool inWindow = true;
+            for (size_t k = 0; k < mine.blocks.size(); ++k)
+            {
+                PlacedBlock const& a = home.blocks[k];
+                PlacedBlock const& b = mine.blocks[k];
+                if (b.bx != a.bx + shiftBX || b.by != a.by + shiftBY ||
+                    b.role != a.role || b.socketMask != a.socketMask ||
+                    b.alt != a.alt || b.chunkId != a.chunkId ||
+                    b.roomId != a.roomId || b.depth != a.depth ||
+                    b.chainIndex != a.chainIndex || b.branchOf != a.branchOf ||
+                    b.detourOf != a.detourOf || b.isEvent != a.isEvent)
+                {
+                    translated = false;
+                }
+                // Inside the 8x8 window the origin opens - stated as the
+                // window AND as the tile, because they are the same statement
+                // only while the origin is a multiple of PD_BLOCKS_PER_TILE,
+                // which is what makes a layout composable into one ADT.
+                if (b.bx < 256 || b.bx >= 256 + PD_BLOCKS_PER_TILE ||
+                    b.by < 272 || b.by >= 272 + PD_BLOCKS_PER_TILE ||
+                    b.bx / PD_BLOCKS_PER_TILE != 32 ||
+                    b.by / PD_BLOCKS_PER_TILE != 34)
+                {
+                    inWindow = false;
+                }
+            }
+            Check(translated, "origin (256,272) is not the default layout translated "
+                              "by the origin delta", seed);
+            Check(inWindow, "a block of the origin-(256,272) layout left its 8x8 "
+                            "window / its ADT tile (32,34)", seed);
+            Check(home.entranceIndex == mine.entranceIndex &&
+                  home.bossIndex == mine.bossIndex &&
+                  home.effectiveSeed == mine.effectiveSeed &&
+                  home.eventsDropped == mine.eventsDropped,
+                  "origin (256,272) moved the plan's own bookkeeping", seed);
+        }
+    }
+
+    // --- Round F / F1c: the random theme (operator 2026-09-13, spec D16) ----
+    //
+    // `cfg_theme` 0 means RANDOM, and RollTheme is the whole of that draw. The
+    // engine half around it - which list it is handed, when V2.Theme stands
+    // instead - lives in PDv2Mgr and cannot be linked here, which is exactly
+    // why the draw itself was lifted into the planner (PDBlockPlan.h).
+    //
+    // Two properties, and the second is the one that matters to a player: the
+    // roll is UNIFORM over the list it is given (every loaded theme really
+    // comes up), and it is a PURE function of the seed (the same seed is the
+    // same look, whatever else has been drawn).
+    //
+    // The rolls cost no layout, so the coverage and fairness samples are their
+    // own FIXED size rather than the batch's tenth: a `--batch 10` run would
+    // otherwise ask three themes to show up in two draws and fail for being
+    // small. The caller's `seeds` still drives the purity walk, which is where
+    // a bigger batch buys more.
+    int const PD_THEME_ROLL_SAMPLE = 600;
+
+    // The first 16 rolls over the live kit's three themes, seeds 1..16.
+    // Captured by RUNNING the harness, never by reasoning about the value.
+    // This is what makes the draw the same dungeon on MSVC and on gcc, and
+    // what catches a changed PD_THEME_SEED_MIX: nothing stored re-skins when
+    // the mix moves (the theme is a COLUMN), but `gen <seed>` would stop
+    // reproducing the run an operator wrote down.
+    //
+    // It reads clumpy - five 3s, then four 1s - and that is what sixteen
+    // samples of a one-in-three draw look like, not a broken one. Measured
+    // over 500 CONSECUTIVE seeds before this was written: 159 / 164 / 177
+    // against a fair share of 167, longest run 6 (log_3(500) is about 5.7).
+    // A multiply-by-golden-ratio spread of the seed was measured beside it and
+    // was not better (177 / 162 / 161, longest run 5), so the plain mix stays.
+    // The fairness band below is the statement a sixteen-roll string cannot
+    // make.
+    char const* const PD_THEME_ROLL_PIN = "2,3,2,3,3,3,3,3,1,1,1,1,2,3,3,2;";
+
+    void RunThemeRollChecks(int seeds)
+    {
+        // The three themes kit t1b-v40 carries, a pair (what t1b-v39 had), and
+        // a deliberately NON-contiguous list: a kit whose ids have a gap must
+        // be uniform over what it HAS, never over the range it spans, or the
+        // roll would offer a look nothing composes.
+        std::vector<int> const three = { 1, 2, 3 };
+        std::vector<int> const pair = { 1, 2 };
+        std::vector<int> const gapped = { 1, 3, 7 };
+
+        char msg[256];
+
+        // 1. The edges, which no seed sample can say anything about: an empty
+        //    list is "no theme at all" - the caller's cue to fall back to
+        //    V2.Theme - and a one-entry list is that entry for every seed.
+        std::vector<int> const none;
+        std::vector<int> const one = { 2 };
+        Check(RollTheme(none, 12345u) == 0,
+              "RollTheme over an empty list did not answer 0", 0);
+        bool oneAlways = true;
+        for (int i = 0; i < 64; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
+            if (RollTheme(one, seed) != 2)
+            {
+                oneAlways = false;
+            }
+        }
+        Check(oneAlways, "RollTheme over a one-entry list answered something else", 0);
+
+        // 2. Purity, over the caller's sample. Three statements in one walk:
+        //    the same (list, seed) answers the same id when asked twice; it
+        //    still does after OTHER draws have run in between (so the function
+        //    carries no stream of its own between calls); and walking the
+        //    seeds backwards answers what walking them forwards did (so the
+        //    answer cannot depend on call ORDER).
+        std::vector<int> forward;
+        forward.reserve(static_cast<size_t>(seeds));
+        bool stable = true;
+        bool member = true;
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            int const first = RollTheme(three, seed);
+
+            // Noise between the two asks: another list, another seed, and a
+            // whole PDRandom stream of this harness's own.
+            RollTheme(gapped, seed ^ 0x5A5A5A5Au);
+            RollTheme(pair, seed + 1u);
+            PDRandom noise(seed);
+            for (int k = 0; k < 7; ++k)
+            {
+                noise.NextUInt32();
+            }
+
+            if (RollTheme(three, seed) != first)
+            {
+                stable = false;
+            }
+            if (first != 1 && first != 2 && first != 3)
+            {
+                member = false;
+            }
+            forward.push_back(first);
+        }
+        Check(stable, "RollTheme answered two different themes for one seed - the roll "
+                      "is not a pure function of the seed", 0);
+        Check(member, "RollTheme answered a theme that is not in the list it was given", 0);
+
+        bool backwardsAgrees = true;
+        for (int i = seeds - 1; i >= 0; --i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2246822519u + 11u;
+            if (RollTheme(three, seed) != forward[static_cast<size_t>(i)])
+            {
+                backwardsAgrees = false;
+            }
+        }
+        Check(backwardsAgrees, "RollTheme answers depend on the ORDER the seeds are "
+                               "asked in", 0);
+
+        // 3. Coverage and fairness, over the fixed sample. NON-VACUOUS by
+        //    construction: "0 failures" here would be a lie if some theme
+        //    never came up at all, so every loaded theme must be rolled, and
+        //    its share must sit between half and double the fair one. The
+        //    sample is fixed and the draw deterministic, so these counts are
+        //    the same numbers on every run - this band cannot flake, it can
+        //    only catch a draw that stopped being uniform.
+        struct ListCase { std::vector<int> const* ids; char const* what; };
+        ListCase const cases[3] = {
+            { &three, "the three themes kit t1b-v40 loads" },
+            { &pair, "the two themes kit t1b-v39 loaded" },
+            { &gapped, "a kit whose theme ids have gaps (1, 3, 7)" },
+        };
+
+        // Both seed sources the module really has, because they are different
+        // questions of the same draw: CONSECUTIVE seeds are what a GM types
+        // (`gen 1`, `gen 2`, ...) and the only place a weak seeding would show
+        // as "it keeps giving me the mine", while SPREAD seeds are what a
+        // player's Generate uses (urand over the whole range).
+        struct SeedSource { uint32_t step; uint32_t base; char const* what; };
+        SeedSource const sources[2] = {
+            { 1u, 1u, "consecutive seeds" },
+            { 2654435761u, 13u, "spread seeds" },
+        };
+
+        for (ListCase const& c : cases)
+        {
+            std::vector<int> const& ids = *c.ids;
+            for (SeedSource const& src : sources)
+            {
+                std::map<int, int> hits;
+                bool inList = true;
+                for (int i = 0; i < PD_THEME_ROLL_SAMPLE; ++i)
+                {
+                    uint32_t const seed = static_cast<uint32_t>(i) * src.step + src.base;
+                    int const got = RollTheme(ids, seed);
+                    if (std::find(ids.begin(), ids.end(), got) == ids.end())
+                    {
+                        inList = false;
+                    }
+                    ++hits[got];
+                }
+
+                std::snprintf(msg, sizeof(msg),
+                              "%s, %s: RollTheme answered an id outside the list",
+                              c.what, src.what);
+                Check(inList, msg, 0);
+
+                // Read BEFORE the fairness loop, and with find() inside it:
+                // std::map::operator[] INSERTS a zero for a missing key, which
+                // would grow `hits` to the full id list and make the "every
+                // theme came up" check below pass for ever. Measured, not
+                // feared - the mutant that always answers the first theme was
+                // caught by every band below and by NOTHING else until this
+                // line moved up.
+                size_t const distinct = hits.size();
+
+                int const fair = PD_THEME_ROLL_SAMPLE / static_cast<int>(ids.size());
+                for (int id : ids)
+                {
+                    std::map<int, int>::const_iterator const it = hits.find(id);
+                    int const n = it == hits.end() ? 0 : it->second;
+                    std::snprintf(msg, sizeof(msg),
+                                  "%s, %s: theme %d came up %d times in %d rolls (fair "
+                                  "share %d, band %d..%d)",
+                                  c.what, src.what, id, n, PD_THEME_ROLL_SAMPLE, fair,
+                                  fair / 2, fair * 2);
+                    Check(n >= fair / 2 && n <= fair * 2, msg, 0);
+                }
+
+                // And the count itself: a list of n ids must produce exactly n
+                // distinct answers, which is the statement "every loaded theme
+                // is reachable" said once more in a form a silent drop cannot
+                // pass.
+                std::snprintf(msg, sizeof(msg),
+                              "%s, %s: %d of %d themes ever came up", c.what, src.what,
+                              static_cast<int>(distinct), static_cast<int>(ids.size()));
+                Check(distinct == ids.size(), msg, 0);
+            }
+        }
+
+        // 4. The pin: the exact rolls, so a changed mix or a changed draw is
+        //    loud rather than merely different.
+        std::string got;
+        for (uint32_t seed = 1; seed <= 16; ++seed)
+        {
+            if (seed > 1)
+            {
+                got += ',';
+            }
+            got += std::to_string(RollTheme(three, seed));
+        }
+        got += ';';
+        std::snprintf(msg, sizeof(msg), "the pinned theme roll moved: %s", got.c_str());
+        Check(got == PD_THEME_ROLL_PIN, msg, 0);
     }
 
     // --- Round B: the spine (spec 2026-09-02 §7.1) --------------------------
@@ -5324,8 +5893,14 @@ namespace
             why = "the pinned critter plan could not generate a layout";
             return false;
         }
+        // ThemeExclusive ON, which is the shipped default - and the pin does
+        // not move under it (Round F / K5): every rule of CritterFixture() is
+        // theme 0, MakeCfg builds a theme-1 plan, and a theme that owns no
+        // rule of its own falls back to the theme-0 rules. That fallback IS
+        // the pre-K5 behaviour, which is what makes this string a pin across
+        // the change rather than a re-capture.
         std::vector<CritterSpot> const spots = BuildCritterPlan(
-            plan, MaskFor, CritterFixture(), plan.effectiveSeed);
+            plan, MaskFor, CritterFixture(), plan.effectiveSeed, true);
 
         std::string got;
         for (CritterSpot const& s : spots)
@@ -5345,6 +5920,173 @@ namespace
             return false;
         }
         return true;
+    }
+
+    // --- Round F / K5: ambient life follows the theme ----------------------
+    //
+    // The operator's verdict of 2026-09-12, on a screenshot of the forest:
+    // "Critter sollen auch passend zum Theme sein" - a Sewer Rat was running
+    // between the pines, because every rule this module had shipped is
+    // `theme 0` and a theme-0 rule is ADDITIVE on a themed run. The fix is the
+    // rule the PACKS already keep (SelectThemePacks, generator/PDv2PackDraw.h)
+    // and this is its critter twin.
+    //
+    // The fixture below is CritterFixture()'s five shipped theme-0 rows plus
+    // the FOREST set the same commit ships in
+    // mod_pdungeon_critter_mine_forest.sql (ids 16-20, theme 3), mirrored row
+    // for row exactly as CritterFixture mirrors the base file.
+    //
+    // The MINE set of that file (ids 11-15, theme 1) is deliberately NOT here,
+    // and that is not an oversight: every pinned layout in this file is a
+    // theme-1 plan (MakeCfg leaves BlockCfg::theme at its default 1), so a
+    // themed mine rule would take those runs away from the theme-0 rules and
+    // move PD_CRITTER_PLAN_PIN. That is precisely the behaviour under test
+    // here - but testing it must not cost the pin whose job is to prove that
+    // nothing ELSE moved. Theme 3 carries no pin, so it is the free axis, and
+    // theme 1 stays in this file as the "a theme with no rules of its own"
+    // case, which is the half that has to reproduce the old dungeon exactly.
+    std::vector<CritterRule> ThemedCritterFixture()
+    {
+        std::vector<CritterRule> rules = CritterFixture();
+        CritterRule r;
+        r.id = 16; r.theme = 3; r.roleFilter = "room";
+        r.creatureEntry = 721; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 100;
+        rules.push_back(r);
+        r.id = 17; r.theme = 3; r.roleFilter = "room";
+        r.creatureEntry = 1412; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 80;
+        rules.push_back(r);
+        r.id = 18; r.theme = 3; r.roleFilter = "room";
+        r.creatureEntry = 883; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 60;
+        rules.push_back(r);
+        r.id = 19; r.theme = 3; r.roleFilter = "corridor";
+        r.creatureEntry = 1420; r.minPerBlock = 0; r.maxPerBlock = 2; r.weight = 100;
+        rules.push_back(r);
+        r.id = 20; r.theme = 3; r.roleFilter = "room_boss";
+        r.creatureEntry = 1420; r.minPerBlock = 0; r.maxPerBlock = 1; r.weight = 60;
+        rules.push_back(r);
+        return rules;
+    }
+
+    void RunCritterThemeChecks()
+    {
+        std::vector<CritterRule> const rules = ThemedCritterFixture();
+
+        std::vector<int> const shipped = { 1, 2, 3, 4, 6 };
+        std::vector<int> const forest = { 16, 17, 18, 19, 20 };
+        std::vector<int> both = shipped;
+        both.insert(both.end(), forest.begin(), forest.end());
+
+        // --- the rule itself, stated in full and without a kit --------------
+        Check(SelectCritterRules(rules, 3, true) == forest,
+              "an exclusive forest run did not take the forest rules ALONE", 0);
+        Check(SelectCritterRules(rules, 3, false) == both,
+              "ThemeExclusive = 0 did not merge the forest rules with theme 0", 0);
+        Check(SelectCritterRules(rules, 2, true) == shipped,
+              "a theme with no critter rule of its own did not fall back to theme 0", 0);
+        Check(SelectCritterRules(rules, 2, false) == shipped,
+              "a theme with no rule of its own must read the same in both modes", 0);
+        // theme 0 is not a look, it is the absence of one - so it can never be
+        // its own theme, in either mode.
+        Check(SelectCritterRules(rules, 0, true) == shipped,
+              "theme 0 claimed a theme of its own under ThemeExclusive = 1", 0);
+        Check(SelectCritterRules(rules, 0, false) == shipped,
+              "theme 0 claimed a theme of its own under ThemeExclusive = 0", 0);
+        // And the pre-K5 world: a rule set with no themed row at all behaves
+        // exactly as it always did, whatever the key says.
+        Check(SelectCritterRules(CritterFixture(), 3, true) == shipped,
+              "a rule set with no themed row stopped answering the theme-0 rules", 0);
+        Check(SelectCritterRules(CritterFixture(), 3, false) == shipped,
+              "a rule set with no themed row answered something else at 0", 0);
+
+        // --- the same rule where the masks are ------------------------------
+        //
+        // A kit staged before t1b-v40 has no theme-3 chunk, and then a forest
+        // plan would decorate nothing at all and every check below would pass
+        // vacuously. Say so and stop instead; the rule checks above need no
+        // kit and have already run.
+        // 22001 spelled out and not taken from ThemeChunkIdBase, for the
+        // reason the inventory sweep above gives: that table lives in the
+        // file under test and this one states the id scheme independently
+        // (themeBase 22000 + alt 0 + role 0 + socket mask 1 - a forest room).
+        if (!MaskFor(22001))
+        {
+            std::printf("  (no theme-3 chunk in the staged kit - "
+                        "critter theme plan checks skipped)\n");
+            return;
+        }
+
+        bool sawThemed = false;
+        bool sawThemedInUnion = false;
+        bool sawTheme0InUnion = false;
+        for (int i = 0; i < 40; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 7u;
+
+            BlockPlan forestPlan;
+            BlockCfg forestCfg = MakeCfg(seed, 6);
+            forestCfg.theme = 3;
+            if (!GenerateBlockPlan(forestCfg, &forestPlan))
+            {
+                Check(false, "the forest layout would not generate", seed);
+                continue;
+            }
+
+            // THE OPERATOR'S CASE: no theme-0 critter may stand in a forest
+            // that has critters of its own.
+            std::vector<CritterSpot> const only = BuildCritterPlan(
+                forestPlan, MaskFor, rules, forestPlan.effectiveSeed, true);
+            for (CritterSpot const& s : only)
+            {
+                Check(std::find(forest.begin(), forest.end(), s.ruleId) != forest.end(),
+                      "an exclusive forest run placed a critter from a foreign rule", seed);
+                sawThemed = true;
+            }
+
+            // ThemeExclusive off: the same layout, both rule sets.
+            std::vector<CritterSpot> const merged = BuildCritterPlan(
+                forestPlan, MaskFor, rules, forestPlan.effectiveSeed, false);
+            for (CritterSpot const& s : merged)
+            {
+                bool const themed =
+                    std::find(forest.begin(), forest.end(), s.ruleId) != forest.end();
+                bool const theme0 =
+                    std::find(shipped.begin(), shipped.end(), s.ruleId) != shipped.end();
+                Check(themed || theme0,
+                      "the merged forest run placed a critter from no rule of the set", seed);
+                sawThemedInUnion = sawThemedInUnion || themed;
+                sawTheme0InUnion = sawTheme0InUnion || theme0;
+            }
+
+            // A theme with NO rule of its own is the dungeon this module built
+            // before K5 - spot for spot, in BOTH modes, and identical to the
+            // plan the theme-0-only fixture produces. This is the half that
+            // says the change is additive for the city and the mine until
+            // their own rules are loaded.
+            BlockPlan minePlan;
+            if (!GenerateBlockPlan(MakeCfg(seed, 6), &minePlan))
+            {
+                Check(false, "the theme-1 layout would not generate", seed);
+                continue;
+            }
+            std::vector<CritterSpot> const strict = BuildCritterPlan(
+                minePlan, MaskFor, rules, minePlan.effectiveSeed, true);
+            std::vector<CritterSpot> const loose = BuildCritterPlan(
+                minePlan, MaskFor, rules, minePlan.effectiveSeed, false);
+            std::vector<CritterSpot> const preK5 = BuildCritterPlan(
+                minePlan, MaskFor, CritterFixture(), minePlan.effectiveSeed, true);
+            Check(SameCritters(strict, loose),
+                  "a theme with no rule of its own read differently in the two modes", seed);
+            Check(SameCritters(strict, preK5),
+                  "a theme with no rule of its own stopped building the pre-K5 plan", seed);
+        }
+
+        // Non-vacuity, and it is not decoration: a fixture or a rule change
+        // that quietly stopped placing the themed critters would leave every
+        // "only forest rules" check above trivially true.
+        Check(sawThemed,
+              "no exclusive forest run placed a single critter - the check is vacuous", 0);
+        Check(sawThemedInUnion && sawTheme0InUnion,
+              "ThemeExclusive = 0 never produced a mixed sample - the union is not one", 0);
     }
 
     // Round B: the chain itself, pinned. RunLayoutFreezeCheck pins the
@@ -5694,6 +6436,7 @@ namespace
             bool const ok = CheckCritterPlanPinned(why);
             Check(ok, why.c_str(), 12345u);
         }
+        RunCritterThemeChecks();
 
         std::vector<DecorRule> const rules = DecorFixture();
         std::vector<CritterRule> const critterRules = CritterFixture();
@@ -5756,9 +6499,9 @@ namespace
                     }
 
                     std::vector<CritterSpot> const critters = BuildCritterPlan(
-                        plan, MaskFor, critterRules, plan.effectiveSeed);
+                        plan, MaskFor, critterRules, plan.effectiveSeed, true);
                     std::vector<CritterSpot> const crittersAgain = BuildCritterPlan(
-                        plan, MaskFor, critterRules, plan.effectiveSeed);
+                        plan, MaskFor, critterRules, plan.effectiveSeed, true);
                     Check(SameCritters(critters, crittersAgain),
                           "two critter builds of the same plan differ", seed);
                     Check(CheckCritterSpots(plan, critters, why),
@@ -6165,6 +6908,272 @@ namespace
                 cursor = end;
             }
         }
+    }
+
+    // --- Round F / F1: packs per theme (spec D2) ---------------------------
+    //
+    // The rule lives in SelectThemePacks (generator/PDv2PackDraw.cpp) and is
+    // applied by PDv2PackMgr::SelectSpawns, which includes DatabaseEnv.h and
+    // can never link in here - the same split, and for the same reason, as
+    // FilterEligibleTrashPacks above. So this section does what that file
+    // does: it asks SelectThemePacks which packs a run of theme N may use,
+    // builds the pools out of exactly those packs the way the manager builds
+    // them, and then checks the DRAW that comes out - which is the half a
+    // player would notice.
+    //
+    // Every OTHER fixture in this file leaves SpawnSelectInputs::theme at its
+    // default 0 and therefore describes a theme-0 run, which is precisely the
+    // pool they always described - that is why no pin in this file moved for
+    // F1. The theme-0 case below states it as a check of its own rather than
+    // leaving it to be inferred from the other pins staying green.
+    struct ThemedFixturePack
+    {
+        int packId = 0;
+        int theme = 0;
+        std::vector<PackMember> members;
+    };
+
+    // Two theme-0 packs (the pool every run had before F1) and one theme-1
+    // pack. The entries are real: 84264.. are the stock trash the other
+    // fixtures here use, and pack 3 is the Mine roster of spec D3 - Defias
+    // miners 657/634, the caster 1732 and Mr. Smite 646 - so a failure names
+    // creatures a reader of the plan recognises.
+    std::vector<ThemedFixturePack> ThemedFixturePacks()
+    {
+        std::vector<ThemedFixturePack> packs;
+
+        ThemedFixturePack p1;
+        p1.packId = 1;
+        p1.theme = 0;
+        p1.members = { {1, 84264}, {1, 84265},
+                       {1, 84263, PACK_ROLE_CASTER, 47809},
+                       {1, 84288, PACK_ROLE_BOSS} };
+        packs.push_back(p1);
+
+        ThemedFixturePack p2;
+        p2.packId = 2;
+        p2.theme = 0;
+        p2.members = { {2, 84267}, {2, 84269},
+                       {2, 84276, PACK_ROLE_CASTER, 47857},
+                       {2, 84289, PACK_ROLE_BOSS} };
+        packs.push_back(p2);
+
+        ThemedFixturePack p3;
+        p3.packId = 3;
+        p3.theme = 1;
+        p3.members = { {3, 657}, {3, 634},
+                       {3, 1732, PACK_ROLE_CASTER, 47809},
+                       {3, 646, PACK_ROLE_BOSS} };
+        packs.push_back(p3);
+
+        return packs;
+    }
+
+    // What PDv2PackMgr::SelectSpawns hands SelectThemePacks: one info per
+    // loaded pack, `usableTrash` answered against the run's band and unlock
+    // filter. This fixture has no band or unlock to fail, so usableTrash is
+    // exactly "holds a non-boss member" - the question the manager's own
+    // HasTrashMember asks.
+    std::vector<ThemePackInfo> ThemedFixtureInfos(std::vector<ThemedFixturePack> const& packs)
+    {
+        std::vector<ThemePackInfo> infos;
+        for (ThemedFixturePack const& p : packs)
+        {
+            ThemePackInfo info;
+            info.packId = p.packId;
+            info.theme = p.theme;
+            info.usableTrash = false;
+            for (PackMember const& m : p.members)
+            {
+                if (m.role != PACK_ROLE_BOSS)
+                {
+                    info.usableTrash = true;
+                    break;
+                }
+            }
+            infos.push_back(info);
+        }
+        return infos;
+    }
+
+    // The pools a run of `theme` ends up with, built from the surviving packs
+    // exactly as PDv2PackMgr::SelectSpawns builds them: role split in loader
+    // order, `trash` the melee/caster interleave, the two per-pack groups, and
+    // trashPackIds through FilterEligibleTrashPacks.
+    PackPools ThemedPoolsFor(std::vector<ThemedFixturePack> const& packs,
+                             std::vector<int> const& candidates)
+    {
+        PackPools pools;
+        for (ThemedFixturePack const& p : packs)
+        {
+            if (std::find(candidates.begin(), candidates.end(), p.packId) == candidates.end())
+            {
+                continue;
+            }
+            for (PackMember const& m : p.members)
+            {
+                if (m.role == PACK_ROLE_BOSS)
+                {
+                    pools.boss.push_back(m);
+                    continue;
+                }
+                pools.trash.push_back(m);
+                (m.role == PACK_ROLE_CASTER ? pools.caster : pools.melee).push_back(m);
+            }
+        }
+
+        for (ThemedFixturePack const& p : packs)
+        {
+            if (std::find(candidates.begin(), candidates.end(), p.packId) == candidates.end())
+            {
+                continue;
+            }
+            PackPools::PackGroup melee{ p.packId, {} };
+            PackPools::PackGroup caster{ p.packId, {} };
+            for (PackMember const& m : p.members)
+            {
+                if (m.role == PACK_ROLE_MELEE)
+                {
+                    melee.members.push_back(m);
+                }
+                else if (m.role == PACK_ROLE_CASTER)
+                {
+                    caster.members.push_back(m);
+                }
+            }
+            if (!melee.members.empty())
+            {
+                pools.meleeByPack.push_back(melee);
+            }
+            if (!caster.members.empty())
+            {
+                pools.casterByPack.push_back(caster);
+            }
+        }
+
+        pools.trashPackIds = FilterEligibleTrashPacks(candidates, pools);
+        return pools;
+    }
+
+    // Which pack an entry belongs to, or 0. Deliberately NOT SpawnPick::packId:
+    // that field records the pack a ROOM was themed to, so a run whose every
+    // slot fell back to the merged pool would still "cohere" by it. The entry
+    // is where the creature actually came from, which is the question a theme
+    // rule has to answer.
+    int ThemedPackOfEntry(std::vector<ThemedFixturePack> const& packs, uint32_t entry)
+    {
+        for (ThemedFixturePack const& p : packs)
+        {
+            for (PackMember const& m : p.members)
+            {
+                if (m.entry == entry)
+                {
+                    return p.packId;
+                }
+            }
+        }
+        return 0;
+    }
+
+    // One themed run, end to end: the rule picks the packs, the draw fills the
+    // rooms, and every creature that comes out has to belong to one of the
+    // packs the rule allowed. `sawPacks` collects what was really drawn, so a
+    // caller can also insist that a pack it EXPECTED to see was not merely
+    // permitted but used.
+    void CheckThemedDraw(std::vector<ThemedFixturePack> const& packs, int theme, bool exclusive,
+                         std::vector<int> const& wantCandidates, uint32_t seed,
+                         std::vector<int>& sawPacks)
+    {
+        std::vector<int> const candidates =
+            SelectThemePacks(ThemedFixtureInfos(packs), theme, exclusive);
+        Check(candidates == wantCandidates,
+              "SelectThemePacks chose the wrong packs for this theme", seed);
+        if (candidates.empty())
+        {
+            return;                     // nothing to draw from; the check above said so
+        }
+
+        PackPools const pools = ThemedPoolsFor(packs, candidates);
+
+        SpawnSelectInputs in;
+        in.rooms = { {0, false}, {1, false}, {2, false}, {3, true} };
+        in.spawnsPerRoom = 5;
+        in.bossRoomAdds = 2;
+        in.casterPct = 40;
+        in.bandMin = 76;
+        in.affixPct = 40;
+        in.theme = theme;
+
+        std::vector<SpawnPick> flat;
+        if (!PDv2SelectSpawns(seed, in, pools, flat))
+        {
+            Check(false, "the themed draw refused to select", seed);
+            return;
+        }
+        Check(!flat.empty(), "the themed draw came back empty", seed);
+
+        for (SpawnPick const& pick : flat)
+        {
+            int const owner = ThemedPackOfEntry(packs, pick.entry);
+            Check(std::find(candidates.begin(), candidates.end(), owner) != candidates.end(),
+                  "a themed run drew a creature from a pack its theme excludes", seed);
+            if (std::find(sawPacks.begin(), sawPacks.end(), owner) == sawPacks.end())
+            {
+                sawPacks.push_back(owner);
+            }
+        }
+    }
+
+    void RunThemedPackChecks(int seeds)
+    {
+        std::vector<ThemedFixturePack> const packs = ThemedFixturePacks();
+
+        // A boss-only themed pack: the one shape that could claim a run and
+        // then leave every room empty. It must NOT count as usable, so a
+        // theme-2 run still falls back to the theme-0 packs and nothing of
+        // pack 4's ever spawns.
+        std::vector<ThemedFixturePack> withBossOnly = packs;
+        ThemedFixturePack bossOnly;
+        bossOnly.packId = 4;
+        bossOnly.theme = 2;
+        bossOnly.members = { {4, 8923, PACK_ROLE_BOSS} };
+        withBossOnly.push_back(bossOnly);
+
+        std::vector<int> sawThemed;
+        std::vector<int> sawTheme0;
+        std::vector<int> sawMerged;
+        std::vector<int> sawZero;
+        std::vector<int> sawBossOnly;
+        for (int i = 0; i < seeds; ++i)
+        {
+            uint32_t const seed = static_cast<uint32_t>(i) * 2654435761u + 17u;
+
+            // The mine draws the mine's pack and nothing else.
+            CheckThemedDraw(packs, /*theme*/ 1, /*exclusive*/ true, { 3 }, seed, sawThemed);
+            // A theme with no pack of its own falls back to the theme-0 pool -
+            // today's set, and the reason a new look can ship its art first.
+            CheckThemedDraw(packs, 2, true, { 1, 2 }, seed, sawTheme0);
+            // ThemeExclusive off: the themed pack merely joins the pool.
+            CheckThemedDraw(packs, 1, false, { 1, 2, 3 }, seed, sawMerged);
+            // Theme 0 is not a look, it is the absence of one: the same pool
+            // in both modes, and the same pool every pre-F1 fixture describes.
+            CheckThemedDraw(packs, 0, true, { 1, 2 }, seed, sawZero);
+            CheckThemedDraw(packs, 0, false, { 1, 2 }, seed, sawZero);
+            // The boss-only themed pack cannot claim its theme.
+            CheckThemedDraw(withBossOnly, 2, true, { 1, 2 }, seed, sawBossOnly);
+        }
+
+        // Non-vacuity, and it is not decoration: a fixture or a rule change
+        // that quietly stopped drawing the themed pack would leave every
+        // "drew only from allowed packs" check above trivially true.
+        Check(std::find(sawThemed.begin(), sawThemed.end(), 3) != sawThemed.end(),
+              "no themed run ever drew the theme-1 pack - the themed draw is vacuous", 0);
+        Check(std::find(sawMerged.begin(), sawMerged.end(), 3) != sawMerged.end(),
+              "ThemeExclusive = 0 never drew the themed pack in the whole sample", 0);
+        Check(sawMerged.size() > 1,
+              "ThemeExclusive = 0 drew from one pack only - the merged pool is not merged", 0);
+        Check(std::find(sawBossOnly.begin(), sawBossOnly.end(), 4) == sawBossOnly.end(),
+              "a boss-only themed pack was drawn from - it can fill no room", 0);
     }
 
     // --- Round C / C6: a boss appears at most once per run -----------------
@@ -6799,13 +7808,20 @@ namespace
             }
         }
         Check(roomChunks > 0, "no room chunk in kit_meta.json", 0);
-        // Completeness of the sweep, not a sample of it: 15 masks in each of
-        // the two theme namespaces, times the alts that role ships. This is
-        // the check that goes red if the kit ever stops shipping the third
-        // Room look while AltCountFor still promises it.
+        // Completeness of the sweep, not a sample of it: 15 masks in each
+        // theme namespace, times the alts that role ships. This is the check
+        // that goes red if the kit ever stops shipping the third Room look
+        // while AltCountFor still promises it.
+        //
+        // Round F / K2: the theme factor was the literal 2 and is now
+        // KitThemeCount(), because it is the one factor here that moves when
+        // a look is added - and it moved, from 2 to 3, the moment the forest
+        // entered the kit SQL. The other two factors stay literal, which is
+        // where this check's teeth are.
         for (int r = 0; r <= 2; ++r)
         {
-            int const want = AltCountFor(static_cast<BlockRole>(r)) * 15 * 2;
+            int const want = AltCountFor(static_cast<BlockRole>(r)) * 15
+                           * KitThemeCount();
             char msg[160];
             std::snprintf(msg, sizeof(msg),
                           "the spawn-point sweep covered %d chunks of room role %d, "
@@ -7054,8 +8070,26 @@ namespace
     // against, so 8 cells of chunks 13001-13014 changed clearance. The walk masks
     // did NOT move (8410 walkable cells both sides), which is why the no-layer
     // string - a property of the masks alone - is untouched.
-    char const* const PD_PATROL_CLEAR_PIN_NOLAYER = "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:8410:;";
-    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:353:73:635:59:6953:;";
+    // Round F / K2 (2026-09-11): both strings move, and for the same reason as
+    // PD_SUPERCOVER_PAIRS_PIN - the histogram is swept over every chunk the
+    // kit ships and the kit gained a third theme's 122. The delta is exactly
+    // the forest's 4190 walkable cells, all in bucket 15, and NOT ONE other
+    // bucket moved:
+    //
+    //     theme 1 (mine)   4190 walkable cells, 0:...:0:4190
+    //     theme 2 (city)   4220 walkable cells, 0:45:2:0:16:7:187:5:34:15:26:353:73:635:59:2763
+    //     theme 3 (forest) 4190 walkable cells, 0:...:0:4190
+    //     themes 1+2       = the previous pin, 0:45:2:...:59:6953
+    //     themes 1+2+3     = this pin,         0:45:2:...:59:11143
+    //
+    // A theme with no MODF row gets clearance 15 on every walkable cell,
+    // because patrol_clear_grids derives the layer from WMO ground boxes
+    // alone - which is what THEME1_WMO = {} and THEME3_WMO = {} buy, and why
+    // the mine's rock bodies and the forest's tree line cost no pin of their
+    // own. The no-layer string moves by the same 4190: it is a property of the
+    // masks, and there are 122 more of them.
+    char const* const PD_PATROL_CLEAR_PIN_NOLAYER = "0:0:0:0:0:0:0:0:0:0:0:0:0:0:0:12600:;";
+    char const* const PD_PATROL_CLEAR_PIN = "0:45:2:0:16:7:187:5:34:15:26:353:73:635:59:11143:;";
 
     // The histogram itself, over g_masks and g_patrol rather than over a built
     // grid: this is a statement about the KIT, and a grid only ever holds the
@@ -7789,6 +8823,22 @@ namespace
         Check(sawDetour, "no seed in the sample produced a loop room - the detour draw is dead code", 0);
         RunPhase2Checks(count / 10 + 1);
         RunThemeParityChecks(count / 10 + 1);
+        // Round F / F3-B, same tenth-of-the-batch size as the parity check it
+        // extends: the property is per layout, so the sample only decides how
+        // many role/mask/alt combinations get their id re-derived.
+        RunThemeThreeNamespaceChecks(count / 10 + 1);
+        // Round F / L1, same tenth-of-the-batch size and the same reasoning as
+        // the two checks above it: "an origin is a pure translation that keeps
+        // the layout inside one tile" is a property of every single layout, so
+        // the sample size only decides how many shapes get walked. The three
+        // window centres it pins are not seed-dependent at all and are checked
+        // once per call.
+        RunThemeOriginWindowChecks(count / 10 + 1);
+        // Round F / F1c. The batch's tenth drives the PURITY walk only; the
+        // coverage and fairness samples inside are a fixed size of their own,
+        // because a roll costs no layout and "every theme comes up" must not
+        // depend on how big a batch somebody asked for.
+        RunThemeRollChecks(count / 10 + 1);
         // Same tenth-of-the-batch reasoning: one pack per room is structural
         // too, and a real seed only ever gets a handful of rooms per run.
         RunPackThemeChecks(count / 10 + 1);
@@ -7799,6 +8849,13 @@ namespace
             bool const ok = CheckEligibleTrashPackFilter(why);
             Check(ok, why.empty() ? "eligible trash pack filter failed" : why.c_str(), 0);
         }
+        // Round F / F1. SelectThemePacks itself is pure and would be answered
+        // by one seed, but the DRAW half beside it is not: whether the merged
+        // pool really reaches the themed pack is a statement about a sample.
+        // Same tenth-of-the-batch size as the checks above it, for the same
+        // reason - the properties are per run, so the sample only decides how
+        // much of the draw space gets walked.
+        RunThemedPackChecks(count / 10 + 1);
         {
             // Round C / C6. Same tenth-of-the-batch reasoning as the theme
             // checks: no-repeat is a property of ONE run's boss rooms, so the

@@ -19,6 +19,7 @@
 
 #include "Chat.h"
 #include "Creature.h"
+#include "DBCStores.h"
 #include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "InstanceScript.h"
@@ -2382,6 +2383,73 @@ namespace PDungeon
         // uint32 on the account row and 255 is far past any cap a conf can set.
         _run.dlvl = static_cast<uint8>(std::clamp(dlvl, 0, 255));
 
+        // Round F / F3-B (plan task F3-B.3, recon D 2b): the run's MOOD, and
+        // the one statement of it - frozen with the rest of the run, from the
+        // PLAN's theme, for the same reason every other line above uses the
+        // plan: the look belongs to the layout the player owns and not to
+        // whatever the gen panel says right now.
+        //
+        // The theme's light is a Light.dbc ROW id read live off the conf
+        // (V2.Theme<N>.LightId, 0 = leave the map alone, which is every theme
+        // until an operator sets a key) and pushed to the map's zone as
+        // SMSG_OVERRIDE_LIGHT. Map::SetZoneOverrideLight keeps it in the Map's
+        // own _zoneDynamicInfo (AC Map.cpp:3241-3252), which is per instance
+        // and dies with the map - so a mine and a city are lit differently at
+        // the same minute on the same realm, and NO server-side dbc row has to
+        // describe map 760 for that to work.
+        //
+        // Sent ONCE per build, and that is not a hole for late joiners. The
+        // stored override is re-sent by Map::SendZoneDynamicInfo
+        // (Map.cpp:3135-3153), which Player::UpdateZone calls unconditionally
+        // for anyone whose zone HAS an AreaTable row (PlayerUpdates.cpp:
+        // 1288-1295; ours is areatable_dbc 5100, shipped in
+        // mod_pdungeon_map760.sql), and a cross-map teleport always runs
+        // UpdateZone on arrival (MovementHandler.cpp:264-267). The player who
+        // triggered this build is covered by the immediate broadcast instead:
+        // InstanceMap::AddPlayerToMap adds them to the map BEFORE it calls the
+        // instance script (Map.cpp:2067, then :2070), so Map::SendZoneMessage
+        // already sees them. No OnPlayerEnter hook of our own is needed.
+        //
+        // The zone is the map's LINKED zone off the MapEntry and never a
+        // literal: map 760 carries no gridmap, so every position on it falls
+        // back to linked_zone (Map.cpp:1281) and that is the only zone a
+        // player in here can be in. It reads 5100 today; F3-C gives the CLIENT
+        // a per-theme area id, and this has to keep naming whatever the SERVER
+        // side really is rather than a number copied out of a sibling task.
+        if (uint32 const themeLight = sPDv2Mgr->ThemeLightId(plan.config.theme))
+        {
+            MapEntry const* mapEntry = instance->GetEntry();
+            uint32 const zoneId = mapEntry ? mapEntry->linked_zone : 0;
+            if (zoneId)
+            {
+                // One second of fade: every production override (Lich King,
+                // Malygos, the gunship) sends a non-zero transition, and the
+                // first workbench run with 0 ms left the client on the map
+                // default - a zero-length transition is not a documented
+                // client state. The map default id travels in the packet
+                // (Map::_defaultLight = GetDefaultMapLight at construction),
+                // so it is logged here: 0 would mean the light_dbc row is
+                // missing and the client has nothing to override.
+                instance->SetZoneOverrideLight(zoneId, themeLight, 1000ms);
+                LOG_INFO(PD_LOG, "PDv2: instance {} theme {} overrides zone {} "
+                                 "light with Light.dbc row {} (map default light {})",
+                         instance->GetInstanceId(), plan.config.theme, zoneId,
+                         themeLight, GetDefaultMapLight(instance->GetId()));
+            }
+            else
+            {
+                // A dungeon map with no linked zone is a broken map_dbc row and
+                // not a state to work around: SendZoneMessage would match no
+                // player and _zoneDynamicInfo[0] would collect an entry that is
+                // never read again.
+                LOG_WARN(PD_LOG, "PDv2: instance {} map {} has no linked zone - "
+                                 "theme {} keeps the map default light instead "
+                                 "of Light.dbc row {}",
+                         instance->GetInstanceId(), instance->GetId(),
+                         plan.config.theme, themeLight);
+            }
+        }
+
         // Rooms only, in plan order. A corridor is 8.3 yd wide, so anything
         // standing in one would be shoulder to shoulder with the walls; the
         // entrance stays empty so an arriving player is not already in combat.
@@ -2487,6 +2555,12 @@ namespace PDungeon
         inputs.affixPct = cfg.affixPct;
         inputs.casterPct = account.cfgCasterPct;
         inputs.bandMin = account.cfgBandMin;
+        // Round F / F1 (spec D2): which packs this dungeon may draw from. The
+        // PLAN's theme and never the account's current knob or the server
+        // config - the look is frozen into the layout at generation, so a
+        // player who re-skins the panel mid-evening does not change what is
+        // standing in the dungeon they already own.
+        inputs.theme = plan.config.theme;
         // No creature-type cap any more: every trash slot draws from the whole
         // unlocked pool (PDv2PackMgr.h says why). dlvl still decides which
         // packs are unlocked, which is the variety lever that remains.
@@ -3283,10 +3357,17 @@ namespace PDungeon
         // The PLAN's seed, exactly like SpawnDecor: BuildCritterPlan derives
         // its own stream from it (PD_CRITTER_SEED_MIX), so critters follow a
         // re-roll the way the props and the terrain do.
+        // The theme flag travels with the call and is never read inside the
+        // generator (Round F / K5): src/generator/ is engine-free, so the
+        // operator key reaches BuildCritterPlan the way V2.Packs.ThemeExclusive
+        // reaches the spawn draw - through the inputs. Read here, at the
+        // instance build, which is what makes `.reload config` retune the next
+        // dungeon without touching anybody's stored layout.
         std::vector<CritterSpot> const spots = BuildCritterPlan(
             plan,
             [](int chunkId) { return sPDv2Mgr->WalkMaskFor(chunkId); },
-            rules, plan.effectiveSeed);
+            rules, plan.effectiveSeed,
+            sPDv2Mgr->GetConfig().crittersThemeExclusive);
 
         uint32 placed = 0;
         uint32 skippedForClearance = 0;
@@ -3871,6 +3952,10 @@ namespace PDungeon
             in.affixPct = cfg.affixPct;
             in.bandMin = account.cfgBandMin;
             in.unlockedDlvl = static_cast<int>(account.dlvl);
+            // Round F / F1: the same pool the rooms draw from, for the same
+            // reason every other input here is copied from the room draw - a
+            // corridor sentry belongs to the dungeon it patrols.
+            in.theme = plan.config.theme;
 
             std::vector<RoomSpawns> out;
             uint32 const seed = plan.effectiveSeed ^ PD_PATROL_SEED_MIX ^
@@ -4068,6 +4153,10 @@ namespace PDungeon
             in.affixPct = cfg.affixPct;
             in.bandMin = account.cfgBandMin;
             in.unlockedDlvl = static_cast<int>(account.dlvl);
+            // Round F / F1: the plan's look, like the room draw above - an
+            // ambush is this dungeon's trash lying in wait, not a second
+            // dungeon's.
+            in.theme = plan.config.theme;
 
             std::vector<RoomSpawns> out;
             uint32 const seed = plan.effectiveSeed ^ PD_AMBUSH_SEED_MIX ^
@@ -4791,6 +4880,9 @@ namespace PDungeon
             in.affixPct = cfg.affixPct;
             in.bandMin = account.cfgBandMin;
             in.unlockedDlvl = static_cast<int>(account.dlvl);
+            // Round F / F1: the plan's look once more - the wave the pilgrim
+            // is holding out against is what lives in this dungeon.
+            in.theme = plan.config.theme;
 
             std::vector<RoomSpawns> out;
             uint32 const seed = plan.effectiveSeed ^ PD_EVENT_SEED_MIX ^

@@ -512,6 +512,29 @@ namespace PDungeon
             // through, because a panel is a thing an untrusted client runs.
             << ' ' << static_cast<int>(account.cfgStatProfile)
             << ' ' << (TaggedAuraAmount(player, PD_TALENT_TAG_STATFILTER) ? 1 : 0)
+            // Round F / F1, fields 27 and 28, appended under the same rule as
+            // the WP9 pair above: new fields go at the END, in front of the
+            // free-text tail, so an older panel simply drops them.
+            //
+            // The look the NEXT Generate will use (0 = RANDOM since F1c: the
+            // server rolls one of the loaded themes out of that run's seed) and
+            // the highest theme this server has art for. themeMax is what the
+            // panel's dropdown ends at, and it is READ FROM THE KIT
+            // (PDv2Mgr::ThemeMax, off the loaded chunk meta) rather than being
+            // a constant in either half: a kit that ships a third theme adds a
+            // third entry with no Lua and no C++ change, and one rolled back to
+            // a single theme drops it again.
+            //
+            // The wire did NOT move for F1c - same two fields, same order, same
+            // meanings for every id above 0. Only what 0 MEANS changed, and the
+            // one thing the client does with it is print the word "Random".
+            //
+            // static_cast<int> for the same reason as the profile above -
+            // cfgTheme is a uint8_t and an ostream would write it as a
+            // CHARACTER. A hint, never a permission: the SET handler checks
+            // the id against HasTheme itself.
+            << ' ' << static_cast<int>(account.cfgTheme)
+            << ' ' << sPDv2Mgr->ThemeMax()
             << ' ' << Sanitize(LinkState::Describe(verdict));
 
         SendAddonWhisper(player, PREFIX_UI_DOWN, out.str());
@@ -975,6 +998,37 @@ namespace PDungeon
                 // through the struct honest.
                 wanted.cfgStatProfile = GameClampStatProfile(value);
             }
+            else if (key == "theme")
+            {
+                // Round F / F1 (spec D1). REFUSED rather than clamped, and the
+                // band branch above is the pattern once more: a look this
+                // server has no kit for is not a number to be bent into the
+                // nearest legal one - silently generating a city when the
+                // player asked for a mine is exactly the kind of "it worked,
+                // just not like that" this module keeps out of the wire.
+                //
+                // 0 always passes: it is not a theme at all, it is "let the
+                // server roll one" (F1c; it used to be "follow V2.Theme"). It
+                // is the column's default, the entry the dropdown calls Random,
+                // and the way back for a player who changes their mind - so it
+                // can never be refused, whatever the kit carries.
+                if (value != 0 && !sPDv2Mgr->HasTheme(value))
+                {
+                    if (PDv2Debug())
+                    {
+                        LOG_INFO(PD_LOG, "PDv2 UI: account {} asked for theme {}, which this "
+                                         "kit does not carry (max {})",
+                                 accountId, value, sPDv2Mgr->ThemeMax());
+                    }
+                    return;
+                }
+                // The refusal above IS the range check - HasTheme only answers
+                // true for one of the handful of ids the chunk meta carries -
+                // so this narrowing cast into the uint8_t field cannot wrap the
+                // way a raw wire value would (the trap cfg_stat_profile clamps
+                // for, one branch up).
+                wanted.cfgTheme = static_cast<uint8_t>(value);
+            }
             else
             {
                 if (PDv2Debug())
@@ -1022,7 +1076,19 @@ namespace PDungeon
                 return;
             }
 
-            PDv2GenOutcome const outcome = PDv2DoGenerate(player, 0, nullptr);
+            // Round F / F1 (spec D1). The panel's own theme knob, handed in as
+            // the override the GM command has always used - and since F1c a 0
+            // here means "roll one", which GeneratePlan does off the run's seed.
+            // Nothing about that decision lives on this side: the panel sends a
+            // knob, not a theme.
+            //
+            // Read HERE and not cached anywhere: the knob is what the account
+            // row says at the moment Generate is pressed, and GeneratePlan then
+            // freezes it into the layout, which is what makes the choice affect
+            // the NEXT dungeon and no dungeon that already exists.
+            PDv2AccountState const genState = sPDv2Mgr->GetAccountState(accountId);
+            PDv2GenOutcome const outcome =
+                PDv2DoGenerate(player, 0, nullptr, static_cast<int>(genState.cfgTheme));
             if (!outcome.ok)
             {
                 SendNotice(player, outcome.error);

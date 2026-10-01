@@ -53,6 +53,22 @@ class Player;
 //     where the floor is (`GroundZ -100000`); only the client does.
 namespace PDungeon
 {
+    // Round F / F3-B. How many per-theme slots the conf carries. A FIXED
+    // window and deliberately not ThemeMax(): the keys are read in LoadConfig,
+    // which runs long before LoadChunkMeta has told anyone which themes the kit
+    // ships, so a config reader has nothing else to size itself by. Nine
+    // matches the AreaTable block PDv2 reserved for itself (5101-5109), i.e.
+    // the most themes this dungeon can ever name.
+    //
+    // It sizes every per-theme key FAMILY, not just the light one it was
+    // introduced for: ProceduralDungeon.V2.Theme1.LightId .. Theme9.LightId
+    // since F3-B, and .Theme1.OriginBX/.OriginBY .. Theme9 since L1. One
+    // window for all of them on purpose - a theme that is worth a mood is
+    // worth a region, and two windows of different sizes would be a silent
+    // trap the day they disagreed. (The name still says LIGHT; widening it is
+    // a rename this task deliberately did not take, see the L1 report.)
+    int const PD_THEME_LIGHT_MAX = 9;
+
     struct PDv2Config
     {
         bool        enabled = false;
@@ -66,6 +82,82 @@ namespace PDungeon
         int         detourChancePct = 33;  // Round B (B0b): chance per boss segment of a loop room (V2.DetourChance)
         int         branches = 2;        // Round B: pocket rooms per layout (V2.Branches)
         int         theme = 1;
+        // Round F / F1 (spec D2). Does a run of theme N draw ONLY from the
+        // packs authored for theme N? On by default, because that is the whole
+        // point of a themed pack: a mine that spawns Defias miners beside the
+        // city's ghouls is two dungeons in one corridor. Off merges the themed
+        // packs into the theme-0 pool instead, which is what an operator who
+        // wants variety over coherence asks for.
+        //
+        // Either way a theme with no usable pack of its own falls back to the
+        // theme-0 packs - a look nobody has written creatures for still gets a
+        // dungeon (PDv2PackMgr::SelectSpawns, SelectThemePacks).
+        //
+        // An operator lever and NOT a layout input: it is read live at the
+        // draw, so `.reload config` retunes the next instance rather than
+        // rerolling anybody's stored plan. It does move WHICH creatures a
+        // stored seed spawns, exactly as adding a pack does.
+        bool        packsThemeExclusive = true;
+        // Round F / K5. The same question for AMBIENT LIFE: does a run of
+        // theme N draw ONLY from the critter rules authored for theme N?
+        // On by default for the reason the operator gave on 2026-09-12,
+        // looking at a forest screenshot - "Critter sollen auch passend zum
+        // Theme sein" - with a Sewer Rat (a theme-0 rule) running between the
+        // pines. Off keeps the pre-K5 shape, where the themed rules merely
+        // join the theme-0 ones.
+        //
+        // A theme with no critter rule of its own falls back to the theme-0
+        // rules either way, so a look whose art shipped before its ambient
+        // life still has some (SelectCritterRules, generator/PDv2DecorPlan.h).
+        //
+        // An operator lever and NOT a layout input, exactly like the pack key
+        // above: BuildCritterPlan draws on its own stream
+        // (PD_CRITTER_SEED_MIX), so flipping this re-rolls which critters a
+        // stored seed places and moves no prop, no spawn and no layout.
+        bool        crittersThemeExclusive = true;
+        // Round F / F3-B (recon D 2b). The Light.dbc ROW id a run of theme N
+        // overrides its zone with, indexed theme-1: themeLightId[0] is
+        // V2.Theme1.LightId. 0 = no override, and 0 is the default for every
+        // slot - a server whose client patch does not carry the rows behaves
+        // exactly as it did before this key existed.
+        //
+        // A Light ROW and not a LightParams id: that is what
+        // Map::SetZoneOverrideLight sends and what SMSG_OVERRIDE_LIGHT means
+        // (AC Map.cpp:3241-3252; the stock overrides LIGHT_SNOWSTORM 2490 etc.
+        // are Light rows too). Read live at the instance build, so it is an
+        // operator lever and never a layout input - nobody's stored plan
+        // rerolls because the mine got a new mood.
+        std::array<uint32_t, PD_THEME_LIGHT_MAX> themeLightId{};
+        // Round F / L1 (recon D section 6, decision 1). The block coordinate a
+        // run of theme N lays its field out from, indexed theme-1 exactly like
+        // themeLightId above: themeOriginBX[0] is V2.Theme1.OriginBX. 0 on an
+        // axis means "use the global V2.OriginBX / V2.OriginBY for that axis",
+        // and 0 is the default for every slot - a server that sets none
+        // generates every theme on the same tile, exactly as it did before
+        // these keys existed.
+        //
+        // WHY a theme needs its own region: the F3-B light channel does not
+        // work. The 3.3.5a client ignores SMSG_OVERRIDE_LIGHT for our
+        // off-field Light rows (the server log proves the packet goes out,
+        // the sky stays the map default), so the mood has to come from the
+        // mechanism every stock WoW zone uses instead - POSITIONED Light.dbc
+        // rows, which the client selects by CAMERA POSITION. That only
+        // separates two themes if the two themes are in different places.
+        //
+        // A layout never leaves the 8x8-block window starting at its origin
+        // (V2.FieldBlocks is capped there and the field only shrinks below
+        // it), i.e. it stays inside exactly one ADT tile - PD_BLOCKS_PER_TILE,
+        // the unit the client composer works in. So an origin is a multiple of
+        // 8 and a theme owns a tile of its own.
+        //
+        // Unlike the light id beside it this IS a layout input: GeneratePlan
+        // copies it into BlockCfg::originBX/BY and SavePlanToDB persists it
+        // (pdungeon_account.gen_origin_bx/by). So retuning a key moves only
+        // layouts generated AFTER it, and every stored dungeon keeps the
+        // region it was built in - LoadPlanFromDB reads the stored origin and
+        // never these keys.
+        std::array<int, PD_THEME_LIGHT_MAX> themeOriginBX{};
+        std::array<int, PD_THEME_LIGHT_MAX> themeOriginBY{};
         std::string manifestPath;        // where `v2 gen` writes the manifest
 
         // 01 §8 gameplay knobs.
@@ -400,6 +492,29 @@ namespace PDungeon
         // the node is bought back - which is what a permission that lives on a
         // talent tree should do. Everything below this line still reads Off.
         uint8_t     cfgStatProfile = PD_STAT_PROFILE_OFF;
+        // Round F / F1 (cfg_theme, spec D1): the look the account's NEXT
+        // Generate is built with. 0 = RANDOM since Round F / F1c (operator
+        // 2026-09-13, spec D16): GeneratePlan rolls one of the themes the kit
+        // loaded, uniformly and out of the run's own seed. It is the default of
+        // the column and therefore what an account that never touches the row
+        // gets. It used to mean "follow the server's V2.Theme", which now
+        // stands only where a roll would be meaningless - a kit with fewer than
+        // two themes.
+        //
+        // A uint8_t for the same reason cfgStatProfile is one: it is a small
+        // wire value end to end (the C payload, the column, the themeOverride
+        // argument), and a wider type would only invite a cast at each of them.
+        //
+        // What this is NOT is the theme of the dungeon the account currently
+        // owns - that is `pdungeon_account.theme`, frozen into the stored
+        // layout by SavePlanToDB, and this knob never touches it. Changing the
+        // look is therefore a decision about the next roll, never a re-skin of
+        // a dungeon somebody may be standing in.
+        //
+        // The legal values are whatever the loaded chunk meta carries
+        // (ThemeMax/HasTheme below), not a constant: a kit that ships a third
+        // theme must not need a code change to offer it.
+        uint8_t     cfgTheme = 0;
         std::string cfgPacks;
         bool        loaded = false;
     };
@@ -462,9 +577,18 @@ namespace PDungeon
         // Builds a plan for `accountId`, replaces any previous one and saves
         // its generation inputs to the characters DB. Returns false when the
         // generator could not produce a valid layout.
-        // themeOverride 0 follows the server config; a nonzero value is the
-        // GM test path (`.pdungeon v2 gen [seed] [theme]`) and is persisted
-        // like any other gen input - the theme is frozen into the layout.
+        // themeOverride 0 means "no theme named" and, since Round F / F1c,
+        // ROLLS one uniformly over the themes the loaded chunk meta carries,
+        // out of `seed` alone (V2.Theme stands only for a kit with fewer than
+        // two themes); a nonzero value is taken as given. Either way the
+        // CONCRETE theme is persisted like any other gen input and frozen into
+        // the layout, so a stored dungeon keeps the look it was rolled in.
+        // Two callers hand one in: the GM test path
+        // (`.pdungeon v2 gen [seed] [theme]`) and, since Round F / F1, the gen
+        // panel's Generate button, which passes the account's own cfg_theme.
+        // Both have already checked the id against HasTheme; this function
+        // takes it at face value and lets the block planner refuse a namespace
+        // it has no kit ids for.
         bool GeneratePlan(uint32_t accountId, uint32_t seed, BlockPlan& out,
                           int themeOverride = 0);
 
@@ -563,6 +687,51 @@ namespace PDungeon
         // threads may query it without a lock.
         void LoadChunkMeta();
 
+        // Round F / F1 (spec D1). Which themes this server can actually build,
+        // read off the chunk meta LoadChunkMeta walked - the kit's own SQL is
+        // the only thing that knows, and it says so one row per chunk.
+        //
+        // ThemeMax is the highest id present (2 with kit t1b-v39) and travels
+        // to the panel as the last entry of its theme dropdown; HasTheme
+        // answers for one id, because the ids a kit ships need not be
+        // contiguous and a bound alone would happily offer a gap - which is
+        // also why F1c's random roll draws over the LIST of loaded themes and
+        // never over 1..ThemeMax(). Both answer 0 / false
+        // before LoadChunkMeta has run, and after a chunk-meta load that found
+        // nothing at all - which is the state the module already refuses to
+        // generate in.
+        //
+        // No lock: _chunkThemes is written once at startup beside the walk
+        // masks and read-only afterwards, exactly like WalkMaskFor.
+        int ThemeMax() const;
+        bool HasTheme(int theme) const;
+
+        // Round F / F3-B. The Light.dbc row a run of `theme` overrides the
+        // zone light with, or 0 for "leave the map's own light alone" - which
+        // is the answer for an unconfigured theme AND for any id outside the
+        // conf's 1..PD_THEME_LIGHT_MAX window, so a caller never has to range
+        // check before asking. Straight off the live config, exactly like
+        // GetConfig(): `.reload config` retunes the NEXT instance to build and
+        // touches nothing already standing, because the override is sent once
+        // per build and then lives on the Map.
+        uint32_t ThemeLightId(int theme) const;
+
+        // Round F / L1. Overwrites `bx` / `by` with the layout origin of
+        // `theme`, per axis and only where that theme really names one.
+        //
+        // A MUTATOR and not a getter on purpose: "0 means follow the global
+        // origin" then lives in exactly one place instead of at every call
+        // site, and the caller passes in the global values it already has.
+        // A theme outside the conf's 1..PD_THEME_LIGHT_MAX window, and the
+        // theme 0 that means "Random" on an account row (F1c), leave both
+        // arguments untouched - so a caller never has to range check.
+        //
+        // Read straight off the live config like ThemeLightId, but unlike it
+        // this value is FROZEN into the plan by the caller (GeneratePlan ->
+        // BlockCfg::originBX/BY -> gen_origin_bx/by), so `.reload config`
+        // moves the next layout to be GENERATED and no layout already stored.
+        void ThemeOriginBlock(int theme, int& bx, int& by) const;
+
         // The 8x8 walk mask for a kit chunk, or nullptr for an unknown id -
         // the shape BuildWalkGrid's WalkMaskProvider wants.
         uint8_t const* WalkMaskFor(int chunkId) const;
@@ -620,9 +789,24 @@ namespace PDungeon
         // BuildCritterPlan's determinism promise rests on that order.
         std::vector<CritterRule> const& CritterRules() const { return _critterRules; }
 
+        // "theme 0: 5, theme 1: 5, theme 3: 5" - the per-theme shape of the
+        // loaded critter rules for the boot line, the critter twin of
+        // PDv2PackMgr::DescribePacksPerTheme. Public for no other reason than
+        // that LoadCritterRules is the only caller; it is a pure formatter
+        // over _critterRules and touches nothing else.
+        std::string DescribeCritterRulesPerTheme() const;
+
     private:
         void StorePlan(uint32_t accountId, BlockPlan const& plan);
         void SavePlanToDB(uint32_t accountId, BlockPlan const& plan);
+
+        // Round F / F1. The one statement of what a legal cfg_theme is, used
+        // by BOTH the load and the SET path, because a clamp written twice is
+        // a clamp that will disagree with itself: 0 (Random, F1c) always
+        // passes, and any other id has to be one the loaded chunk meta really
+        // carries. An unknown id therefore becomes 0 rather than a generation
+        // the validator would refuse later with "no valid layout".
+        uint8_t ClampThemeChoice(int wanted) const;
 
         PDv2Config _config;
         mutable std::mutex _lock;
@@ -640,6 +824,13 @@ namespace PDungeon
             std::array<uint8_t, PD_CELLS_PER_BLOCK * PD_CELLS_PER_BLOCK> dv{};
         };
         std::unordered_map<int, PatrolLayerBytes> _chunkPatrol;
+        // Round F / F1. Every theme id the chunk meta carries, ascending and
+        // without duplicates - the whole backing store of ThemeMax/HasTheme,
+        // and since F1c the very list GeneratePlan rolls a random theme out of.
+        // A sorted vector rather than a set: it holds two entries today, it is
+        // written once and read on every panel refresh, and an ascending
+        // vector is also what makes the boot line read in theme order.
+        std::vector<int> _chunkThemes;
         std::unordered_map<int, std::vector<DecorAnchor>> _chunkAnchors;
         std::unordered_map<int, RoomAnchors> _chunkRoomAnchors;
         std::unordered_map<int, std::vector<KitProp>> _chunkProps;

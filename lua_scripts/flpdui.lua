@@ -119,14 +119,15 @@ local function ToNumbers(fields, count)
 end
 
 -- How many numeric fields the C payload carries before its free-text tail. The
--- server only ever APPENDS to that list and this number moves in lockstep: 26
--- since the stat profile (25) and its unlock flag (26) went on the wire ahead of
--- the tail. A worldserver from before them sends 24, its verdict text lands in
--- fields 25/26, ToNumbers refuses it and the payload is dropped WHOLE - the
--- panel keeps asking and reads "..." rather than showing a profile nobody sent.
--- That is the intended failure and not a compatibility bug: this addon and the
--- worldserver that speaks to it are deployed together.
-local CFG_FIELDS = 26
+-- server only ever APPENDS to that list and this number moves in lockstep: 28
+-- since the chosen theme (27) and the highest theme the loaded kit can build
+-- (28) went on the wire ahead of the tail, behind the stat profile (25) and its
+-- unlock flag (26). A worldserver from before the theme pair sends 26, its
+-- verdict text lands in fields 27/28, ToNumbers refuses it and the payload is
+-- dropped WHOLE - the panel keeps asking and reads "..." rather than showing a
+-- theme nobody sent. That is the intended failure and not a compatibility bug:
+-- this addon and the worldserver that speaks to it are deployed together.
+local CFG_FIELDS = 28
 
 local function ParseCfg(body)
     local f = SplitHead(body, CFG_FIELDS)
@@ -150,6 +151,13 @@ local function ParseCfg(body)
         -- - the server refuses `SET statprofile` on its own side while the
         -- talent is missing, exactly as it does for the band row.
         statProfile = f[25], statUnlocked = f[26],
+        -- The account's theme for the NEXT generation (0 = the server rolls
+        -- one) and the highest theme id the loaded kit can build. Both are the
+        -- server's word: this panel knows neither which themes exist nor how
+        -- the roll picks, it only moves the knob between 0 and the ceiling it
+        -- was handed - which is how a kit that learns a new theme widens this
+        -- row without a new addon.
+        cfgTheme = f[27], themeMax = f[28],
         verdictText = f.tail,
     }
 
@@ -161,6 +169,13 @@ local function ParseCfg(body)
        c.casterMin > c.casterMax or c.bandLo > c.bandHi then
         return nil
     end
+    -- The theme menu's LOW bound does not travel, because it is the wire
+    -- contract itself: 0 ("let the server roll one") is always a legal choice,
+    -- so a themeMax under it is the same "lo > hi" the line above refuses. A
+    -- server with exactly one theme sends 0 and gets a menu of one entry
+    -- reading "Random", which is the honest picture of it - what such a server
+    -- rolls between is its business and not this panel's.
+    if c.themeMax < 0 then return nil end
     return c
 end
 
@@ -265,7 +280,29 @@ end
 -- ============================================================================
 
 local PANEL_W = 420
-local PANEL_H = 364            -- +20 current-depths (2026-08-07), +14 affixes
+-- +20 current-depths (2026-08-07), +14 affixes, +66 the theme row (2026-09-11).
+-- The theme row is NOT optional - every account has a theme and the server
+-- sends the pair in every C - so its height belongs to the base panel instead
+-- of to one of LayoutPanel's conditional terms. The 66 is summed, not
+-- eyeballed, the way the profile row's is, and it is the DROPDOWN's sum (the
+-- row shipped as a slider earlier the same day and cost 64):
+--
+--   16  from the casters slider's bottom to the dropdown frame's top. A slider
+--       row's 26 is 7 of Low/High end labels + 9 of air + 10 of the next
+--       slider's value text, which sits ABOVE its own top; a dropdown carries
+--       no text above it, so the same 7 + 9 is 16.
+--   32  the dropdown itself - UIDropDownMenuTemplate's own frame height, which
+--       UIDropDownMenu_SetWidth does not touch (it sets the width alone).
+--    8  from the frame's bottom to the hint line. A slider spends 7 of its own
+--       11 on the Low/High labels and leaves 4 of air; a dropdown has none, so
+--       8 is the same gap to the eye and clears the backdrop art, which is
+--       drawn taller than the frame rect and bleeds a little past it.
+--   10  the hint line.
+--
+-- Everything below now hangs off the theme hint instead of the casters slider
+-- with the offsets it always had, so all three optional rows keep their own
+-- numbers unchanged.
+local PANEL_H = 430
 local BAND_ROW_H = 52           -- what the hidden band row would add back
 -- What the hidden stat-profile row would add back, summed rather than guessed:
 -- 26 of gap to the slider + 17 of slider (OptionsSliderTemplate's own height)
@@ -348,8 +385,30 @@ local function RenderBand(v)
     return string.format("%d-%d", v, v + cfg.bandStep - 1)
 end
 
--- The stat profile is the one slider whose value is a WORD. 0..3 travels on the
--- wire and lives in the account column because that is what the SET verb and the
+-- The theme's value is a WORD too, and it is the one label in this panel the
+-- server does not send: the list lives on the CLIENT, indexed by the very id
+-- the wire carries, and themeMax says how far it may be read (spec D8). That
+-- is not the forbidden copy of a server-owned value - the names are art, not
+-- rules, and no decision hangs on them - but the ids underneath them are the
+-- contract, so a theme this table has no word for still prints its NUMBER:
+-- hiding a choice the server would accept is worse than showing it unnamed, and
+-- "..." would claim the server had said nothing when it had.
+--
+-- Id 0 reads "Random" since the operator's 2026-09-13 verdict (spec D16): the
+-- server rolls one of the themes it loaded, out of the run's own seed, so the
+-- word is a description of what the server will DO and no longer the name of a
+-- configured default. Still one word in one table - the client neither knows
+-- nor needs to know which themes the roll draws between.
+local THEME_NAMES = { [0] = "Random", [1] = "Mine", [2] = "City", [3] = "Forest" }
+local function RenderTheme(v)
+    local name = THEME_NAMES[v]
+    if name then return name end
+    if type(v) ~= "number" then return "..." end
+    return string.format("%d", v)
+end
+
+-- The stat profile's value is a WORD as well. 0..3 travels on the wire and
+-- lives in the account column because that is what the SET verb and the
 -- engine's PD_STAT_PROFILE_* take; the player never sees the number. A value the
 -- server clamps to that range can only arrive outside it if the two sides have
 -- stopped agreeing, and then this reads "..." like every other widget that has
@@ -397,14 +456,93 @@ end
 local roomsSlider = MakeSlider("FLPDRoomsSlider", "Rooms", RenderRooms, "rooms", sep1, -20)
 local diffSlider = MakeSlider("FLPDDiffSlider", "Difficulty", RenderDiff, "diff", roomsSlider, -26)
 local casterSlider = MakeSlider("FLPDCasterSlider", "Casters", RenderCaster, "caster", diffSlider, -26)
--- The stat-profile row sits between the casters slider and the band row, in the
+
+-- The theme row, and it is a DROPDOWN rather than a slider (operator,
+-- 2026-09-11) sitting UNDER the casters row rather than over it. A theme is a
+-- NAME out of a short list, not a quantity: a slider says the ids are a scale
+-- and makes the player drag THROUGH Mine to reach City, which is exactly what
+-- they are not. Unlike the two rows below it this one is ALWAYS up - there is
+-- no flag to hide it behind, every account has a theme and the server sends
+-- the pair in every C - which is why it costs no branch in LayoutPanel and its
+-- height simply belongs to PANEL_H.
+--
+-- 3.3.5a API only, and the frame needs a GLOBAL name: UIDropDownMenuTemplate
+-- builds its Text, its Button and its three backdrop textures as globals off
+-- that name, exactly like OptionsSliderTemplate's Low/High/Text, and every
+-- UIDropDownMenu_* helper looks them up that way.
+local themeDrop = CreateFrame("Frame", "FLPDThemeDropDown", Panel, "UIDropDownMenuTemplate")
+themeDrop:SetPoint("TOP", casterSlider, "BOTTOM", 0, -16)
+UIDropDownMenu_SetWidth(themeDrop, 140)
+
+-- The label a slider carries inside its own value text. It hangs off the LEFT
+-- of the control the way this server's two other client addons place theirs,
+-- and the 8 pulls it into the frame's own left padding: the drawn box starts
+-- inside the frame rect, so the label would otherwise float away from it.
+local themeLabel = Panel:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+themeLabel:SetPoint("RIGHT", themeDrop, "LEFT", 8, 2)
+themeLabel:SetText("Theme")
+
+-- One click = one SET, down the SAME path a slider's drag takes: the id goes
+-- into pending under the same setKey and the driver's debounce sends
+-- "UI SET theme <n>". Nothing here writes the widget. The panel does not assume
+-- its own click succeeded - the server clamps, and the selection moves only
+-- when the next C says it did - which is the same rule every slider obeys by
+-- being rewritten from the payload instead of from its own OnValueChanged.
+local function ThemePicked(self)
+    pending["theme"] = self.value
+    pendingAt = GetTime() + SET_DEBOUNCE
+end
+
+-- What the menu offers: ids 0..themeMax, the same range the slider's bounds
+-- were, under the names RenderTheme gives them. ToggleDropDownMenu re-runs this
+-- on every open, so the list is built from the LAST C the panel was given and a
+-- kit that learns a forest widens the menu with no new addon. A panel that has
+-- not been told anything yet offers nothing, and the control is disabled until
+-- the first C anyway. themeMax 0 is a legal, ordinary answer - a server whose
+-- kit can build one theme - and the menu is then a single ENABLED "Random"
+-- entry rather than a greyed-out box, because grey in this panel means "the
+-- server has not spoken" and that would be a lie. The check mark is read from
+-- cfg.cfgTheme when the menu opens, never from the last click, for that reason.
+--
+-- Entry 0 is "Random" and it is the one the panel shows by default, because it
+-- is the account column's default: an account that never touched this row has
+-- cfgTheme 0 and ApplyCfg writes the box from that. The default selection is
+-- therefore the server's value as always - the panel guesses nothing, it just
+-- has a word for what 0 now means (spec D16).
+local function ThemeDropDownInit()
+    if not cfg then return end
+    for id = 0, cfg.themeMax do
+        local info = UIDropDownMenu_CreateInfo()
+        info.text = RenderTheme(id)
+        info.value = id
+        info.func = ThemePicked
+        info.checked = (id == cfg.cfgTheme)
+        UIDropDownMenu_AddButton(info)
+    end
+end
+UIDropDownMenu_Initialize(themeDrop, ThemeDropDownInit)
+UIDropDownMenu_SetText(themeDrop, "...")
+UIDropDownMenu_DisableDropDown(themeDrop)
+
+-- What the row does, said once under it the way the stat-profile row says it: a
+-- theme takes effect on the NEXT Generate and leaves the depths the account
+-- already holds exactly as they were rolled (the server freezes the theme into
+-- the stored layout). No SetWidth on purpose - an unwrapped FontString is one
+-- line tall, which is the line PANEL_H's 66 pays for - and the copy is kept
+-- short enough that it can never run past the panel border, which Panel would
+-- not clip.
+local themeHint = Panel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+themeHint:SetPoint("TOP", themeDrop, "BOTTOM", 0, -8)
+themeHint:SetText("|cffaaaaaaApplies to the next Generate|r")
+
+-- The stat-profile row sits between the theme row and the band row, in the
 -- order the two optional rows were added. Both anchors passed here are the
 -- "neither optional row is up" case: from here on LayoutPanel owns where the
 -- band slider hangs, because what sits above it depends on the profile row.
 local profileSlider = MakeSlider("FLPDProfileSlider", "Stat profile", RenderProfile,
-                                 "statprofile", casterSlider, -26)
+                                 "statprofile", themeHint, -26)
 profileSlider:Hide()
-local bandSlider = MakeSlider("FLPDBandSlider", "Mob level", RenderBand, "band", casterSlider, -26)
+local bandSlider = MakeSlider("FLPDBandSlider", "Mob level", RenderBand, "band", themeHint, -26)
 bandSlider:Hide()
 
 -- What the row is FOR, said once under it. A slider labelled "Stat profile"
@@ -420,7 +558,7 @@ profileHint:SetText("|cffaaaaaaDiscerning Eye: loot follows this profile|r")
 profileHint:Hide()
 
 local lootLine = Panel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-lootLine:SetPoint("TOP", casterSlider, "BOTTOM", 0, -16)
+lootLine:SetPoint("TOP", themeHint, "BOTTOM", 0, -16)
 lootLine:SetText("...")
 
 -- What the account's CURRENT layout holds - which can differ from the sliders:
@@ -508,9 +646,11 @@ local previewRow = false   -- previewCanvas up: an M payload has been drawn
 
 local function LayoutPanel()
     -- What the rows underneath hang from: the profile row's hint line while
-    -- that row is up, the casters slider while it is not. They re-anchor rather
-    -- than move, so neither optional row has to know about the other.
-    local above = casterSlider
+    -- that row is up, the theme row's hint line while it is not (the theme row
+    -- is unconditional, so it is the last fixed thing above them). They
+    -- re-anchor rather than move, so neither optional row has to know about the
+    -- other.
+    local above = themeHint
     if profileRow then
         profileSlider:Show()
         profileHint:Show()
@@ -579,7 +719,19 @@ local function ApplyCfg(c)
     ApplySlider(roomsSlider, c.rooms, c.roomsMin, c.roomsMax, 1)
     ApplySlider(diffSlider, c.diff, c.diffMin, c.diffMax, c.diffStep)
     ApplySlider(casterSlider, c.caster, c.casterMin, c.casterMax, 1)
-    -- The only slider whose bounds do NOT arrive on the wire, and the exception
+    -- The theme has no bounds to write here: its range is 0..themeMax and the
+    -- menu re-reads both off cfg every time it opens, so all that is set on the
+    -- control is WHICH id is live - and it is the server's, on every single C,
+    -- which is what makes a clamped or refused click correct itself here.
+    -- SetText goes last on purpose: SetSelectedValue refreshes an OPEN list and
+    -- rewrites the box from whatever button it finds checked in it, so the name
+    -- the panel means to show has to be the last word. RenderTheme gives a
+    -- theme the label table has no word for its NUMBER, never a guess and
+    -- never nil.
+    UIDropDownMenu_EnableDropDown(themeDrop)
+    UIDropDownMenu_SetSelectedValue(themeDrop, c.cfgTheme)
+    UIDropDownMenu_SetText(themeDrop, RenderTheme(c.cfgTheme))
+    -- The only slider whose bounds BOTH stay off the wire, and the exception
     -- proves the rule: 0..3 is the wire contract itself - the four values the
     -- SET verb accepts and the four names the addon can render - not a tuning
     -- number the server may move under us. A fifth profile is a new payload and

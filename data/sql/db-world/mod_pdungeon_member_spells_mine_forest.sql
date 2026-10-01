@@ -1,0 +1,738 @@
+-- ----------------------------------------------------------------------------
+-- mod-procedural-dungeon: combat kits for the MINE and FOREST casters
+-- (world database), Round F / F2
+--
+-- 48 rows for the 16 RANGE members of packs 9-14 - three per creature, the
+-- shipped RANGE shape: one slot-0 filler at minDiff 1 plus two gated rows at
+-- minDiff 50 and 75. No melee and no boss row is added here; this file exists
+-- for exactly one reason, and the boot log states it sixteen times:
+--
+--   "PDv2: range member <entry> has no slot-0 filler in pdungeon_member_spells
+--    - falling back to the pack's casterSpellId <id>"
+--
+-- (PDv2PackMgr::ReportFillerlessCasters, src/PDv2PackMgr.cpp). The warning is
+-- correct: mod_pdungeon_packs_mine.sql and mod_pdungeon_packs_forest.sql both
+-- say in their own headers that "THIS ROUND SHIPS NO member_spells ROWS FOR
+-- THESE EIGHT CASTERS, so the fallback IS their whole ranged kit today; the
+-- flavour rows (a Medic who heals, a Flameweaver who burns) are a later
+-- round's work and deliberately not faked here." This is that later round.
+--
+-- THE SIXTEEN, and the pack row each one comes from:
+--
+--   theme 1 MINE                              theme 3 FOREST
+--   pack  9  1732 Defias Squallshaper  SENIOR pack 12  3673 Lord Serpentis SENIOR
+--            1729 Defias Evoker                        3671 Lady Anacondra
+--            4418 Defias Wizard                        3840 Druid of the Fang
+--   pack 10  7321 Stonevault Flameweaver SEN.  pack 13 11793 Celebrian Dryad SENIOR
+--            4852 Stonevault Oracle                   12224 Cavern Shambler
+--            4853 Stonevault Geomancer         pack 14  4516 Death's Head Adept SEN.
+--   pack 11  8894 Anvilrage Medic       SENIOR          4440 Razorfen Totemic
+--            8912 Twilight's Hammer Torturer            4520 Razorfen Geomancer
+--
+-- "SENIOR" is the packs files' own word: the caster each pack gave the heavier
+-- fallback bolt 69211 instead of 60015. That rank is kept here - see THE
+-- FILLER LAW below - so the column and the table never disagree.
+--
+-- THIS FILE SHIPS ZERO creature_template ROWS, ZERO UPDATES TO THEM AND ZERO
+-- spell_dbc ROWS. All 16 entries are stock 3.3.5 content shared with the live
+-- Deadmines / Uldaman / Blackrock Depths / Wailing Caverns / Maraudon /
+-- Razorfen Kraul, and all 27 spell ids are stock Spell.dbc entries. Nothing
+-- here can retune those instances for a player outside map 760.
+--
+-- ----------------------------------------------------------------------------
+-- CADENCE (operator law, 2026-08-09; copied from
+-- mod_pdungeon_member_spells.sql unchanged)
+--
+--   RANGE          position 1  the slot-0 filler, cd 0, minDiff 1
+--                  position 2  cd 8000-10000 ms  minDiff 50
+--                  position 3  cd 8000-12000 ms  minDiff 75
+--   CC             ALWAYS cd 60000, and NEVER position 1
+--
+-- Inside a band the heavier ability takes the longer end: 8000+ an AoE, a
+-- DoT, a channel or anything with a cast time. Every position-2 row below is
+-- an AoE, a DoT or has a cast time and therefore sits at 10000; the ONE
+-- exception is 1732's 38645 Frostbolt, which is an instant single-target
+-- nuke with no aura at all and takes the 8000 floor. Every position-3 row is
+-- at 12000 except the three CC rows, which are at 60000 by the law.
+--
+-- `slot` is 0 for the filler and 1 for everything else; the "position" of a
+-- non-filler row is carried by minDiff, not by slot, exactly as the five
+-- shipped kit files do it. Row order is priority order - the loader queries
+-- ORDER BY entry, slot, minDiff, spellId (PDv2PackMgr.cpp) and the AI casts
+-- the FIRST ready row (PDv2CreatureAI::CastReadyKitSpell). The consequence is
+-- worth stating because it decides how the two gated rows below interact: the
+-- minDiff-50 row sorts FIRST, so it is cast whenever it is off cooldown and
+-- the minDiff-75 row only ever fills the GAP the 50 row left. A 75 row
+-- therefore never has to beat the 50 row on sustained dps to be an upgrade -
+-- it competes with the mob standing there doing nothing - and the number this
+-- file makes climb from 50 to 75 is the PER-CAST payload, which is also the
+-- number the sibling files compare ("326 per cast ... against 61567
+-- Fireball's 4163-4837", mod_pdungeon_member_spells_faceless.sql). Where a
+-- longer cooldown makes the heavier row's dps-equivalent smaller, both
+-- numbers are written out in the row's own comment so nothing is hidden.
+--
+-- ----------------------------------------------------------------------------
+-- THE FILLER LAW (this file)
+--
+-- A slot-0 filler is not a spell the mob casts sometimes. `CastFiller` runs it
+-- with cooldownMs 0 and "UNIT_STATE_CASTING is the ONLY thing that paces it"
+-- (src/PDv2CreatureAI.cpp, UpdateCasterCombat). So each of the eight distinct
+-- fillers below satisfies all five of:
+--
+--   1) FREE FOREVER. ManaCost 0 flat AND ManaCostPct 0 AND ManaCostPerLevel 0
+--      and PowerType 0 - the reason pack 7's header argues at length: a mob
+--      that runs out of power has no out-of-power fallback and just stands
+--      there. Measured for all eight: 0/0/0.
+--   2) A REAL CAST TIME >= 1500 ms. Since the cast is the only pacing, an
+--      instant filler would fire on every AI tick. (StartRecoveryTime is NOT
+--      a substitute: 59994, 59986 and 21369 carry 0 there and would have no
+--      GCD at all. Every filler below is paced by its own cast bar.)
+--   3) 30-40 yd, i.e. past ProceduralDungeon.V2.CastRangeYd - measured 25.0 in
+--      the deployed dcore\configs\modules\mod_procedural_dungeon.conf - and
+--      rangeMin 0, because UpdateCasterCombat plants the mob ANYWHERE inside
+--      that range and a minimum range would silently refuse.
+--   4) INSIDE THE SHIPPED BAND. The two fallback bolts the packs files measure
+--      are 69211 Shadow Bolt 30 yd 2.2 s 1313-1687 ~682 dps and 60015 Shadow
+--      Bolt 40 yd 3.0 s 1273-1427 ~450 dps. Every filler below lands in
+--      [450, 682] - re-derived here, and 69211/60015 re-measured to exactly
+--      the numbers those headers state, which is what validates the method.
+--   5) NOT CC, single target, no chain targets, no area effect.
+--
+-- SENIOR / JUNIOR, kept from the packs files rather than re-invented: the
+-- caster its pack gave 69211 gets the HEAVIER filler of that pack, everyone
+-- else the lighter one. Per pack:
+--   pack  9  1732 SENIOR 500 dps  >  1729 450, 4418 450
+--   pack 10  7321 SENIOR 541 dps  >  4852 450, 4853 450
+--   pack 11  8894 SENIOR 682 dps  >  8912 450
+--   pack 12  3673 SENIOR 500 dps  >  3671 450, 3840 450
+--   pack 13 11793 SENIOR 500 dps  > 12224 450
+--   pack 14  4516 SENIOR 500 dps  >  4440 450, 4520 450
+--
+-- TWO FILLERS ARE THE FALLBACK ITSELF, and that is deliberate. 8894 Anvilrage
+-- Medic keeps 69211 and 8912 Twilight's Hammer Torturer keeps 60015, because
+-- both are SHADOW casters and those two ids already ARE the right shadow bolt
+-- at the right weight for them. The row's job there is to EXIST: with it,
+-- BuildKit stops falling back, the loader stops warning, and the kit is stated
+-- in the one table this module calls the truth. The other fourteen get a bolt
+-- of their own creature's school.
+--
+-- ----------------------------------------------------------------------------
+-- WHERE THE KITS COME FROM - the creature's OWN stock rotation
+--
+-- Measured on this box 2026-09-12: `SELECT entryorguid, event_type,
+-- action_type, action_param1, comment FROM smart_scripts WHERE source_type = 0
+-- AND entryorguid IN (the 16)`. All 16 carry AIName 'SmartAI' and a real
+-- rotation, and it is the strongest identity evidence there is (packs-research
+-- section 2.4 E). What it says, and what this file did with it:
+--
+--  entry  its own smart_scripts casts              school taken here
+--   1729  11829 Flamestrike, 12544 Frost Armor,     FIRE   (its AoE is kept,
+--         4979 Quick Flame Ward                            as 22275)
+--   1732  2138 Fire Blast, 12544 Frost Armor,       FROST  (the Frost Armor
+--         4979 (the row's comment says "Frost Nova")       half; see below)
+--   4418  9053 Fireball, 113 Chains of Ice,         FIRE + its own ROOT
+--         4979 Quick Flame Ward
+--   4852  945 Lightning Shield, 5605 Healing Ward,  NATURE (a trogg shaman)
+--         8264 Lava Spout Totem, 8005 Healing Wave
+--   4853  9053 Fireball, 10452 Flame Buffet         FIRE
+--   7321  2941 Immolate, 7739 Inferno Shell         FIRE   (Immolate kept, as
+--                                                          20294)
+--   8894  15587 Mind Blast, 15585 Prayer of Healing, SHADOW + a HEAL
+--         15586 Heal, 13864 Power Word: Fortitude
+--   8912  14032 Shadow Word: Pain, 13616 Wracking    SHADOW (SW:P kept, as
+--         Pains Proc                                       34942)
+--   3671  9532 Lightning Bolt, 8040 Druid's Slumber, NATURE + its own SLEEP
+--         5187 Healing Touch, 8148 Thorns
+--   3673  9532 Lightning Bolt, 8040 Druid's Slumber, NATURE
+--         6778 Healing Touch
+--   3840  9532 Lightning Bolt, 8040 Druid's Slumber, NATURE
+--         5187 Healing Touch, 8041 Serpent Form,
+--         13236 Nature Channeling
+--  11793  8601 Slowing Poison                        NATURE (poison; see the
+--                                                           deviation note)
+--  12224  7948 Wild Regeneration, 16790 Knockdown    NATURE
+--   4516  9672 Frostbolt, 113 Chains of Ice          FROST + its own ROOT
+--   4440  4971 Healing Ward, 8376 Earthgrab Totem    NATURE (both are SUMMONs)
+--   4520  8270 Summon Earth Rumbler,                 NATURE
+--         9532 Lightning Bolt
+--
+-- NOT ONE of those native ids is shipped below, and the reason is arithmetic,
+-- not taste: they are rank-3-to-rank-7 spells authored for a level 17-51
+-- creature and PDv2 force-levels every member to 80 without touching the
+-- spell. Measured at level 80 on the creature's own unit_class: 9053 Fireball
+-- 308-414, 9532 Lightning Bolt 308-414, 9672 Frostbolt 231-308, 2941 Immolate
+-- 265 total, 11829 Flamestrike 673-731, 10452 Flame Buffet 79-81, 14032
+-- Shadow Word: Pain 1039 over 18 s, 15587 Mind Blast 668-774. Against a
+-- 1273-1427 filler those are one third to one fortieth of a single bolt. Each
+-- one is therefore replaced by a HIGHER-WEIGHT SPELL OF THE SAME ABILITY where
+-- one exists (Immolate -> 20294 Immolate, Shadow Word: Pain -> 34942 Shadow
+-- Word: Pain, Mind Blast -> 41374 Mind Blast, Flamestrike -> 22275
+-- Flamestrike, Chains of Ice -> 29991 Chains of Ice, Fireball -> 47074 /
+-- 66042 / 71928 Fireball, Frostbolt -> 38645 / 59017 Frostbolt), and the
+-- identity is preserved by the spell's NAME and effect, not by its id.
+--
+-- 1732's frost half needs a word, because its own script row is mislabelled in
+-- the world DB: `Defias Squallshaper - In Combat - Cast Frost Nova` has
+-- action_param1 = 4979, which is Quick Flame Ward. The COMMENT is what the
+-- author meant and the id is what runs; 12544 Frost Armor is unambiguous and
+-- is what this file reads as "this mage is the pack's ice one". Making 1732
+-- the frost caster is also what stops a Defias room reading as three copies of
+-- one mage - the same argument mod_pdungeon_packs_forest.sql makes about
+-- CreatureDisplayIDs, applied to spell schools.
+--
+-- ----------------------------------------------------------------------------
+-- WHAT EVERY ROW IS WORTH AT LEVEL 80, MEASURED
+--
+-- SpellEffectInfo::CalcValue (azerothcore-wotlk src/server/game/Spells/
+-- SpellInfo.cpp:415-520) re-implemented against C:\wowstuff\dcore\Data\dbc\
+-- Spell.dbc for a level-80 creature of THAT ROW'S OWN unit_class and
+-- expansion 0: EffectBasePoints + EffectRealPointsPerLevel x the clamped level
+-- delta + the EffectDieSides band, times the SPELL_ATTR0_SCALES_WITH_CREATURE_
+-- LEVEL factor BaseDamage[exp0]@80 / BaseDamage[exp0]@SpellLevel where that
+-- attribute is set, times the periodic tick count (SpellDuration /
+-- EffectAuraPeriod). All 16 creatures are `exp = 0`, so the factor reads
+-- creature_classlevelstats.damage_base: class 2 44.2013@80, class 8
+-- 40.099@80. That matters - the same spell is worth ~1.4 % more on a class-2
+-- caster than on a class-8 one - so every number below was taken for the
+-- creature that actually carries the row, never once for "a caster".
+--
+-- THE METHOD IS VALIDATED, not asserted: run against the two ids the packs
+-- files already publish it returns 69211 = 1313-1687 at 2200 ms = 682 dps and
+-- 60015 = 1273-1427 at 3000 ms = 450 dps, which is those headers' table to the
+-- digit.
+--
+--  entry  spell  name                sch   rng cast   per cast    dps / eq
+--  ---- FILLERS (dps = per cast / cast time) -------------------------------
+--   1729  59994  Fireball            fire  40  3000   1273-1427   450
+--   4418  59994  Fireball            fire  40  3000   1273-1427   450
+--   4853  59994  Fireball            fire  40  3000   1273-1427   450
+--   1732  21369  Frostbolt           frost 40  1500    638- 862   500
+--   4516  21369  Frostbolt           frost 40  1500    638- 862   500
+--   7321  19391  Fireball            fire  40  2000    923-1241   541
+--   8894  69211  Shadow Bolt         shad  30  2200   1313-1687   682
+--   8912  60015  Shadow Bolt         shad  40  3000   1273-1427   450
+--   4852  60009  Lightning Bolt      nat   30  2500   1051-1199   450
+--   3671  60009  Lightning Bolt      nat   30  2500   1051-1199   450
+--  12224  60009  Lightning Bolt      nat   30  2500   1051-1199   450
+--   4440  60009  Lightning Bolt      nat   30  2500   1051-1199   450
+--   4520  60009  Lightning Bolt      nat   30  2500   1051-1199   450
+--   3673  21667  Wrath               nat   40  1500    638- 862   500
+--  11793  21667  Wrath               nat   40  1500    638- 862   500
+--   3840  59986  Wrath               nat   40  2000    849- 951   450
+--  ---- minDiff 50 (eq = per cast / cooldown) ------------------------------
+--   1729  47074  Fireball            fire  40  1000   2925-3575   325
+--   1732  38645  Frostbolt           frost 40     0   2844-3656   406
+--   4418  66042  Fireball            fire  40  2500   3299-3701   350
+--   4852  59963  Lightning Breath    nat   30  2000   2775-3225   300
+--   4853  71928  Fireball            fire  40  3000   2828-3172   300
+--   7321  20294  Immolate            fire  40     0   3420-3780   360
+--   8894  41374  Mind Blast          shad  30  1500   3469-4031   375
+--   8912  34942  Shadow Word: Pain   shad  30     0   3510        351
+--   3671  49708  Poison Spit         nat   35  1500   2408-2792   260
+--   3673  59963  Lightning Breath    nat   30  2000   2775-3225   300
+--   3840  49708  Poison Spit         nat   35  1500   2408-2792   260
+--  11793  49708  Poison Spit         nat   35  1500   2408-2792   260
+--  12224  39121  Greenkeeper's Fury  nat   40  2000   2805-3795   330
+--   4516  59017  Frostbolt           frost 40  1500   3570-4830   420
+--   4440  24683  Lightning Cloud     nat   30     0   3088-3912   350
+--   4520  59963  Lightning Breath    nat   30  2000   2775-3225   300
+--  ---- minDiff 75 ---------------------------------------------------------
+--   1729  22275  Flamestrike         fire  30  2000   4040-4386   351
+--   1732  59017  Frostbolt           frost 40  1500   3570-4830   350
+--   4418  29991  Chains of Ice       frost 30     0   CC (root)     -
+--   4852  26550  Lightning Cloud     nat   30     0   3942-5058   375
+--   4853  20294  Immolate            fire  40     0   3420-3780   300
+--   7321  22275  Flamestrike         fire  30  2000   4040-4386   351
+--   8894  30155  Heal                holy  40  3000   SELF-HEAL     -
+--   8912  60953  Death and Decay     shad  30     0   4000        333
+--   3671   8040  Druid's Slumber     shad  30  2500   CC (sleep)    -
+--   3673  55700  Venom Spit          nat   30  2000   4788-5912   446
+--   3840  26550  Lightning Cloud     nat   30     0   3942-5058   375
+--  11793  55700  Venom Spit          nat   30  2000   4788-5912   446
+--  12224  26550  Lightning Cloud     nat   30     0   3942-5058   375
+--   4516  29991  Chains of Ice       frost 30     0   CC (root)     -
+--   4440  26550  Lightning Cloud     nat   30     0   3942-5058   375
+--   4520  26550  Lightning Cloud     nat   30     0   3942-5058   375
+--
+-- EVERY kit climbs on per-cast payload from minDiff 50 to minDiff 75, which is
+-- the failure the faceless file's fix pass was written to catch - "a tier-75
+-- row that resolves LIGHTER than the same mob's tier-50 row, i.e. a kit that
+-- silently stops climbing while every number in the file says it does". Three
+-- kits climb by changing CURRENCY instead (4418 and 4516 to a root, 3671 to a
+-- sleep) and one to a self-heal (8894); all four are called out where they
+-- sit. Two kits (1732, 7321) have a lower dps-EQUIVALENT at 75 than at 50
+-- because the cadence law, not the payload, sets the cooldown - see the note
+-- under CADENCE for why that costs nothing.
+--
+-- A GROUND AoE's "per cast" is its THEORETICAL maximum: 22275/24683/26550/
+-- 60953 drop a persistent area aura at the victim's feet and a player who
+-- steps out of the 5-10 yd circle takes only the first tick. The number is
+-- stated as the ceiling it is, not as expected damage. Likewise a DoT whose
+-- duration exceeds its cooldown refreshes rather than stacks: 20294 Immolate
+-- runs 21 s on a 10000/12000 ms row and 34942 Shadow Word: Pain 18 s on a
+-- 10000 ms row, so both sit at ~100 % uptime and their SUSTAINED contribution
+-- is the tick rate (20294: 380-420 per 3 s = ~133 dps; 34942: 585 per 3 s =
+-- 195 dps) plus the direct half, not the full per-cast figure every cooldown.
+-- That is a disclosure, not a balance problem - it is the same shape
+-- mod_pdungeon_member_spells_worgen.sql records for 69124 Seeping Darkness.
+--
+-- ----------------------------------------------------------------------------
+-- THE SpellDifficulty STEP (packs-research section 2.5.1 - NOT optional)
+--
+-- Map 760 is InstanceType 1 with a single mapdifficulty_dbc row, so
+-- GetSpawnMode() is 0 and SpellMgr::GetSpellIdForDifficulty casts
+-- SpellDifficultyEntry::SpellID[0] - not the id in the row - for any spell
+-- that IS the ID of a difficulty entry. The store is SpellDifficulty.dbc PLUS
+-- the world table `spelldifficulty_dbc`, and both halves were read on
+-- 2026-09-12 for all 27 ids:
+--
+--   DBC half (581 records): NOT ONE of the 27 is an entry ID. 66042 appears as
+--     SpellID[0] of entry 923 [66042, 68310, 0, 0] - it is a substitution
+--     TARGET, which is harmless: LookupEntry(66042) finds nothing, so nothing
+--     substitutes it.
+--   World half (604 rows): exactly ONE of the 27 is an entry ID -
+--     55700 Venom Spit, ID 55700, SpellID[0] = 55700, SpellID[1] = 59019.
+--     At GetSpawnMode() 0 that resolves to 55700 itself, i.e. what the row
+--     says is what casts. The row is marked (SD) below per the rule.
+--     Four more are TARGETS of other entries and are likewise untouched:
+--     34942 (of 34941), 39121 (of 34798), 59017 (of 50378), 59963 (of 49537).
+--     Those four are the HEROIC halves of their pairs, which is exactly why
+--     they measure heavier than the normal ids of the same name - and casting
+--     the heroic id directly is the only way to get that weight on a map whose
+--     spawn mode is 0.
+--
+-- ----------------------------------------------------------------------------
+-- THE STOCK-ID TEST, and the trap it closes
+--
+-- C:\wowstuff\dcore\Data\dbc\Spell.dbc on this box is the FL-PATCHED client
+-- DBC: 55100 records, against ~49.8k stock. The extra ones are FL customs and
+-- they are perfectly visible to the oracle - a name search in the band this
+-- file works in turns up ids like 235008, 325010, 530047, 530062, 800113 and
+-- 800221, several of which measure squarely inside the caster band and would
+-- have read as ordinary candidates. A custom id in a pack kit would be a
+-- silent dependency on the FL patch for a file whose whole premise is "stock
+-- 3.3.5a only".
+--
+-- The test is exact and is the inverse of the oracle's own note: an FL custom
+-- spell HAS a row in `acore_world.spell_dbc` (5555 rows) and a stock one does
+-- not. Measured 2026-09-12:
+--   SELECT ID FROM spell_dbc WHERE ID IN (the 27) -> 0 rows.
+-- All 27 are stock.
+--
+-- ----------------------------------------------------------------------------
+-- NOTHING CAN HIJACK THESE 27 IDS
+--
+-- The 31104/67879 trap (mod_pdungeon_member_spells_faceless.sql) is a DATABASE
+-- one: a global SpellScript bound in `spell_script_names` runs no matter which
+-- CreatureAI the module binds, so PDv2CreatureAIBinder is no protection. Every
+-- spell-side world table was therefore read for all 27 ids on 2026-09-12, and
+-- every one of them is EMPTY: spell_script_names, spell_linked_spell,
+-- spell_custom_attr, spell_proc, spell_bonus_data, spell_target_position,
+-- spell_required, spell_ranks, spell_area, spell_group, spell_scripts (both
+-- the positive and the negative form where the table takes one).
+--
+-- spell_bonus_data being empty also pins the measurement basis: no row means no
+-- coefficient override, so what the base points say is what lands.
+--
+-- `smart_scripts` DOES cast many of them - 12457 Blackwing Spellbinder casts
+-- 22275, 15389 Captain Drenn casts 26550, 32501 High Thane Jorfus casts 60953,
+-- 26625 Darkweb Recluse casts 49708, 29774 Spitting Cobra casts 55700, 22964
+-- Illidari Archon casts 41374, 25708 Sinister Reflection casts 47074, 18331
+-- Ethereal Darkcaster casts 34942, 10504 Lord Alexei Barov casts 20294, 13256
+-- Lokholar casts 21369, 1854 High Priest Thel'danis casts 30155, and the five
+-- Fang lords cast 8040. That is not a hazard, it is CONFIRMATION: SmartAI
+-- action_type 11 calls me->CastSpell(target, id) at a UNIT target, which is
+-- the same call UnitAI::DoCastVictim makes (UnitAI.cpp:278-284), so the
+-- ground-AoE and dest-target ids below are PROVEN to resolve their destination
+-- from a unit target by stock data rather than assumed to.
+--
+-- ----------------------------------------------------------------------------
+-- CC CLASSIFICATION (aura effects and mechanics read out of Spell.dbc)
+--
+--  spell  name              why it is CC                     placed    cd
+--  29991  Chains of Ice     Mechanic 7 MECHANIC_ROOT,        4418 @75  60000
+--                           aura 26 MOD_ROOT, 10 s           4516 @75  60000
+--   8040  Druid's Slumber   Mechanic 10 MECHANIC_SLEEP,      3671 @75  60000
+--                           aura 12 MOD_STUN, 15 s
+--
+-- THREE CC rows across sixteen creatures. The shipped corpus carries four
+-- across fifty-two, so this is a denser file and the count is stated rather
+-- than left to be discovered. Both ids are a creature's OWN signature - 4418
+-- and 4516 are the only two members of either theme whose smart_scripts cast
+-- 113 Chains of Ice, and 3671 is the Fang lord whose script casts 8040 - and
+-- no other row in this file is CC.
+--
+-- Two readings that decide how they feel in game, both measured:
+--   * 8040 carries AuraInterruptFlags 0x2 AURA_INTERRUPT_FLAG_DAMAGE, so the
+--     sleep breaks on the first hit anybody lands, and SPELL_ATTR0_HEARTBEAT_
+--     RESIST on top. It is a pull-opener, not a lockout.
+--   * 29991 carries AuraInterruptFlags 0x0 and does NOT break on damage. It is
+--     a 10 s root - and Unit::ApplyDiminishingToDuration caps a creature-cast
+--     CC at the group's limitduration for a PLAYER target and halves it on
+--     repeats, so the practical worst case is one 10 s root per minute per
+--     caster, diminishing.
+--
+-- DELIBERATELY NOT CC, because the shipped header says so in writing: the
+-- MECHANIC_SNARE halves of 21369 Frostbolt (-50 %, 4 s), 38645 Frostbolt
+-- (-65 %, 4 s) and 59017 Frostbolt (-50 %, 4 s). "A snare is not in the
+-- operator's fear/stun/root/silence/disorient list"
+-- (mod_pdungeon_member_spells.sql, CC CLASSIFICATION block), and the shipped
+-- filler 42842 Frostbolt carries exactly the same aura - an earlier version of
+-- the guard that treated snare as CC flagged it three times, "and that was the
+-- guard being wrong, not the data" (packs-research section 2.2).
+--
+-- ----------------------------------------------------------------------------
+-- *** THE ONE DELIBERATE DEVIATION: 8894 Anvilrage Medic's HEAL ***
+--
+-- Guard rule R3 is "no heal effect / heal aura - no self-heal loops", and
+-- `reports/pd_spell_lookup.py check` flags row (8894, 30155) for it. That is
+-- the ONLY problem the shipped guard finds in all 48 rows, it is expected, and
+-- it is taken knowingly on the operator's instruction that the Medic gets a
+-- heal. The reading that makes it safe, in four measured parts:
+--
+--  1) THE MEDIC'S OWN HEAL CANNOT LAND AT ALL, so "just use its native spell"
+--     was never an option. 15586 Heal's only effect targets
+--     TARGET_UNIT_TARGET_ALLY; the module casts every kit row through
+--     DoCastVictim, i.e. at the PLAYER, and SpellInfo::CheckExplicitTarget
+--     (SpellInfo.cpp:1844-1877) returns SPELL_FAILED_BAD_TARGETS for an ally
+--     target that is not friendly. The row would burn its cooldown every
+--     rotation and heal nobody - and the AI has no friendly-target branch to
+--     add one to (there is no heal, ally or assist path anywhere in
+--     src/PDv2CreatureAI.cpp). 30155 is the same spell NAME with
+--     TARGET_UNIT_CASTER, for which the explicit-target mask carries no
+--     UNIT_ALLY/UNIT_ENEMY bit at all, so the passed victim is ignored and the
+--     heal lands on the Medic. It is the only shape that can work here.
+--
+--  2) IT IS BOUNDED, AND IT IS SMALL. 2837-3289 per cast (SpellLevel 20 x the
+--     class-8 creature-level factor 40.099/8.3382 = x4.809) on a 12000 ms row
+--     = ~255 health per second. One level-80 player sustains thousands.
+--
+--  3) THE HP LEVER AND THE ROW'S PLACEMENT POINT THE SAME WAY. PDv2Scaling
+--     multiplies a mob's maximum health by (100 + difficulty x 5)/100 and
+--     deliberately does NOT hook ModifyHealReceived, so the heal is FLAT while
+--     the health it tops up grows. The row is gated at minDiff 75, where the
+--     Medic already has 11217 x 4.75 = 53281 health: one cast restores 5.3-6.2
+--     % of it, and at difficulty 100 (67302 hp) 4.2-4.9 %. The gate is what
+--     makes the unhooked hook work FOR the design instead of against it - the
+--     heal is at its relatively weakest exactly where it exists, and it does
+--     not exist at all at the low difficulties where it would have been
+--     relatively strongest.
+--
+--  4) IT IS NOT A LOOP. A loop needs the heal to outpace incoming damage; this
+--     one is ~1/20th of a single player's output and cannot be recast until
+--     the cooldown is spent on the attempt (CastReadyKitSpell spends it even
+--     when the cast refuses). It is a priest visibly patching himself up once
+--     every twelve seconds, which is the flavour asked for.
+--
+-- No other heal, heal aura, PERIODIC_HEAL, HEALTH_LEECH or PERIODIC_LEECH row
+-- is shipped anywhere in this file. 24300 Drain Life was measured and dropped
+-- for exactly the reason the faceless file gives - "SPELL_EFFECT_HEALTH_LEECH
+-- is a heal by another name and guard rule R3 only tests for SPELL_EFFECT_HEAL
+-- by id".
+--
+-- ----------------------------------------------------------------------------
+-- CANDIDATES MEASURED AND REJECTED, and why (every class of them)
+--
+--  spell  name              rejected for
+--  30093  Blizzard          SPELL_ATTR1_IS_CHANNELED, 6 s. So are 50715 and
+--  50715  Blizzard          70421 - every stock Blizzard is. The shipped
+--  70421  Blizzard          file's own note 2 already warns about this shape:
+--                           "42940 Blizzard (84285 @75) channels for 8 s. On a
+--                           12 s cadence an Underground Spectrum spends two
+--                           thirds of a difficulty-75 fight in that channel
+--                           and its filler stays silent meanwhile." 1732's
+--                           frost AoE slot was given 38645 Frostbolt instead.
+--  43301  Lightning         EffectChainTargets 5 - it bounces to five targets
+--  64888  Ball Lightning    for full value each, which is a multi-target
+--                           special dressed as a single-target one and would
+--                           put 5 x 2925-3075 into a five-player group. Both
+--                           were shortlisted for 12224/4520 and dropped; the
+--                           chain audit was then run over all 27 shipped ids
+--                           and every one of them is chain 0.
+--  61568  Flamestrike       20938-22062 per cast on a trash caster. It is in
+--                           the corpus (30111 @50) and it still dwarfs
+--                           everything in this file by a factor of five; 22275
+--                           is the same ability at 4040-4386.
+--  33452  Flamestrike       numerically IDENTICAL to 22275 (same base points,
+--                           same ticks, 60 yd instead of 30). A second id for
+--                           the same numbers buys nothing and costs a whole
+--                           verification pass; 22275 is used on both creatures
+--                           that want it, which the PK (entry, spellId)
+--                           allows.
+--  15586  Heal              TARGET_UNIT_TARGET_ALLY - see the deviation block.
+--   8005  Healing Wave      TARGET_UNIT_TARGET_ALLY, same.
+--   5187  Healing Touch     TARGET_UNIT_TARGET_ALLY, same.
+--   6778  Healing Touch
+--  15585  Prayer of Healing SPELL_EFFECT_HEAL and an area friendly target.
+--   7948  Wild Regeneration SPELL_AURA_PERIODIC_HEAL on the caster - a real
+--                           self-heal loop, and 12224's own script spell.
+--  24300  Drain Life        SPELL_AURA_PERIODIC_LEECH; see above.
+--   4971  Healing Ward      SPELL_EFFECT_SUMMON. So are 5605 Healing Ward,
+--   8376  Earthgrab Totem   8264 Lava Spout Totem and 8270 Summon Earth
+--   8264  Lava Spout Totem  Rumbler. Four of the sixteen creatures have a
+--   8270  Summon Earth      TOTEM or a SUMMON as their signature; guard rule
+--         Rumbler           R1 bans the effect outright, so 4440 Razorfen
+--                           Totemic in particular has NO usable native spell
+--                           at all and its kit is built from the school its
+--                           class implies.
+--  16790  Knockdown         5 yd, and MECHANIC_STUN - a melee CC on a mob the
+--                           module plants at 25 yd. It would sweep empty air
+--                           for the same reason 29477 Banshee Wail was cut.
+--  28297  Shock             SCHOOL_DAMAGE on TARGET_SRC_CASTER - a self-centred
+--  55323  Shadow Bolt Volley AoE. A range mob holding at V2.CastRangeYd is 25 yd
+--  59853  Toxic Volley      from everyone, so the burst lands on nothing. Same
+--  49205  Shadow Bolt Volley reason 29477 Banshee Wail is excluded in the
+--  61591  Arcane Volley     shipped file.
+--  48132  Acid Spit         MOD_RESISTANCE -1000 riding on the damage.
+--  24111  Corrosive Poison  MOD_RESISTANCE -5000. Neither is in scope: this
+--                           file adds damage and control, not permanent
+--                           stat-stripping the player cannot see coming.
+--  45524  Chains of Ice     TargetCreatureType mask 1023 - restricted, so it
+--  53534  Chains of Ice     can refuse silently. 29991 is mask 0.
+--  66020  Chains of Ice
+--  61077  Chains of Ice     rangeMin 10 yd - refuses whenever the player is
+--                           closer, and UpdateCasterCombat plants the mob
+--                           anywhere inside 25 yd (guard rule R9).
+--  22744  Chains of Ice     PERIODIC_TRIGGER_SPELL beside the root: a trigger
+--  39268  Chains of Ice     is a second spell this file has not measured.
+--  39120  Nature Shock      SPELL_EFFECT_INTERRUPT_CAST. Not banned - the
+--                           shipped header says an interrupt "is not an aura"
+--                           and is not CC - but a spammable caster interrupt
+--                           on five casters per room is a different design
+--                           decision than this file is allowed to take.
+--  ALL    native ranks      11829, 9053, 9532, 9672, 2941, 10452, 14032,
+--                           15587, 2138, 113 ... measured at level 80 and one
+--                           third to one fortieth of a filler; see the
+--                           rotation table above.
+--
+-- ----------------------------------------------------------------------------
+-- TWO DEVIATIONS FROM WHAT THE PACK HEADERS FORECAST
+--
+-- mod_pdungeon_packs_forest.sql promised "a Dryad who roots, a Geomancer who
+-- throws stone". Neither happens, and both times the creature's own script
+-- decided it:
+--   * 11793 Celebrian Dryad's entire native rotation is 8601 Slowing Poison, a
+--     SNARE. Her kit is therefore poison - 49708 Poison Spit at 50, 55700
+--     Venom Spit at 75 - and the root went to the two casters whose scripts
+--     really do cast 113 Chains of Ice (4418 and 4516). A fourth CC row would
+--     also have pushed this file to four CCs in sixteen creatures.
+--   * 4520 Razorfen Geomancer's only castable native spell is 9532 Lightning
+--     Bolt (8270 Summon Earth Rumbler is a SUMMON), and 4853 Stonevault
+--     Geomancer's are 9053 Fireball and 10452 Flame Buffet. Neither geomancer
+--     throws stone in stock data; this file follows the script, not the name.
+-- mod_pdungeon_packs_mine.sql's forecast is met exactly: the Medic heals and
+-- the Flameweaver burns.
+--
+-- ----------------------------------------------------------------------------
+-- POWER
+--
+-- All 16 are unit_class 2 (paladin) or 8 (mage), so the unit_class 1/4
+-- zero-basemana trap the shipped header spends a block on CANNOT fire here -
+-- guard rule R14 has nothing to bite. Level-80 pools, measured against
+-- creature_classlevelstats x the template's ManaModifier: 1729/1732/4418/8894
+-- 17628, 4516 13221, 3673 11982, 7321 8814, 8912/3840 7988, 4520/11793/12224
+-- 5991, 4852/4853/4440 3994.
+--
+-- Every FILLER is 0/0/0 by the filler law, so no mob can ever run dry of the
+-- spell it spams. The gated rows cost at most 350 flat (29991 on 4418 and
+-- 4516, both 13221+ mana) and the worst sustained case in the file is 7321
+-- Stonevault Flameweaver at 300 + 260 per full rotation against 8814 mana:
+-- 6 x 300 + 5 x 260 = 3100 over a 60-second fight, about a third of the pool,
+-- before Creature::Regenerate puts any of it back.
+--
+-- ----------------------------------------------------------------------------
+-- ONE MORE THING WORTH KNOWING
+--
+-- 3671 Lady Anacondra carries a creature_template_addon spawn aura, 13236
+-- Nature Channeling. It is a bare SPELL_AURA_DUMMY on the caster with no
+-- script anywhere, i.e. a visual - it neither buffs her nor interacts with
+-- anything in this file. Stated because a reader will find it.
+--
+-- 3671 and 3673 are the only two of the sixteen with a creature_immunities row
+-- (-93, SchoolMask 0, mech 0x1000020 FEAR|HORROR). Nothing in this file is
+-- fear or horror, and SchoolMask 0 means the 8911 rule
+-- (mod_pdungeon_packs_forest.sql) is untouched: no member of either theme is
+-- immune to a school of magic.
+--
+-- ----------------------------------------------------------------------------
+-- APPLICATION ORDER, PROVEN
+--
+-- UpdateFetcher::PathCompare is `left.first.filename().string() <
+-- right.first.filename().string()` (azerothcore-wotlk src/server/database/
+-- Updater/UpdateFetcher.cpp:521-524) - a plain std::string compare on the file
+-- NAME. At index 26 "mod_pdungeon_member_spells.sql" has '.' (0x2E) and
+-- "mod_pdungeon_member_spells_mine_forest.sql" has '_' (0x5F), and 0x2E <
+-- 0x5F, so the canonical file ALWAYS runs first and its CREATE TABLE has
+-- already made `pdungeon_member_spells` before this file is read. The
+-- CREATE TABLE IF NOT EXISTS block below is therefore free insurance and not
+-- an ordering fix - the same disposition every sibling kit file takes - and it
+-- is byte-identical to the canonical definition.
+--
+-- Full order of this module's member_spells files under that compare:
+--   mod_pdungeon_member_spells.sql
+--   mod_pdungeon_member_spells_cult.sql
+--   mod_pdungeon_member_spells_faceless.sql
+--   mod_pdungeon_member_spells_mine_forest.sql   <- this file
+--   mod_pdungeon_member_spells_undead_demon.sql
+--   mod_pdungeon_member_spells_worgen.sql
+-- and all six sort before every mod_pdungeon_packs*.sql ('m' < 'p').
+--
+-- The DELETE below is an EXPLICIT ENTRY LIST of exactly the 16 entries this
+-- file owns, never a BETWEEN and never a DROP: the list spans 1729..12224 and
+-- a range delete over that span would wipe an operator's own rows for more
+-- than ten thousand unrelated templates. Measured 2026-09-12, `SELECT COUNT(*)
+-- FROM pdungeon_member_spells WHERE entry IN (the 16)` returns 0, so this
+-- file's delete list is disjoint from all five shipped ones and the six files
+-- apply in any order and on their own.
+-- ----------------------------------------------------------------------------
+
+CREATE TABLE IF NOT EXISTS `pdungeon_member_spells` (
+  `entry` INT UNSIGNED NOT NULL,
+  `spellId` INT UNSIGNED NOT NULL,
+  `slot` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `cooldownMs` INT UNSIGNED NOT NULL DEFAULT 8000,
+  `minDiff` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  `enabled` TINYINT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (`entry`, `spellId`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Idempotent re-apply: delete exactly this file's own 16 entries, then insert.
+DELETE FROM `pdungeon_member_spells` WHERE `entry` IN
+  (1729, 1732, 3671, 3673, 3840, 4418, 4440, 4516, 4520, 4852, 4853, 7321,
+   8894, 8912, 11793, 12224);
+
+INSERT INTO `pdungeon_member_spells`
+  (`entry`, `spellId`, `slot`, `cooldownMs`, `minDiff`, `enabled`) VALUES
+  -- ==========================================================================
+  -- THEME 1 - MINE.  Packs 9 Defias Miners, 10 Stonevault, 11 Dark Iron Forge
+  -- ==========================================================================
+  -- 1729 Defias Evoker  (uc8, 11217 hp, 17628 mp)  pack 9  FIRE
+  -- Its own script casts 11829 Flamestrike; the AoE is kept, at a weight that
+  -- reaches level 80.
+  ( 1729, 59994, 0,     0,  1, 1),  -- Fireball       40 yd, 3.0s cast, 1273-1427, free  = 450 dps  FILLER
+  ( 1729, 47074, 1, 10000, 50, 1),  -- Fireball       40 yd, 1.0s cast, 2925-3575, 90 mp = 325 eq   t50
+  ( 1729, 22275, 1, 12000, 75, 1),  -- Flamestrike    30 yd, 2.0s cast, 2193-2539 direct + 462 x4 ticks over 8s
+                                    --                = 4040-4386, 5 yd ground AoE, 260 mp = 351 eq t75
+  -- 1732 Defias Squallshaper  (uc8, 11217 hp, 17628 mp)  pack 9  SENIOR  FROST
+  -- The pack's ice mage: 12544 Frost Armor is its unambiguous native, and
+  -- three fire casters in one room would have read as one mage three times.
+  ( 1732, 21369, 0,     0,  1, 1),  -- Frostbolt      40 yd, 1.5s cast, 638-862, free = 500 dps     FILLER
+                                    --                + MOD_DECREASE_SPEED -50% 4s (snare, not CC)
+  ( 1732, 38645, 1,  8000, 50, 1),  -- Frostbolt      40 yd, instant, 2844-3656, free = 406 eq      t50
+                                    --                + snare -65% 4s; instant single target -> the 8000 floor
+  ( 1732, 59017, 1, 12000, 75, 1),  -- Frostbolt      40 yd, 1.5s cast, 3570-4830, 90 mp = 350 eq   t75
+                                    --                + snare -50% 4s; heavier per cast than the t50 row
+  -- 4418 Defias Wizard  (uc8, 11217 hp, 17628 mp)  pack 9  FIRE + its own ROOT
+  ( 4418, 59994, 0,     0,  1, 1),  -- Fireball       40 yd, 3.0s cast, 1273-1427, free  = 450 dps  FILLER
+  ( 4418, 66042, 1, 10000, 50, 1),  -- Fireball       40 yd, 2.5s cast, 3299-3701, 90 mp = 350 eq   t50
+  ( 4418, 29991, 1, 60000, 75, 1),  -- Chains of Ice  30 yd, instant, MOD_ROOT 10s, 350 mp          t75
+                                    --                CC: Mechanic 7 ROOT -> cd 60000 by the law.
+                                    --                Its own script casts 113 Chains of Ice.
+  -- 4852 Stonevault Oracle  (uc2, 12822 hp, 3994 mp)  pack 10  NATURE
+  -- A trogg shaman: Lightning Shield, Healing Wave and a Lava Spout Totem. The
+  -- totem is a SUMMON (banned), so the ground effect becomes a lightning cloud.
+  ( 4852, 60009, 0,     0,  1, 1),  -- Lightning Bolt 30 yd, 2.5s cast, 1051-1199, free = 450 dps   FILLER
+  ( 4852, 59963, 1, 10000, 50, 1),  -- Lightning Breath 30 yd, 2.0s cast, 2775-3225, free = 300 eq  t50
+  ( 4852, 26550, 1, 12000, 75, 1),  -- Lightning Cloud 30 yd, instant, 657-843 direct + 657-843 x5
+                                    --                ticks over 15s = 3942-5058, 10 yd ground AoE,
+                                    --                free = 375 eq                                 t75
+  -- 4853 Stonevault Geomancer  (uc2, 12822 hp, 3994 mp)  pack 10  FIRE
+  -- Its native nuke really is 9053 Fireball - see the deviation note on the
+  -- word "geomancer".
+  ( 4853, 59994, 0,     0,  1, 1),  -- Fireball       40 yd, 3.0s cast, 1273-1427, free = 450 dps   FILLER
+  ( 4853, 71928, 1, 10000, 50, 1),  -- Fireball       40 yd, 3.0s cast, 2828-3172, free = 300 eq    t50
+  ( 4853, 20294, 1, 12000, 75, 1),  -- Immolate       40 yd, instant, 760-840 direct + 380-420 x7
+                                    --                ticks over 21s = 3420-3780, 300 mp = 300 eq   t75
+  -- 7321 Stonevault Flameweaver  (uc8, 11217 hp, 8814 mp)  pack 10  SENIOR  FIRE
+  -- "a Flameweaver who burns", as mod_pdungeon_packs_mine.sql asked for: its
+  -- own 2941 Immolate, at a weight that reaches level 80.
+  ( 7321, 19391, 0,     0,  1, 1),  -- Fireball       40 yd, 2.0s cast, 923-1241, free = 541 dps    FILLER
+  ( 7321, 20294, 1, 10000, 50, 1),  -- Immolate       40 yd, instant, 3420-3780 total, 300 mp = 360 eq t50
+  ( 7321, 22275, 1, 12000, 75, 1),  -- Flamestrike    30 yd, 2.0s cast, 4040-4386 total, 5 yd
+                                    --                ground AoE, 260 mp = 351 eq                   t75
+  -- 8894 Anvilrage Medic  (uc8, 11217 hp, 17628 mp)  pack 11  SENIOR  SHADOW + HEAL
+  -- The pack file gave it 69211 as its fallback and 69211 is already the right
+  -- shadow bolt for it, so the filler row repeats that id on purpose: the row
+  -- exists so BuildKit stops falling back and the kit lives in this table.
+  ( 8894, 69211, 0,     0,  1, 1),  -- Shadow Bolt    30 yd, 2.2s cast, 1313-1687, free = 682 dps   FILLER
+  ( 8894, 41374, 1, 10000, 50, 1),  -- Mind Blast     30 yd, 1.5s cast, 3469-4031, 110 mp = 375 eq  t50
+                                    --                its own 15587 Mind Blast, at level-80 weight
+  ( 8894, 30155, 1, 12000, 75, 1),  -- Heal           40 yd, 3.0s cast, SELF-HEAL 2837-3289, 215 mp t75
+                                    --                *** the R3 deviation - see the block above ***
+                                    --                TARGET_UNIT_CASTER, so DoCastVictim lands it
+                                    --                on the Medic; ~255 hps, 5.3-6.2 % of its own
+                                    --                difficulty-75 health per cast
+  -- 8912 Twilight's Hammer Torturer  (uc2, 12822 hp, 7988 mp)  pack 11  SHADOW
+  -- Same filler reasoning as the Medic: 60015 already IS its bolt.
+  ( 8912, 60015, 0,     0,  1, 1),  -- Shadow Bolt    40 yd, 3.0s cast, 1273-1427, free = 450 dps   FILLER
+  ( 8912, 34942, 1, 10000, 50, 1),  -- Shadow Word: Pain 30 yd, instant, 585 x6 ticks over 18s
+                                    --                = 3510, 95 mp = 351 eq                        t50
+                                    --                its own 14032 Shadow Word: Pain  (SD target)
+  ( 8912, 60953, 1, 12000, 75, 1),  -- Death and Decay 30 yd, instant, 400 x10 ticks over 10s
+                                    --                = 4000, 5 yd ground AoE, free = 333 eq        t75
+  -- ==========================================================================
+  -- THEME 3 - FOREST.  Packs 12 Druids of the Fang, 13 Maraudon Grove,
+  --                          14 Razorfen Thicket
+  -- ==========================================================================
+  -- 3671 Lady Anacondra  (uc2, 21370 hp, 3994 mp)  pack 12  NATURE + its own SLEEP
+  ( 3671, 60009, 0,     0,  1, 1),  -- Lightning Bolt 30 yd, 2.5s cast, 1051-1199, free = 450 dps   FILLER
+                                    --                her own 9532 Lightning Bolt, at level-80 weight
+  ( 3671, 49708, 1, 10000, 50, 1),  -- Poison Spit    35 yd, 1.5s cast, 602-698 x4 ticks over 8s
+                                    --                = 2408-2792, free = 260 eq                    t50
+  ( 3671,  8040, 1, 60000, 75, 1),  -- Druid's Slumber 30 yd, 2.5s cast, MOD_STUN 15s, 60 mp        t75
+                                    --                CC: Mechanic 10 SLEEP -> cd 60000 by the law.
+                                    --                AuraInterruptFlags 0x2 DAMAGE: breaks on the
+                                    --                first hit. Her own script's signature spell.
+  -- 3673 Lord Serpentis  (uc2, 25644 hp, 11982 mp)  pack 12  SENIOR  NATURE
+  ( 3673, 21667, 0,     0,  1, 1),  -- Wrath          40 yd, 1.5s cast, 638-862, free = 500 dps     FILLER
+  ( 3673, 59963, 1, 10000, 50, 1),  -- Lightning Breath 30 yd, 2.0s cast, 2775-3225, free = 300 eq  t50
+  ( 3673, 55700, 1, 12000, 75, 1),  -- Venom Spit  (SD) 30 yd, 2.0s cast, 1943-2257 direct +
+                                    --                569-731 x5 ticks over 10s = 4788-5912, free
+                                    --                = 446 eq                                      t75
+                                    --                (SD) ID 55700, SpellID[0] 55700 / [1] 59019;
+                                    --                GetSpawnMode() 0 -> casts itself
+  -- 3840 Druid of the Fang  (uc2, 12822 hp, 7988 mp)  pack 12  NATURE
+  ( 3840, 59986, 0,     0,  1, 1),  -- Wrath          40 yd, 2.0s cast, 849-951, free = 450 dps     FILLER
+  ( 3840, 49708, 1, 10000, 50, 1),  -- Poison Spit    35 yd, 1.5s cast, 2408-2792 total, free = 260 eq t50
+  ( 3840, 26550, 1, 12000, 75, 1),  -- Lightning Cloud 30 yd, instant, 3942-5058 total, 10 yd
+                                    --                ground AoE, free = 375 eq                     t75
+  -- 4516 Death's Head Adept  (uc8, 14956 hp, 13221 mp)  pack 14  SENIOR  FROST + its own ROOT
+  -- The only frost caster the forest has; its script casts 9672 Frostbolt and
+  -- 113 Chains of Ice, and both survive here as their level-80 equivalents.
+  ( 4516, 21369, 0,     0,  1, 1),  -- Frostbolt      40 yd, 1.5s cast, 638-862, free = 500 dps     FILLER
+                                    --                + snare -50% 4s (not CC)
+  ( 4516, 59017, 1, 10000, 50, 1),  -- Frostbolt      40 yd, 1.5s cast, 3570-4830, 90 mp = 420 eq   t50
+                                    --                + snare -50% 4s
+  ( 4516, 29991, 1, 60000, 75, 1),  -- Chains of Ice  30 yd, instant, MOD_ROOT 10s, 350 mp          t75
+                                    --                CC: Mechanic 7 ROOT -> cd 60000 by the law
+  -- 4440 Razorfen Totemic  (uc2, 12822 hp, 3994 mp)  pack 14  NATURE
+  -- Its whole native rotation is two SUMMONs, so there is nothing of its own
+  -- to keep: the kit is the same ability twice, growing with difficulty.
+  ( 4440, 60009, 0,     0,  1, 1),  -- Lightning Bolt 30 yd, 2.5s cast, 1051-1199, free = 450 dps   FILLER
+  ( 4440, 24683, 1, 10000, 50, 1),  -- Lightning Cloud 30 yd, instant, 463-537 direct + 875-1125 x3
+                                    --                ticks over 15s = 3088-3912, 10 yd ground AoE,
+                                    --                60 mp = 350 eq                                t50
+  ( 4440, 26550, 1, 12000, 75, 1),  -- Lightning Cloud 30 yd, instant, 3942-5058 total, 10 yd
+                                    --                ground AoE, free = 375 eq                     t75
+  -- 4520 Razorfen Geomancer  (uc2, 12822 hp, 5991 mp)  pack 14  NATURE
+  ( 4520, 60009, 0,     0,  1, 1),  -- Lightning Bolt 30 yd, 2.5s cast, 1051-1199, free = 450 dps   FILLER
+                                    --                its own 9532 Lightning Bolt, at level-80 weight
+  ( 4520, 59963, 1, 10000, 50, 1),  -- Lightning Breath 30 yd, 2.0s cast, 2775-3225, free = 300 eq  t50
+  ( 4520, 26550, 1, 12000, 75, 1),  -- Lightning Cloud 30 yd, instant, 3942-5058 total, 10 yd
+                                    --                ground AoE, free = 375 eq                     t75
+  -- 11793 Celebrian Dryad  (uc2, 12822 hp, 5991 mp)  pack 13  SENIOR  NATURE (poison)
+  -- Her only native spell is 8601 Slowing Poison; the kit follows the poison,
+  -- not the pack header's forecast of a root. See the deviation note.
+  (11793, 21667, 0,     0,  1, 1),  -- Wrath          40 yd, 1.5s cast, 638-862, free = 500 dps     FILLER
+  (11793, 49708, 1, 10000, 50, 1),  -- Poison Spit    35 yd, 1.5s cast, 2408-2792 total, free = 260 eq t50
+  (11793, 55700, 1, 12000, 75, 1),  -- Venom Spit  (SD) 30 yd, 2.0s cast, 4788-5912 total, free
+                                    --                = 446 eq; SpellID[0] 55700 / [1] 59019        t75
+  -- 12224 Cavern Shambler  (uc2, 12822 hp, 5991 mp)  pack 13  NATURE
+  -- A Theradrim elemental. 7948 Wild Regeneration is a self-heal and 16790
+  -- Knockdown is a 5 yd stun, so neither native spell survives; nature is the
+  -- school its faction and its class agree on.
+  (12224, 60009, 0,     0,  1, 1),  -- Lightning Bolt 30 yd, 2.5s cast, 1051-1199, free = 450 dps   FILLER
+  (12224, 39121, 1, 10000, 50, 1),  -- Greenkeeper's Fury 40 yd, 2.0s cast, 2805-3795, 75 mp
+                                    --                = 330 eq                                      t50
+  (12224, 26550, 1, 12000, 75, 1);  -- Lightning Cloud 30 yd, instant, 3942-5058 total, 10 yd
+                                    --                ground AoE, free = 375 eq                     t75

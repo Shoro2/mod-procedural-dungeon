@@ -291,6 +291,9 @@ ProceduralDungeon.V2.FieldBlocks = 8
 #        Description: Global block coordinate of the field's origin. A tile is 8
 #                     blocks, so 256 puts the field on tile 32. Changing these
 #                     moves the dungeon to another tile of the same map.
+#                     These are the FALLBACK since Round F / L1: a theme that
+#                     names its own region in V2.Theme<N>.OriginBX / .OriginBY
+#                     below overrides them, per axis, for its own layouts.
 #        Default:     256 / 256
 #
 
@@ -332,11 +335,157 @@ ProceduralDungeon.V2.Branches = 2
 #                     whatever this says (masks for ALL themes stay loaded),
 #                     and `.pdungeon v2 gen [seed] [theme]` overrides it for
 #                     one GM test generation.
-#        Default:     2 - the city is the standard look the UI presents;
-#                     the mine stays reachable with `gen [seed] 1`.
+#                     Since Round F / F1 this is the FALLBACK, not the last
+#                     word: the gen panel carries a theme row, and an account
+#                     that picked a look there (pdungeon_account.cfg_theme)
+#                     generates with it instead. The dropdown offers exactly
+#                     the themes the kit's chunk meta carries, so a value here
+#                     that the kit does not have is still an error and still
+#                     refuses to generate.
+#                     Since Round F / F1c (operator 2026-09-13) cfg_theme 0 -
+#                     the column default, shown as "Random" - no longer follows
+#                     this key at all: the server rolls one of the loaded
+#                     themes out of the run's own seed, so a player who picks
+#                     nothing gets a different look per Generate while the same
+#                     seed always comes back as the same one. This key is then
+#                     read ONLY where a roll would be meaningless, i.e. a kit
+#                     whose chunk meta carries fewer than two themes, and by
+#                     nothing else.
+#        Default:     2 - the city, which is what a single-theme kit falls
+#                     back to. On the shipped multi-theme kit it decides
+#                     nothing: a look is either picked on the panel / with
+#                     `gen [seed] [theme]`, or rolled.
 #
 
 ProceduralDungeon.V2.Theme = 2
+
+#
+#    ProceduralDungeon.V2.Packs.ThemeExclusive
+#        Description: Round F / F1: does a run draw ONLY from the creature
+#                     packs authored for its own theme (pdungeon_packs.theme)?
+#                     1 = yes, and a theme with at least one usable pack of
+#                     its own spawns nothing else - a mine full of Defias
+#                     miners stays a mine. 0 = the themed packs merely join
+#                     the theme-0 pool, i.e. variety over coherence.
+#                     A theme with no pack of its own falls back to the
+#                     theme-0 packs either way, so a look whose art has
+#                     shipped before its roster still gets a dungeon (the
+#                     boot log says which themes are in that state).
+#                     Read live: `.reload config` retunes the next instance
+#                     to build. It is NOT a layout input - it changes which
+#                     creatures a stored seed spawns, exactly as adding a
+#                     pack does, and nobody's layout rerolls.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.Packs.ThemeExclusive = 1
+
+#
+#    ProceduralDungeon.V2.Critters.ThemeExclusive
+#        Description: Round F / K5: the same question for AMBIENT LIFE. Does a
+#                     run place ONLY the critters authored for its own theme
+#                     (pdungeon_critter_rules.theme)?
+#                     1 = yes, and a theme with at least one critter rule of
+#                     its own places nothing else - the forest gets its
+#                     rabbits and toads and no Sewer Rat (operator verdict
+#                     2026-09-12: "Critter sollen auch passend zum Theme
+#                     sein", on a forest screenshot with exactly that rat in
+#                     it). 0 = the themed rules merely join the theme-0 ones,
+#                     which is the shape this module had before K5.
+#                     A theme with no critter rule of its own places the
+#                     theme-0 critters either way, so a look whose art has
+#                     shipped before its ambient life is still alive (the boot
+#                     log says which themes are in that state).
+#                     Read live: `.reload config` retunes the next instance to
+#                     build. It is NOT a layout input - the critter draw has
+#                     its own RNG stream, so flipping this re-rolls which
+#                     critters a stored seed places and moves no prop, no
+#                     spawn and no layout.
+#        Default:     1
+#
+
+ProceduralDungeon.V2.Critters.ThemeExclusive = 1
+
+#
+#    ProceduralDungeon.V2.Theme<N>.LightId       (N = 1 .. 9)
+#        Description: Round F / F3-B: the MOOD of a theme. The Light.dbc ROW
+#                     id a run generated with theme N overrides its zone
+#                     light with, sent once per instance build as
+#                     SMSG_OVERRIDE_LIGHT (Map::SetZoneOverrideLight). It is
+#                     a per-MAP runtime override, not DBC data the server
+#                     reads: it lives on the instance, dies with it, and two
+#                     dungeons of different themes are lit differently at the
+#                     same minute on the same realm.
+#                     0 = no override at all: that theme keeps whatever light
+#                     the map already has, which is what every unset slot
+#                     means and what this module did before F3-B.
+#                     A Light ROW and NOT a LightParams id - the stock
+#                     overrides (LIGHT_SNOWSTORM 2490, the Malygos 1822-1825
+#                     family) are Light rows too.
+#                     The rows below are the ones workspace script 47 writes
+#                     in task F3-A: Light 2864 (mine, LightParams 919, built
+#                     from Ahn'kahet donor 811) and Light 2865 (forest,
+#                     LightParams 920, from Scarlet Monastery donor 513),
+#                     both positioned OFF-FIELD so the map default stays
+#                     Light 2863. Until that client patch is deployed the
+#                     client has no such row and the override is a no-op on
+#                     its side; the server sends it either way.
+#                     Read live: `.reload config` retunes the NEXT instance
+#                     to build. It is NOT a layout input - nobody's stored
+#                     plan rerolls because a theme got a new mood. The boot
+#                     log prints one line naming every theme that has one.
+#        Default:     0 for every theme that is not listed below
+#
+
+ProceduralDungeon.V2.Theme1.LightId = 2864
+ProceduralDungeon.V2.Theme2.LightId = 0
+ProceduralDungeon.V2.Theme3.LightId = 2865
+
+#
+#    ProceduralDungeon.V2.Theme<N>.OriginBX / .OriginBY   (N = 1 .. 9)
+#        Description: Round F / L1: the REGION of the map a run generated with
+#                     theme N is laid out in - the global block coordinate its
+#                     8x8-block field starts at, overriding V2.OriginBX /
+#                     V2.OriginBY above for that theme alone.
+#                     0 on an axis = use the global value for that axis, which
+#                     is what every unset slot means and what this module did
+#                     before L1. Block 0 is therefore not addressable as a
+#                     theme origin; it is the corner of the map.
+#                     WHY: the per-theme mood cannot be delivered by the
+#                     V2.Theme<N>.LightId packet above - the 3.3.5a client
+#                     ignores SMSG_OVERRIDE_LIGHT for our off-field Light rows
+#                     (the server log shows the packet going out and the sky
+#                     staying the map default). The mechanism that DOES work
+#                     is the one every stock WoW zone uses: POSITIONED
+#                     Light.dbc rows, which the client picks by camera
+#                     position - and that only tells two themes apart when the
+#                     two themes are in different places.
+#                     A layout never leaves the 8x8-block window starting at
+#                     its origin (V2.FieldBlocks is capped there), i.e. it
+#                     stays inside exactly ONE ADT tile, so an origin is a
+#                     multiple of 8 and a theme owns a tile of its own. The
+#                     city stays where it has always been (256, 256 = tile
+#                     32,32), the mine sits two tiles along BY (+16 blocks =
+#                     tile 32,34) and the forest two tiles the other way
+#                     (-16 = tile 32,30). Workspace script 47 places each
+#                     theme's Light row over the window centre this names, and
+#                     the worldserver logs that centre once per generation:
+#                     "PDv2: theme N layout origin block (bx, by) - window
+#                     centre world (x, y)".
+#                     A LAYOUT INPUT, unlike the light id above it: the value
+#                     is frozen into the plan and stored with it
+#                     (pdungeon_account.gen_origin_bx/by), so retuning a key
+#                     moves only layouts generated AFTER it and every stored
+#                     dungeon keeps the region it was built in.
+#        Default:     0 / 0 for every theme that is not listed below
+#
+
+ProceduralDungeon.V2.Theme1.OriginBX = 256
+ProceduralDungeon.V2.Theme1.OriginBY = 272
+ProceduralDungeon.V2.Theme2.OriginBX = 0
+ProceduralDungeon.V2.Theme2.OriginBY = 0
+ProceduralDungeon.V2.Theme3.OriginBX = 256
+ProceduralDungeon.V2.Theme3.OriginBY = 240
 
 #
 #    ProceduralDungeon.V2.RequiredDllVersion

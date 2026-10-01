@@ -90,6 +90,20 @@ namespace PDungeon
         int bandMin = 76;               // band is [bandMin, bandMin + 4]
         int unlockedDlvl = 0;
         int affixPct = 40;              // share of TRASH that wears the affixes
+        // Round F / F1 (spec D2): the LOOK this run was generated with
+        // (BlockPlan::config.theme), which decides which packs its rooms may
+        // draw from - a mine spawns Defias miners, the city spawns its ghouls.
+        //
+        // Read by PDv2PackMgr::SelectSpawns, which assembles the pools, and
+        // NOT by the draw below: by the time PDv2SelectSpawns runs, the theme
+        // has already decided what is IN those pools. It lives here all the
+        // same because it is an input of the selection the caller asks for,
+        // and splitting the inputs across two structs by which half reads them
+        // is how a call site ends up filling one in and forgetting the other.
+        //
+        // 0 = no theme - the pre-F1 pool, and what every hand-built fixture
+        // gets by default, which is why no existing pin moves.
+        int theme = 0;
     };
 
     // The pools the draw reads, as a view over whatever holds them. Lifting
@@ -183,6 +197,44 @@ namespace PDungeon
     // this AFTER populating meleeByPack/casterByPack, and assigns the result
     // - not `loaded` itself - to `pools.trashPackIds`.
     std::vector<int> FilterEligibleTrashPacks(std::vector<int> const& loaded, PackPools const& pools);
+
+    // One loaded pack as the THEME filter sees it (Round F / F1, spec D2):
+    // which pack, which look it was authored for, and whether it can actually
+    // fill a trash slot in THIS run - i.e. it holds a non-boss member that
+    // survives the caller's band and unlock filter. Three plain fields and no
+    // members, because the rule below is the whole point and everything else
+    // about a Pack (its name, its levels, its members) lives in the manager's
+    // own type, which includes DatabaseEnv.h and can never come in here.
+    struct ThemePackInfo
+    {
+        int  packId = 0;
+        int  theme = 0;             // 0 = usable under ANY look
+        bool usableTrash = false;
+    };
+
+    // Which packs a run of `theme` draws from, as ids in `packs` order.
+    //
+    // The D2 rule, and the reason it is one function rather than a condition
+    // inside the pool walk: it is the whole of the theme feature's behaviour,
+    // and PDv2PackMgr.cpp cannot be linked into the harness (DatabaseEnv.h),
+    // so a rule written there could only ever be tested through the dungeon.
+    // FilterEligibleTrashPacks above was lifted out for exactly the same
+    // reason, after exactly that gap let a Critical through.
+    //
+    //   exclusive && the run's theme has a usable pack -> that theme's packs
+    //   exclusive (but it has none)                    -> the theme-0 packs
+    //   !exclusive                                     -> both
+    //
+    // theme 0 answers the theme-0 packs in either mode, which is what makes a
+    // caller that never sets the field behave exactly as it did before F1.
+    //
+    // "Usable" is deliberately about TRASH and not about bosses: a themed pack
+    // that carries nothing but a boss cannot fill a room, and letting it claim
+    // a run would empty every trash slot in it. Such a pack simply waits for a
+    // sibling with trash in it - the fallback keeps the dungeon populated in
+    // the meantime, which is the whole reason the theme-0 packs exist.
+    std::vector<int> SelectThemePacks(std::vector<ThemePackInfo> const& packs, int theme,
+                                      bool exclusive);
 
     // The whole spawn draw. Deterministic for a given (seed, inputs, pools):
     // same three on any compiler yields the same picks, which is why it lives

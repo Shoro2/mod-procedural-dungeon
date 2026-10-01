@@ -27,6 +27,7 @@
 #include "Player.h"
 #include "RBAC.h"
 #include "ScriptMgr.h"
+#include "StringFormat.h"
 #include "generator/PDBlockPlan.h"
 
 #include <sstream>
@@ -113,15 +114,37 @@ private:
             return true;
         }
 
-        // The theme argument is the GM TEST path - it overrides V2.Theme for
-        // this one generation and is then frozen into the account row like any
-        // other gen input. Refuse an id the planner has no kit namespace for,
-        // or the refusal would surface later as "generation failed".
+        // The theme argument is the GM TEST path - it overrides V2.Theme (and
+        // the account's own cfg_theme) for this one generation and is then
+        // frozen into the account row like any other gen input. Refuse an id
+        // the planner has no kit namespace for, or the refusal would surface
+        // later as "generation failed".
+        //
+        // Round F / F1: asked of the KIT rather than of a literal 1-or-2 list.
+        // The themes are a property of the chunk meta the kit shipped
+        // (PDv2Mgr::HasTheme), the panel's dropdown is already bounded by the
+        // same fact, and a hand-written list here was one more place a third
+        // theme would have had to be remembered in.
+        //
+        // Round F / F1c: NO argument (or 0) no longer means "follow V2.Theme",
+        // it means the same thing it means on the panel - the server rolls a
+        // theme out of this run's seed. Deliberately the same rule for the GM
+        // path: `gen <seed>` is reproducible either way (the roll is a pure
+        // function of the seed), and `gen <seed> <theme>` is still how a look
+        // is pinned for a test.
+        //
+        // Round F / F3-B is exactly that third theme, and it needed no code
+        // change here at all - only the NAMES below, which are prose for a GM
+        // and not a gate. Theme 3 becomes generatable on the day the kit ships
+        // forest chunk meta (22000+) and not one commit earlier, which is the
+        // whole point of asking the kit.
         int const themeOverride = static_cast<int>(themeArg.value_or(0));
-        if (themeOverride != 0 && themeOverride != 1 && themeOverride != 2)
+        if (themeOverride != 0 && !sPDv2Mgr->HasTheme(themeOverride))
         {
-            handler->PSendSysMessage("pdungeon v2: theme {} is unknown (1 = mine, "
-                                     "2 = city).", themeOverride);
+            handler->PSendSysMessage("pdungeon v2: theme {} is unknown - this kit carries "
+                                     "1..{} (1 = mine, 2 = city, 3 = forest; 0 or no "
+                                     "argument rolls one at random from this run's seed).",
+                                     themeOverride, sPDv2Mgr->ThemeMax());
             return true;
         }
 
@@ -358,6 +381,21 @@ private:
                                  cfg.enabled ? "enabled" : "disabled", cfg.mapId, cfg.floorZ,
                                  cfg.rooms, cfg.bossRooms, cfg.fieldBlocks,
                                  cfg.originBX, cfg.originBY, cfg.branches, cfg.detourChancePct);
+        // Round F / D5b: a theme may own its own region (V2.Theme<N>.OriginBX/BY),
+        // so the global origin above is only the city's. List the themes that
+        // differ - a mine or forest run really sits on those blocks.
+        {
+            std::string themed;
+            for (int theme = 1; theme <= 9; ++theme)
+            {
+                int bx = 0, by = 0;
+                sPDv2Mgr->ThemeOriginBlock(theme, bx, by);
+                if (bx != cfg.originBX || by != cfg.originBY)
+                    themed += Acore::StringFormat("{}theme {} ({},{})", themed.empty() ? "" : ", ", theme, bx, by);
+            }
+            handler->PSendSysMessage("pdungeon v2: theme origins: {}",
+                                     themed.empty() ? std::string("all themes share the global origin") : themed);
+        }
         // Round B / B3-B5, the run-shaping keys. They are read live, so this
         // line is the only place an operator can confirm that the
         // `.reload config` they just ran actually reached the module.
