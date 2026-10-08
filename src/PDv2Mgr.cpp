@@ -433,10 +433,14 @@ namespace PDungeon
             LOG_INFO(PD_LOG, "PDv2: zone light override per theme: {}",
                      lights.empty() ? std::string("none configured") : lights);
         }
+        // Players get their manifest from PDClientLink; the file is only the
+        // dev transport of `.pdungeon v2 gen` (the DLL's LOAD verb), and empty
+        // is the production setting - so this is information, not a warning.
         if (_config.enabled && _config.manifestPath.empty())
         {
-            LOG_WARN(PD_LOG, "PDv2: ProceduralDungeon.V2.ManifestPath is empty - `.pdungeon v2 gen` "
-                             "can plan but cannot hand the manifest to the client");
+            LOG_INFO(PD_LOG, "PDv2: ProceduralDungeon.V2.ManifestPath is empty - the dev manifest "
+                             "file of `.pdungeon v2 gen` is off (players get theirs from "
+                             "PDClientLink)");
         }
     }
 
