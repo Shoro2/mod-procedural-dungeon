@@ -1,0 +1,58 @@
+name    mod-procedural-dungeon: a death on map 760 (zone 5100) ends alive at the entrance, never at a graveyard
+# Server-side test bot run (mod-fl-testbots), T1. Zone 5100 has no graveyard_zone row; the core's fallback for a
+# release there is a graveyard far away. The interim (operator 2026-10-16: "sollen vorerst einfach am anfang
+# respawnen"): the module resurrects a dead player on its next 1 Hz tick at the entrance (or the last cleared boss
+# hall), no release on map 760 reaches the core's graveyard search, and a player who logs out dead is resurrected
+# so the home teleport carries them out alive. A fresh layout has no cleared boss hall: back at the entrance.
+# The director generates a layout for its account and enters with `enter force` (no FLStream.dll on a bot
+# session; the server side builds the map all the same); bot a follows by `.summon` in GM mode (GM mode skips the
+# DLL gate), then leaves GM mode. Needs EvictDisconnected to spare bot sessions (they have no socket).
+#   1. die and release at once: the release is held back, the tick brings the bot back alive, unsickened, at the
+#      entrance.
+#   2. die, no release: the same, by the tick alone.
+#   3. die and log out at once (a client's drop): the bot logs in again at its homebind (Tbwara: Dalaran, map 571),
+#      not at a graveyard. The harness revives a bot at login, so the place is the proof, not the life state.
+timeout 150s
+
+bot a warrior
+group party
+
+place 727 13288.5 11776.2 -31.5
+as gm .pdungeon v2 gen
+expect output has "pdungeon v2: seed"
+as gm .pdungeon v2 enter force
+waitfor gm map 760 timeout 20s
+do a gm on
+as gm .summon Tbwara
+waitfor a map 760 timeout 20s
+do a gm off
+wait 3s
+require a map 760
+mark start
+
+log 1 - die and release at once
+do a die
+expect a dead
+do a release
+expect a map 760
+waitfor a alive timeout 5s
+expect a map 760
+expect a at start 15
+expect a noaura 15007
+
+log 2 - die, no release
+do a die
+expect a dead
+waitfor a alive timeout 5s
+expect a map 760
+expect a at start 15
+
+log 3 - die and log out at once
+do a die
+do a relog
+waitfor a exists timeout 30s
+expect a map 571
+expect a near 5718.6 682.7 645.8 40
+
+cleanup
+place 727 13288.5 11776.2 -31.5

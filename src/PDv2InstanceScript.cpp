@@ -4594,6 +4594,14 @@ namespace PDungeon
             {
                 continue;
             }
+            // A server-side bot (mod-fl-testbots on the workbench) has no
+            // socket by design and no client that could crash: without this
+            // it was sent home within a second, and no bot test could stay
+            // on this map. No production session is flagged as a bot.
+            if (player->GetSession()->IsBot())
+            {
+                continue;
+            }
             if (!player->GetSession()->IsSocketClosed() && !player->GetSession()->IsKicked())
             {
                 continue;
