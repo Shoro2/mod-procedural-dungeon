@@ -780,6 +780,16 @@ public:
     // pending the release is simply refused; the tick then removes the ghost
     // aura and the corpse on its own, so nothing is left for the player to do
     // but wait out that one second.
+    //
+    // Zone 5100 interim (operator 2026-10-16: "sollen vorerst einfach am
+    // anfang respawnen"): no release on this map reaches the core's graveyard
+    // search any more. A dead player without a pending respawn gets one queued
+    // (entrance, or the last cleared boss hall - RespawnPending decides); a
+    // dead player who is leaving the map right now (logout: the home teleport
+    // from OnPlayerBeforeLogout is still pending when LogoutPlayer repops a
+    // fresh corpse, WorldSession.cpp:735-739) is resurrected on the spot, so
+    // the teleport carries them home alive instead of as a ghost whose corpse
+    // lies on a map they cannot reach.
     bool OnPlayerCanRepopAtGraveyard(Player* player) override
     {
         if (!sPDv2Mgr->IsEnabled() || !player ||
@@ -787,9 +797,26 @@ public:
         {
             return true;
         }
+        if (!player->IsAlive() && player->IsBeingTeleportedFar())
+        {
+            player->ResurrectPlayer(1.0f, false);
+            player->SpawnCorpseBones();
+            return false;
+        }
         if (auto* script = dynamic_cast<PDungeon::PDv2InstanceScript*>(player->GetInstanceScript()))
         {
-            return !script->HasPendingRespawn(player->GetGUID());
+            if (script->HasPendingRespawn(player->GetGUID()))
+            {
+                return false;
+            }
+            if (!player->IsAlive())
+            {
+                script->QueueRespawn(player->GetGUID());
+                LOG_INFO(PDungeon::PD_LOG, "PDv2 link: {} released without a pending "
+                         "respawn - queued one instead of a graveyard search",
+                         player->GetName());
+                return false;
+            }
         }
         return true;
     }

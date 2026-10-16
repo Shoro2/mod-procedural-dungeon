@@ -4445,6 +4445,13 @@ namespace PDungeon
         }
     }
 
+    // No death tally here: a death that reached OnUnitDeath was counted there,
+    // and one that never did is not this run's to grade.
+    void PDv2InstanceScript::QueueRespawn(ObjectGuid const& playerGuid)
+    {
+        _pendingRespawn.emplace(playerGuid, getMSTime());
+    }
+
     void PDv2InstanceScript::RespawnPending()
     {
         if (_pendingRespawn.empty())

@@ -370,6 +370,13 @@ namespace PDungeon
             return _pendingRespawn.find(playerGuid) != _pendingRespawn.end();
         }
 
+        // Zone 5100 interim (operator 2026-10-16: "sollen vorerst einfach am
+        // anfang respawnen"). A dead player whose death this script never
+        // recorded, or whose record a rebuild dropped, asks to release: queue
+        // the same respawn a recorded death gets instead of letting the core
+        // search a graveyard zone 5100 does not have (fallback: Westfall).
+        void QueueRespawn(ObjectGuid const& playerGuid);
+
         // Round C / C7. The gate the HUD reports on: the LOWEST segment whose
         // portcullis is still sealed, with that segment's own numbers. False -
         // and three zeros - means no barrier of this run is closed any more,
