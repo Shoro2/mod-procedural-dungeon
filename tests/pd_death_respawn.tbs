@@ -1,0 +1,40 @@
+name    mod-procedural-dungeon: a death on map 760 (zone 5100) ends alive at the entrance, never at a graveyard
+# Server-side test bot run (mod-fl-testbots), T1. Zone 5100 has no graveyard_zone row; the core's fallback for a
+# release there is Westfall. The interim (operator 2026-10-16: "sollen vorerst einfach am anfang respawnen"): the
+# module resurrects a dead player on its next 1 Hz tick at the entrance (or the last cleared boss hall), and no
+# release on map 760 reaches the core's graveyard search. A fresh layout has no cleared boss hall, so the
+# director must come back where it entered.
+# The director generates a layout for its account and enters with `enter force` (no FLStream.dll on a bot
+# session - the server side builds the map all the same). It dies and releases at once: the release is held
+# back, and the tick brings it back alive and unsickened at the entrance on map 760.
+timeout 120s
+
+bot a warrior
+group none
+
+place 727 13288.5 11776.2 -31.5
+as gm .pdungeon v2 gen
+expect output has "pdungeon v2: seed"
+as gm .pdungeon v2 enter force
+waitfor gm map 760 timeout 20s
+wait 3s
+mark start
+
+log 1 - die and release at once
+do gm die
+expect gm dead
+do gm release
+expect gm map 760
+waitfor gm alive timeout 5s
+expect gm map 760
+expect gm at start 15
+expect gm noaura 15007
+
+log 2 - a second death in the same run, no release
+do gm die
+waitfor gm alive timeout 5s
+expect gm map 760
+expect gm at start 15
+
+cleanup
+place 727 13288.5 11776.2 -31.5
