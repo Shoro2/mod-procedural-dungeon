@@ -559,6 +559,18 @@ ProceduralDungeon.V2.XP.PerDlvl = 100
 ProceduralDungeon.V2.DlvlCap = 30
 
 #
+#    ProceduralDungeon.V2.RunCredit
+#        Description: A finished run gives every player in the instance one
+#                     kill credit of this creature. The call board's run
+#                     quests count it (mod-hero-call-board: the daily "complete
+#                     a run" and the weekly "complete 5 runs", credit creature
+#                     402450). 0 = no credit.
+#        Default:     402450
+#
+
+ProceduralDungeon.V2.RunCredit = 402450
+
+#
 #    ProceduralDungeon.V2.Diff.HealthPctPerLevel
 #        Description: Percent added to a dungeon mob's HP per point of the
 #                     difficulty dial (1..100). mult = 1 + difficulty * pct/100,

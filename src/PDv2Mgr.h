@@ -164,6 +164,11 @@ namespace PDungeon
         int         xpPerRoom = 10;
         int         xpPerDlvl = 100;
         int         dlvlCap = 30;
+        // Kill credit of this creature for every player in the instance when
+        // a run is finished (FinishRun): the call board's "complete a run"
+        // daily and weekly count it (mod-hero-call-board, creature 402450).
+        // 0 = no credit.
+        uint32_t    runCredit = 402450;
         // Trash in a NORMAL room, and trash beside the boss in a boss room.
         // Two knobs because one cannot say "rooms got fuller, boss rooms did
         // not" - which is exactly what the operator asked for on 2026-08-08.

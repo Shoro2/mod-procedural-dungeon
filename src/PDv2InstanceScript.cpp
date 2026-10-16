@@ -1387,6 +1387,13 @@ namespace PDungeon
             {
                 continue;
             }
+            // The call board's run quests (daily and weekly) count this
+            // credit; it reaches only a quest that asks for it.
+            if (cfg.runCredit)
+            {
+                player->KilledMonsterCredit(cfg.runCredit);
+            }
+
             ChatHandler handler(player->GetSession());
             handler.PSendSysMessage("The Forgotten Depths yield: +{} dungeon XP (dlvl {}).",
                                     reward.dxpGained, reward.newDlvl);
