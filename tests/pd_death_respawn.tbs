@@ -4,9 +4,9 @@ name    mod-procedural-dungeon: a death on map 760 (zone 5100) ends alive at the
 # respawnen"): the module resurrects a dead player on its next 1 Hz tick at the entrance (or the last cleared boss
 # hall), no release on map 760 reaches the core's graveyard search, and a player who logs out dead is resurrected
 # so the home teleport carries them out alive. A fresh layout has no cleared boss hall: back at the entrance.
-# The director generates a layout for its account and enters with `enter force` (no FLStream.dll on a bot
-# session; the server side builds the map all the same); bot a follows by `.summon` in GM mode (GM mode skips the
-# DLL gate), then leaves GM mode. Needs EvictDisconnected to spare bot sessions (they have no socket).
+# The director generates a fixed layout for its account (seed 434578084, theme 1: entrance -1166.67 -300.00 52.00)
+# and both are placed there in GM mode - GM mode skips the DLL gate (no FLStream.dll on a bot session; the server
+# side builds the map all the same) - then leave GM mode. Needs EvictDisconnected to spare bot sessions.
 #   1. die and release at once: the release is held back, the tick brings the bot back alive, unsickened, at the
 #      entrance.
 #   2. die, no release: the same, by the tick alone.
@@ -18,13 +18,14 @@ bot a warrior
 group party
 
 place 727 13288.5 11776.2 -31.5
-as gm .pdungeon v2 gen
-expect output has "pdungeon v2: seed"
-as gm .pdungeon v2 enter force
-waitfor gm map 760 timeout 20s
+as gm .pdungeon v2 gen 434578084 1
+expect output has "pdungeon v2: seed 434578084 theme 1"
+do gm gm on
 do a gm on
-as gm .summon Tbwara
-waitfor a map 760 timeout 20s
+place 760 -1166.67 -300.00 52.00
+require gm map 760
+require a map 760
+do gm gm off
 do a gm off
 wait 3s
 require a map 760
