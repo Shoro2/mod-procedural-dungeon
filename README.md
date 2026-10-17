@@ -1,189 +1,144 @@
 # mod-procedural-dungeon
 
-Procedurally generated dungeons for AzerothCore (WoW 3.3.5a) — **every run a
-unique layout, no client patch required.**
+Procedurally generated dungeons for AzerothCore (WoW 3.3.5a): every run gets a
+freshly generated layout. The module ships two generations of the same idea:
 
-Inspired by [threejs-procedural-dungeon / "Dungeon Forge"](https://github.com/majidmanzarpour/threejs-procedural-dungeon):
-seed → room scattering → separation → connectivity graph → MST + loop edges →
-BFS room semantics (entrance / combat / elite / treasure / shrine / boss) →
-tile grid → decoration. The server runs exactly that pipeline per instance run
-and **assembles the result out of existing WMO/M2 GameObjects** (Wintergrasp
-walls, gates, braziers, chests) on an unused, client-known base map.
+- **v1** assembles the dungeon on the server out of existing WMO/M2 GameObjects
+  (Wintergrasp walls, gates, braziers, chests) on an unused, client-known base
+  map. **No client patch required.**
+- **v2** plans a chain of rooms and corridors on its own map (default 760) and
+  lets the client compose the terrain from a pre-built block kit. v2 is the
+  full game mode (per-account dungeon, difficulty dial, affixes, bosses, loot,
+  themes) but needs client-side components, see Requirements.
 
-> **PDv2 (map 760, the client-composed kit) plans differently since Round B:** one chain of
-> rooms from the entrance through the boss rooms, a few one-room pockets and, per boss segment,
-> a possible loop room beside the corridor - see `docs/superpowers/specs/2026-09-02-pdv2-b0-spine-generator-design.md`.
->
-> Round B also **fills** that chain. **Death** returns you alive - at full health, with **no
-> resurrection sickness** (operator, 2026-09-08), never to a world graveyard (map 760 has
-> none) - to the arena of the **furthest boss you have already killed**, or to the entrance
-> while no boss has fallen. Since Round C / C5 that checkpoint is computed from the run's own
-> state; B1's clickable Altars of Return are gone.
-> A **sealed portcullis** (GO 910059) holds each boss doorway - the walk grid is cut on both
-> sides, so creatures stop at it too - until that segment's PLANNED non-boss kills reach
-> `V2.Barrier.Pct`. Since Round D **every corridor between two chain rooms carries one
-> patrol** - a **single file** of 1, 2 or 3 melee creatures (2 from difficulty
-> `V2.Patrol.Size2Diff`, 3 from `V2.Patrol.Size3Diff`), the leader walking a **corridor-only**
-> beat from doorway to doorway and the others following it at `V2.Patrol.FollowDistYd` per rank.
-> The beat is planned by the patrol's own path finder: **axis-aligned legs down the lane centre**
-> that pay for a turn, for hugging a wall and for a cell carrying a prop, so a patrol no longer
-> cuts through house corners or furniture. It rejoins that existing beat after an evade rather
-> than re-planning a shorter one, and a file whose leader dies dissolves and holds. And with
-> `V2.Ambush.Chance` one corridor per segment is an **ambush**: step into that corridor
-> block and it springs once - a 2 s stun and `V2.Ambush.Mobs` creatures. The trigger is the
-> block, not a radius (Round C removed `V2.Ambush.RadiusYd`: a 9 yd disc could be walked
-> past on every corner, T and cross junction). Neither patrol nor ambush moves any counter.
-> Since Round C / C6 a run also draws **no boss twice** while the pool holds more distinct
-> bosses than the run has boss rooms (below that, repeats fill the rooms), and every boss
-> fights with **two abilities at difficulty 1** - four rows per boss, two at `minDiff 1`
-> plus one each at 50 and 75.
-> Round C / C7 puts that state on the **HUD**: a `Gate` line counts the next sealed
-> portcullis's kills up and reads `open` when nothing is sealed, the map paints every
-> **cleared room green**, and every notice is shouted as a **raid warning** on top of the
-> chat line. And with C8 the run now **ends** somewhere: when the last boss dies **Chromie**
-> (NPC 910550) appears in that hall, speaks three lines four seconds apart, a **reward
-> cache** (GO 910068) stands beside her, and about a second after the last line a **portal
-> to Azealia** (GO 910067) opens - a click, not an automatic pull, so the cache is looted
-> first. All three go down with the run, so re-entering during the finale rebuilds the
-> dungeon and takes an un-looted cache with it.
-> Creatures also stand on the kit's **published spawn anchors** now, not on a 12 yd circle
-> around the block centre (that circle survives only as the overflow), and the ordinary room
-> gained a **third size** - a 33.33 yd platform - while the entrance and boss rooms lost their
-> centre pad. Eight conf keys tune the three hazards; every code default equals the shipped
-> `.conf.dist` value, so none has to be set.
->
-> **Round E (2026-09-10) gives the dungeon its loot.** Every kill pays every player on the map
-> personally: a **Faded Remnant** (white) always, a **Gleaming Remnant** (green) at 5 %, a
-> **Radiant Remnant** (blue) at 1 % — the five Round-E currencies 920105–920109 that the
-> Forgotten Talents tree is bought with — scaled by a **room factor** (a ten-room run pays the
-> listed chance, a one-room run a tenth of it, +1 % per room above ten, so one-room farming
-> does not pay), plus 1..5 random **materials** from every expansion, the count growing with
-> the dungeon level. **Gear** comes from six pools generated out of the world DB by workspace
-> script 106 (`pdungeon_loot_pool`): the Shifting Cache in dead ends and loop rooms holds a
-> WotLK heroic-dungeon or non-ICC normal-raid epic (ICC normal from dungeon level 10), every
-> boss corpse a ToGC / Ruby-Sanctum heroic item, Chromie's Cache an ICC 10/25 item (ICC heroic
-> from dungeon level 10) plus the **Sovereign** (purple, difficulty ≥ 50, 50 %) and **Eternal**
-> (orange, ≥ 75, 10 %) Remnants and the old Azealia-Underground rares (five mounts at
-> 1/10 000, the Expert Emblem, the Exobeast plate, the Mystery Boxes). Finished **tier-set
-> pieces** are in the pools; tier tokens, VoA and PvP gear are not. Gear is filtered to what
-> the looter's class and race can wear, item counts scale with the loot multiplier, and every
-> number is a `ProceduralDungeon.V2.Loot.*` key whose code default equals the shipped
-> `.conf.dist`. All loot rolls use the core's `urand` — the layout is seeded, the loot never is.
->
-> Round E also **caps the difficulty dial per account**: everyone starts at 1, a completed run
-> unlocks up to its difficulty **+5** without a death and **+3** with one (`V2.Cap.CleanUnlock` /
-> `.DeathUnlock`), account-wide and never lowered by play; the panel's slider follows the cap.
-> The **rooms slider now counts ordinary rooms** — the entrance and the boss rooms come on top —
-> so "14" on the panel is "0/14 rooms" on the HUD (bosses have their own counter; stored layouts
-> reroll once, layout version 4). **`ProceduralDungeon.V2.Debug`** gates every per-creature and
-> per-tick line, so a quiet log is the default. And the gen panel **draws the planned layout**
-> after Generate, the same map the HUD shows once you are inside.
->
-> Kit **`t1b-v39`** (Round E / WP4) closes the two visual leftovers: the tower room's side walls
-> are lined with houses again (the facade reserve was still sized for a pad ring Round B removed),
-> and the ground texture no longer breaks at chunk edges — every MCNK carries `0x8000`
-> (`do_not_fix_alpha_map`), so the alpha feather is authored edge to edge instead of pinned.
->
-> **Event rooms (Round E / WP5).** Each boss segment has a `V2.Event.ChancePct` (25 %) chance of
-> an extra dead-end room with its own corridor — purple on the map — where the **Weary Pilgrim**
-> waits. Talk to him and **hold the line** for `V2.Event.DurationSec` (60 s): every
-> `V2.Event.SpawnEverySec` (5 s) one creature of the run's packs (10 % casters) storms in from
-> the room's rim and goes for him; the HUD counts down and shows his health. If he lives, a
-> Shifting Cache appears and everyone on the map earns `V2.Event.ParagonXp` (1 000) × the loot
-> multiplier in Paragon XP; if he falls, the wave vanishes and there is no reward. The wave
-> drops materials but no Remnants (`V2.Loot.Currency.ExtraMobsDropCurrency`), and it never
-> counts toward the run, the gates or the room total. The layout decides where an event room
-> sits (layout version 5), so a stored dungeon rerolls once.
->
-> **Respawn echoes (Round E / WP6).** The Forgotten Talents node *Restless Echoes* (a legendary node
-> behind the deepest combat milestone, two ranks) makes every ordinary kill in the depths rise again
-> as one or two **echoes** of the same creature — full copies that attack the killer at once. Echoes
-> are rewards, not progress: they count toward no room, gate or run total, drop materials but no
-> Remnants (`V2.Loot.Currency.ExtraMobsDropCurrency`), pay Paragon XP like any kill, and never echo
-> themselves; bosses, event waves and Lil' Bro children never echo either. `V2.Respawn.Enable`
-> switches the feature, `V2.Respawn.MaxCopies` (2) caps the count below whatever the node says. The
-> module reads the talent by its aura tag (`EffectMiscValue` 76001), never by spell id, so the FT
-> content can renumber freely.
->
-> **After Runde 31 (Round E / WP8).** Dungeon creatures drop **no item loot of their own**
-> any more (`V2.Loot.NativeItems`, default off; gold stays): the packs are stock Shadowfang,
-> Scholomance and Twilight creatures whose tables are not FL content — everything worth
-> having comes from the pools (mats and Remnants into the bags, gear on bosses and in
-> caches). The **mats pool is exactly what the Endless Storage stores** (trade goods and
-> raw gems, stackable; no cut gems). The HUD's gate line describes the segment you stand in
-> and says `Gate open` once its barrier is up; the event row is a bar (time left, NPC
-> health). A won event leaves a small **Pilgrim's Cache** where the pilgrim stood and he
-> departs; he and every boss face the doorway they are entered through. If a chest shows
-> the cursor but does nothing on click, the client's object cache is stale — the server's
-> `ClientCacheVersion` bump refreshes it on the next login.
->
-> **Stat profile (Round E / WP9).** The talent *Discerning Eye* (end of the treasure branch)
-> adds a **stat profile** slider to the gen panel — Off, Strength, Agility or Caster — and
-> from then on every cache, the final cache and every boss corpse roll only gear that fits
-> it on top of the class fit: an item's primary stat decides (a Strength/Intellect hybrid
-> fits both), trinkets and relics without stats always drop, and a ring with only ratings
-> is judged by what those ratings are for. If a pool runs dry for your class and profile
-> the profile is dropped first, never the class. The choice is per account; the unlock
-> is per character (the talent).
->
-> **Night fixes (Round E / WP10–WP11).** Every cache disappears once it is looted empty
-> (it used to refill from its template on the next click). The portal after the last boss
-> lands on the `game_tele` row named in `V2.Finale.TeleName` (`flcapital`). Materials from
-> kills and bonus rolls go **straight into the Endless Storage** (`V2.Loot.MatsToStorage`),
-> with a `[Depths] Stored …` line in chat; Remnants stay in the bags because the talent tree
-> spends them from there — and the storage's own deposit button will happily take them, so
-> withdraw before buying.
->
-> **Remnants are currency (Round E / WP12).** The five Remnants sit in the Currency tab of
-> the character sheet, not in the bags: no bag space, and the storage button cannot take
-> them any more. Old stacks in your bags move over by themselves the next time you log in.
->
-> **Themes (Round F).** The kit carries two looks - the **city** and the **mine**
-> (rock floors and walls, rock columns, stalagmites, cave-ins, carts). Since F1 the gen panel
-> has a **Theme** dropdown under the caster row (Random / Mine / City); it applies to the next Generate, a stored
-> dungeon keeps the look it was generated with. **Random** is the default and means what it says
-> since 2026-09-13: the server picks one of the looks it can build, out of that run's seed - so
-> every Generate can come up different, and the same seed always comes back the same.
-> The mine draws its own creature packs
-> (Defias, Stonevault, Dark Iron) and is lit by glowing crystal formations, with braziers in
-> boss rooms and mining clutter in rooms and corridors. The forest is next (F2).
->
-> **Round F, second wave.** The theme choice is a dropdown under the caster row. The mine's
-> walls are dressed with rock bodies and timbering; the **forest** (theme 3) is the third look:
-> mossy cliffs and tree lines by turns, pine-needle and grass floors, Wailing Caverns / Maraudon /
-> Razorfen packs, fallen trees and fences as blockers, campfires in boss rooms. Every theme has
-> its own light, ambience and music (the mine is a dark blue cave, the forest a green day, the
-> city unchanged) and its own zone name. Kit **t1b-v40** with a DBC patch and the streaming
-> DLL ship together.
->
-> The v1 pipeline below still describes the GameObject-assembled prototype.
+The generator is inspired by
+[threejs-procedural-dungeon / "Dungeon Forge"](https://github.com/majidmanzarpour/threejs-procedural-dungeon):
+seed, room scattering, separation, connectivity graph, MST + loop edges, BFS
+room semantics (entrance / combat / elite / treasure / shrine / boss), tile grid,
+decoration. The same seed always produces the same layout.
 
-## How it works
+## Features
 
-- Each run is a fresh `InstanceMap` with its **own dynamic collision tree** —
-  spawned walls give real server-side line of sight and standable height;
-  the client collides players against the models it already has in its MPQs.
-- The `InstanceScript` is attached via the `OnBeforeCreateInstanceScript`
-  hook — no core edits, no `instance_template.ScriptId`.
-- The base map (default: 37 *Azshara Crater*) is re-typed to a dungeon
-  **server-side only** through the `map_dbc` DB override.
-- Same seed = same dungeon (deterministic generator, portable across
-  compilers) — usable for daily seeds or leaderboards later.
-- Mob movement: static mmaps cannot see spawned walls, so the module runs its
-  own A* on the generated tile grid and drives cross-room chases with
-  waypoint chains; rooms are convex, so in-room combat needs no help. Casters
+- Deterministic, engine-free layout generator (`src/generator/`), usable with a
+  fixed seed for reproducible runs.
+- v1: room/corridor dungeon built from GameObjects, entrance NPC, elite rooms
+  that open a boss gate, treasure chest, exit portal, shrine buff.
+- v2: spine of rooms from entrance to boss rooms with side pockets and loop
+  rooms, sealed boss gates, patrols and ambushes in corridors, event rooms,
+  bosses with affixes, a finale (NPC, reward cache, exit portal), three visual
+  themes (city, mine, forest), a difficulty dial 1..100 that unlocks per account,
+  personal loot pools (currency tokens, materials, gear), optional Paragon XP and
+  Endless Storage integration, a generation panel and run HUD delivered by AIO.
+- Own creature AI for generated layouts: static mmaps cannot see spawned walls,
+  so mobs path on the module's own A* grid; casters only cast with real line of
+  sight.
+- Dungeon creatures never grant reputation (a code switch, no stock data is
+  changed).
+
+## How a v2 run plays
+
+**Layout.** A run is one chain of rooms from the entrance through the boss rooms, with a few one-room pockets
+off the ordinary rooms and, per boss segment, a possible loop room beside a straight corridor. Rooms come in
+three sizes (standard, blob outline, 33 yd platform); the entrance and boss rooms are open arenas. The rooms
+slider counts ordinary rooms; the entrance and boss rooms come on top. The same seed always gives the same
+layout. Creatures stand on the kit's published spawn anchors.
+
+**Death.** Dying returns you alive at full health, with no resurrection sickness, to the arena of the furthest
+boss you have already killed (or to the entrance while no boss has fallen). The map has no graveyard.
+
+**Gates, patrols, ambushes.** A sealed portcullis holds each boss doorway (creatures stop at it too) until that
+segment's planned non-boss kills reach `V2.Barrier.Pct`. Every corridor between two chain rooms carries one
+patrol: a single file of 1, 2 or 3 melee creatures (2 from difficulty `V2.Patrol.Size2Diff`, 3 from
+`V2.Patrol.Size3Diff`) walking a corridor-only beat from doorway to doorway, planned so that it keeps to the lane
+centre and avoids walls and props. With `V2.Ambush.Chance`, one corridor per segment is an ambush: stepping into
+that corridor block stuns you for 2 s and spawns `V2.Ambush.Mobs` creatures. Patrols and ambushes do not count
+toward any kill counter.
+
+**Bosses and affixes.** A run draws no boss twice while the pool holds more distinct bosses than the run has boss
+rooms. Bosses fight with two abilities at difficulty 1, more from difficulty 50 and 75. Trash creatures come from
+themed creature packs; with `V2.Affix.Percentage` a room has a chance to include one creature carrying all
+affixes unlocked at the current difficulty (the Dungeon Challenge affix set).
+
+**Difficulty.** An integer 1..100 chosen on the panel; mob health and damage grow per level
+(`V2.Diff.HealthPctPerLevel`, `V2.Diff.DamagePctPerLevel`). The dial is capped per account: everyone starts at 1,
+and a completed run unlocks up to its difficulty +5 without a death and +3 with one
+(`V2.Cap.CleanUnlock` / `.DeathUnlock`), account-wide and never lowered by play.
+
+**Event rooms.** Each boss segment has a `V2.Event.ChancePct` chance of an extra dead-end room (purple on the
+map) where a Weary Pilgrim waits. Talk to him and hold the line for `V2.Event.DurationSec`: every
+`V2.Event.SpawnEverySec` one creature of the run's packs storms in and goes for him, and the HUD shows the
+countdown and his health. If he lives, a Shifting Cache appears and everyone on the map earns Paragon XP
+(`V2.Event.ParagonXp`, if mod-paragon is installed); if he falls, the wave vanishes. Event waves never count
+toward the run.
+
+**Respawn echoes.** A Forgotten Talents node (found through the aura tag, not a spell id) can make ordinary kills
+rise again as one or two echoes of the same creature. Echoes are rewards: they count toward no room, gate or
+total, drop no currency, and never echo themselves. `V2.Respawn.Enable` and `V2.Respawn.MaxCopies` control it.
+
+**Finale.** When the last boss dies, the NPC Chromie (910550) appears in that hall, speaks three lines, a reward
+cache stands beside her and a portal opens to the `game_tele` row named in `V2.Finale.TeleName`. The portal is a
+click, not an automatic pull, so the cache can be looted first; all three disappear with the run.
+
+**Loot.** Every kill pays every player on the map personally. Five Remnant currencies (white to orange tier;
+shown in the Currency tab, not in the bags) drop with rising rarity, scaled by a room factor so that one-room
+farming does not pay, plus 1..5 random crafting materials per kill, with the count growing with the dungeon level.
+Gear comes from loot pools stored in `pdungeon_loot_pool` / `pdungeon_loot_bonus`: dead-end caches, boss corpses
+and the finale cache each have their own pool, filtered to what the looter's class and race can wear. A talent-
+unlocked **stat profile** (Off / Strength / Agility / Caster) further restricts caches and boss gear to that
+primary stat. Dungeon creatures drop no item loot of their own (`V2.Loot.NativeItems`, off by default; gold
+stays). Materials go straight into the Endless Storage when `mod-endless-storage` is installed
+(`V2.Loot.MatsToStorage`). Spent caches despawn. All loot rolls use the core's `urand`, so the layout is seeded
+but the loot never is. Every number is a `ProceduralDungeon.V2.Loot.*` key.
+
+**Themes.** The kit carries three looks: the city, the mine (rock floors and walls, crystals, carts) and the
+forest (mossy cliffs, tree lines, campfires). Each theme has its own creature packs, light, ambience, music and
+zone name. The panel's Theme dropdown offers Random / Mine / City / Forest; Random rolls a theme from the run's
+seed, so every Generate can differ while the same seed always returns the same look. A stored dungeon keeps the
+theme it was generated with.
+
+**Panel and HUD.** The AIO addons give a generation panel (rooms, difficulty, caster ratio, theme, stat profile,
+and a drawn map of the planned layout) and a run HUD with the room and boss counters, the next gate's progress
+(`Gate open` once its barrier is up), the event bar, a map that paints cleared rooms green, and raid-warning
+notices.
+
+## How it works (v1)
+
+- Each run is a fresh `InstanceMap` with its **own dynamic collision tree**: spawned walls give real server-side
+  line of sight and standable height; the client collides players against the models it already has in its MPQs.
+- The `InstanceScript` is attached via the `OnBeforeCreateInstanceScript` hook - no core edits, no
+  `instance_template.ScriptId`.
+- The base map (default: 37 *Azshara Crater*) is re-typed to a dungeon **server-side only** through the `map_dbc`
+  DB override.
+- Mob movement: static mmaps cannot see spawned walls, so the module runs its own A* on the generated tile grid
+  and drives cross-room chases with waypoint chains; rooms are convex, so in-room combat needs no help. Casters
   only cast with real (dynamic-tree) line of sight.
+- v1 rules of a run: clear all elite rooms to open the boss gate; the boss spawns the treasure chest and the exit
+  portal; treasure rooms hold bonus chests and the shrine buffs the party once per run.
 
 ## Requirements
 
-- AzerothCore rev with the `OnBeforeCreateInstanceScript` map hook (present
-  in current 15.x master and this project's fork).
-- Extracted `vmaps/` including the `GAMEOBJECT_MODELS` list (standard vmap
-  extraction) — without it the spawned pieces have no **server-side**
-  collision. Verify in game with `.pdungeon validate`.
-- `worldserver.conf`: `CheckGameObjectLoS = 1` (default).
+- AzerothCore (WotLK 3.3.5a) with the `OnBeforeCreateInstanceScript` map hook,
+  which current upstream master has. The module was developed against the
+  [Shoro2/azerothcore-wotlk](https://github.com/Shoro2/azerothcore-wotlk) fork;
+  we found no fork-only hook used by the module sources, but it has not been
+  built against vanilla upstream.
+- v1: extracted `vmaps/` including the `GAMEOBJECT_MODELS` list (standard vmap
+  extraction), and `CheckGameObjectLoS = 1` (default) in `worldserver.conf`.
+- v2 additionally needs:
+  - **AIO** (Rochet2) running on a Lua engine such as `mod-ale`; the two addons in
+    `lua_scripts/` (`flprocdungeon.lua`, `flpdui.lua`) are delivered to players
+    through it. Put them into the server's `lua_scripts/` folder.
+  - Client files that are **not part of this repository**: the block kit (loose
+    files under the client's `Data` folder), the `FLStream.dll` client
+    extension that composes the map from the server's layout manifest, and the
+    matching client DBC rows for map 760 (Map, MapDifficulty, AreaTable, Light,
+    plus CurrencyTypes for the Remnant currencies). Without them a client cannot
+    load map 760; the entry gate refuses clients that do not report the DLL.
+  - Optional: `mod-paragon` (Paragon XP rewards), `mod-endless-storage` (kill
+    materials are deposited there when present), `mod-forgotten-talents` (the
+    talents that react to dungeon content).
 
-## Install
+## Installation
 
 ```bash
 cd azerothcore-wotlk/modules
@@ -191,81 +146,87 @@ git clone https://github.com/Shoro2/mod-procedural-dungeon.git
 cd ../build && cmake .. -DSCRIPTS=static -DMODULES=static && make -j$(nproc)
 ```
 
-SQL under `data/sql/db-world/` and `data/sql/db-characters/` is applied
-automatically by the db updater on worldserver start. Copy
-`conf/mod_procedural_dungeon.conf.dist` next to your `worldserver.conf` (the
-build installs it automatically) and set:
+The SQL under `data/sql/db-world/` and `data/sql/db-characters/` is applied
+automatically by the AzerothCore db updater on the next worldserver start. That
+includes `mod_pdungeon_map760.sql` (server-side rows for map 760); the client
+side of map 760 has to match and is not part of this repo.
 
-1. `ProceduralDungeon.Enable = 1`
-2. Scout a large flat spot on the base map with a GM character
-   (`.go xyz <x> <y> <z> 37`, then `.gps`) and set
-   `ProceduralDungeon.Center.X/Y/Z`. Update the graveyard row in
-   `mod_pdungeon_base.sql` to match.
-3. Optional: spawn the entrance NPC in a capital: `.npc add 910510`.
+Copy `conf/mod_procedural_dungeon.conf.dist` to your `configs/modules/` folder as
+`mod_procedural_dungeon.conf` (the build installs the `.dist` automatically), then:
+
+1. v1: set `ProceduralDungeon.Enable = 1`. Scout a large flat spot on the base
+   map with a GM character (`.go xyz <x> <y> <z> 37`, then `.gps`), set
+   `ProceduralDungeon.Center.X/Y/Z` and update the graveyard row in
+   `mod_pdungeon_base.sql` to match. Optionally spawn the entrance NPC in a
+   capital: `.npc add 910510`.
+2. v2: set `ProceduralDungeon.V2.Enable = 1` once the client components above are
+   in place.
+
+## Configuration
+
+`conf/mod_procedural_dungeon.conf.dist` documents every key; the code default of
+each key equals the shipped value. The main ones:
+
+| Key | Meaning |
+|---|---|
+| `ProceduralDungeon.Enable` / `ProceduralDungeon.V2.Enable` | switch v1 / v2 on (both default 0) |
+| `ProceduralDungeon.BaseMapId`, `.Center.X/Y/Z` | v1: map and grid centre the dungeon is assembled on |
+| `ProceduralDungeon.Rooms.Min/.Max`, `.Mob.PackSize.*`, `.Theme` | v1: room count, packs, palette theme |
+| `ProceduralDungeon.V2.MapId`, `.FloorZ` | v2: the dungeon map and the kit's floor height (must match the kit) |
+| `ProceduralDungeon.V2.Rooms`, `.BossRooms`, `.DetourChance`, `.Branches` | v2 layout fallbacks (per-account values from the panel win) |
+| `ProceduralDungeon.V2.Theme` | fallback theme; the panel can pick Random / Mine / City / Forest |
+| `ProceduralDungeon.V2.RequiredDllVersion` | minimum `FLStream.dll` bridge version the entry gate accepts |
+| `ProceduralDungeon.V2.Loot.*`, `.Cap.*`, `.Event.*`, `.Barrier.*`, `.Patrol.*`, `.Ambush.*` | loot, difficulty cap, event rooms, boss gates, corridor hazards |
+| `ProceduralDungeon.V2.Finale.TeleName` | `game_tele` name the exit portal after the last boss leads to |
+| `ProceduralDungeon.V2.Debug` | verbose per-creature logging (off by default) |
 
 ## Usage
 
+All commands need GM level.
+
 | Command | Effect |
 |---|---|
-| `.pdungeon gen [seed]` | Dry run: prints the generated layout as ASCII in chat |
-| `.pdungeon enter [seed]` | GM: teleport into a fresh run (random seed if omitted) |
-| `.pdungeon leave` | Teleport back to your hearth location |
-| `.pdungeon info` | Seed, spawn queue, elite rooms remaining, timings |
-| `.pdungeon validate` | Spawns every palette piece and reports collision models |
+| `.pdungeon gen [seed]` | v1 dry run: prints the generated layout as ASCII in chat |
+| `.pdungeon enter [seed]` | v1: teleport into a fresh run (random seed if omitted) |
+| `.pdungeon leave` / `info` / `validate` | v1: leave, show run state, check that every palette piece has a collision model |
+| `.pdungeon v2 gen [seed] [theme]` | v2: plan and store a layout for your account, push it to the client |
+| `.pdungeon v2 enter [force]` | v2: enter your dungeon (`force` skips the client-ready check, dev only) |
+| `.pdungeon v2 info` / `patrol` | v2: run state / the patrol beat of the room you stand in |
+| `.pdungeon v2 cap [n]` | v2: set the difficulty cap of your account |
 
-Players use the **entrance NPC** (entry 910510): random layout or a chosen
-seed. Rules of a run: clear all **elite rooms** to open the **boss gate**;
-kill the boss to spawn the **treasure chest** and the **exit portal**.
-Treasure rooms hold bonus chests, the shrine buffs the party once per run.
+Players use the **entrance NPC** (entry 910510) for v1 (random layout or a chosen
+seed). In v1, clear all elite rooms to open the boss gate; killing the boss spawns
+the treasure chest and the exit portal. In v2, players use the generation panel
+(rooms, difficulty, caster ratio, theme) delivered by the addon, press Generate and
+enter; the HUD shows rooms, bosses, the next gate and events.
 
 ## Customization
 
-- **Palette** (`pdungeon_palette` table): swap wall/gate/decoration pieces or
-  add a new `theme` — no rebuild needed. Walls and gates should use **WMO**
-  displays (M2 pieces do not block creature vision).
-- **Layout knobs** (`mod_procedural_dungeon.conf`): grid size, room count and
-  sizes, loop chance, pack sizes, torch density, spawn batching.
-- **Creature packs** (`pdungeon_packs` / `pdungeon_pack_members` /
-  `pdungeon_member_spells`): **eight** packs ship today — 1 Crypt Horrors,
-  2 Abyssal Broodpit, 3 Lords of the Deep, 4 Barrow Dead, 5 Legion Rift,
-  6 Shadowfang Pack, 7 Cult of the Damned, 8 Ahn'kahet Deep — one theme per
-  room, with the boss drawn from the role-2 pool across all packs and no boss
-  appearing twice in a run while the pool allows it. Every pack **references**
-  stock creature entries and adds no `creature_template` or `spell_dbc` row of
-  its own, so adding a pack is pure data: a `.sql` pair that deletes and
-  re-inserts its own `packId` only. Add one by copying a sibling file rather
-  than by hand — the header of each records what has to be measured (health,
-  swing, silhouette, loot, immunities, and the `SpellDifficulty` substitution
-  that decides whether the spell id you wrote is the spell the core casts).
-- **No dungeon kill grants reputation.** The module calls
-  `Creature::SetReputationRewardDisabled(true)` on every creature it spawns —
-  room mobs, patrols, ambushes, split children and critters alike — so stock
-  entries that carry a `creature_onkill_reputation` row cannot turn a generated
-  dungeon into a reputation faucet (pack 7's Scholomance trash would otherwise
-  pay +10 Argent Dawn per kill, to Exalted, with no turn-in). It is a code
-  switch, not a data patch, so no stock table is retuned and every future pack
-  inherits it; there is deliberately no per-pack opt-out.
-- **Base map**: `ProceduralDungeon.BaseMapId` + the matching SQL block in
-  `mod_pdungeon_base.sql` (prepared variants: 451 Development Land,
-  169 Emerald Dream, 44 Monastery).
+- **Palette** (`pdungeon_palette`): swap wall/gate/decoration pieces or add a
+  `theme`, no rebuild needed. Walls and gates should use WMO displays (M2 pieces
+  do not block creature vision).
+- **Creature packs** (`pdungeon_packs`, `pdungeon_pack_members`,
+  `pdungeon_member_spells`): packs reference stock creature entries and add no
+  `creature_template` or `spell_dbc` rows, so a new pack is a SQL file that deletes
+  and re-inserts its own `packId`. Copy a sibling pack file as the template.
+- **Loot pools** (`pdungeon_loot_pool`) and the affix list (`pdungeon_affixes`)
+  are plain world tables.
+- **Base map** (v1): `ProceduralDungeon.BaseMapId` plus the matching block in
+  `mod_pdungeon_base.sql` (prepared variants: 451 Development Land, 169 Emerald
+  Dream, 44 Monastery).
 
-## Known limitations (MVP)
+## Known limitations
 
 - Mobs that flee or are feared use core movement and can clip through spawned
-  walls; evade home-runs walk straight lines.
-- No minimap for the generated layout (planned: AIO map frame fed from the
-  tile grid).
-- Decorative liquids only — no swimmable pools.
-- The client keeps its own view of the base map (weather/zone name/music from
-  the original map).
+  walls; evade home-runs walk straight lines (v1) or can cross the void (v2).
+- v1 has decorative liquids only (no swimmable pools) and no minimap; the client
+  keeps its own view of the base map (weather, zone name, music).
+- v2 cannot be entered without the client components; entering map 760 without a
+  loaded layout crashes the client, which is why the entry gate checks first.
+- Logging out inside a v2 dungeon parks the character at its homebind; the
+  dungeon persists, the position inside it does not.
 
-## Roadmap
+## Part of the Forgotten Land project
 
-- AIO minimap UI (tile grid → addon frame)
-- More palette themes (Icecrown, Ulduar, …) and room templates
-- Difficulty scaling, affixes, timed runs, leaderboards on `pdungeon_runs`
-- Optional one-time MPQ patch with a purpose-built modular tile kit
-
-## License
-
-GPL v2, like AzerothCore.
+Developed for the Forgotten Land server project; it does not depend on the rest
+of it apart from the optional modules listed above.
