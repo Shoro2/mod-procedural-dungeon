@@ -753,8 +753,16 @@ public:
             return false;
         }
 
+        // The level gate (report #12, operator 2026-10-26: "Mindestlevel 80
+        // fuer pd"): every mob in here is level 80. A GM's forced entry
+        // (TELE_TO_GM_MODE) never reaches this hook.
         std::string whyNot;
-        if (sPDClientLink->MayEnter(player, whyNot))
+        uint32 const minLevel = sPDv2Mgr->GetConfig().minPlayerLevel;
+        if (player->GetLevel() < minLevel && !player->IsGameMaster())
+        {
+            whyNot = "you need to be level " + std::to_string(minLevel) + " to enter";
+        }
+        else if (sPDClientLink->MayEnter(player, whyNot))
         {
             return true;
         }

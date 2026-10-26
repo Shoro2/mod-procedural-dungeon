@@ -293,6 +293,13 @@ namespace PDungeon
 
         if (!skipGate)
         {
+            uint32 const minLevel = sPDv2Mgr->GetConfig().minPlayerLevel;
+            if (player->GetLevel() < minLevel && !player->IsGameMaster())
+            {
+                outcome.error = "you need to be level " + std::to_string(minLevel) + " to enter";
+                return outcome;
+            }
+
             std::string whyNot;
             if (!sPDClientLink->MayEnter(player, whyNot))
             {

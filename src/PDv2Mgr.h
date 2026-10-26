@@ -73,6 +73,7 @@ namespace PDungeon
     {
         bool        enabled = false;
         uint32_t    mapId = 760;
+        uint32_t    minPlayerLevel = 80; // operator 2026-10-26 (report #12): every mob is level 80 (V2.MinPlayerLevel)
         float       floorZ = 50.0f;      // must match the kit's floor plane
         int         rooms = 5;
         int         bossRooms = 1;

@@ -62,6 +62,7 @@ namespace PDungeon
     {
         _config.enabled = sConfigMgr->GetOption<bool>("ProceduralDungeon.V2.Enable", false);
         _config.mapId = sConfigMgr->GetOption<uint32>("ProceduralDungeon.V2.MapId", 760);
+        _config.minPlayerLevel = sConfigMgr->GetOption<uint32>("ProceduralDungeon.V2.MinPlayerLevel", 80);
         _config.floorZ = sConfigMgr->GetOption<float>("ProceduralDungeon.V2.FloorZ", 50.0f);
         _config.rooms = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.Rooms", 5);
         _config.bossRooms = sConfigMgr->GetOption<int32>("ProceduralDungeon.V2.BossRooms", 1);

@@ -1,0 +1,25 @@
+name    mod-procedural-dungeon: below ProceduralDungeon.V2.MinPlayerLevel (80) nobody enters map 760
+# Server-side test bot run (mod-fl-testbots), T1. Report #12 (2026-10-22): low-level characters entered the
+# dungeon, whose mobs are all level 80; the operator 2026-10-26: "Mindestlevel 80 fuer pd". The director (not in
+# GM mode) generates a fixed layout and asks to enter through PDv2DoEnter, the panel's path: at level 70 the level
+# gate refuses it; at level 80 the next gate (the client handshake a bot session cannot pass) answers instead.
+timeout 60s
+
+bot a warrior
+group none
+
+place 727 13288.5 11776.2 -31.5
+as gm .pdungeon v2 gen 434578084 1
+expect output has "pdungeon v2: seed 434578084 theme 1"
+as gm .character level Tbdirector 70
+wait 1s
+as gm .pdungeon v2 enter
+expect output has "you need to be level 80"
+as gm .character level Tbdirector 80
+wait 1s
+as gm .pdungeon v2 enter
+expect output lacks "you need to be level"
+expect gm map 727
+
+cleanup
+as gm .character level Tbdirector 80

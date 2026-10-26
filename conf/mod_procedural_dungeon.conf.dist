@@ -251,6 +251,16 @@ ProceduralDungeon.V2.Enable = 0
 ProceduralDungeon.V2.MapId = 760
 
 #
+#    ProceduralDungeon.V2.MinPlayerLevel
+#        Description: The lowest character level that may enter the dungeon
+#                     (the panel and the map's own entry check). Every mob in
+#                     it is level 80. Game masters are exempt.
+#        Default:     80
+#
+
+ProceduralDungeon.V2.MinPlayerLevel = 80
+
+#
 #    ProceduralDungeon.V2.FloorZ
 #        Description: The kit's floor plane. MUST match the height the block kit
 #                     was generated at, or the server places players above or
