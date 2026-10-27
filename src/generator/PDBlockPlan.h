@@ -280,8 +280,24 @@ namespace PDungeon
     // Returns false only when maxTries layouts in a row failed validation.
     bool GenerateBlockPlan(BlockCfg const& cfg, BlockPlan* out);
 
+    // Pinwheel guard (operator 2026-10-27). The run HUD and the gen panel draw
+    // the plan block for block, and a four-way block whose arms all bend the
+    // same way round reads as a swastika. An ARM is the run behind one socket
+    // of a four-way block; it HOOKS clockwise or counter-clockwise at the
+    // first block where it leaves the straight line, and does not hook when
+    // it ends straight or forks both ways there (a T, not a hook). A plan is
+    // a pinwheel when some four-way block has at least
+    // PD_PINWHEEL_MIN_HOOKS arms hooking the SAME way - three, not four,
+    // because three hooks and one straight arm read as the same symbol.
+    // Both chiralities count. `hubIndex`, when given, receives the index of
+    // the first such block in `plan.blocks` (-1 when there is none).
+    constexpr int PD_PINWHEEL_MIN_HOOKS = 3;
+    bool HasPinwheel(BlockPlan const& plan, int* hubIndex);
+
     // Structural self-check, run inside GenerateBlockPlan and again by the
-    // harness. `error` receives a short reason on failure.
+    // harness. `error` receives a short reason on failure. Its last rule is
+    // HasPinwheel: a pinwheel is not broken, but it must never ship, and a
+    // failed validation is what makes GenerateBlockPlan move to the next seed.
     bool ValidateBlockPlan(BlockPlan const& plan, std::string* error);
 
     // FLPD2 manifest, LF separated, CRC32 trailer. This is the wire format the

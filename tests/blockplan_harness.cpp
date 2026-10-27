@@ -8693,6 +8693,123 @@ namespace
         Check(beats == want, msg.c_str(), PD_OPERATOR_SEED);
     }
 
+    // --- pinwheel guard (operator 2026-10-27) --------------------------------
+    //
+    // HasPinwheel reads nothing but coordinates and socket masks, so the
+    // fixtures are bare blocks on a 5x5 field with the hub at (2, 2). Every
+    // generated plan in this file already goes through ValidateBlockPlan, whose
+    // last rule is HasPinwheel, so the batch proves "never ships"; these prove
+    // the test sees the shape at all, in both chiralities, and stays quiet on
+    // the shapes that only look a little like it.
+    struct PinBlock { int x; int y; unsigned mask; };
+
+    BlockPlan PinwheelFixture(std::vector<PinBlock> const& blocks, bool mirror)
+    {
+        BlockPlan plan;
+        for (PinBlock const& p : blocks)
+        {
+            PlacedBlock b;
+            b.bx = mirror ? 4 - p.x : p.x;
+            b.by = p.y;
+            b.socketMask = p.mask;
+            if (mirror)
+            {
+                // East and west swap sides; north and south stay.
+                b.socketMask = (p.mask & (SOCKET_N | SOCKET_S)) |
+                               ((p.mask & SOCKET_E) ? SOCKET_W : 0u) |
+                               ((p.mask & SOCKET_W) ? SOCKET_E : 0u);
+            }
+            plan.blocks.push_back(b);
+        }
+        return plan;
+    }
+
+    void RunPinwheelChecks()
+    {
+        unsigned const N = SOCKET_N, E = SOCKET_E, S = SOCKET_S, W = SOCKET_W;
+
+        // Each arm one block out, then one block clockwise: the classic shape.
+        std::vector<PinBlock> const clockwise = {
+            { 2, 2, N | E | S | W },
+            { 2, 1, S | E }, { 3, 1, W },       // north arm bends east
+            { 3, 2, W | S }, { 3, 3, N },       // east arm bends south
+            { 2, 3, N | W }, { 1, 3, E },       // south arm bends west
+            { 1, 2, E | N }, { 1, 1, S },       // west arm bends north
+        };
+        // Two blocks out before the bend: arm length must not matter.
+        std::vector<PinBlock> const longArms = {
+            { 2, 2, N | E | S | W },
+            { 2, 1, N | S }, { 2, 0, S | E }, { 3, 0, W },
+            { 3, 2, W | E }, { 4, 2, W | S }, { 4, 3, N },
+            { 2, 3, N | S }, { 2, 4, N | W }, { 1, 4, E },
+            { 1, 2, E | W }, { 0, 2, E | N }, { 0, 1, S },
+        };
+        // Three hooks and a straight arm still read as the symbol.
+        std::vector<PinBlock> const threeHooks = {
+            { 2, 2, N | E | S | W },
+            { 2, 1, S | E }, { 3, 1, W },
+            { 3, 2, W | S }, { 3, 3, N },
+            { 2, 3, N | W }, { 1, 3, E },
+            { 1, 2, E },                        // west arm ends straight
+        };
+        // Two arms each way: a pinwheel needs one direction of turn.
+        std::vector<PinBlock> const mixed = {
+            { 2, 2, N | E | S | W },
+            { 2, 1, S | E }, { 3, 1, W },                   // clockwise
+            { 3, 2, W | S }, { 3, 3, N },                   // clockwise
+            { 2, 3, N | S }, { 2, 4, N | E }, { 3, 4, W },  // counter-clockwise
+            { 1, 2, E | S }, { 1, 3, N },                   // counter-clockwise
+        };
+        // Two arms end in a T (fork both ways at the bend): those are bars,
+        // not hooks, which leaves only two hooks.
+        std::vector<PinBlock> const tees = {
+            { 2, 2, N | E | S | W },
+            { 2, 1, S | E | W }, { 3, 1, W | S }, { 1, 1, S | E },
+            { 3, 2, W | S | N }, { 3, 3, N },
+            { 2, 3, N | W }, { 1, 3, E },
+            { 1, 2, E | N },
+        };
+        // Three hooks round a THREE-way block: a triskele, which the planner
+        // draws all the time on small fields and which is not the symbol.
+        std::vector<PinBlock> const threeWay = {
+            { 2, 2, N | E | S },
+            { 2, 1, S | E }, { 3, 1, W },
+            { 3, 2, W | S }, { 3, 3, N },
+            { 2, 3, N | W }, { 1, 3, E },
+        };
+        // A plain cross with straight dead-end arms.
+        std::vector<PinBlock> const cross = {
+            { 2, 2, N | E | S | W },
+            { 2, 1, S }, { 3, 2, W }, { 2, 3, N }, { 1, 2, E },
+        };
+
+        struct Case { char const* name; std::vector<PinBlock> const* blocks; bool want; };
+        Case const cases[] = {
+            { "clockwise pinwheel",        &clockwise,  true  },
+            { "long-armed pinwheel",       &longArms,   true  },
+            { "three hooks + straight arm", &threeHooks, true  },
+            { "two hooks each way",        &mixed,      false },
+            { "two T-ended arms",          &tees,       false },
+            { "three-way triskele",        &threeWay,   false },
+            { "plain cross",               &cross,      false },
+        };
+        for (Case const& c : cases)
+        {
+            for (int m = 0; m < 2; ++m)
+            {
+                BlockPlan const plan = PinwheelFixture(*c.blocks, m != 0);
+                int hub = -2;
+                bool const got = HasPinwheel(plan, &hub);
+                char msg[160];
+                std::snprintf(msg, sizeof(msg), "HasPinwheel says %s for the %s fixture (%s)",
+                              got ? "yes" : "no", c.name, m ? "mirrored" : "as drawn");
+                Check(got == c.want, msg, 0);
+                // The hub is the first block of every fixture, and -1 says "none".
+                Check(hub == (c.want ? 0 : -1), "HasPinwheel names the wrong hub block", 0);
+            }
+        }
+    }
+
     int RunBatch(int count, int rooms)
     {
         std::printf("batch of %d seeds, %d rooms + 1 boss each\n\n", count, rooms);
@@ -8707,6 +8824,9 @@ namespace
         // what Round C / C2's ambush trigger stands on.
         RunBlockDerivationChecks();
         RunChainMathChecks();
+        // Hand-built shapes, no seed: the batch's own validation proves no
+        // generated plan is a pinwheel, these prove the test can see one.
+        RunPinwheelChecks();
         // Round E / R2. 200 seeds per (rooms, bossRooms) pair regardless of
         // --batch n: the counts are STRUCTURAL and hold per seed, so this is a
         // fixed sweep of the draw space rather than a sample whose size means

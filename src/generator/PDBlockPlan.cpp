@@ -1223,6 +1223,82 @@ namespace PDungeon
         return nullptr;
     }
 
+    bool HasPinwheel(BlockPlan const& plan, int* hubIndex)
+    {
+        if (hubIndex)
+        {
+            *hubIndex = -1;
+        }
+
+        // Directions clockwise from north, so "+1" is a right turn (a
+        // clockwise hook) and "+3" a left one, whatever way the arm points.
+        unsigned const bits[4] = { SOCKET_N, SOCKET_E, SOCKET_S, SOCKET_W };
+
+        std::map<std::pair<int, int>, unsigned> masks;
+        for (PlacedBlock const& b : plan.blocks)
+        {
+            masks[std::make_pair(b.bx, b.by)] = b.socketMask;
+        }
+
+        // +1 clockwise hook, -1 counter-clockwise, 0 none (ends straight, runs
+        // off the plan, or forks both ways at its first bend).
+        auto armHook = [&](int x, int y, int dir)
+        {
+            int dx = 0, dy = 0;
+            StepFor(bits[dir], dx, dy);
+            // A plan has fewer blocks than this, so the walk cannot outlast a
+            // straight run; the bound only guards a malformed plan.
+            for (size_t step = 0; step <= plan.blocks.size(); ++step)
+            {
+                x += dx;
+                y += dy;
+                auto it = masks.find(std::make_pair(x, y));
+                if (it == masks.end())
+                {
+                    return 0;
+                }
+                unsigned const exits = it->second & ~bits[(dir + 2) & 3];
+                bool const right = (exits & bits[(dir + 1) & 3]) != 0;
+                bool const left = (exits & bits[(dir + 3) & 3]) != 0;
+                if (right != left)
+                {
+                    return right ? 1 : -1;
+                }
+                if (right || !(exits & bits[dir]))
+                {
+                    return 0;
+                }
+            }
+            return 0;
+        };
+
+        for (size_t i = 0; i < plan.blocks.size(); ++i)
+        {
+            PlacedBlock const& b = plan.blocks[i];
+            if (PopCount(b.socketMask) != 4)
+            {
+                continue;
+            }
+            int clockwise = 0;
+            int counter = 0;
+            for (int dir = 0; dir < 4; ++dir)
+            {
+                int const hook = armHook(b.bx, b.by, dir);
+                clockwise += hook > 0 ? 1 : 0;
+                counter += hook < 0 ? 1 : 0;
+            }
+            if (clockwise >= PD_PINWHEEL_MIN_HOOKS || counter >= PD_PINWHEEL_MIN_HOOKS)
+            {
+                if (hubIndex)
+                {
+                    *hubIndex = static_cast<int>(i);
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool ValidateBlockPlan(BlockPlan const& plan, std::string* error)
     {
         auto fail = [error](char const* why) {
@@ -1857,6 +1933,17 @@ namespace PDungeon
                     return fail("a boss room can be bypassed");
                 }
             }
+        }
+
+        // Last, because nothing above depends on it: a pinwheel plays fine
+        // but draws as a swastika on the HUD map (HasPinwheel, operator
+        // 2026-10-27). GenerateBlockPlan answers this like any other failure,
+        // with the next seed. That re-lays exactly the seeds that drew one -
+        // about 5 % of them - and leaves every other stored seed's dungeon as
+        // it was, so PD_LAYOUT_VERSION stays.
+        if (HasPinwheel(plan, nullptr))
+        {
+            return fail("the layout draws a pinwheel (swastika) around a four-way block");
         }
         return true;
     }
