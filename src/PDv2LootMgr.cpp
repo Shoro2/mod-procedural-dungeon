@@ -343,6 +343,50 @@ namespace PDungeon
         return _pools.back();
     }
 
+    // The raid pools hold both factions' versions of the faction gear (Wrynn's
+    // and Hellscream's, the ToC trinkets ...), each flagged "Alliance only" or
+    // "Horde only" (ITEM_FLAG2_FACTION_*). A player of the other faction could
+    // never equip what he was handed (player report 2026-10-27: a Horde warrior
+    // with Wrynn's Breastplate of Triumph; the operator 2026-10-29: "a" - every
+    // faction gets its own version).
+    static bool FitsFaction(ItemTemplate const* proto, TeamId team)
+    {
+        return proto &&
+               !((proto->Flags2 & ITEM_FLAG2_FACTION_HORDE) && team != TEAM_HORDE) &&
+               !((proto->Flags2 & ITEM_FLAG2_FACTION_ALLIANCE) && team != TEAM_ALLIANCE);
+    }
+
+    // The last word on a drawn item: the other faction's version turned into
+    // the looter's through the core's faction-change pairs
+    // (player_factionchange_items). An item without a pair stays as drawn -
+    // Collect keeps those out of every filtered draw already.
+    static uint32_t ForLooterFaction(uint32_t item, Player const* looter)
+    {
+        if (!item || !looter)
+        {
+            return item;
+        }
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item);
+        if (!proto || FitsFaction(proto, looter->GetTeamId()))
+        {
+            return item;
+        }
+        for (auto const& [allianceItem, hordeItem] : sObjectMgr->FactionChangeItems)
+        {
+            uint32_t const pair =
+                looter->GetTeamId() == TEAM_HORDE && allianceItem == item ? hordeItem
+                : looter->GetTeamId() == TEAM_ALLIANCE && hordeItem == item ? allianceItem : 0u;
+            // gear for gear only: the faction-change table also turns quest
+            // items into a gold coin
+            ItemTemplate const* pairProto = pair ? sObjectMgr->GetItemTemplate(pair) : nullptr;
+            if (pairProto && proto->InventoryType && pairProto->InventoryType == proto->InventoryType)
+            {
+                return pair;
+            }
+        }
+        return item;
+    }
+
     void PDv2LootMgr::Collect(LootPool const& pool, Player const* filterFor,
                               uint8_t expansionMask, uint8_t profile,
                               std::vector<LootPoolEntry const*>& out)
@@ -351,6 +395,7 @@ namespace PDungeon
         // two questions 2 235 times.
         uint8_t const classId = filterFor ? filterFor->getClass() : uint8_t(0);
         uint32_t const raceMask = filterFor ? filterFor->getRaceMask() : 0u;
+        TeamId const team = filterFor ? filterFor->GetTeamId() : TEAM_NEUTRAL;
 
         out.reserve(out.size() + pool.entries.size());
         for (LootPoolEntry const& entry : pool.entries)
@@ -368,11 +413,14 @@ namespace PDungeon
             {
                 continue;
             }
-            if (filterFor &&
-                !ItemFitsPlayer(sObjectMgr->GetItemTemplate(entry.item),
-                                classId, raceMask))
+            if (filterFor)
             {
-                continue;
+                ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entry.item);
+                if (!ItemFitsPlayer(proto, classId, raceMask) ||
+                    !FitsFaction(proto, team))
+                {
+                    continue;
+                }
             }
             out.push_back(&entry);
         }
@@ -486,7 +534,7 @@ namespace PDungeon
             Collect(*found, nullptr, PD_LOOT_EXPANSION_ALL,
                     PD_STAT_PROFILE_OFF, candidates);
         }
-        return PickWeighted(candidates);
+        return ForLooterFaction(PickWeighted(candidates), looter);
     }
 
     uint32_t PDv2LootMgr::RollGearUnion(std::string_view a, std::string_view b,
@@ -565,7 +613,7 @@ namespace PDungeon
                         PD_STAT_PROFILE_OFF, candidates);
             }
         }
-        return PickWeighted(candidates);
+        return ForLooterFaction(PickWeighted(candidates), looter);
     }
 
     uint32_t PDv2LootMgr::RollMaterial(uint8_t expansionMask) const
