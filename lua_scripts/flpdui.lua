@@ -328,6 +328,7 @@ Panel:SetScript("OnDragStop", Panel.StopMovingOrSizing)
 -- rows below are measured against it.
 local FLUI = assert(FLUI, "The Forgotten Depths needs AIO_UI/FLUI_Client.lua loaded first")
 FLUI.Skin(Panel, "dialog")
+FLUI.SizeGrip(Panel) -- the style guide's size grip (scale 60-150 %, per character)
 Panel:SetFrameStrata("DIALOG")
 Panel:Hide()
 table.insert(UISpecialFrames, "FLPDGenPanel")
