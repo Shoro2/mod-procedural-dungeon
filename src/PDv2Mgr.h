@@ -405,7 +405,7 @@ namespace PDungeon
         // all, and the stack. Deliberately NOT scaled by lootMult: the token
         // is the same scarce currency as the heroic-dungeon and raid drops of
         // the same item, and the difficulty dial must not be able to farm it.
-        uint32      heartstoneItem = 920301;
+        uint32_t    heartstoneItem = 920301;
         int         heartstoneChance = 50;
         int         heartstoneCount = 1;
 
