@@ -1004,6 +1004,42 @@ ProceduralDungeon.V2.Loot.IccDlvl = 10
 ProceduralDungeon.V2.Loot.ClassFilter = 1
 
 #
+#    ProceduralDungeon.V2.Heartstone.Item
+#    ProceduralDungeon.V2.Heartstone.Chance
+#    ProceduralDungeon.V2.Heartstone.Count
+#        Description: Cursed altar (2026-10-31): the Tainted Heartstone, a
+#                     crafting/altar material that also drops from the end boss
+#                     of every level-80 heroic 5-man and every level-80 raid
+#                     (plain loot rows in the world DB). This is the dungeon's
+#                     share of it: the run's FINAL boss - the kill that brings
+#                     the boss counter up to the run's boss total, whichever
+#                     room that boss stood in - rolls Chance percent once and,
+#                     on a hit, carries Count of Item in its corpse loot.
+#
+#                     It lies ONCE in the loot window and goes to ONE player
+#                     under the group's normal loot rules, like the injected
+#                     boss gear; it is not paid into every bag the way the
+#                     currency is. Earlier bosses of the run drop nothing.
+#
+#                     Not scaled by the run's difficulty (lootMult): the token
+#                     is a scarce currency shared with the heroic and raid
+#                     drops, and the dial must not be able to farm it.
+#
+#                     Item   0 turns the whole mechanic off; an id with no
+#                            item_template logs a WARN per rolled drop and
+#                            drops nothing.
+#                     Chance percent, clamped into 0..100.
+#                     Count  stack size, clamped into 1..10.
+#
+#                     Read LIVE: `.reload config` applies to the next kill.
+#        Default:     920301 / 50 / 1
+#
+
+ProceduralDungeon.V2.Heartstone.Item = 920301
+ProceduralDungeon.V2.Heartstone.Chance = 50
+ProceduralDungeon.V2.Heartstone.Count = 1
+
+#
 #    ProceduralDungeon.V2.Cap.DeathUnlock
 #    ProceduralDungeon.V2.Cap.CleanUnlock
 #        Description: Round E (2026-09-10): how far one finished run pushes the

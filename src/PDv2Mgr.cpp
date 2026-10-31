@@ -370,6 +370,17 @@ namespace PDungeon
         _config.lootClassFilter = sConfigMgr->GetOption<bool>(
             "ProceduralDungeon.V2.Loot.ClassFilter", true);
 
+        // The Tainted Heartstone. Item 0 switches the mechanic off; the chance
+        // is a plain percent and the count a stack of 1..10 (a negative or
+        // absurd stack is a typo, and Loot::AddItem would split anything past
+        // the item's own stack size into several slots of the 18-slot window).
+        _config.heartstoneItem = sConfigMgr->GetOption<uint32>(
+            "ProceduralDungeon.V2.Heartstone.Item", 920301);
+        _config.heartstoneChance = std::min(100, std::max(0, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Heartstone.Chance", 50)));
+        _config.heartstoneCount = std::min(10, std::max(1, sConfigMgr->GetOption<int32>(
+            "ProceduralDungeon.V2.Heartstone.Count", 1)));
+
         // Round E / R1. The two unlock steps of the account-wide difficulty
         // cap. Clamped into [0, 100] and not into the dial's [1, 100]: 0 is a
         // meaningful setting here - it says that outcome unlocks nothing - and

@@ -1096,6 +1096,58 @@ namespace PDungeon
         }
     }
 
+    void PDv2InstanceScript::InjectHeartstone(Creature* creature)
+    {
+        PDv2Config const& cfg = sPDv2Mgr->GetConfig();
+        if (!creature || !cfg.heartstoneItem || cfg.heartstoneChance <= 0)
+        {
+            return;
+        }
+
+        // Core urand, like every loot roll in this module. One roll per run:
+        // this is only reached for the final boss's single death.
+        if (static_cast<int>(urand(1, 100)) > cfg.heartstoneChance)
+        {
+            return;
+        }
+
+        // Loot::AddItem returns early for an item with no template - a typo in
+        // the conf key would otherwise be a silent no-op, so say it once per
+        // drop that was rolled.
+        if (!sObjectMgr->GetItemTemplate(cfg.heartstoneItem))
+        {
+            LOG_WARN(PD_LOG, "PDv2: V2.Heartstone.Item {} has no item_template - "
+                             "no heartstone dropped", cfg.heartstoneItem);
+            return;
+        }
+
+        // The same 18-slot window test AddCertain makes for chests
+        // (PDv2ChestLoot.cpp): Loot::AddItem past the ceiling is a silent
+        // no-op. The boss pays at most a handful of gear rows, so this is a
+        // guard and not an expected branch.
+        if (creature->loot.items.size() >= static_cast<size_t>(MAX_NR_LOOT_ITEMS))
+        {
+            LOG_WARN(PD_LOG, "PDv2: heartstone not dropped, boss {} loot window "
+                             "is already full", creature->GetEntry());
+            return;
+        }
+
+        // chance 100, no quest flag, group 0: certain by construction, the
+        // roll happened above. ONE row in the corpse, so it goes to one player
+        // under the group's normal loot rules rather than to everybody.
+        int32 const count = static_cast<int32>(cfg.heartstoneCount);
+        creature->loot.AddItem(LootStoreItem(cfg.heartstoneItem, 0, 100.0f, false,
+                                             LOOT_MODE_DEFAULT, 0, count,
+                                             static_cast<uint8>(count)));
+
+        // Unit::Kill sets the lootable flag only if the loot was NOT empty at
+        // that moment (Unit.cpp:14622-14630). A boss whose native table and
+        // gold were both empty would keep a corpse that cannot be opened, and
+        // the heartstone would be invisible; re-raise the flag. The empty-
+        // corpse check at the end of OnMobDied then sees a non-empty loot.
+        creature->SetDynamicFlag(UNIT_DYNFLAG_LOOTABLE);
+    }
+
     void PDv2InstanceScript::OnMobDied(Creature* creature, Unit* killer)
     {
         if (!creature)
@@ -1132,12 +1184,19 @@ namespace PDungeon
         // run whose total counted them could not be finished without hunting
         // down a patroller, and a barrier whose denominator counted them would
         // seal itself behind mobs that may never be pulled at all.
+        //
+        // Set below by the one kill that brings bossKilled up to bossTotal -
+        // the run's FINAL boss, whichever room it stood in (the bosses may
+        // fall out of chain order) - and read much later by the loot funnel,
+        // which is why it lives out here and not inside the block.
+        bool finalBoss = false;
         if (tag->countsForRun)
         {
             ++_run.killed;
             if (tag->isRunBoss && _run.bossKilled < _run.bossTotal)
             {
                 ++_run.bossKilled;
+                finalBoss = _run.bossKilled >= _run.bossTotal;
                 // Round C / C5: the checkpoint is the FURTHEST cleared boss
                 // hall, so it moves only forward. `>` against the running
                 // maximum, not "the latest kill", makes it order-proof: the
@@ -1273,6 +1332,15 @@ namespace PDungeon
             if (tag->isRunBoss)
             {
                 InjectBossGear(creature, killer);
+
+                // The Tainted Heartstone, only off the run's FINAL boss. It
+                // goes in LAST, after both the native-loot clear and the
+                // boss gear above, so nothing in this funnel can wipe it and
+                // the gear cannot crowd it out of the window first.
+                if (finalBoss)
+                {
+                    InjectHeartstone(creature);
+                }
             }
         }
 

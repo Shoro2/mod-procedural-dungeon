@@ -398,6 +398,17 @@ namespace PDungeon
         // pool anyway whenever it would leave nothing to roll.
         bool        lootClassFilter = true;
 
+        // The Tainted Heartstone (cursed altar token), rolled ONCE for the
+        // run's FINAL boss and written into that corpse's loot. Three keys
+        // because the three numbers are three operator decisions: which item
+        // (0 = the whole mechanic off), the percent chance of it dropping at
+        // all, and the stack. Deliberately NOT scaled by lootMult: the token
+        // is the same scarce currency as the heroic-dungeon and raid drops of
+        // the same item, and the difficulty dial must not be able to farm it.
+        uint32      heartstoneItem = 920301;
+        int         heartstoneChance = 50;
+        int         heartstoneCount = 1;
+
         // Round E / R1 (2026-09-10, spec D15). How far ONE completed run may
         // push the account's difficulty cap: the cap becomes
         // min(100, max(cap, runDifficulty + unlock)), and the unlock is the

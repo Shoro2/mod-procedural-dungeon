@@ -917,6 +917,14 @@ namespace PDungeon
         // core's business, not ours.
         void InjectBossGear(Creature* creature, Unit* killer);
 
+        // The Tainted Heartstone: called for the run's FINAL boss only (the
+        // kill that brings bossKilled up to bossTotal), after the native-loot
+        // clear and after InjectBossGear so nothing wipes it. One roll against
+        // V2.Heartstone.Chance, then one certain row in the corpse loot - it
+        // lies once in the window and goes to ONE player under the normal
+        // loot rules, exactly like the injected gear.
+        void InjectHeartstone(Creature* creature);
+
         // One stack into a bag, and a letter from Chromie when there is no room
         // for it. Player::AddItem already prints the client's "You receive
         // item" line, so a grant that lands says nothing extra; only the mail
