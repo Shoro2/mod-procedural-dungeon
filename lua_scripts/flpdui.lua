@@ -323,14 +323,11 @@ Panel:EnableMouse(true)
 Panel:RegisterForDrag("LeftButton")
 Panel:SetScript("OnDragStart", Panel.StartMoving)
 Panel:SetScript("OnDragStop", Panel.StopMovingOrSizing)
-Panel:SetBackdrop({
-    bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-    edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 16,
-    insets = { left = 4, right = 4, top = 4, bottom = 4 }
-})
-Panel:SetBackdropColor(0.05, 0.05, 0.1, 0.95)
-Panel:SetBackdropBorderColor(0.4, 0.4, 0.8, 0.8)
+-- FLUI (fl-lua-scripts AIO_UI/, the Forgotten Land window kit) draws the
+-- frame in the player's theme; the panel keeps its own centred title, whose
+-- rows below are measured against it.
+local FLUI = assert(FLUI, "The Forgotten Depths needs AIO_UI/FLUI_Client.lua loaded first")
+FLUI.Skin(Panel, "dialog")
 Panel:SetFrameStrata("DIALOG")
 Panel:Hide()
 table.insert(UISpecialFrames, "FLPDGenPanel")
@@ -362,11 +359,10 @@ xpFill:SetWidth(1)
 xpFill:SetHeight(8)
 xpFill:SetTexture(0.35, 0.65, 1.0, 0.95)
 
-local sep1 = Panel:CreateTexture(nil, "ARTWORK")
+local sep1 = FLUI.Line(Panel)
 sep1:SetPoint("TOP", xpBg, "BOTTOM", 0, -8)
 sep1:SetWidth(BAR_W)
 sep1:SetHeight(1)
-sep1:SetTexture(0.4, 0.4, 0.6, 0.5)
 
 -- How each slider renders one value. The one x100 division left decodes the
 -- wire's fixed point (the field is NAMED x100); it does not recompute anything
@@ -595,25 +591,18 @@ previewCanvas:Hide()
 -- lend each other one, and each hides its own leftovers.
 local previewTarget = { canvas = previewCanvas, pool = {}, size = PREVIEW }
 
-local sep2 = Panel:CreateTexture(nil, "ARTWORK")
+local sep2 = FLUI.Line(Panel)
 sep2:SetPoint("TOP", affixLine, "BOTTOM", 0, -8)
 sep2:SetWidth(BAR_W)
 sep2:SetHeight(1)
-sep2:SetTexture(0.4, 0.4, 0.6, 0.5)
 
-local genBtn = CreateFrame("Button", nil, Panel, "UIPanelButtonTemplate")
-genBtn:SetWidth(150)
-genBtn:SetHeight(24)
+local genBtn = FLUI.Button(Panel, "Generate", 150, 24)
 genBtn:SetPoint("TOPLEFT", sep2, "BOTTOM", -156, -10)
-genBtn:SetText("Generate")
 genBtn:Disable()
 genBtn:SetScript("OnClick", function() SendUp("UI GEN") end)
 
-local enterBtn = CreateFrame("Button", nil, Panel, "UIPanelButtonTemplate")
-enterBtn:SetWidth(150)
-enterBtn:SetHeight(24)
+local enterBtn = FLUI.Button(Panel, "Enter", 150, 24)
 enterBtn:SetPoint("TOPRIGHT", sep2, "BOTTOM", 156, -10)
-enterBtn:SetText("Enter")
 enterBtn:Disable()
 enterBtn:SetScript("OnClick", function() SendUp("UI ENTER") end)
 
@@ -819,14 +808,7 @@ Hud:EnableMouse(true)
 Hud:RegisterForDrag("LeftButton")
 Hud:SetScript("OnDragStart", Hud.StartMoving)
 Hud:SetScript("OnDragStop", Hud.StopMovingOrSizing)
-Hud:SetBackdrop({
-    bgFile = "Interface/Tooltips/UI-Tooltip-Background",
-    edgeFile = "Interface/Tooltips/UI-Tooltip-Border",
-    tile = true, tileSize = 16, edgeSize = 16,
-    insets = { left = 4, right = 4, top = 4, bottom = 4 }
-})
-Hud:SetBackdropColor(0.05, 0.05, 0.1, 0.92)
-Hud:SetBackdropBorderColor(0.4, 0.4, 0.8, 0.8)
+FLUI.Skin(Hud, "hud")
 Hud:SetFrameStrata("HIGH")
 Hud:Hide()
 if AIO and AIO.SavePosition then
@@ -913,7 +895,7 @@ hudEvent:SetText("")
 -- which is also what the server sends between two defences.
 local eventSpan = 0
 
-local hudSep = Hud:CreateTexture(nil, "ARTWORK")
+local hudSep = FLUI.Line(Hud)
 -- Anchored to the bar's BACKGROUND, never to the health strip: the strip's
 -- width follows the host's health, and a point on a shrinking texture would
 -- walk the separator - and the map hanging off it - sideways across the HUD.
@@ -921,7 +903,6 @@ local hudSep = Hud:CreateTexture(nil, "ARTWORK")
 hudSep:SetPoint("TOP", hudEventBg, "BOTTOM", 0, -10)
 hudSep:SetWidth(HUD_W - 20)
 hudSep:SetHeight(1)
-hudSep:SetTexture(0.4, 0.4, 0.6, 0.5)
 
 local canvas = CreateFrame("Frame", nil, Hud)
 canvas:SetWidth(CANVAS)
